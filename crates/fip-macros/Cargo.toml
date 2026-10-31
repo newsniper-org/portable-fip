@@ -15,6 +15,7 @@ publish.workspace = true
 proc-macro = true
 
 [dependencies]
+fip-lint-rules = { path = "../fip-lint-rules" }
 
 [dev-dependencies]
 fip-testkit = { path = "../fip-testkit" }

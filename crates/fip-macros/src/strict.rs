@@ -26,26 +26,7 @@
 use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 
 use crate::{GHOST_MACROS, HEAP_CONSTRUCTORS, HEAP_TYPES, is_group, is_ident, is_punct};
-
-/// `core` functions accepted as `fip` without a certificate: no allocation, no
-/// deallocation, no recursion, no call into user code. **Audited, not machine-proved**:
-/// "no allocation" follows from `core` having no allocator (crate boundary); the rest
-/// was read in the `core` sources of rustc 1.99.1. Paths below the crate root,
-/// accepted under the roots `core` and `std` (the `std` items are re-exports).
-/// Per-entry reasons: `docs/decisions/2026-11-01-strict-core-table.md`.
-pub(crate) const CORE_TABLE: &[&str] = &[
-    "slice::len",
-    "slice::is_empty",
-    "slice::swap",
-    "slice::split_at",
-    "slice::split_at_mut",
-    "mem::swap",
-    "mem::replace",
-    "mem::size_of",
-    "mem::align_of",
-    "hint::black_box",
-    "convert::identity",
-];
+use fip_lint_rules::CORE_TABLE;
 
 /// Macros a strict body may invoke. Their arguments are still checked; what they
 /// expand to on the panic path is outside the guarantee (see crate docs).
@@ -376,15 +357,8 @@ fn in_core_table(segs: &[String], name: &str) -> bool {
     let Some((root, rest)) = segs.split_first() else {
         return false;
     };
-    if root != "core" && root != "std" {
-        return false;
-    }
-    let mut p = rest.join("::");
-    if !p.is_empty() {
-        p.push_str("::");
-    }
-    p.push_str(name);
-    CORE_TABLE.contains(&p.as_str())
+    let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+    fip_lint_rules::in_core_table(root, &rest, name)
 }
 
 fn ts(s: &str) -> TokenStream {

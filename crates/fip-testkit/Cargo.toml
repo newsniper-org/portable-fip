@@ -12,6 +12,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+fip-lint-rules = { path = "../fip-lint-rules" }
 
 [dev-dependencies]
 fip-core = { path = "../fip-core" }

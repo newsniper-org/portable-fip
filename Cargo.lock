@@ -23,11 +23,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fip-lint-rules"
+version = "0.1.0"
+
+[[package]]
 name = "fip-macros"
 version = "0.1.0"
 dependencies = [
  "fip-alloc",
  "fip-core",
+ "fip-lint-rules",
  "fip-strict",
  "fip-testkit",
 ]
@@ -41,4 +46,5 @@ name = "fip-testkit"
 version = "0.1.0"
 dependencies = [
  "fip-core",
+ "fip-lint-rules",
 ]

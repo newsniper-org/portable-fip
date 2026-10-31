@@ -5,6 +5,7 @@
 resolver = "3"
 members = [
     "crates/fip-core",
+    "crates/fip-lint-rules",
     "crates/fip-strict",
     "crates/fip-alloc",
     "crates/fip-arch",

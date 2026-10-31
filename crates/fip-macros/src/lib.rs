@@ -289,53 +289,7 @@ use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenSt
 
 mod strict;
 
-const HEAP_TYPES: &[&str] = &[
-    "Box",
-    "Vec",
-    "String",
-    "Rc",
-    "Arc",
-    "BTreeMap",
-    "BTreeSet",
-    "HashMap",
-    "HashSet",
-    "VecDeque",
-    "BinaryHeap",
-    "LinkedList",
-];
-const HEAP_CONSTRUCTORS: &[&str] = &[
-    "new",
-    "pin",
-    "with_capacity",
-    "from",
-    "from_iter",
-    "new_uninit",
-    "new_zeroed",
-    "new_cyclic",
-    "default",
-];
-const ALLOC_MACROS: &[&str] = &["vec", "format"];
-const ALLOC_METHODS: &[&str] = &[
-    "clone",
-    "to_vec",
-    "to_owned",
-    "to_string",
-    "collect",
-    "push",
-    "push_back",
-    "push_front",
-    "insert",
-    "extend",
-    "extend_from_slice",
-    "reserve",
-    "resize",
-    "append",
-    "repeat",
-    "concat",
-    "join",
-    "into_boxed_slice",
-];
-const GHOST_MACROS: &[&str] = &["proof", "proof_decl", "proof_with"];
+use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, HEAP_CONSTRUCTORS, HEAP_TYPES};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
