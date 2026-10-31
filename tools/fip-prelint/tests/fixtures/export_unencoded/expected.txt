@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+app/src/lib.rs:10:5: error: fip-prelint: cannot check `via_unencoded` (#[fip]): unresolved: `via_unencoded` -> `dep_unencoded::twice` (app/src/lib.rs:10): `dep_unencoded::twice` (no MIR although the crate declares `fip::export`: it was built without `-Zalways-encode-mir`)
+error: fip-prelint: crate `dep_unencoded` declares `fip::export` but `dep_unencoded::twice` has no MIR: it was built without `-Zalways-encode-mir`. Build it through `cargo fip-prelint` (as a workspace member) or remove `fip::export`
+note: fip-prelint: crate `app`: 1 roots, 0 passed, 2 errors, 0 warnings, 0 notes

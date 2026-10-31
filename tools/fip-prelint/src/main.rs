@@ -138,7 +138,26 @@ fn main() -> std::process::ExitCode {
     // Version queries (`-vV`) and `--print` probes have no crate to analyse.
     let compiles = args.iter().any(|a| a == "--crate-name");
     if compiles {
-        args.extend(CRATE_FLAGS.iter().map(|s| (*s).to_string()));
+        // Skip flags already present (e.g. from RUSTFLAGS): a repeated
+        // `register_tool(fip)` is an error.
+        let mut i = 0;
+        while i < CRATE_FLAGS.len() {
+            let f = CRATE_FLAGS[i];
+            let pair = matches!(f, "--cfg" | "--check-cfg");
+            let present = if pair {
+                args.windows(2)
+                    .any(|w| w[0] == f && w[1] == CRATE_FLAGS[i + 1])
+            } else {
+                args.iter().any(|a| a == f)
+            };
+            if !present {
+                args.push(f.to_string());
+                if pair {
+                    args.push(CRATE_FLAGS[i + 1].to_string());
+                }
+            }
+            i += if pair { 2 } else { 1 };
+        }
     }
     // SAFETY: single-threaded here, before the compiler starts any thread.
     unsafe { std::env::set_var(MARK_ENV, "1") };

@@ -121,6 +121,14 @@ fn bad_attr() {
     check("bad_attr");
 }
 
+/// A dependency that declares `fip::export` but was compiled without
+/// `-Zalways-encode-mir` (a non-member, built by plain rustc): a hard error naming the
+/// crate, and the call is unresolved, never 0.
+#[test]
+fn export_unencoded() {
+    check("export_unencoded");
+}
+
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.
 #[test]
 fn clean() {

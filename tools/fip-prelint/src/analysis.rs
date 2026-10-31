@@ -357,6 +357,10 @@ struct Node<'tcx> {
 /// whose root declares `fip::export`.
 pub struct Crates {
     exported: HashMap<CrateNum, bool>,
+    /// Crates that declare `fip::export` but contain a function with a body in source
+    /// and no MIR in their metadata: built without `-Zalways-encode-mir`, i.e. not by
+    /// the driver. Value: the first such function found.
+    unencoded: HashMap<CrateNum, String>,
 }
 
 impl Crates {
@@ -366,10 +370,60 @@ impl Crates {
             exported.insert(cnum, declares_export(tcx, cnum.as_def_id()));
         }
         exported.insert(LOCAL_CRATE, true);
-        Crates { exported }
+        let mut unencoded = HashMap::new();
+        for krate in rustc_public::external_crates() {
+            let Some(&cnum) = tcx
+                .crates(())
+                .iter()
+                .find(|&&c| tcx.crate_name(c).as_str() == krate.name.as_str())
+            else {
+                continue;
+            };
+            if !exported.get(&cnum).copied().unwrap_or(false) {
+                continue;
+            }
+            for f in krate.fn_defs() {
+                let def_id: DefId =
+                    rustc_public::rustc_internal::internal(tcx, rustc_public::CrateDef::def_id(&f));
+                if def_id.krate != cnum || !has_source_body(tcx, def_id) {
+                    continue;
+                }
+                if !tcx.is_mir_available(def_id) {
+                    unencoded.insert(cnum, tcx.def_path_str(def_id));
+                    break;
+                }
+            }
+        }
+        Crates {
+            exported,
+            unencoded,
+        }
     }
     fn exported(&self, c: CrateNum) -> bool {
         self.exported.get(&c).copied().unwrap_or(false)
+    }
+    /// Exported crates whose metadata lacks MIR, with one function as evidence.
+    pub fn unencoded(&self, tcx: TyCtxt<'_>) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .unencoded
+            .iter()
+            .map(|(c, f)| (tcx.crate_name(*c).to_string(), f.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+}
+
+/// `true` if `def_id` is a function whose source has a body: not a foreign item and
+/// not a required trait method without a default.
+fn has_source_body(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+    if tcx.is_foreign_item(def_id) {
+        return false;
+    }
+    match tcx.def_kind(def_id) {
+        DefKind::Fn => true,
+        DefKind::AssocFn => tcx.defaultness(def_id).has_value(),
+        _ => false,
     }
 }
 
@@ -734,7 +788,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             let why = if std_like {
                 "no MIR: not generic and not #[inline]"
             } else {
-                "no MIR"
+                "no MIR although the crate declares `fip::export`: it was built without `-Zalways-encode-mir`"
             };
             return NodeKind::Leaf(vec![Ev::Unknown(format!("`{path}` ({why})"))]);
         }

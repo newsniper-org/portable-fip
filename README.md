@@ -86,10 +86,12 @@ panicking macros.
 The `core` table is **audited** (at rustc 1.97.1 and 1.99.1; a test fails on any
 other compiler) rather than machine-proved, except that "no allocation" follows from
 `core` having no allocator; the installed `vstd` specifies 7 of its 11 entries.
-Not covered (measured, see `TODOs/strict-open-items.md`): implicit calls (`Drop`,
-operators, `Deref`, `Index`; `assert_fip!` catches them at run time), panics other
-than the macros, and generic instantiations under `cargo check` (they are checked
-when built). See `docs/decisions/2026-11-01-strict-core-table.md`.
+Not covered by the attribute macro (measured, see `TODOs/strict-open-items.md`):
+implicit calls (`Drop`, operators, `Deref`, `Index`), panics other than the macros,
+generic instantiations under `cargo check`, and `use` aliases. `fip-prelint` (below)
+catches the first three on MIR; `crates/fip-macros/tests/strict_gaps.rs` with
+`tools/fip-prelint/tests/selfcheck.expected` pins that. `assert_fip!` catches
+implicit calls at run time. See `docs/decisions/2026-11-01-strict-core-table.md`.
 
 ## `fip-prelint`
 

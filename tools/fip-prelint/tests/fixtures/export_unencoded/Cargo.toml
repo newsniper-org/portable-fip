@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: a dependency that declares
+# `fip::export` but is not a workspace member, so cargo compiles it with plain rustc
+# (RUSTFLAGS give it the cfg and the registered tool, but no `-Zalways-encode-mir`).
+[workspace]
+resolver = "3"
+members = ["app"]
+exclude = ["dep_unencoded"]

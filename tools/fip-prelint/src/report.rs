@@ -319,11 +319,21 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         notes: 0,
     };
     validate_tool_attrs(&mut out);
+    let crates = Crates::new(tcx);
+    // A dependency that declares `fip::export` but carries no MIR would otherwise look
+    // opted in while giving no bodies: a hard error, whether or not a root calls it.
+    for (krate, func) in crates.unencoded(tcx) {
+        out.errors += 1;
+        tcx.dcx().err(format!(
+            "fip-prelint: crate `{krate}` declares `fip::export` but `{func}` has no MIR: \
+             it was built without `-Zalways-encode-mir`. Build it through `cargo fip-prelint` \
+             (as a workspace member) or remove `fip::export`"
+        ));
+    }
     let roots = roots(tcx, &mut out);
     if roots.is_empty() {
         return;
     }
-    let crates = Crates::new(tcx);
     let mut passed = 0usize;
     for (def_id, mark) in &roots {
         let before = (out.errors, out.warnings);

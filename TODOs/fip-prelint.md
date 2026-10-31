@@ -256,3 +256,14 @@ because the errors are in a leaf crate.
 8. The 7 behaviour `compile_fail` examples of `fip-macros` and the reproducers in
    `TODOs/` are not run through the driver one by one (the macro rejects them first);
    a mode of `fip-macros` that only emits the mark would allow it.
+
+## Update 2026-11-01 (after implementation)
+
+- A dependency that declares `fip::export` but has no MIR is a hard error
+  (decision record item 5; fixture `export_unencoded`). The driver no longer adds
+  flags that are already on the command line, because a repeated
+  `register_tool(fip)` is a compile error.
+- The token-level gaps of strict mode (implicit `Drop`, operator impls, generic
+  instances under `cargo check`, `use` aliases) are caught by the driver; see
+  `TODOs/strict-open-items.md` items 5, 7 and 10.
+

@@ -38,6 +38,15 @@
      roots and declared bounds.
    - The driver rejects any other name under `fip::`. rustc accepts unknown names
      under a registered tool silently (measured).
+   - **A crate declaring `fip::export` must carry MIR.** The attribute stays readable
+     when the bodies are missing (measured: the control crate reports `fip::export`
+     with `has_body = false` everywhere). So a dependency with `fip::export` that has a
+     function with a body in source but no MIR in its metadata (built without
+     `-Zalways-encode-mir`, i.e. not by the driver) is a **hard error** naming the
+     crate and one such function, whether or not a root calls it. A call into it is
+     also reported as unresolved. It is never 0 and never silently ⊤. Fixture:
+     `tests/fixtures/export_unencoded` (a non-member dependency built by plain rustc
+     with the tool flags from RUSTFLAGS).
 6. **Analysis.** The `fip_testkit::summaries` design (lattice {0..N, ∞, ⊤}, SCCs with
    widening, symbolic parameter terms, witnesses, unresolved = ⊤ and reported) on
    MIR:
