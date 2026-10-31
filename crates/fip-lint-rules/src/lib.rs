@@ -178,6 +178,244 @@ pub fn is_drop_function(root: &str, rest: &[&str], name: &str) -> bool {
     })
 }
 
+/// Tables of the MIR-level checker `fip-prelint` (`tools/fip-prelint`): entry points
+/// it does not look into, and intrinsics, which have no MIR body. Paths are
+/// defining paths as rustc prints them (`alloc::alloc::exchange_malloc`, not the
+/// `std::` re-export); foreign symbols are matched by name.
+pub mod mir {
+    /// Allocation entry points: a call counts as one allocation. The `alloc::alloc`
+    /// functions are what `Box::new` (`exchange_malloc`), `Vec`/`String`/`RawVec`
+    /// (`Global::alloc_impl` → `alloc`/`alloc_zeroed`) reach on rustc 1.99.1; the
+    /// `__rust_*` symbols are the global allocator shims behind them.
+    pub const ALLOC_ENTRY_POINTS: &[&str] = &[
+        "alloc::alloc::alloc",
+        "alloc::alloc::alloc_zeroed",
+        "alloc::alloc::exchange_malloc",
+        "__rust_alloc",
+        "__rust_alloc_zeroed",
+    ];
+
+    /// Reallocation: one allocation and one possible free.
+    pub const REALLOC_ENTRY_POINTS: &[&str] = &["alloc::alloc::realloc", "__rust_realloc"];
+
+    /// Deallocation entry points: a possible free.
+    pub const DEALLOC_ENTRY_POINTS: &[&str] = &["alloc::alloc::dealloc", "__rust_dealloc"];
+
+    /// Foreign symbols without allocation or free: `__rust_no_alloc_shim_is_unstable_v2`
+    /// is an empty marker function that `Global::alloc_impl_runtime` calls before
+    /// `__rust_alloc` on rustc 1.99.1, so that linking without a global allocator
+    /// fails; the allocation itself is the `__rust_alloc*` call next to it.
+    pub const ALLOC_FREE_SYMBOLS: &[&str] = &["__rust_no_alloc_shim_is_unstable_v2"];
+
+    /// Path prefixes of the panic machinery: a call is a panic path and is not
+    /// looked into (its allocations happen only while panicking).
+    pub const PANIC_PREFIXES: &[&str] = &[
+        "core::panicking::",
+        "std::panicking::",
+        "std::rt::begin_panic",
+    ];
+
+    /// Functions that run only when a safety precondition is already violated (the
+    /// `assert_unsafe_precondition!` checks of `core`, compiled in under
+    /// `debug_assertions`) or are unreachable by contract. They are skipped: the
+    /// caller's `unsafe` contract excludes them.
+    pub const UB_CHECK_MARKERS: &[&str] =
+        &["::precondition_check", "core::hint::unreachable_unchecked"];
+
+    /// Intrinsics without allocation, free, panic or call into user code, with the
+    /// reason. An intrinsic not listed here (and not in [`PANIC_INTRINSICS`]) is
+    /// unknown (`⊤`).
+    pub const ALLOC_FREE_INTRINSICS: &[(&str, &str)] = &[
+        ("size_of", "compile-time layout query"),
+        ("align_of", "compile-time layout query"),
+        ("min_align_of", "compile-time layout query"),
+        ("pref_align_of", "compile-time layout query"),
+        ("size_of_val", "layout from pointer metadata"),
+        ("align_of_val", "layout from pointer metadata"),
+        ("min_align_of_val", "layout from pointer metadata"),
+        ("needs_drop", "compile-time type query"),
+        ("type_id", "compile-time type query"),
+        ("type_name", "compile-time type query (static string)"),
+        ("variant_count", "compile-time type query"),
+        ("ptr_metadata", "reads pointer metadata"),
+        ("aggregate_raw_ptr", "builds a raw pointer from parts"),
+        ("transmute", "reinterprets bits"),
+        ("transmute_unchecked", "reinterprets bits"),
+        ("copy_nonoverlapping", "memcpy of caller-provided memory"),
+        ("copy", "memmove of caller-provided memory"),
+        ("write_bytes", "memset of caller-provided memory"),
+        ("volatile_load", "single memory access"),
+        ("volatile_store", "single memory access"),
+        ("unaligned_volatile_load", "single memory access"),
+        ("unaligned_volatile_store", "single memory access"),
+        ("volatile_copy_memory", "memmove of caller-provided memory"),
+        (
+            "volatile_copy_nonoverlapping_memory",
+            "memcpy of caller-provided memory",
+        ),
+        ("volatile_set_memory", "memset of caller-provided memory"),
+        ("read_via_copy", "single memory access"),
+        ("write_via_move", "single memory access"),
+        ("compare_bytes", "memcmp of caller-provided memory"),
+        (
+            "typed_swap_nonoverlapping",
+            "swaps two caller-provided values in place (`mem::swap`)",
+        ),
+        ("raw_eq", "byte comparison"),
+        ("offset", "pointer arithmetic"),
+        ("arith_offset", "pointer arithmetic"),
+        ("ptr_offset_from", "pointer arithmetic"),
+        ("ptr_offset_from_unsigned", "pointer arithmetic"),
+        ("ptr_mask", "pointer arithmetic"),
+        ("ptr_guaranteed_cmp", "pointer comparison"),
+        ("slice_get_unchecked", "unchecked element access"),
+        ("add_with_overflow", "integer arithmetic"),
+        ("sub_with_overflow", "integer arithmetic"),
+        ("mul_with_overflow", "integer arithmetic"),
+        ("wrapping_add", "integer arithmetic"),
+        ("wrapping_sub", "integer arithmetic"),
+        ("wrapping_mul", "integer arithmetic"),
+        ("saturating_add", "integer arithmetic"),
+        ("saturating_sub", "integer arithmetic"),
+        (
+            "unchecked_add",
+            "integer arithmetic (UB on overflow, no panic)",
+        ),
+        (
+            "unchecked_sub",
+            "integer arithmetic (UB on overflow, no panic)",
+        ),
+        (
+            "unchecked_mul",
+            "integer arithmetic (UB on overflow, no panic)",
+        ),
+        ("unchecked_div", "integer arithmetic (UB on zero, no panic)"),
+        ("unchecked_rem", "integer arithmetic (UB on zero, no panic)"),
+        ("unchecked_shl", "integer arithmetic"),
+        ("unchecked_shr", "integer arithmetic"),
+        ("unchecked_funnel_shl", "integer arithmetic"),
+        ("unchecked_funnel_shr", "integer arithmetic"),
+        ("exact_div", "integer arithmetic (UB if inexact, no panic)"),
+        ("disjoint_bitor", "integer arithmetic"),
+        ("carrying_mul_add", "integer arithmetic"),
+        ("rotate_left", "integer arithmetic"),
+        ("rotate_right", "integer arithmetic"),
+        ("ctpop", "bit count"),
+        ("ctlz", "bit count"),
+        ("ctlz_nonzero", "bit count"),
+        ("cttz", "bit count"),
+        ("cttz_nonzero", "bit count"),
+        ("bswap", "byte swap"),
+        ("bitreverse", "bit reversal"),
+        ("three_way_compare", "integer comparison"),
+        ("discriminant_value", "reads an enum tag"),
+        ("assume", "optimizer hint"),
+        ("likely", "optimizer hint"),
+        ("unlikely", "optimizer hint"),
+        ("cold_path", "optimizer hint"),
+        ("select_unpredictable", "branch-free select of two values"),
+        ("black_box", "identity with an optimizer barrier"),
+        ("is_val_statically_known", "compile-time query"),
+        ("ub_checks", "reads the `debug_assertions` setting"),
+        ("overflow_checks", "reads the `overflow-checks` setting"),
+        ("contract_checks", "reads the contract-checks setting"),
+        ("forget", "no-op ownership transfer"),
+        ("unreachable", "unreachable by contract (UB if reached)"),
+        ("float_to_int_unchecked", "numeric conversion"),
+        ("fadd_fast", "float arithmetic"),
+        ("fsub_fast", "float arithmetic"),
+        ("fmul_fast", "float arithmetic"),
+        ("fdiv_fast", "float arithmetic"),
+        ("frem_fast", "float arithmetic"),
+        ("fadd_algebraic", "float arithmetic"),
+        ("fsub_algebraic", "float arithmetic"),
+        ("fmul_algebraic", "float arithmetic"),
+        ("fdiv_algebraic", "float arithmetic"),
+        ("frem_algebraic", "float arithmetic"),
+        ("atomic_load", "single atomic memory access"),
+        ("atomic_store", "single atomic memory access"),
+        ("atomic_xchg", "single atomic memory access"),
+        ("atomic_cxchg", "single atomic memory access"),
+        ("atomic_cxchgweak", "single atomic memory access"),
+        ("atomic_xadd", "single atomic memory access"),
+        ("atomic_xsub", "single atomic memory access"),
+        ("atomic_and", "single atomic memory access"),
+        ("atomic_or", "single atomic memory access"),
+        ("atomic_xor", "single atomic memory access"),
+        ("atomic_nand", "single atomic memory access"),
+        ("atomic_max", "single atomic memory access"),
+        ("atomic_min", "single atomic memory access"),
+        ("atomic_umax", "single atomic memory access"),
+        ("atomic_umin", "single atomic memory access"),
+        ("atomic_fence", "memory fence"),
+        ("atomic_singlethreadfence", "compiler fence"),
+        ("prefetch_read_data", "cache hint"),
+        ("prefetch_write_data", "cache hint"),
+        ("prefetch_read_instruction", "cache hint"),
+        ("prefetch_write_instruction", "cache hint"),
+    ];
+
+    /// Intrinsics that abort or panic: a panic path.
+    pub const PANIC_INTRINSICS: &[&str] = &[
+        "abort",
+        "assert_inhabited",
+        "assert_zero_valid",
+        "assert_mem_uninitialized_valid",
+    ];
+
+    fn path_in(path: &str, table: &[&str]) -> bool {
+        table.contains(&path)
+    }
+
+    /// `true` for an [`ALLOC_ENTRY_POINTS`] path or symbol.
+    #[must_use]
+    pub fn is_alloc_entry(path: &str) -> bool {
+        path_in(path, ALLOC_ENTRY_POINTS)
+    }
+
+    /// `true` for a [`REALLOC_ENTRY_POINTS`] path or symbol.
+    #[must_use]
+    pub fn is_realloc_entry(path: &str) -> bool {
+        path_in(path, REALLOC_ENTRY_POINTS)
+    }
+
+    /// `true` for a [`DEALLOC_ENTRY_POINTS`] path or symbol.
+    #[must_use]
+    pub fn is_dealloc_entry(path: &str) -> bool {
+        path_in(path, DEALLOC_ENTRY_POINTS)
+    }
+
+    /// `true` for an [`ALLOC_FREE_SYMBOLS`] foreign symbol.
+    #[must_use]
+    pub fn is_alloc_free_symbol(name: &str) -> bool {
+        path_in(name, ALLOC_FREE_SYMBOLS)
+    }
+
+    /// `true` if `path` starts with a [`PANIC_PREFIXES`] entry.
+    #[must_use]
+    pub fn is_panic_entry(path: &str) -> bool {
+        PANIC_PREFIXES.iter().any(|p| path.starts_with(p))
+    }
+
+    /// `true` if `path` contains a [`UB_CHECK_MARKERS`] entry.
+    #[must_use]
+    pub fn is_ub_check(path: &str) -> bool {
+        UB_CHECK_MARKERS.iter().any(|m| path.contains(m))
+    }
+
+    /// `true` for an intrinsic in [`ALLOC_FREE_INTRINSICS`].
+    #[must_use]
+    pub fn is_alloc_free_intrinsic(name: &str) -> bool {
+        ALLOC_FREE_INTRINSICS.iter().any(|(n, _)| *n == name)
+    }
+
+    /// `true` for an intrinsic in [`PANIC_INTRINSICS`].
+    #[must_use]
+    pub fn is_panic_intrinsic(name: &str) -> bool {
+        PANIC_INTRINSICS.contains(&name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +428,31 @@ mod tests {
         assert!(!in_core_table("core", &["mem"], "take"));
         assert!(!in_core_table("core", &[], "swap"));
         assert!(!in_core_table("core", &["mem", "x"], "swap"));
+    }
+
+    #[test]
+    fn mir_tables() {
+        assert!(mir::is_alloc_entry("__rust_alloc"));
+        assert!(mir::is_alloc_entry("alloc::alloc::exchange_malloc"));
+        assert!(!mir::is_alloc_entry("alloc::alloc::dealloc"));
+        assert!(mir::is_realloc_entry("__rust_realloc"));
+        assert!(mir::is_dealloc_entry("__rust_dealloc"));
+        assert!(mir::is_alloc_free_symbol(
+            "__rust_no_alloc_shim_is_unstable_v2"
+        ));
+        assert!(mir::is_panic_entry("core::panicking::panic_fmt"));
+        assert!(!mir::is_panic_entry("core::panic::Location::caller"));
+        assert!(mir::is_ub_check(
+            "core::slice::index::get_unchecked::precondition_check"
+        ));
+        assert!(mir::is_alloc_free_intrinsic("typed_swap_nonoverlapping"));
+        assert!(!mir::is_alloc_free_intrinsic("catch_unwind"));
+        assert!(mir::is_panic_intrinsic("abort"));
+        assert!(
+            mir::ALLOC_FREE_INTRINSICS
+                .iter()
+                .all(|(n, why)| !n.is_empty() && !why.is_empty())
+        );
     }
 
     #[test]

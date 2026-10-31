@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# A rustc driver on the pinned Verus toolchain (rustc 1.99.1 + rustc-dev), outside
+# the main workspace: `RUSTC_BOOTSTRAP=1 cargo +1.99.1 build`.
+# Decision record: docs/decisions/2026-11-01-fip-prelint.md.
+
+[package]
+name = "fip-prelint"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["윤병익 (BYUNG-IK YEUN) <yeun0908@gmail.com>"]
+publish = false
+description = "MIR-level checker for #[fip] / #[fip(N)] / #[fbip] functions (rustc driver)."
+default-run = "fip-prelint"
+
+[[bin]]
+name = "fip-prelint"
+path = "src/main.rs"
+
+[[bin]]
+name = "cargo-fip-prelint"
+path = "src/bin/cargo-fip-prelint.rs"
+
+[dependencies]
+fip-lint-rules = { path = "../../crates/fip-lint-rules" }
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+# Not a member of the repository workspace.
+[workspace]

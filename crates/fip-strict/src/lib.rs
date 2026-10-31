@@ -58,6 +58,7 @@
 //! contents are pinned by a test and justified entry by entry.
 
 #![no_std]
+#![cfg_attr(fip_prelint, fip::export)]
 #![deny(unsafe_code)]
 
 #[cfg(verus_keep_ghost)]

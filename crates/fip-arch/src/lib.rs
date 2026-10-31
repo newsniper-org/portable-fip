@@ -20,6 +20,7 @@
 //! `asm!` hints and justified in `docs/decisions/2026-10-31-arch-prefetch-asm.md`.
 
 #![no_std]
+#![cfg_attr(fip_prelint, fip::export)]
 #![deny(unsafe_code)]
 
 /// Name of the target architecture this build was compiled for.

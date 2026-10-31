@@ -37,6 +37,11 @@
 //! The macros add a `# FIP` section **after** the item's own documentation saying
 //! what was checked; they never claim more than that.
 //!
+//! Compiled by the MIR-level checker `fip-prelint` (`tools/fip-prelint`), they also
+//! emit `#[cfg_attr(fip_prelint, fip::mark(..))]` with the mode, bound, `strict`,
+//! `panic_macros` and `param(..)` bounds; the driver checks those functions over MIR
+//! (callees, implicit calls, panics). Plain builds get no such attribute.
+//!
 //! ## Examples
 //!
 //! ```
@@ -959,6 +964,7 @@ fn expand_parts(
         return Err(errors);
     }
     let doc = fip_doc(mode, strict_scan.is_some());
+    let mark = prelint_mark(mode, args);
     let mut items = TokenStream::new();
     let mut toks = toks;
     if let Some(ss) = &strict_scan {
@@ -987,6 +993,7 @@ fn expand_parts(
     let mut f = TokenStream::new();
     f.extend(toks[..shape.after_attrs].iter().cloned());
     f.extend(doc);
+    f.extend(mark);
     f.extend(toks[shape.after_attrs..].iter().cloned());
     Ok((items, f))
 }
@@ -1032,6 +1039,58 @@ fn base_errors(mode: Mode, tag: &str, scan: &Scan<'_>, fn_name: &str) -> TokenSt
         }
     }
     errors
+}
+
+/// Environment variable the `fip-prelint` driver sets in its own process before it
+/// expands any crate. Proc macros run inside the compiler process, so they see it.
+const PRELINT_ENV: &str = "FIP_PRELINT_DRIVER";
+
+/// The inert `#[cfg_attr(fip_prelint, fip::mark(..))]` read by the MIR checker
+/// `fip-prelint` (`tools/fip-prelint`).
+///
+/// Emitted only when the expanding compiler is the `fip-prelint` driver (it sets
+/// [`PRELINT_ENV`] in its own process); plain builds get no extra tokens at all.
+/// Emitting it unconditionally would make every downstream crate without
+/// `check-cfg = ["cfg(fip_prelint)"]` warn `unexpected_cfgs` (measured, rustc 1.99).
+/// Under the driver `--cfg fip_prelint` is set, so the attribute stays.
+///
+/// Syntax (every key always present, in this order):
+///
+/// `fip::mark(kind = "fip"|"fbip", n = N, strict = true|false,
+/// panic_macros = true|false[, param(name = K, ..)])`
+///
+/// `n` is the declared allocation bound (`#[fip]` and `#[fbip]`: 0, `#[fip(N)]`: N);
+/// `param(..)` repeats the declared `FipFn` parameter bounds of strict functions.
+fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
+    if std::env::var_os(PRELINT_ENV).is_none() {
+        return TokenStream::new();
+    }
+    let (kind, n) = match mode {
+        Mode::Fip => ("fip", 0),
+        Mode::FipN(n) => ("fip", n),
+        Mode::Fbip => ("fbip", 0),
+    };
+    let strict = args.is_some_and(|a| a.strict);
+    let panic_macros = args.is_none_or(|a| a.panic_macros);
+    let mut parts = vec![
+        format!("kind = \"{kind}\""),
+        format!("n = {n}"),
+        format!("strict = {strict}"),
+        format!("panic_macros = {panic_macros}"),
+    ];
+    if let Some(a) = args
+        && !a.params.is_empty()
+    {
+        let decls: Vec<String> = a
+            .params
+            .iter()
+            .map(|(p, k, _)| format!("{p} = {k}"))
+            .collect();
+        parts.push(format!("param({})", decls.join(", ")));
+    }
+    format!("#[cfg_attr(fip_prelint, fip::mark({}))]", parts.join(", "))
+        .parse()
+        .unwrap_or_default()
 }
 
 /// The `# FIP` doc section stating what was checked.

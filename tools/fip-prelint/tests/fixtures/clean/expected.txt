@@ -1,0 +1,3 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: success
+note: fip-prelint: crate `ok`: 4 roots, 4 passed, 0 errors, 0 warnings, 0 notes

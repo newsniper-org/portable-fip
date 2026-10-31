@@ -3,7 +3,9 @@
 
 # TODO: `fip-prelint`, a MIR-level checker, and crate-level MIR export
 
-**Status:** PROPOSED; feasibility probes done (2026-11-01), nothing implemented.
+**Status:** IMPLEMENTED 2026-11-01 (`tools/fip-prelint`, `just prelint`); see
+"Implementation" at the end for what was built, measured results and open items.
+Decision record: `docs/decisions/2026-11-01-fip-prelint.md`.
 
 ## Why a rustc driver, not another syntactic pass
 
@@ -96,10 +98,161 @@ Control: a `dep` built with the flag by 1.99.1 and read by rustc 1.97.1 fails wi
 ## Plan
 
 1. `rustc_public` probe; decision record (toolchain pinning, `rustc_public` vs
-   `rustc_middle`, Y4 toolchain alignment, sidecar format).
+   `rustc_middle`, Y4 toolchain alignment, sidecar format). **Done** (sidecar
+   deferred).
 2. `fip-prelint` driver: port the `summaries` fixpoint to MIR input (resolved calls,
-   `Drop` terminators, `Assert` terminators, allocator calls).
+   `Drop` terminators, `Assert` terminators, allocator calls). **Done** 2026-11-01.
 3. Compare with the existing checks on every reproducer in `TODOs/` and every
    `compile_fail` example; measure false positives against the 718 reported by the
    token-level checker on the whole workspace (CallgraphChecker agent's
-   measurement).
+   measurement). **Partly done:** the workspace comparison is below; the
+   `compile_fail` examples stop at the macro's own error before the driver runs, so
+   their behaviour cases are covered by equivalent fixtures instead (open item 8).
+
+## Implementation (2026-11-01)
+
+### What was built
+
+| part | where |
+|---|---|
+| driver `fip-prelint` (`RUSTC_WORKSPACE_WRAPPER`; drops `argv[1]`, adds the flags of the decision record, validates `fip::` attributes, analyses after type checking) | `tools/fip-prelint/src/main.rs`, `report.rs` |
+| analysis: instance graph, summaries, SCC widening, terms, witnesses | `tools/fip-prelint/src/analysis.rs` |
+| `fip::mark(..)` parser | `tools/fip-prelint/src/marks.rs` |
+| `cargo fip-prelint [--warn-only]` (`cargo check --workspace --all-targets --keep-going` into `target/fip-prelint` on 1.99.1, `RUSTC_BOOTSTRAP=1`, `LD_LIBRARY_PATH=<sysroot>/lib`) | `tools/fip-prelint/src/bin/cargo-fip-prelint.rs` |
+| tables: allocator/deallocator entry points, allocation-free foreign symbols, panic prefixes, UB-check markers, intrinsics with reasons | `crates/fip-lint-rules/src/lib.rs`, module `mir` |
+| `fip::mark` emitted by `#[fip]`, `#[fip(N)]`, `#[fbip]`, strict forms, `#[fip_impl]` methods | `crates/fip-macros/src/lib.rs` (`prelint_mark`) |
+| `#![cfg_attr(fip_prelint, fip::export)]` | `fip-core`, `fip-alloc`, `fip-strict`, `fip-arch` crate roots |
+| fixture workspaces + expected diagnostics; workspace self-check | `tools/fip-prelint/tests/` |
+| recipe `just prelint` (fmt check, unit tests, fixtures, self-check), part of `just ci` | `justfile` |
+
+**Mark syntax** (every key emitted, in this order):
+`fip::mark(kind = "fip"|"fbip", n = N, strict = true|false, panic_macros = true|false[, param(g = K, ..)])`.
+`fip-macros` emits `#[cfg_attr(fip_prelint, fip::mark(..))]` **only when the
+expanding compiler is the driver**: the driver sets `FIP_PRELINT_DRIVER=1` in its own
+process before expansion, and proc macros run in that process. Measured: emitting it
+unconditionally makes every downstream crate without `check-cfg = ["cfg(fip_prelint)"]`
+warn `unexpected_cfgs`, so plain builds now get no extra token at all.
+
+### Analysis, as implemented
+
+- **Roots:** local functions with `fip::mark`, through `rustc_public`
+  (`local_crate().fn_defs()`, `all_tool_attrs()`).
+- **Graph:** nodes are `Instance`s. A root is analysed with its identity arguments in
+  `TypingEnv::post_analysis(root)`; every call is resolved with
+  `Instance::try_resolve` after substituting the caller's arguments, so generic
+  callees and closure arguments are analysed as the instantiation that runs.
+  (`rustc_public`'s `Instance::resolve` works only fully monomorphized, so this part
+  uses `rustc_middle`.)
+- **MIR used:** local, crates whose root has `fip::export` (with `-Zalways-encode-mir`),
+  `core`/`alloc`/`std` where a body exists; everything else `⊤` with the reason.
+  Diverging `core`/`alloc`/`std` functions (`-> !`, e.g. `handle_alloc_error`,
+  `raw_vec::handle_error`) are panic paths.
+- **Costs:** per body, maximum over control-flow paths (not the sum over call sites:
+  `if c { boxed(x) } else { boxed(y) }` is 1); cleanup (unwind) blocks are skipped;
+  a block in a CFG cycle multiplies by `∞`. Recursive components: every non-zero
+  component is widened to `∞`.
+- **Events:** allocation entry points (1), `Drop` terminators on types with drop
+  glue and deallocation entry points (possible free), `Assert` terminators and panic
+  entry points (panic path; asserts whose condition is a constant that cannot fail,
+  e.g. the shift check of `x >> 1`, and the UB checks for null/misaligned pointers
+  are skipped), unresolvable calls (`⊤`).
+- **Terms:** a call of a callable generic parameter (`Fn*`, `FipFn`) is `alloc(g)`
+  (named after the value parameter); another trait method on a generic parameter is
+  `alloc(<T as Trait>::m)`; dropping a value whose type mentions a generic parameter is
+  `drop(T)`. `param(g = K)` instantiates `alloc(g)` with `K` and `drop(F)` (for `g: F`)
+  with 0. Terms left are a warning ("only relative to its generic parameters"),
+  never a pass.
+- **Verdicts:** `fip` / `fip(N)`: bound ≤ N, no possible free, no recursion; `fbip`:
+  bound 0; `⊤`: one error per distinct unresolved leaf; `strict`: panic paths are
+  errors with `panic_macros = false`, notes otherwise. `FIP_PRELINT_WARN_ONLY=1`
+  (`--warn-only`) reports errors as warnings tagged `[error]`.
+
+### Allocator entry points on rustc 1.99.1 (measured with `FIP_PRELINT_DUMP=1`)
+
+The `std`/`alloc` MIR shipped with the toolchain is optimized MIR (inlined), so
+`alloc::alloc::alloc` does not appear on these paths; the `__rust_*` symbols do.
+
+| source | path to the entry point |
+|---|---|
+| `Box::new(x)` | `Box::<T>::new` → `alloc::boxed::box_new_uninit` → `Global::alloc_impl_runtime` → `__rust_alloc` or `__rust_alloc_zeroed` (after the empty marker `__rust_no_alloc_shim_is_unstable_v2`) |
+| `vec![a, b, c]` | `Box::<[T; N]>::new_uninit` → `box_new_uninit` → as above |
+| `Vec::with_capacity(n)` | `RawVecInner::with_capacity_in` → `RawVecInner::try_allocate_in` → `<Global as Allocator>::allocate{,_zeroed}` → `alloc_impl_runtime` → `__rust_alloc*` |
+| `String::from(&str)` | `<u8 as ConvertVec>::to_vec` → `RawVecInner::with_capacity_in` → as above |
+| `format!(..)` | `alloc::fmt::format` → `str::to_owned` → as above, and `alloc::fmt::format::format_inner` (no MIR: `⊤`) |
+| `Vec::push` | `finish_grow` → `__rust_realloc` (allocation + free) or `__rust_alloc*`; path maximum 1 |
+| drop of a `Box` | drop glue → `<Box<T> as Drop>::drop` → `Global::deallocate` → `__rust_dealloc` |
+
+`alloc::alloc::{alloc, alloc_zeroed, exchange_malloc, realloc, dealloc}` stay in the
+tables for direct calls and other toolchains; `exchange_malloc` is not on any path above.
+
+### Tests (`just prelint`, measured 2026-11-01)
+
+`RUSTC_BOOTSTRAP=1 cargo +1.99.1 test` in `tools/fip-prelint`: 7 unit tests (lattice,
+path maximum, Tarjan order, mark parser), 5 fixture workspaces, 1 self-check; about
+5 s from an empty `target/tmp`, deterministic (also with `CARGO_BUILD_JOBS=1`).
+
+| fixture | cases (expected result) |
+|---|---|
+| `cross_crate` | `Box::new` directly (violation); callee in `dep_export` with `fip::export` (violation, chain through `dep_export::make`); same callee in `dep_plain` without it (`⊤`); allocation-free callee in `dep_plain` (`⊤`, never passed); `use dep_export::make as fresh` (violation); the alias under `fip(1)` (pass) |
+| `implicit` | `#[fip] fn consume(b: Box<u8>)` through `fip-macros` (token check passes; possible free); `a + b` with an allocating `Add` (violation) and a non-allocating one (pass); `xs[i]` under `panic_macros = false` (error), with panic macros allowed (note); `xs.get(i)` (pass); guarded `xs[i]` (error, imprecision below); `p.value()` on two types with a same-named method, only one allocating (one violation, no over-report) |
+| `generics` | `produce::<Stack>` (pass) / `produce::<Heap>` (violation); generic root `produce_any<T>` (warning `alloc(<T as Make>::make)`); allocation-free closure (pass) / `Box::new` closure called in a loop (∞); higher-order root without `param` (warning `∞·alloc(g)`), with `param(g = 0)` (pass); `fip(2)` with two allocations (pass), `fip(1)` with two (violation, both chains), one allocation per branch under `fip(1)` (pass), allocating call in a loop under `fip(3)` (∞); `even`/`odd` recursion (violation), the same under `fbip` (pass) |
+| `bad_attr` | `#![cfg_attr(fip_prelint, fip::exprot)]`, `fip::mrak(..)`, `kind = "fop"` (three errors) |
+| `clean` | `#[fip]`, `#[fip(1)]`, `#[fbip]` (recursive), `#[fip(strict = true, param(g = 0))]` from `fip-macros`: all pass, exit status 0 |
+
+### Self-check: the portable-fip workspace (`cargo fip-prelint`, all targets)
+
+Recorded in `tools/fip-prelint/tests/selfcheck.expected` (errors, warnings, per-crate
+summaries; notes omitted). 41 roots: `fip_core` 6, `fip-macros/tests` 33 (`accept`
+8, `strict_accept` 11, `strict_impl` 11, `strict_gaps` 3), `fip-core/tests/strict_behaviour`
+2. `fip-alloc`, `fip-strict`, `fip-arch` have no marked functions. Results: 37 roots
+pass, **3 errors in 2 roots, 0 `⊤`, 1 warning, 64 notes**. Every one investigated:
+
+| report | verdict | reason |
+|---|---|---|
+| `strict_gaps::consume` may free (drop of `Box<u8>`) | real | the documented implicit-`Drop` gap of the token-level strict mode (`strict-open-items.md` item 5); the test measures 1 free |
+| `strict_gaps::sum` may allocate 1 (`<Big as Add>::add` → `Box::new`) | real | overloaded operator gap (item 5); the test measures 1 allocation |
+| `strict_gaps::sum` may free (`drop of Big` inside `add`) | real | `add` drops `self` and `o`; the test measures 2 frees |
+| `strict_impl::Slot::<T>::put_twice` only relative to `drop(T)` (warning) | real, new | `Self::put(self, a);` discards the returned old value, which is dropped: a free for every `T` with drop glue (`T = u16` in the test). The token-level checker cannot see it |
+| 29 notes: overflow checks (`i += 1`, `w + 1` in loops) | imprecision (notes only) | the loop guard bounds the counter by a slice length; the analysis is path-insensitive and does not use it |
+| 19 notes: bounds checks (`xs[r]` under `while r < xs.len()`) | imprecision (notes only) | same: guarded index, MIR at opt-level 0 keeps the check |
+| 9 notes: `core::panicking::panic_fmt` from `<[T]>::split_at_mut` in `fip_core::slice::swap_lt` | real path, unreachable under the documented precondition `a < b < len` | `split_at_mut`'s assert |
+| 1 note: `panic_fmt` in `strict_gaps::checked_dec` | real | `assert!(x > 0)` |
+| 6 notes: `alloc::alloc::handle_alloc_error` (diverges) | real | allocation failure in the allocating strict roots (`boxed`, `two_boxes` twice, `Slot::boxed`, `box_it`, `sum`) |
+
+The overflow and bounds notes would be errors under `panic_macros = false`; the only
+such root in the workspace (`strict_accept::checked_halve`, `x >> 1`) passes because
+constant asserts that cannot fail are skipped. Without `--warn-only` the run exits
+101 (the `strict_gaps` test crate fails to check, as intended); nothing else changes,
+because the errors are in a leaf crate.
+
+### Comparison with the token-level checker (`fip_testkit::summaries`)
+
+| scope | token-level (2026-10-31) | `fip-prelint` |
+|---|---|---|
+| `fip-macros/tests` with `fip_core`, `fip_alloc`, `fip_strict` | 39 roots, 0 violations, 0 conditional | the same 39 roots: 3 violations in `strict_gaps` (2 roots), 1 conditional (`put_twice`), 0 `⊤`; all four are real and invisible to tokens (implicit `Drop`, operator, discarded generic value) |
+| all workspace sources at once | 41 roots, 718 violations in 16 roots (by-name method resolution, edges into the checker's own sources) | 41 roots (the 39 + `strict_behaviour` 2), the same 3 violations + 1 warning; method calls are resolved, so no by-name false positive |
+
+### Open items
+
+1. **Path-insensitive panics.** Guarded indexing and loop counters keep their checks
+   in MIR at opt-level 0 (fixture `get_guarded`); a value analysis (intervals from
+   `SwitchInt` guards) would remove most of the 48 overflow/bounds notes.
+2. **Function pointers and trait objects** whose target is not in the analysed MIR are
+   `⊤` (as the decision record says), also when they are the root's own parameter
+   (`g: fn(u8) -> u8`, `g: &dyn Fn(..)`); the token-level design made those terms.
+3. **Declared parameter bounds at call sites.** `param(g = K)` is used for the
+   callee's own verdict; a caller passing a closure is analysed with the actual
+   closure (exact), but a non-root caller passing one above `K` is not reported
+   (`fip_testkit::summaries` reports `ArgumentExceedsDeclared`; for `FipFn` the strict
+   mode's `FipBound` check covers it at compile time).
+4. **Drops of generic values** are terms (`drop(T)`, `drop(Option<T>)`), also when the
+   type frees for every instantiation (`Vec<T>`); reported as warnings, never passed.
+5. **`format!`**: `alloc::fmt::format::format_inner` has no MIR, so `format!` is `⊤` in
+   addition to its allocation violation; a summary table for such `std` functions
+   (or `-Zbuild-std`) would remove it.
+6. **Cross-toolchain summary sidecars** (decision record item 7): deferred.
+7. Measured on `x86_64` Linux only. `cargo-fip-prelint` sets `LD_LIBRARY_PATH`; the
+   binaries also carry an rpath to the sysroot `lib`.
+8. The 7 behaviour `compile_fail` examples of `fip-macros` and the reproducers in
+   `TODOs/` are not run through the driver one by one (the macro rejects them first);
+   a mode of `fip-macros` that only emits the mark would allow it.

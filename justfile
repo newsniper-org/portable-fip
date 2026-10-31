@@ -6,9 +6,11 @@ verus := env_var_or_default("VERUS", "verus")
 singular := env_var_or_default("SINGULAR", "/usr/bin/Singular")
 # Lowest supported toolchain (workspace `rust-version`).
 msrv := "1.97.1"
+# Toolchain of `fip-prelint` (the installed Verus toolchain; decision 2026-11-01-fip-prelint).
+prelint_tc := "1.99.1"
 
 # Every gate; a change merges only when this passes.
-ci: fmt-check lint test msrv nostd cross arch-override verify compile-fail-reasons
+ci: fmt-check lint test msrv nostd cross arch-override verify compile-fail-reasons prelint
 
 # Formatting.
 fmt-check:
@@ -172,3 +174,11 @@ compile-fail-reasons:
     rm -rf target/compile-fail
     cargo build -q -p fip-macros -p fip-strict --target-dir target/compile-fail
     uv run --no-project python verify/compile_fail_reasons.py target/compile-fail
+
+# MIR-level checker `fip-prelint` (tools/fip-prelint, a rustc driver on the Verus toolchain
+# with `rustc-dev`): builds the driver, runs the fixture workspaces and the workspace
+# self-check against `tools/fip-prelint/tests/*.expected`. Report-only run on the
+# workspace: `tools/fip-prelint/target/debug/cargo-fip-prelint --warn-only`.
+prelint:
+    cd tools/fip-prelint && cargo +{{prelint_tc}} fmt --check
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test

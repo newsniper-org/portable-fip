@@ -1,0 +1,6 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+note: fip-prelint: crate `typo`: 1 roots, 1 passed, 3 errors, 0 warnings, 0 notes
+typo/src/lib.rs:15:1: error: fip-prelint: malformed `fip::mark`: `kind` is "fip" or "fbip", found `fop`
+typo/src/lib.rs:5:26: error: fip-prelint: unknown attribute `fip::exprot`; the tool `fip` has only `fip::export` and `fip::mark`
+typo/src/lib.rs:8:25: error: fip-prelint: unknown attribute `fip::mrak`; the tool `fip` has only `fip::export` and `fip::mark`

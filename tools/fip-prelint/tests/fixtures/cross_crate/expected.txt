@@ -1,0 +1,8 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+app/src/lib.rs:11:5: error: fip-prelint: `direct` is #[fip] but may allocate 1 time(s), at most 0 allowed: `direct` -> `alloc::boxed::Box::<u32>::new` (app/src/lib.rs:11) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+app/src/lib.rs:17:5: error: fip-prelint: `via_export` is #[fip] but may allocate 1 time(s), at most 0 allowed: `via_export` -> `dep_export::make` (app/src/lib.rs:17) -> `alloc::boxed::Box::<u32>::new` (dep_export/src/lib.rs:9) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+app/src/lib.rs:23:5: error: fip-prelint: cannot check `via_plain` (#[fip]): unresolved: `via_plain` -> `dep_plain::make` (app/src/lib.rs:23): `dep_plain::make` (crate `dep_plain` does not declare `fip::export`)
+app/src/lib.rs:35:5: error: fip-prelint: cannot check `pure_plain` (#[fip]): unresolved: `pure_plain` -> `dep_plain::twice` (app/src/lib.rs:35): `dep_plain::twice` (crate `dep_plain` does not declare `fip::export`)
+app/src/lib.rs:41:5: error: fip-prelint: `via_alias` is #[fip] but may allocate 1 time(s), at most 0 allowed: `via_alias` -> `dep_export::make` (app/src/lib.rs:41) -> `alloc::boxed::Box::<u32>::new` (dep_export/src/lib.rs:9) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+note: fip-prelint: crate `app`: 7 roots, 2 passed, 5 errors, 0 warnings, 0 notes

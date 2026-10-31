@@ -66,6 +66,47 @@
 | crate-root tool attribute `fip::export`, local and in a dependency, via `tcx.get_all_attrs` | read in both |
 | different rustc reading the dependency | `E0514` |
 
+## Corrections found while implementing (2026-11-01)
+
+Implementation: `tools/fip-prelint`; results and open items: `TODOs/fip-prelint.md`.
+
+1. **Item 3 (API).** `rustc_public`'s `Instance::resolve` and `Instance::body` work
+   only in a fully monomorphized typing environment (the bridge's
+   `resolve_instance` uses `TypingEnv::fully_monomorphized()`), so generic roots such
+   as `fip_core::strict::compact<T, F>` cannot be analysed through them. The
+   analysis therefore uses `rustc_middle` (`Instance::try_resolve` in
+   `TypingEnv::post_analysis(root)`, `instance_mir`); `rustc_public` finds the roots
+   and reads their `fip::mark` (`local_crate().fn_defs()`, `all_tool_attrs()`). The
+   driver has its own `Callbacks` with `rustc_internal::run` instead of
+   `run_driver!`, because compilation must continue after the analysis so that
+   `cargo check` writes the `.rmeta` the dependants need.
+2. **Item 4 (flags).** Also `--check-cfg cfg(fip_prelint)` (fixture workspaces have no
+   `check-cfg`) and `-Aunused_features` (`custom_inner_attributes` is unused in
+   crates without `#![fip::export]`). `cargo fip-prelint` runs
+   `cargo check --workspace --all-targets --keep-going` into `target/fip-prelint`.
+3. **Item 5 (`fip::mark`).** `fip-macros` emits the `cfg_attr` only when the expanding
+   compiler is the driver (it sets `FIP_PRELINT_DRIVER=1` in its own process before
+   expansion). Measured: emitted unconditionally, it makes every downstream crate
+   without `check-cfg = ["cfg(fip_prelint)"]` warn `unexpected_cfgs`. Syntax:
+   `fip::mark(kind = "fip"|"fbip", n = N, strict = .., panic_macros = .., param(g = K, ..))`.
+4. **Item 6 (entry points).** The `std`/`alloc` MIR shipped with 1.99.1 is optimized
+   MIR with inlining: `alloc::alloc::alloc` is inlined into
+   `alloc::alloc::Global::alloc_impl_runtime`, which calls the symbols
+   `__rust_alloc` / `__rust_alloc_zeroed` directly (after the empty marker
+   `__rust_no_alloc_shim_is_unstable_v2`). `Box::new` reaches it through
+   `alloc::boxed::box_new_uninit`, not `exchange_malloc`; `Vec::with_capacity`,
+   `String::from` and `vec![]` through `RawVecInner::try_allocate_in` /
+   `box_new_uninit`; `Vec::push` reaches `__rust_realloc`; dropping a `Box` reaches
+   `__rust_dealloc`; `format!` reaches `alloc::fmt::format::format_inner`, which has
+   no MIR (⊤). The tables (`fip_lint_rules::mir`) list the symbols and keep the
+   `alloc::alloc::*` paths for direct calls.
+5. **Item 6 (panics).** Diverging `core`/`alloc`/`std` functions (`-> !`, e.g.
+   `alloc::alloc::handle_alloc_error`, `alloc::raw_vec::handle_error`) count as panic
+   paths and are not looked into. Skipped: `Assert`s whose condition is a constant that
+   cannot fail (opt-level 0 keeps the shift check of `x >> 1`), the null/misaligned
+   pointer UB checks, and `core`'s `precondition_check` functions (they fire only
+   when an `unsafe` contract is already broken).
+
 ## Not covered, and why
 
 - Crates outside the workspace (crates.io) are compiled by plain rustc under

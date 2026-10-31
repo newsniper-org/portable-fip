@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+[package]
+name = "dep_plain"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]

@@ -12,6 +12,8 @@ members = [
     "crates/fip-macros",
     "crates/fip-testkit",
 ]
+# `fip-prelint` is a rustc driver on a pinned toolchain, built on its own.
+exclude = ["tools"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,10 +26,12 @@ publish = false
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
-# `verus_keep_ghost` is set by the `verus` driver; plain cargo builds never see it.
+# `verus_keep_ghost` is set by the `verus` driver, `fip_prelint` by the `fip-prelint`
+# driver (tools/fip-prelint); plain cargo builds never see either.
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(verus_keep_ghost)",
     "cfg(fip_cache_line, values(none(), \"32\", \"64\", \"128\"))",
+    "cfg(fip_prelint)",
 ] }
 
 [workspace.lints.clippy]

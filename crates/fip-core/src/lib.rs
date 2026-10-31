@@ -50,6 +50,7 @@
 //! to be minted just to satisfy a placeholder.
 
 #![no_std]
+#![cfg_attr(fip_prelint, fip::export)]
 #![forbid(unsafe_code)]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 

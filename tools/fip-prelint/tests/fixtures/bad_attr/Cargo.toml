@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: unknown names under the tool `fip`
+[workspace]
+resolver = "3"
+members = ["typo"]

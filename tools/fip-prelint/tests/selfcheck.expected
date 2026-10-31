@@ -1,0 +1,11 @@
+# `cargo fip-prelint --warn-only` on the workspace (tests/selfcheck.rs); notes omitted.
+crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume`: drop of `std::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23)
+crates/fip-macros/tests/strict_gaps.rs:38:5: warning: fip-prelint [error]: `sum` is #[fip(strict = true)] but may allocate 1 time(s), at most 0 allowed: `sum` -> `<Big as core::ops::arith::Add>::add` (crates/fip-macros/tests/strict_gaps.rs:38) -> `alloc::boxed::Box::<u64>::new` (crates/fip-macros/tests/strict_gaps.rs:31) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+crates/fip-macros/tests/strict_gaps.rs:38:5: warning: fip-prelint [error]: `sum` is #[fip(strict = true)] but may free: `sum` -> `<Big as core::ops::arith::Add>::add` (crates/fip-macros/tests/strict_gaps.rs:38): drop of `Big` (crates/fip-macros/tests/strict_gaps.rs:32)
+crates/fip-macros/tests/strict_impl.rs:33:9: warning: fip-prelint: `shapes::Slot::<T>::put_twice` is #[fip(strict = true)] only relative to its generic parameters: allocation bound alloc(drop(T)); open: drop of a `T` (crates/fip-macros/tests/strict_impl.rs:34) (each instantiation is checked where it is analysed; `param(g = K)` fixes the bound of a callable parameter)
+note: fip-prelint: crate `accept`: 8 roots, 8 passed, 0 errors, 0 warnings, 0 notes
+note: fip-prelint: crate `fip_core`: 6 roots, 6 passed, 0 errors, 0 warnings, 24 notes
+note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warnings, 15 notes
+note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 14 notes
+note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 4 notes
+note: fip-prelint: crate `strict_impl`: 11 roots, 10 passed, 0 errors, 1 warnings, 7 notes
