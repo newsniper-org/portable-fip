@@ -1,0 +1,42 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN) -->
+
+# Bounded stack: acyclic call graphs
+
+**Status:** ACCEPTED, 2026-10-31.
+
+## Decision
+
+FP²'s `fip` includes constant stack space. Rust has no tail-call guarantee and no
+stack-size analysis on stable, so this repository bounds the stack **structurally**:
+a function that takes part in no recursion, and whose frames have fixed size (true
+of Rust without `alloca`), uses stack bounded by its longest call chain.
+
+| code | mechanism | strength |
+|---|---|---|
+| verified crates (`fip-core`, `fip-alloc`) | Verus rejects any recursion (direct or mutual) among verified functions that lacks a `decreases` clause. `tests/verified_surface.rs` forbids function-level `decreases` and requires every function to be verified. | proof: the call graph among the crate's functions is acyclic |
+| user code marked `#[fip]` | the macro rejects direct self-recursion; `fip_testkit::callgraph::fip_cycles` lexes a crate's sources, builds a call graph by name and reports every cycle reachable from a `#[fip]` function | conservative check: may over-report on name collisions; misses only calls it cannot see (closures, function pointers, trait objects, functions outside the scanned sources) |
+
+## Measured (2026-10-31)
+
+- Probe: two mutually recursive functions with `verus_spec` and no `decreases` are
+  rejected with "recursive function must have a decreases clause".
+- `just verify-negative`: a mutant of `fip_core::swap` that calls itself is rejected
+  by Verus; a mutant adding a function-level `decreases` is rejected by the surface
+  gate.
+- `fip-testkit` unit tests: mutual recursion through an unmarked function, path and
+  turbofish calls, method calls through `self`, and qualifiers between the attribute
+  and `fn` are detected; strings, comments, Verus ghost code, `core`/`std`/`alloc`
+  paths and method calls on non-`self` functions are not reported.
+
+## Not covered
+
+- Closures and functions passed in by the caller (`keep`, `same`, `f`): their stack
+  use is the caller's.
+- A byte count. The bound is the absence of recursion, not a number.
+
+## What would reopen this
+
+- A stable way to obtain per-function stack sizes (e.g. `-Z emit-stack-sizes`
+  stabilised), which would allow a numeric bound.
+- Verus accepting recursion without `decreases` (it would break the first row).

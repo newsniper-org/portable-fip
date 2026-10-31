@@ -16,11 +16,11 @@ a kernel.
 
 | crate | `no_std` | `alloc` | `unsafe` | what it is |
 |---|---|---|---|---|
-| `fip-core` | yes | **no** | forbidden | `replace`, `update`, `swap`, `compact`, `map_in_place` on `&mut` slots and slices; Verus-verified |
+| `fip-core` | yes | **no** | forbidden | `replace`, `update`, `swap`, `compact`, `dedup_by`, `compact_map`, `map_in_place` on `&mut` slots and slices; Verus-verified |
 | `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
-| `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE`, `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
+| `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
 | `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]`: syntactic lints |
-| `fip-testkit` | no (tests) | — | 1 `impl` | per-thread counting allocator; `assert_fip!`, `assert_fbip!`, `assert_fip_n!` |
+| `fip-testkit` | no (tests) | — | 1 `impl` | counting allocator (`assert_fip!`, `assert_fbip!`, `assert_fip_n!`, `assert_fip_all_threads!`); `callgraph` (recursion through other functions); `surface` (spec coverage of verified crates) |
 
 All crates have empty `[dependencies]`.
 
@@ -33,10 +33,11 @@ each property here has its own mechanism, and the strength differs:
 | property | mechanism | strength |
 |---|---|---|
 | `fip-core` cannot allocate | it does not link `alloc` | by construction |
-| functions do what their spec says | Verus, `--no-cheating`, + 5 mutants that must fail | proof (Verus trust base) |
+| functions do what their spec says | Verus, `--no-cheating`; specs pre-verified against concrete accept/reject cases; 9 functional mutants must fail | proof (Verus trust base) |
 | no allocation in a `#[fip]` body | `fip-macros` token scan | heuristic: blind to callees, trait methods, macros |
-| no allocation when the code runs | `fip-testkit` counts | evidence for the tested inputs |
-| bounded stack | `#[fip]` rejects direct self-recursion; loops have proved `decreases` | heuristic + termination |
+| no allocation when the code runs | `fip-testkit` counts (per thread, or process-wide) | evidence for the tested inputs |
+| bounded stack, verified crates | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases`; a recursive mutant must fail | proof that the call graph is acyclic (closures passed in excluded) |
+| bounded stack, other `#[fip]` code | `#[fip]` rejects direct self-recursion; `fip_testkit::callgraph::fip_cycles` reports cycles across the crate by name | conservative check: name collisions can over-report, nothing defined in the scanned sources is missed |
 
 Nothing in this repository says "proved zero-allocation" about code that only the
 lint or the tests checked. `#[fip]` adds a `# FIP` doc section stating exactly what
@@ -59,6 +60,15 @@ pub fn replace<T>(slot: &mut T, new: T) -> T { /* … */ }
 `true` for every element before the returned length and `false` after it, and the
 retained elements keep their original order.
 
+**Pre-verification → implementation → post-verification.** For `dedup_by` and
+`compact_map` the postcondition was first written as a spec predicate
+(`dedup_post`, `compact_map_post` in `fip-core/src/spec.rs`) and checked on concrete
+inputs before any code existed: the intended answer satisfies it, and wrong answers
+(keeping a duplicate, merging different elements; keeping a dropped element,
+missing a kept one, returning an unmapped value) provably do not. Then the
+function was implemented and verified against that predicate, and mutants of it
+must fail.
+
 Requirements: upstream Verus (`verus-lang/verus`) and Singular
 (`VERUS_SINGULAR_PATH`, default `/usr/bin/Singular`).
 
@@ -72,27 +82,32 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 | `test` | unit, integration, doc tests (allocation tests run in parallel) |
 | `msrv` | the same on rustc 1.97.1 |
 | `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch` (only `core`/`alloc` exist there) |
-| `cross` | `aarch64` and `riscv64gc` checks |
-| `verify` | Verus proofs; `#[fip]` + `verus_spec` composition; 5 mutants must fail verification |
+| `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks |
+| `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected |
+| `verify` | Verus proofs; `#[fip]` + `verus_spec` composition; 10 Verus mutants (incl. one recursive) and 2 surface-gate mutants must fail |
 | `compile-fail-reasons` | each `compile_fail` example of `fip-macros` fails because of the lint, not another error |
 
 ## Usage notes
 
 - Write `#[fip]` **above** `verus_spec`. Below it, the macro sees Verus's rewritten
   item and reports an error.
-- `update` and `map_in_place` take a `hole` value and return it: no `Default`
-  bound, nothing is manufactured. A capability-like type never has to be minted
+- `update`, `map_in_place` and `compact_map` take a `hole` value and return it: no
+  `Default` bound, nothing is manufactured. A capability-like type never has to be minted
   as a placeholder.
 - `fip_testkit::install!()` once per test binary; the assertion macros panic if
   it is missing, so a missing allocator cannot give a vacuous pass.
 
-## Open items
+## Scope notes
 
-- `dedup` and a `compact` variant whose predicate mutates elements are not yet
-  provided: Verus support for `FnMut` closures taking `&mut T` needs a probe first.
-- `CACHE_LINE` has no override for 128-byte-line cores.
-- No proof of a stack bound; recursion through other functions is not detected.
-- `fip-testkit` counts only the Rust global allocator, per thread.
+- A compaction whose predicate mutates elements through `&mut T` is provided as
+  `compact_map`, which takes each element by value and returns `(value, keep)`:
+  Verus cannot specify closures taking `&mut` arguments, and the by-value form is
+  the FIP shape anyway.
+- `dedup_by` takes a predicate rather than requiring `PartialEq`: `vstd` specifies
+  `==` only for types with proved equality laws, while a closure keeps the function
+  generic and fully specified.
+- `CACHE_LINE` override: `RUSTFLAGS='--cfg fip_cache_line="128"'` (32, 64, 128).
+- `fip-testkit` sees only the Rust global allocator.
 
 ## Acknowledgements
 

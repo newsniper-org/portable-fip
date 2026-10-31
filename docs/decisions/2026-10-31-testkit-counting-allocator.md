@@ -14,12 +14,15 @@
 ## Invariant upheld
 
 Every `GlobalAlloc` method forwards its arguments **unchanged** to `System` and
-returns `System`'s result unchanged. The only addition is updating a
-`thread_local!` `Cell<AllocStats>` with `const` initialisation, which:
+returns `System`'s result unchanged. The only additions are counter updates:
 
-- never allocates (no lazy initialisation, no destructor registration);
-- never unwinds (plain integer arithmetic on `Copy` data);
-- uses no atomics, so it adds no cross-thread ordering.
+- a `thread_local!` `Cell<AllocStats>` with `const` initialisation, which never
+  allocates (no lazy initialisation, no destructor registration);
+- four process-wide `AtomicU64` counters (`Relaxed` increments) for
+  `measure_all_threads`, which never allocate.
+
+Neither unwinds (plain integer arithmetic on `Copy` data). The atomics are confined
+to this test-only crate and never reach a `no_std` or verified crate.
 
 During thread teardown the slot may be inaccessible; `try_with` then skips the
 update. Such events are outside every measured region.
@@ -32,7 +35,8 @@ update. Such events are outside every measured region.
   layout or size would corrupt or lose the 1000 written values;
 - `zeroed_allocation_is_zero` — `alloc_zeroed` must reach `System.alloc_zeroed`;
 - `box_new_and_drop_are_counted_exactly` — exact counts and byte sizes;
-- `other_threads_are_not_counted` — per-thread isolation.
+- `other_threads_are_not_counted` — per-thread isolation;
+- `tests/all_threads.rs` — process-wide counting sees work on other threads.
 
 ## Scope
 
@@ -41,5 +45,4 @@ or `no_std` crate.
 
 ## What would reopen this
 
-A need to count allocations in `no_std` targets (no `thread_local!`), or across
-threads.
+A need to count allocations in `no_std` targets (no `thread_local!`).

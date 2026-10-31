@@ -5,7 +5,7 @@
 //! allocated, cloned or dropped.
 
 #[cfg(verus_keep_ghost)]
-use crate::spec::strictly_increasing_below;
+use crate::spec::{compact_map_by_post, dedup_by_post, dedup_src_ok, strictly_increasing_below};
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
@@ -108,14 +108,7 @@ pub fn compact<T, F: Fn(&T) -> bool>(xs: &mut [T], keep: F) -> usize {
                 proof_decl! { let ghost prev = xs@; }
                 swap_lt(xs, w, r);
                 proof! {
-                    let a = prev[w as int];
-                    let b = prev[r as int];
-                    let s1 = prev.update(w as int, b);
-                    vstd::seq_lib::to_multiset_update(prev, w as int, b);
-                    vstd::seq_lib::to_multiset_update(s1, r as int, a);
-                    vstd::seq_lib::to_multiset_contains(prev, a);
-                    assert(s1[r as int] == b);
-                    assert(xs@.to_multiset() =~= prev.to_multiset());
+                    crate::spec::lemma_swap_multiset(prev, w as int, r as int);
                 }
             }
             proof! { idx = idx.push(r as int); }
@@ -166,4 +159,227 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
         i += 1;
     }
     spare
+}
+
+/// Removes consecutive runs of elements that `same` considers equal, keeping the first
+/// of each run, by moving the kept elements to the front. Returns how many are kept.
+///
+/// Each element is compared with the **last kept** element (as `Vec::dedup_by` does,
+/// with the arguments in the order `(kept, candidate)`). Elements at and after the
+/// returned length are the removed ones, in unspecified order; none is dropped.
+///
+/// Verified (`dedup_by_post` in `spec`): the slice is permuted; the kept elements
+/// appear in their original order, starting with the first; each kept element was
+/// found different from the one kept before it; every removed element was found the
+/// same as the last element kept before it.
+///
+/// ```
+/// let mut xs = [1, 1, 2, 3, 3, 3, 1];
+/// let n = fip_core::dedup_by(&mut xs, |a, b| a == b);
+/// assert_eq!(&xs[..n], &[1, 2, 3, 1]);
+/// ```
+#[cfg_attr(verus_keep_ghost, verus_spec(w =>
+    requires
+        forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
+            ==> same.requires((&old(xs)@[i], &old(xs)@[j])),
+    ensures
+        exists|idx: Seq<int>, src: Seq<int>|
+            #[trigger] dedup_by_post(old(xs)@, final(xs)@, w as int, same, idx, src),
+))]
+#[must_use = "elements at and after the returned length are the removed ones"]
+pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
+    let n = xs.len();
+    if n == 0 {
+        proof! {
+            let idx = Seq::<int>::empty();
+            let src = Seq::<int>::empty();
+            assert(final(xs)@ =~= old(xs)@);
+            assert(dedup_by_post(old(xs)@, final(xs)@, 0, same, idx, src));
+        }
+        return 0;
+    }
+    let mut w: usize = 1;
+    let mut r: usize = 1;
+    proof_decl! {
+        let ghost mut idx: Seq<int> = seq![0int];
+        let ghost mut src: Seq<int> = seq![0int];
+    }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            1 <= w <= r <= n,
+            n == old(xs)@.len(),
+            xs@.len() == n,
+            xs@.to_multiset() == old(xs)@.to_multiset(),
+            forall|k: int| r <= k < n ==> xs@[k] == old(xs)@[k],
+            forall|i: int, j: int| 0 <= i < n && 0 <= j < n
+                ==> same.requires((&old(xs)@[i], &old(xs)@[j])),
+            idx.len() == w,
+            strictly_increasing_below(idx, r as int),
+            idx[0] == 0,
+            forall|i: int| 0 <= i < w ==> #[trigger] xs@[i] == old(xs)@[idx[i]],
+            forall|i: int| 0 < i < w ==> #[trigger] same.ensures((&xs@[i - 1], &xs@[i]), false),
+            src.len() == r,
+            forall|j: int| 0 <= j < r ==> dedup_src_ok(
+                old(xs)@, w as int, |a: T, b: T, r: bool| same.ensures((&a, &b), r), idx, #[trigger] src[j], j),
+        decreases n - r,
+    ))]
+    while r < n {
+        proof! {
+            assert(xs@[w as int - 1] == old(xs)@[idx[w as int - 1]]);
+            assert(0 <= idx[w as int - 1] < n);
+        }
+        let differs = !same(&xs[w - 1], &xs[r]);
+        proof_decl! { let ghost ow = w as int; }
+        if differs {
+            proof_decl! { let ghost prev = xs@; }
+            if w < r {
+                swap_lt(xs, w, r);
+                proof! { crate::spec::lemma_swap_multiset(prev, w as int, r as int); }
+            }
+            proof! {
+                assert forall|j: int| 0 <= j < r implies dedup_src_ok(
+                    old(xs)@, ow + 1, |a: T, b: T, r: bool| same.ensures((&a, &b), r), idx.push(r as int), #[trigger] src[j], j) by {
+                    assert(dedup_src_ok(old(xs)@, ow, |a: T, b: T, r: bool| same.ensures((&a, &b), r), idx, src[j], j));
+                };
+                idx = idx.push(r as int);
+                src = src.push(ow);
+                assert(xs@[ow] == old(xs)@[r as int]);
+            }
+            w += 1;
+        }
+        proof! {
+            if !differs {
+                src = src.push(ow - 1);
+            }
+        }
+        r += 1;
+    }
+    proof! {
+        assert(dedup_by_post(old(xs)@, xs@, w as int, same, idx, src));
+    }
+    w
+}
+
+/// Maps every element through `f` and moves the ones `f` marks to keep to the front,
+/// in their original order. Returns how many are kept, and `hole`.
+///
+/// `f` takes each element **by value** and returns `(new_value, keep)`, so an element
+/// can be transformed and filtered in one pass without cloning and without a `&mut`
+/// closure. `hole` is the temporary occupant of the slot being mapped and is
+/// returned. Elements at and after the returned length are the mapped values that
+/// `f` marked to drop, in unspecified order; none is dropped.
+///
+/// Verified (`compact_map_by_post` in `spec`): every element was passed to `f` once
+/// and replaced by `f`'s value; the result is a permutation of those values; the
+/// first `w` are exactly the ones marked `keep`, in original order.
+///
+/// ```
+/// let mut xs = [1, 2, 3, 4];
+/// let (n, hole) = fip_core::compact_map(&mut xs, 0, |v| (v * 10, v % 2 == 1));
+/// assert_eq!((&xs[..n], hole), (&[10, 30][..], 0));
+/// ```
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        forall|i: int| 0 <= i < old(xs)@.len() ==> f.requires((old(xs)@[i],)),
+    ensures
+        r.1 == hole,
+        exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
+            #[trigger] compact_map_by_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
+))]
+#[must_use = "elements at and after the returned length are the dropped ones"]
+pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (usize, T) {
+    let len = xs.len();
+    let mut spare = hole;
+    let mut w: usize = 0;
+    let mut r: usize = 0;
+    proof_decl! {
+        let ghost mut ys: Seq<T> = Seq::empty();
+        let ghost mut ks: Seq<bool> = Seq::empty();
+        let ghost mut idx: Seq<int> = Seq::empty();
+        let ghost mut pos: Seq<int> = Seq::empty();
+    }
+    proof! { assert(xs@.subrange(0, 0) =~= ys); }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            w <= r <= len,
+            len == old(xs)@.len(),
+            xs@.len() == len,
+            spare == hole,
+            forall|k: int| r <= k < len ==> xs@[k] == old(xs)@[k],
+            forall|i: int| 0 <= i < len ==> f.requires((old(xs)@[i],)),
+            ys.len() == r,
+            ks.len() == r,
+            forall|j: int| 0 <= j < r ==> f.ensures((old(xs)@[j],), (#[trigger] ys[j], ks[j])),
+            xs@.subrange(0, r as int).to_multiset() == ys.to_multiset(),
+            idx.len() == w,
+            strictly_increasing_below(idx, r as int),
+            forall|i: int| 0 <= i < w ==> #[trigger] xs@[i] == ys[idx[i]] && ks[idx[i]],
+            pos.len() == r,
+            forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+        decreases len - r,
+    ))]
+    while r < len {
+        proof_decl! { let ghost pre = xs@; let ghost pys = ys; let ghost pks = ks; }
+        proof! {
+            assert forall|i: int| 0 <= i < w implies #[trigger] pre[i] == pys[idx[i]] && pks[idx[i]] by {
+                assert(xs@[i] == ys[idx[i]] && ks[idx[i]]);
+            };
+        }
+        let item = crate::slot::replace(&mut xs[r], spare);
+        let (mapped, keep) = f(item);
+        spare = crate::slot::replace(&mut xs[r], mapped);
+        proof_decl! { let ghost stored = xs@; }
+        proof! {
+            assert(stored =~= pre.update(r as int, mapped));
+            assert(stored.subrange(0, r as int) =~= pre.subrange(0, r as int));
+            assert(stored.subrange(0, r as int + 1) =~= stored.subrange(0, r as int).push(mapped));
+            vstd::seq_lib::to_multiset_build(stored.subrange(0, r as int), mapped);
+            vstd::seq_lib::to_multiset_build(pys, mapped);
+            ys = pys.push(mapped);
+            ks = pks.push(keep);
+            assert(stored.subrange(0, r as int + 1).to_multiset() == ys.to_multiset());
+            assert(forall|i: int| 0 <= i < w ==> #[trigger] stored[i] == pre[i]);
+            assert(forall|i: int| 0 <= i < w ==> 0 <= #[trigger] idx[i] < r);
+            assert(forall|i: int| 0 <= i < w ==> #[trigger] ys[idx[i]] == pys[idx[i]]);
+            assert(forall|i: int| 0 <= i < w ==> #[trigger] ks[idx[i]] == pks[idx[i]]);
+            assert(forall|i: int| 0 <= i < w ==> #[trigger] stored[i] == ys[idx[i]] && ks[idx[i]]);
+            assert forall|j: int| 0 <= j < r + 1 && #[trigger] ks[j] implies 0 <= pos[j] < w && idx[pos[j]] == j || j == r by {
+                if j < r { assert(ks[j] == pks[j]); }
+            };
+            assert(ys[r as int] == mapped && ks[r as int] == keep);
+        }
+        if keep {
+            if w < r {
+                swap_lt(xs, w, r);
+                proof! {
+                    let p = stored.subrange(0, r as int + 1);
+                    crate::spec::lemma_swap_multiset(p, w as int, r as int);
+                    assert(xs@.subrange(0, r as int + 1) =~= p.update(w as int, p[r as int]).update(r as int, p[w as int]));
+                }
+            }
+            proof! {
+                assert(xs@[w as int] == mapped);
+                assert forall|i: int| 0 <= i < w implies #[trigger] xs@[i] == stored[i] by {};
+                pos = pos.push(w as int);
+                idx = idx.push(r as int);
+            }
+            w += 1;
+        }
+        proof! {
+            if !keep {
+                pos = pos.push(-1);
+            }
+        }
+        r += 1;
+    }
+    proof! {
+        assert(xs@.subrange(0, len as int) =~= xs@);
+        assert(compact_map_by_post(old(xs)@, xs@, w as int, f, ys, ks, idx, pos));
+    }
+    let res = (w, spare);
+    proof! {
+        assert(res.0 == w);
+        assert(compact_map_by_post(old(xs)@, xs@, res.0 as int, f, ys, ks, idx, pos));
+    }
+    res
 }

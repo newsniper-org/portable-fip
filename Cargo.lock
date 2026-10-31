@@ -16,10 +16,16 @@ version = "0.1.0"
 [[package]]
 name = "fip-core"
 version = "0.1.0"
+dependencies = [
+ "fip-testkit",
+]
 
 [[package]]
 name = "fip-macros"
 version = "0.1.0"
+dependencies = [
+ "fip-testkit",
+]
 
 [[package]]
 name = "fip-testkit"

@@ -1,0 +1,577 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+//! Crate-wide recursion check for `#[fip]` / `#[fip(N)]` functions.
+//!
+//! `#[fip]` sees one function and rejects only *direct* self-recursion. Recursion
+//! through other functions (`a → b → a`) leaves the stack unbounded just the same.
+//! [`fip_cycles`] lexes every `.rs` file under a directory, builds a call graph by
+//! function **name**, and reports every cycle reachable from a function marked
+//! `#[fip]` or `#[fip(N)]` (`#[fbip]` may recurse).
+//!
+//! It is conservative: calls are matched by name, so a call to a same-named function
+//! of another type or module counts as a call to the local one. A reported cycle is
+//! therefore either real or a name collision; an unreported one cannot exist among
+//! functions defined in the scanned sources. Calls through closures, function
+//! pointers and trait objects are invisible, as are functions outside the scanned
+//! directory.
+//!
+//! For crates verified with Verus, a stronger guarantee exists: Verus rejects any
+//! recursion among verified functions without `decreases`, and
+//! [`crate::surface::with_fn_decreases`] checks there is none.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Tok {
+    Ident(String),
+    Punct(char),
+}
+
+/// Minimal Rust lexer: identifiers and punctuation; comments, string, char and
+/// byte literals and lifetimes are dropped.
+fn lex(src: &str) -> Vec<Tok> {
+    let c: Vec<char> = src.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        if ch.is_whitespace() {
+            i += 1;
+        } else if ch == '/' && c.get(i + 1) == Some(&'/') {
+            while i < c.len() && c[i] != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && c.get(i + 1) == Some(&'*') {
+            let mut depth = 1;
+            i += 2;
+            while i < c.len() && depth > 0 {
+                if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    i += 2;
+                } else if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if ch == 'r' && (c.get(i + 1) == Some(&'"') || c.get(i + 1) == Some(&'#')) {
+            // raw string r"..." / r#"..."#
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while c.get(j) == Some(&'#') {
+                hashes += 1;
+                j += 1;
+            }
+            if c.get(j) == Some(&'"') {
+                j += 1;
+                'outer: while j < c.len() {
+                    if c[j] == '"' {
+                        let mut k = 0;
+                        while k < hashes && c.get(j + 1 + k) == Some(&'#') {
+                            k += 1;
+                        }
+                        if k == hashes {
+                            j += 1 + hashes;
+                            break 'outer;
+                        }
+                    }
+                    j += 1;
+                }
+                i = j;
+            } else {
+                out.push(Tok::Ident("r".into()));
+                i += 1;
+            }
+        } else if ch == '"' {
+            i += 1;
+            while i < c.len() && c[i] != '"' {
+                if c[i] == '\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+        } else if ch == '\'' {
+            // char literal 'x' / '\n' / '\u{..}', or lifetime 'a
+            if c.get(i + 1) == Some(&'\\') {
+                i += 2;
+                while i < c.len() && c[i] != '\'' {
+                    i += 1;
+                }
+                i += 1;
+            } else if c.get(i + 2) == Some(&'\'') {
+                i += 3;
+            } else {
+                i += 1;
+                while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
+                    i += 1;
+                }
+            }
+        } else if ch.is_alphabetic() || ch == '_' {
+            let s = i;
+            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
+                i += 1;
+            }
+            out.push(Tok::Ident(c[s..i].iter().collect()));
+        } else if ch.is_ascii_digit() {
+            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '.') {
+                if c[i] == '.' && !c.get(i + 1).is_some_and(char::is_ascii_digit) {
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            out.push(Tok::Punct(ch));
+            i += 1;
+        }
+    }
+    out
+}
+
+fn ident(t: Option<&Tok>) -> Option<&str> {
+    match t {
+        Some(Tok::Ident(s)) => Some(s),
+        _ => None,
+    }
+}
+
+fn punct(t: Option<&Tok>, c: char) -> bool {
+    matches!(t, Some(Tok::Punct(p)) if *p == c)
+}
+
+/// Index just past the delimiter group starting at `i` (which must be the opener).
+fn skip_group(t: &[Tok], i: usize) -> usize {
+    let (open, close) = match t.get(i) {
+        Some(Tok::Punct('(')) => ('(', ')'),
+        Some(Tok::Punct('[')) => ('[', ']'),
+        Some(Tok::Punct('{')) => ('{', '}'),
+        _ => return i + 1,
+    };
+    let mut d = 0;
+    let mut j = i;
+    while j < t.len() {
+        if punct(t.get(j), open) {
+            d += 1;
+        } else if punct(t.get(j), close) {
+            d -= 1;
+            if d == 0 {
+                return j + 1;
+            }
+        }
+        j += 1;
+    }
+    j
+}
+
+/// Marker on a function, from its outer attributes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mark {
+    None,
+    Fip,
+    Fbip,
+}
+
+#[derive(Debug)]
+struct Func {
+    name: String,
+    mark: Mark,
+    /// Takes a `self` receiver, so `.name(..)` method calls can reach it.
+    has_self: bool,
+    calls: Calls,
+}
+
+/// Calls found in a body, by syntactic form.
+#[derive(Debug, Default)]
+struct Calls {
+    /// `name(..)`, `path::name(..)`, `Type::name(..)` (paths rooted at `core`,
+    /// `std` or `alloc` are left out).
+    free: BTreeSet<String>,
+    /// `expr.name(..)`.
+    method: BTreeSet<String>,
+}
+
+const EXTERNAL_ROOTS: &[&str] = &["core", "std", "alloc"];
+
+/// Root identifier of the path ending at `t[i]` (`a::b::c` → `a`), if any.
+fn path_root(t: &[Tok], i: usize) -> Option<&str> {
+    let mut j = i;
+    let mut root = None;
+    while j >= 3 && punct(t.get(j - 1), ':') && punct(t.get(j - 2), ':') {
+        match ident(t.get(j - 3)) {
+            Some(r) => {
+                root = Some(r);
+                j -= 3;
+            }
+            None => break,
+        }
+    }
+    root
+}
+
+fn attr_mark(t: &[Tok], start: usize, end: usize) -> Mark {
+    // `#[fip]`, `#[fip(..)]`, `#[fip_macros::fip]`, `#[fbip]`, `#[fip_macros::fbip]`
+    let mut last = None;
+    let mut j = start;
+    while j < end {
+        if let Some(s) = ident(t.get(j))
+            && !punct(t.get(j + 1), ':')
+        {
+            last = Some(s.to_string());
+            break;
+        }
+        j += 1;
+    }
+    match last.as_deref() {
+        Some("fip") => Mark::Fip,
+        Some("fbip") => Mark::Fbip,
+        _ => Mark::None,
+    }
+}
+
+const GHOST_MACROS: &[&str] = &["proof", "proof_decl", "proof_with"];
+
+fn body_calls(t: &[Tok], start: usize, end: usize) -> Calls {
+    let mut calls = Calls::default();
+    let mut i = start;
+    while i < end {
+        // skip attributes and ghost macros
+        if punct(t.get(i), '#') && punct(t.get(i + 1), '[') {
+            i = skip_group(t, i + 1);
+            continue;
+        }
+        if let Some(s) = ident(t.get(i)) {
+            if punct(t.get(i + 1), '!') {
+                if GHOST_MACROS.contains(&s) {
+                    i = skip_group(t, i + 2);
+                    continue;
+                }
+                i += 2; // other macros: scan their arguments as code
+                continue;
+            }
+            let mut k = i + 1;
+            // turbofish: name::<..>(
+            if punct(t.get(k), ':') && punct(t.get(k + 1), ':') && punct(t.get(k + 2), '<') {
+                let mut d = 0;
+                k += 2;
+                while k < end {
+                    if punct(t.get(k), '<') {
+                        d += 1;
+                    } else if punct(t.get(k), '>') {
+                        d -= 1;
+                        if d == 0 {
+                            k += 1;
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+            }
+            if punct(t.get(k), '(') && s != "fn" {
+                if i > 0 && punct(t.get(i - 1), '.') {
+                    calls.method.insert(s.to_string());
+                } else if !path_root(t, i).is_some_and(|r| EXTERNAL_ROOTS.contains(&r)) {
+                    calls.free.insert(s.to_string());
+                }
+            }
+        }
+        i += 1;
+    }
+    calls
+}
+
+fn parse(t: &[Tok], out: &mut Vec<Func>) {
+    let mut i = 0;
+    let mut attr_start: Option<usize> = None;
+    let mut mark = Mark::None;
+    while i < t.len() {
+        if punct(t.get(i), '#') && punct(t.get(i + 1), '[') {
+            let end = skip_group(t, i + 1);
+            let m = attr_mark(t, i + 2, end - 1);
+            if m != Mark::None {
+                mark = m;
+            }
+            attr_start.get_or_insert(i);
+            i = end;
+            continue;
+        }
+        if ident(t.get(i)) == Some("fn")
+            && let Some(name) = ident(t.get(i + 1))
+        {
+            // find body `{` at depth 0 or `;`
+            let mut j = i + 2;
+            let mut depth = 0_i32;
+            while j < t.len() {
+                match t.get(j) {
+                    Some(Tok::Punct('(' | '[' | '<')) => depth += 1,
+                    Some(Tok::Punct(')' | ']')) => depth -= 1,
+                    Some(Tok::Punct('>'))
+                        if !punct(t.get(j - 1), '-') && !punct(t.get(j - 1), '=') =>
+                    {
+                        depth -= 1;
+                    }
+                    Some(Tok::Punct(';' | '{')) if depth <= 0 => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if punct(t.get(j), '{') {
+                let end = skip_group(t, j);
+                out.push(Func {
+                    name: name.to_string(),
+                    mark,
+                    has_self: has_self_param(t, i + 2, j),
+                    calls: body_calls(t, j + 1, end - 1),
+                });
+                // nested fns inside the body are found by scanning on from j + 1
+                i = j + 1;
+            } else {
+                i = j + 1;
+            }
+            mark = Mark::None;
+            attr_start = None;
+            continue;
+        }
+        // Visibility/qualifier tokens between attributes and `fn` keep the mark.
+        let keeps = matches!(
+            ident(t.get(i)),
+            Some(
+                "pub"
+                    | "const"
+                    | "async"
+                    | "unsafe"
+                    | "safe"
+                    | "extern"
+                    | "crate"
+                    | "super"
+                    | "in"
+                    | "default"
+            )
+        ) || matches!(t.get(i), Some(Tok::Punct('(' | ')')))
+            || (attr_start.is_some() && matches!(t.get(i), Some(Tok::Punct(':'))));
+        if !keeps {
+            mark = Mark::None;
+            attr_start = None;
+        }
+        i += 1;
+    }
+}
+
+/// `true` if the first parameter of the signature in `t[start..end]` is `self`,
+/// `&self`, `&mut self`, `mut self` or `self: ..`.
+fn has_self_param(t: &[Tok], start: usize, end: usize) -> bool {
+    let mut i = start;
+    // skip generics `<..>`
+    if punct(t.get(i), '<') {
+        let mut d = 0;
+        while i < end {
+            if punct(t.get(i), '<') {
+                d += 1;
+            } else if punct(t.get(i), '>') {
+                d -= 1;
+                if d == 0 {
+                    i += 1;
+                    break;
+                }
+            }
+            i += 1;
+        }
+    }
+    if !punct(t.get(i), '(') {
+        return false;
+    }
+    let mut k = i + 1;
+    while k < end {
+        match t.get(k) {
+            Some(Tok::Punct('&')) => k += 1,
+            Some(Tok::Ident(s)) if s == "mut" => k += 1,
+            Some(Tok::Ident(s)) => return s == "self",
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A cycle in the call graph, listed as function names; the first name repeats at
+/// the end (`["a", "b", "a"]`).
+pub type Cycle = Vec<String>;
+
+/// Lexes `sources` (path, text) and returns the cycles reachable from functions
+/// marked `#[fip]` / `#[fip(N)]`.
+#[must_use]
+pub fn fip_cycles_in(sources: &[(PathBuf, String)]) -> Vec<Cycle> {
+    let mut funcs = Vec::new();
+    for (_, text) in sources {
+        parse(&lex(text), &mut funcs);
+    }
+    let methods: BTreeSet<&str> = funcs
+        .iter()
+        .filter(|f| f.has_self)
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut roots = BTreeSet::new();
+    for f in &funcs {
+        let e = graph.entry(f.name.clone()).or_default();
+        e.extend(f.calls.free.iter().cloned());
+        e.extend(
+            f.calls
+                .method
+                .iter()
+                .filter(|m| methods.contains(m.as_str()))
+                .cloned(),
+        );
+        if f.mark == Mark::Fip {
+            roots.insert(f.name.clone());
+        }
+    }
+    let defined: BTreeSet<String> = graph.keys().cloned().collect();
+    let mut cycles: BTreeSet<Cycle> = BTreeSet::new();
+    for r in &roots {
+        let mut stack = vec![r.clone()];
+        dfs(&graph, &defined, &mut stack, &mut cycles);
+    }
+    cycles.into_iter().collect()
+}
+
+fn dfs(
+    g: &BTreeMap<String, BTreeSet<String>>,
+    defined: &BTreeSet<String>,
+    stack: &mut Vec<String>,
+    cycles: &mut BTreeSet<Cycle>,
+) {
+    let cur = stack.last().cloned().unwrap_or_default();
+    let Some(callees) = g.get(&cur) else { return };
+    for c in callees {
+        if !defined.contains(c) {
+            continue;
+        }
+        if let Some(pos) = stack.iter().position(|s| s == c) {
+            let mut cyc: Vec<String> = stack[pos..].to_vec();
+            // canonical rotation: start at the smallest name
+            let min = cyc
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.cmp(b.1))
+                .map_or(0, |(i, _)| i);
+            cyc.rotate_left(min);
+            cyc.push(cyc[0].clone());
+            cycles.insert(cyc);
+            continue;
+        }
+        stack.push(c.clone());
+        dfs(g, defined, stack, cycles);
+        stack.pop();
+    }
+}
+
+/// [`fip_cycles_in`] over every `.rs` file under `dir`.
+///
+/// # Panics
+///
+/// Panics if `dir` or a file in it cannot be read.
+#[must_use]
+pub fn fip_cycles(dir: &Path) -> Vec<Cycle> {
+    let mut files = Vec::new();
+    collect(dir, &mut files);
+    files.sort();
+    let sources: Vec<(PathBuf, String)> = files
+        .into_iter()
+        .map(|p| {
+            let s = fs::read_to_string(&p).expect("read source file");
+            (p, s)
+        })
+        .collect();
+    fip_cycles_in(&sources)
+}
+
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).expect("read source dir") {
+        let p = e.expect("dir entry").path();
+        if p.is_dir() {
+            collect(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cycles(src: &str) -> Vec<Cycle> {
+        fip_cycles_in(&[(PathBuf::from("x.rs"), src.to_string())])
+    }
+
+    #[test]
+    fn mutual_recursion_through_unmarked_fn() {
+        let c = cycles(
+            "#[fip]\nfn a(n: u32) -> u32 { b(n) }\nfn b(n: u32) -> u32 { if n == 0 { 0 } else { a(n - 1) } }\n",
+        );
+        assert_eq!(c, vec![vec!["a".to_string(), "b".into(), "a".into()]]);
+    }
+
+    #[test]
+    fn path_calls_and_turbofish_are_seen() {
+        let c = cycles(
+            "#[fip_macros::fip]\npub fn a() { crate::m::b::<u8>() }\nmod m { pub fn b<T>() { super::a() } }\n",
+        );
+        assert_eq!(c.len(), 1, "{c:?}");
+    }
+
+    #[test]
+    fn fbip_and_unmarked_roots_are_not_reported() {
+        assert_eq!(
+            cycles("#[fbip]\nfn a() { a() }\nfn b() { b() }\n"),
+            Vec::<Cycle>::new()
+        );
+    }
+
+    #[test]
+    fn acyclic_and_external_calls() {
+        assert_eq!(
+            cycles(
+                "#[fip(2)]\nfn a(x: &[u8]) -> usize { b(x) + x.len() }\nfn b(x: &[u8]) -> usize { core::cmp::min(x.len(), 3) }\n"
+            ),
+            Vec::<Cycle>::new()
+        );
+    }
+
+    #[test]
+    fn strings_comments_and_ghost_code_are_ignored() {
+        let src = "#[fip]\nfn a() {\n    let _s = \"b()\"; // b()\n    /* b() */\n    proof! { b(); }\n    #[cfg_attr(verus_keep_ghost, verus_spec(invariant b(),))]\n    while c() {}\n}\nfn b() { a() }\nfn c() -> bool { false }\n";
+        assert_eq!(cycles(src), Vec::<Cycle>::new());
+    }
+
+    #[test]
+    fn method_calls_reach_self_methods_by_name() {
+        let c = cycles(
+            "impl S {\n    #[fip]\n    fn step(&mut self) { self.step2() }\n    fn step2(&mut self) { Self::step(self) }\n}\n",
+        );
+        assert_eq!(c.len(), 1, "{c:?}");
+    }
+
+    #[test]
+    fn method_calls_do_not_reach_free_functions() {
+        let c = cycles("#[fip]\nfn len(x: &[u8]) -> usize { x.len() }\n");
+        assert_eq!(c, Vec::<Cycle>::new());
+    }
+
+    #[test]
+    fn std_paths_are_external() {
+        let c = cycles(
+            "#[fip]\nfn swap(a: &mut u8, b: &mut u8) { core::mem::swap(a, b); std::mem::swap(a, b) }\n",
+        );
+        assert_eq!(c, Vec::<Cycle>::new());
+    }
+
+    #[test]
+    fn qualifiers_between_attribute_and_fn_keep_the_mark() {
+        let c = cycles("#[fip]\npub(crate) const unsafe fn a() { a() }\n");
+        assert_eq!(c, vec![vec!["a".to_string(), "a".into()]]);
+    }
+}

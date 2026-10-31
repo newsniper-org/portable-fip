@@ -41,6 +41,13 @@ implementation shipped exactly this defect.
 - `riscv64`: `prefetch.r` belongs to Zicbop and is not assumed; the hint is a
   no-op there.
 
+## Cache-line size
+
+`CACHE_LINE` defaults to 128 bytes on Apple `aarch64` and 64 bytes elsewhere, and can
+be set per build with `--cfg fip_cache_line="N"` (32, 64 or 128). A `cfg` predicate
+can only test listed values, so `build.rs` rejects any other value, a bare
+`fip_cache_line`, or two values (`just arch-override`).
+
 ## What would reopen this
 
 A target where the hint can fault, or a decision to assume Zicbop on RISC-V.

@@ -18,12 +18,17 @@
 //!   the `verus_keep_ghost` cfg is set only by the `verus` driver, so the crate has
 //!   no build-time dependency on Verus or `vstd`.
 //!
+//! - **Bounded stack, by acyclic call graph.** Verus rejects any recursion among
+//!   verified functions that lacks a `decreases` clause; no function here has one
+//!   (checked by `tests/verified_surface.rs`, and a recursive mutant is rejected by
+//!   `just verify-negative`). With no recursion and fixed-size frames, stack depth is
+//!   bounded by the longest call chain. Every loop has a proved `decreases` measure.
+//!
 //! ## What it does not guarantee
 //!
-//! - Bounded stack depth is not proved. No function here recurses, and every loop has a
-//!   proved `decreases` measure, but that is termination, not a stack bound.
-//! - Closures passed in (`keep`, `f`) are the caller's code; this crate makes no claim
-//!   about what they allocate.
+//! - Closures passed in (`keep`, `same`, `f`) are the caller's code; this crate makes
+//!   no claim about what they allocate or how much stack they use.
+//! - The stack bound is structural (no recursion), not a byte count.
 //!
 //! ## Placeholders
 //!
@@ -52,5 +57,5 @@ pub mod slot;
 #[cfg(verus_keep_ghost)]
 pub mod spec;
 
-pub use slice::{compact, map_in_place, swap};
+pub use slice::{compact, compact_map, dedup_by, map_in_place, swap};
 pub use slot::{replace, update};

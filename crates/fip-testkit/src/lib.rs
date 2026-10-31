@@ -31,8 +31,9 @@
 //!
 //! ## Limits
 //!
-//! - Counts are per thread. Work the expression hands to other threads is not
-//!   counted. This is deliberate: it keeps parallel tests independent.
+//! - The `assert_*` macros count per thread, which keeps parallel tests
+//!   independent; work handed to other threads is not counted. To include it, use
+//!   [`measure_all_threads`] (process-wide, needs tests not to run concurrently).
 //! - A pass is evidence for the inputs tested, not a proof for all inputs.
 //! - Only allocations through the Rust global allocator are seen.
 //! - The macros panic if the counting allocator is not installed, so a missing
@@ -40,8 +41,13 @@
 
 #![deny(unsafe_code)]
 
+pub mod callgraph;
+pub mod surface;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
     static COUNTS: Cell<AllocStats> = const { Cell::new(AllocStats::ZERO) };
@@ -81,14 +87,56 @@ impl AllocStats {
     }
 }
 
-fn record(f: impl FnOnce(&mut AllocStats)) {
+/// Process-wide counters, for [`measure_all_threads`].
+static GLOBAL: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Serialises [`measure_all_threads`] calls against each other.
+static GLOBAL_SERIAL: Mutex<()> = Mutex::new(());
+
+fn record(f: impl Fn(&mut AllocStats)) {
     // `try_with`: during thread teardown the slot may be gone; such events are not
-    // inside any measured region, so dropping them is correct.
+    // inside any per-thread measured region, so dropping them there is correct.
     let _ = COUNTS.try_with(|c| {
         let mut s = c.get();
         f(&mut s);
         c.set(s);
     });
+    let mut d = AllocStats::ZERO;
+    f(&mut d);
+    for (slot, v) in GLOBAL
+        .iter()
+        .zip([d.allocs, d.reallocs, d.frees, d.bytes_requested])
+    {
+        if v != 0 {
+            slot.fetch_add(v, Ordering::Relaxed);
+        }
+    }
+}
+
+fn global() -> AllocStats {
+    let [a, r, f, b] = &GLOBAL;
+    AllocStats {
+        allocs: a.load(Ordering::SeqCst),
+        reallocs: r.load(Ordering::SeqCst),
+        frees: f.load(Ordering::SeqCst),
+        bytes_requested: b.load(Ordering::SeqCst),
+    }
+}
+
+/// Like [`measure`], but counts heap operations of **every thread** of the process
+/// while `f` runs, so work `f` hands to other threads is included.
+///
+/// Anything else running concurrently is counted too. Use it in a test binary
+/// whose other tests do not run at the same time (`--test-threads 1`, or a
+/// dedicated `tests/*.rs` file with one test). Calls to this function are
+/// serialised against each other.
+pub fn measure_all_threads<R>(f: impl FnOnce() -> R) -> (R, AllocStats) {
+    let _guard = GLOBAL_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = global();
+    let r = f();
+    let after = global();
+    (r, after.since(before))
 }
 
 fn bytes(layout: Layout) -> u64 {
@@ -206,6 +254,16 @@ macro_rules! assert_fbip {
     ($e:expr $(,)?) => {{
         let (v, s) = $crate::measure(|| $e);
         $crate::__check("fbip", s, 0, true, stringify!($e));
+        v
+    }};
+}
+
+/// Like [`assert_fip!`], but counted over all threads with [`measure_all_threads`].
+#[macro_export]
+macro_rules! assert_fip_all_threads {
+    ($e:expr $(,)?) => {{
+        let (v, s) = $crate::measure_all_threads(|| $e);
+        $crate::__check("fip (all threads)", s, 0, false, stringify!($e));
         v
     }};
 }

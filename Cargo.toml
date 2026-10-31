@@ -23,7 +23,10 @@ publish = false
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
 # `verus_keep_ghost` is set by the `verus` driver; plain cargo builds never see it.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(verus_keep_ghost)",
+    "cfg(fip_cache_line, values(none(), \"32\", \"64\", \"128\"))",
+] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

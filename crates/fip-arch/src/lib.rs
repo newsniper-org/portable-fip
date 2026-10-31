@@ -9,12 +9,12 @@
 //! | target | `CACHE_LINE` | `prefetch_read` |
 //! |---|---|---|
 //! | `x86_64` | 64 | `prefetcht0` (baseline x86-64, no SSE needed) |
-//! | `aarch64` | 64 | `prfm pldl1keep` (baseline `ARMv8`-A) |
+//! | `aarch64` | 64 (Apple: 128) | `prfm pldl1keep` (baseline `ARMv8`-A) |
 //! | `riscv64` | 64 | no-op (`prefetch.r` needs Zicbop; not assumed) |
 //! | other | 64 | no-op |
 //!
-//! `CACHE_LINE` is the common L1 line size. Some cores use 128 bytes (e.g. Apple
-//! M-series); there is no override mechanism yet.
+//! `CACHE_LINE` can be overridden per build: `RUSTFLAGS='--cfg fip_cache_line="128"'`
+//! (allowed: 32, 64, 128).
 //!
 //! `#![no_std]`, no `alloc`, no dependencies. `unsafe` is confined to the two inline
 //! `asm!` hints and justified in `docs/decisions/2026-10-31-arch-prefetch-asm.md`.
@@ -39,8 +39,36 @@ pub const ARCH: &str = "riscv64";
 )))]
 pub const ARCH: &str = "other";
 
-/// Typical L1 cache-line size in bytes for [`ARCH`].
-pub const CACHE_LINE: usize = 64;
+/// Built-in L1 cache-line size for the target: 128 bytes on Apple `aarch64`
+/// (M-series), 64 bytes elsewhere.
+pub const DEFAULT_CACHE_LINE: usize = if cfg!(all(target_arch = "aarch64", target_vendor = "apple"))
+{
+    128
+} else {
+    64
+};
+
+/// L1 cache-line size in bytes used by this build.
+///
+/// [`DEFAULT_CACHE_LINE`] unless overridden at build time with
+/// `RUSTFLAGS='--cfg fip_cache_line="N"'`, N one of `32`, `64`, `128`
+/// (e.g. for 128-byte-line server cores). Other values are rejected at compile time.
+pub const CACHE_LINE: usize = if cfg!(fip_cache_line = "32") {
+    32
+} else if cfg!(fip_cache_line = "64") {
+    64
+} else if cfg!(fip_cache_line = "128") {
+    128
+} else {
+    DEFAULT_CACHE_LINE
+};
+
+// `fip_cache_line` given without one of the supported values.
+#[cfg(all(
+    fip_cache_line,
+    not(any(fip_cache_line = "32", fip_cache_line = "64", fip_cache_line = "128"))
+))]
+compile_error!("fip_cache_line must be \"32\", \"64\" or \"128\"");
 
 /// How many `T` fit in one cache line, for sizing batches of an in-place loop.
 ///
@@ -108,12 +136,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_line_follows_the_build_cfg() {
+        let expected = if cfg!(fip_cache_line = "32") {
+            32
+        } else if cfg!(fip_cache_line = "64") {
+            64
+        } else if cfg!(fip_cache_line = "128") {
+            128
+        } else {
+            DEFAULT_CACHE_LINE
+        };
+        assert_eq!(CACHE_LINE, expected);
+        assert!(CACHE_LINE.is_power_of_two());
+    }
+
+    #[test]
     fn per_cache_line_bounds() {
         assert_eq!(per_cache_line::<u8>(), CACHE_LINE);
         assert_eq!(per_cache_line::<u64>(), CACHE_LINE / 8);
-        assert_eq!(per_cache_line::<[u8; 64]>(), 1);
-        assert_eq!(per_cache_line::<[u8; 65]>(), 1);
         assert_eq!(per_cache_line::<[u8; 128]>(), 1);
+        assert_eq!(per_cache_line::<[u8; 129]>(), 1);
+        assert_eq!(per_cache_line::<[u8; 256]>(), 1);
+        assert_eq!(per_cache_line::<[u8; 32]>(), CACHE_LINE / 32);
         assert_eq!(per_cache_line::<()>(), usize::MAX);
     }
 

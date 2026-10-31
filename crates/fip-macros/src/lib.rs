@@ -22,9 +22,11 @@
 //! `.insert`, `.extend`, `.reserve`, `.resize`, …), which may allocate.
 //!
 //! Not seen: allocation inside called functions, trait methods with other names,
-//! user macros, recursion through other functions. Use `fip-testkit` to check what the
-//! code actually does, and keep allocation-free code in `fip-core`-style crates that
-//! do not link `alloc`, where the compiler rules allocation out.
+//! user macros, recursion through other functions. For those, use `fip-testkit`:
+//! its allocation-count assertions check what the code does, and
+//! `fip_testkit::callgraph::fip_cycles` finds recursion through other functions
+//! across a crate. Keep allocation-free code in `fip-core`-style crates that do not
+//! link `alloc`, where the compiler rules allocation out.
 //!
 //! Contents of `proof!`, `proof_decl!`, `proof_with!` and of attributes inside the
 //! body are skipped: they are Verus ghost code and erased in normal builds. Write

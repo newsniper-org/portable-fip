@@ -42,9 +42,10 @@ The attribute syntax keeps one body, verified as written.
 
 ## Measured (2026-10-31)
 
-- Verus 0.2026.10.18.7d82994 (upstream main), Singular 4.4.1: `fip-core` 8 verified,
-  `fip-alloc` 1 verified, both with `--no-cheating`; 5 mutants rejected
-  (`just verify-negative`).
+- Verus 0.2026.10.18.7d82994 (upstream main), Singular 4.4.1: `fip-core` 20 verified
+  (including 7 pre-verification lemmas on the `dedup_by`/`compact_map` specs),
+  `fip-alloc` 1 verified, both with `--no-cheating`; 10 Verus mutants and 2
+  surface-gate mutants rejected (`just verify-negative`).
 - Plain builds: `x86_64-unknown-none` with rustc 1.97.1 and 1.94.0
   (`--ignore-rust-version`), and `cargo test --workspace` on both.
 
@@ -52,8 +53,9 @@ The attribute syntax keeps one body, verified as written.
 
 - **Unspecified functions are silently unverified.** Under the attribute syntax a
   function without `verus_spec` is external to Verus, and `--no-cheating` does not
-  object. Closed by `tests/verified_surface.rs` in each verified crate: every `fn`
-  outside `verus! { }` must carry a `verus_spec` attribute.
+  object. Closed by `tests/verified_surface.rs` in each verified crate (scanner in
+  `fip_testkit::surface`): every `fn` outside `verus! { }` must carry a `verus_spec`
+  attribute; a mutant with one attribute removed must fail the test.
 - **`vstd` coverage limits what can be used.** E.g. `core::mem::replace` and
   `<[T]>::swap` have no `vstd` specification; `fip-core` builds them from
   `core::mem::swap` and `split_at_mut`, which do. A trusted specification would

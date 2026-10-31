@@ -13,5 +13,8 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+fip-testkit = { path = "../fip-testkit" }
+
 [lints]
 workspace = true
