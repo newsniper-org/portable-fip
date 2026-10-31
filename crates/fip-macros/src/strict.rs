@@ -38,19 +38,11 @@ use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, Tok
 use crate::{GHOST_MACROS, HEAP_CONSTRUCTORS, HEAP_TYPES, is_group, is_ident, is_punct};
 use fip_lint_rules::CORE_TABLE;
 
-/// Macros a strict body may invoke. Their arguments are still checked; what they
-/// expand to on the panic path is outside the guarantee (see crate docs). All of them
-/// panic; `panic_macros = false` rejects them.
-const ALLOWED_MACROS: &[&str] = &[
-    "assert",
-    "assert_eq",
-    "assert_ne",
-    "debug_assert",
-    "debug_assert_eq",
-    "debug_assert_ne",
-    "unreachable",
-    "panic",
-];
+/// Macros a strict body may invoke: the panicking macros of the shared rule set
+/// (`fip_lint_rules::PANIC_MACROS`). Their arguments are still checked; what they
+/// expand to on the panic path is outside the guarantee (see crate docs);
+/// `panic_macros = false` rejects them.
+use fip_lint_rules::PANIC_MACROS as ALLOWED_MACROS;
 
 const KEYWORDS: &[&str] = &[
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
