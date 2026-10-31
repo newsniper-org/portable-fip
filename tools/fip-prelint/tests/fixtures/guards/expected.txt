@@ -1,0 +1,15 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+guarded/src/lib.rs:156:5: error: fip-prelint: `unguarded` is #[fip(strict = true)]: reachable panic path: `unguarded`: index out of bounds (bounds check) (guarded/src/lib.rs:156) (`panic_macros = false`)
+guarded/src/lib.rs:165:23: error: fip-prelint: `other_var` is #[fip(strict = true)]: reachable panic path: `other_var`: index out of bounds (bounds check) (guarded/src/lib.rs:165) (`panic_macros = false`)
+guarded/src/lib.rs:174:24: error: fip-prelint: `off_by_one` is #[fip(strict = true)]: reachable panic path: `off_by_one`: index out of bounds (bounds check) (guarded/src/lib.rs:174) (`panic_macros = false`)
+guarded/src/lib.rs:183:5: error: fip-prelint: `inc_unguarded` is #[fip(strict = true)]: reachable panic path: `inc_unguarded`: arithmetic overflow check (Add) (guarded/src/lib.rs:183) (`panic_macros = false`)
+guarded/src/lib.rs:192:5: error: fip-prelint: `div_unguarded` is #[fip(strict = true)]: reachable panic path: `div_unguarded`: division by zero check (guarded/src/lib.rs:192) (`panic_macros = false`)
+guarded/src/lib.rs:209:9: error: fip-prelint: `changed_through_reference` is #[fip(strict = true)]: reachable panic path: `changed_through_reference`: index out of bounds (bounds check) (guarded/src/lib.rs:209) (`panic_macros = false`)
+guarded/src/lib.rs:223:9: error: fip-prelint: `slice_replaced` is #[fip(strict = true)]: reachable panic path: `slice_replaced`: index out of bounds (bounds check) (guarded/src/lib.rs:223) (`panic_macros = false`)
+guarded/src/lib.rs:238:38: error: fip-prelint: `for_inclusive` is #[fip(strict = true)]: reachable panic path: `for_inclusive`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:238) (`panic_macros = false`)
+guarded/src/lib.rs:251:38: error: fip-prelint: `for_other_bound` is #[fip(strict = true)]: reachable panic path: `for_other_bound`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:251) (`panic_macros = false`)
+guarded/src/lib.rs:265:38: error: fip-prelint: `for_next_index` is #[fip(strict = true)]: reachable panic path: `for_next_index`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:265) (`panic_macros = false`)
+guarded/src/lib.rs:281:38: error: fip-prelint: `step_two` is #[fip(strict = true)]: reachable panic path: `step_two`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:281) (`panic_macros = false`)
+guarded/src/lib.rs:307:16: error: fip-prelint: `signed_dec` is #[fip(strict = true)]: reachable panic path: `signed_dec`: arithmetic overflow check (Sub) (guarded/src/lib.rs:307) (`panic_macros = false`)
+note: fip-prelint: crate `guarded`: 24 roots, 12 passed, 12 errors, 0 warnings, 0 notes

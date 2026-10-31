@@ -56,8 +56,8 @@ pub fn get_or_zero(xs: &[u8], i: usize) -> u8 {
     }
 }
 
-/// A guarded index still has its bounds check in MIR at opt-level 0 (the guard is
-/// not used): reported, a known imprecision.
+/// A guarded index: its bounds check stays in MIR at opt-level 0, and the value
+/// analysis proves it cannot fire: passes (fixture `guards` has more cases).
 #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true, panic_macros = false))]
 pub fn get_guarded(xs: &[u8], i: usize) -> u8 {
     if i < xs.len() { xs[i] } else { 0 }

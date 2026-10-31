@@ -154,8 +154,9 @@ warn `unexpected_cfgs`, so plain builds now get no extra token at all.
 - **Events:** allocation entry points (1), `Drop` terminators on types with drop
   glue and deallocation entry points (possible free), `Assert` terminators and panic
   entry points (panic path; asserts whose condition is a constant that cannot fail,
-  e.g. the shift check of `x >> 1`, and the UB checks for null/misaligned pointers
-  are skipped), unresolvable calls (`⊤`).
+  e.g. the shift check of `x >> 1`, the UB checks for null/misaligned pointers, and,
+  since 2026-11-01, asserts that the value analysis proves unable to fire are
+  skipped), unresolvable calls (`⊤`).
 - **Terms:** a call of a callable generic parameter (`Fn*`, `FipFn`) is `alloc(g)`
   (named after the value parameter); another trait method on a generic parameter is
   `alloc(<T as Trait>::m)`; dropping a value whose type mentions a generic parameter is
@@ -193,14 +194,15 @@ tables for direct calls and other toolchains; `exchange_malloc` is not on any pa
 
 ### Tests (`just prelint`, measured 2026-11-01)
 
-`RUSTC_BOOTSTRAP=1 cargo +1.99.1 test` in `tools/fip-prelint`: 7 unit tests (lattice,
-path maximum, Tarjan order, mark parser), 8 fixture workspaces, 1 self-check;
-deterministic (also with `CARGO_BUILD_JOBS=1`).
+`RUSTC_BOOTSTRAP=1 cargo +1.99.1 test` in `tools/fip-prelint`: 10 unit tests (lattice,
+path maximum, Tarjan order, mark parser, difference-bound matrix), 9 fixture
+workspaces, 1 self-check; deterministic (also with `CARGO_BUILD_JOBS=1`).
 
 | fixture | cases (expected result) |
 |---|---|
 | `cross_crate` | `Box::new` directly (violation); callee in `dep_export` with `fip::export` (violation, chain through `dep_export::make`); same callee in `dep_plain` without it (`⊤`); allocation-free callee in `dep_plain` (`⊤`, never passed); `use dep_export::make as fresh` (violation); the alias under `fip(1)` (pass) |
-| `implicit` | `#[fip] fn consume(b: Box<u8>)` through `fip-macros` (token check passes; possible free); `a + b` with an allocating `Add` (violation) and a non-allocating one (pass); `xs[i]` under `panic_macros = false` (error), with panic macros allowed (note); `xs.get(i)` (pass); guarded `xs[i]` (error, imprecision below); `p.value()` on two types with a same-named method, only one allocating (one violation, no over-report) |
+| `implicit` | `#[fip] fn consume(b: Box<u8>)` through `fip-macros` (token check passes; possible free); `a + b` with an allocating `Add` (violation) and a non-allocating one (pass); `xs[i]` under `panic_macros = false` (error), with panic macros allowed (note); `xs.get(i)` (pass); guarded `xs[i]` (pass since the value analysis; error before); `p.value()` on two types with a same-named method, only one allocating (one violation, no over-report) |
+| `guards` | checks behind guards, all roots `strict = true, panic_macros = false`. Pass: `if i < xs.len() { xs[i] }`; `while i < xs.len() { xs[i]; i += 1 }`; the same through `&mut [u8]` with `n = xs.len()` read once; a second counter `w <= r` (`w += 1`); `xs[w - 1]` with `1 <= w <= r`; `for i in 0..xs.len()`; `for i in 1..xs.len() { xs[i - 1] }`; array index under `i < 4`; `i + 1` under `i < u32::MAX`; `x - 1` after `if x == 0 { return }`; `n / d` under `d != 0`; counting down from `xs.len()`. Reported: unguarded index, guard on another variable, `i <= xs.len()`, unguarded `i + 1` and `n / d`, the index changed through `&mut i`, the slice replaced after the guard, `0..=xs.len()`, `0..n` with unrelated `n`, `xs[i + 1]` in `0..xs.len()` (the addition passes), a counter stepping by 2, signed `i - 1` under `i < 0` |
 | `generics` | `produce::<Stack>` (pass) / `produce::<Heap>` (violation); generic root `produce_any<T>` (warning `alloc(<T as Make>::make)`); allocation-free closure (pass) / `Box::new` closure called in a loop (∞); higher-order root without `param` (warning `∞·alloc(g)`), with `param(g = 0)` (pass); `fip(2)` with two allocations (pass), `fip(1)` with two (violation, both chains), one allocation per branch under `fip(1)` (pass), allocating call in a loop under `fip(3)` (∞); `even`/`odd` recursion (violation), the same under `fbip` (pass) |
 | `bad_attr` | `#![cfg_attr(fip_prelint, fip::exprot)]`, `fip::mrak(..)`, `kind = "fop"` (three errors) |
 | `clean` | `#[fip]`, `#[fip(1)]`, `#[fbip]` (recursive), `#[fip(strict = true, param(g = 0))]` from `fip-macros`: all pass, exit status 0 |
@@ -213,7 +215,8 @@ Recorded in `tools/fip-prelint/tests/selfcheck.expected` (errors, warnings, per-
 summaries; notes omitted). 41 roots: `fip_core` 6, `fip-macros/tests` 33 (`accept`
 8, `strict_accept` 11, `strict_impl` 11, `strict_gaps` 3), `fip-core/tests/strict_behaviour`
 2. `fip-alloc`, `fip-strict`, `fip-arch` have no marked functions. Results: 37 roots
-pass, **3 errors in 2 roots, 0 `⊤`, 1 warning, 64 notes**. Every one investigated:
+pass, **3 errors in 2 roots, 0 `⊤`, 1 warning, 40 notes** (64 before the value
+analysis, see "Resolved: path-insensitive panics" below). Every one investigated:
 
 | report | verdict | reason |
 |---|---|---|
@@ -221,9 +224,9 @@ pass, **3 errors in 2 roots, 0 `⊤`, 1 warning, 64 notes**. Every one investiga
 | `strict_gaps::sum` may allocate 1 (`<Big as Add>::add` → `Box::new`) | real | overloaded operator gap (item 5); the test measures 1 allocation |
 | `strict_gaps::sum` may free (`drop of Big` inside `add`) | real | `add` drops `self` and `o`; the test measures 2 frees |
 | `strict_impl::Slot::<T>::put_twice` only relative to `drop(T)` (warning) | real, new | `Self::put(self, a);` discards the returned old value, which is dropped: a free for every `T` with drop glue (`T = u16` in the test). The token-level checker cannot see it |
-| 29 notes: overflow checks (`i += 1`, `w + 1` in loops) | imprecision (notes only) | the loop guard bounds the counter by a slice length; the analysis is path-insensitive and does not use it |
-| 19 notes: bounds checks (`xs[r]` under `while r < xs.len()`) | imprecision (notes only) | same: guarded index, MIR at opt-level 0 keeps the check |
-| 9 notes: `core::panicking::panic_fmt` from `<[T]>::split_at_mut` in `fip_core::slice::swap_lt` | real path, unreachable under the documented precondition `a < b < len` | `split_at_mut`'s assert |
+| 14 notes: overflow checks | real | unguarded arithmetic: `x + 1` in `two_boxes`, `s += ..` in `sum_rotations`, `old + 1` in `Counter::bump` (and twice through `bump_twice`), `*self.0 + *o.0` in `strict_gaps::Big::add`, `old + 1` / `self.n += 10` in the two `Ticker::step` (5 notes with their callers), `v + 1`, `v * 2`, `v + 10` in the closures of `strict_behaviour::pipeline` |
+| 10 notes: bounds checks | real path, unreachable under the documented precondition `i < j < len` | `a[i]` and `b[0]` after `split_at_mut(xs, j)` in `fip_core::slice::swap_lt`, directly and through its callers; the precondition is a caller's guard, which an intraprocedural analysis does not see |
+| 9 notes: `core::panicking::panic_fmt` from `<[T]>::split_at_mut` in `fip_core::slice::swap_lt` | real path, unreachable under the same precondition | `split_at_mut`'s assert |
 | 1 note: `panic_fmt` in `strict_gaps::checked_dec` | real | `assert!(x > 0)` |
 | 6 notes: `alloc::alloc::handle_alloc_error` (diverges) | real | allocation failure in the allocating strict roots (`boxed`, `two_boxes` twice, `Slot::boxed`, `box_it`, `sum`) |
 
@@ -239,8 +242,8 @@ Declared parameter bounds (since 2026-11-01): 16 call sites of callees with
 root `count_and_compact`, 5 in `strict_accept` into `count_kept`, `make_once`,
 `apply4`. 5 come from root analyses (`pipeline` 4; `count_and_compact` 1, whose
 argument `alloc(keep)` is instantiated by its own `param(keep = 0)`), 11 from test
-functions and closures that are not roots. All are within their bounds;
-`selfcheck.expected` is unchanged.
+functions and closures that are not roots. All are within their bounds; the
+argument check changed nothing in `selfcheck.expected`.
 
 ### Comparison with the token-level checker (`fip_testkit::summaries`)
 
@@ -251,9 +254,10 @@ functions and closures that are not roots. All are within their bounds;
 
 ### Open items
 
-1. **Path-insensitive panics.** Guarded indexing and loop counters keep their checks
-   in MIR at opt-level 0 (fixture `get_guarded`); a value analysis (intervals from
-   `SwitchInt` guards) would remove most of the 48 overflow/bounds notes.
+1. ~~**Path-insensitive panics.**~~ **Resolved** 2026-11-01 by an intraprocedural
+   value analysis (section "Resolved: path-insensitive panics" below; fixture
+   `guards`): 24 of the 48 overflow/bounds notes are gone; the 24 left are
+   unguarded arithmetic or behind `swap_lt`'s precondition.
 2. **Function pointers and trait objects** whose target is not in the analysed MIR are
    `⊤` (as the decision record says), also when they are the root's own parameter
    (`g: fn(u8) -> u8`, `g: &dyn Fn(..)`); the token-level design made those terms.
@@ -342,6 +346,60 @@ files had such a path.
 
 **Self-check:** 16 call sites checked, 0 violations, `selfcheck.expected` unchanged
 (see "Self-check" above).
+
+## Resolved 2026-11-01: path-insensitive panics
+
+Every `Assert` terminator (bounds, overflow, division, negation check) was a panic
+path, also behind a guard, because MIR at opt-level 0 keeps the check after
+`if i < xs.len()`. The driver now runs an intraprocedural value analysis on every
+body with such an assert (`tools/fip-prelint/src/value.rs`) and drops the asserts it
+proves unable to fire on all paths reaching them.
+
+**Method.** Difference bounds `x - y ≤ c` (a zone, with type bounds) between integer
+locals, slice lengths (`PtrMetadata` of a slice pointer, also through `&(*p)`
+reborrows), results of checked operations, `start`/`end` of `Range<integer>` and
+the payload of `Option<integer>`. Comparisons feeding a `SwitchInt` refine each
+edge; infeasible edges are dropped; a successful check adds its condition; loops
+are widened at their heads. A `for` loop over `a..b` is modelled from the contract
+of `Range<integer>` (`into_iter` is the identity; `next` yields `start` and
+increments it while `start < end`, and never changes `end`). Soundness: a local whose
+address is taken (`&mut x`, `&raw x`, `&x` of a place with interior mutability) is
+never tracked (a `Range` passed by `&mut` only to `next` excepted); calls only
+forget their destination; anything else unknown forgets the assigned local;
+128-bit arithmetic and signed division overflow are not decided; unsure means the
+assert stays.
+
+**Measured** (`cargo fip-prelint --warn-only` on the workspace, notes per crate;
+errors and warnings unchanged):
+
+| crate | notes before | notes after |
+|---|---|---|
+| `fip_core` | 24 | 9 |
+| `strict_accept` | 15 | 12 |
+| `strict_behaviour` | 14 | 9 |
+| `strict_gaps` | 4 | 3 |
+| `strict_impl` | 7 | 7 |
+| total | 64 | 40 |
+
+Overflow notes 29 → 14, bounds notes 19 → 10. Gone: the loop counters and guarded
+indices of `fip_core::strict::{map_in_place, compact, dedup_by, compact_map}` (15,
+including `w += 1` under the invariant `w <= r` and `xs[w - 1]` under `1 <= w`),
+`strict_accept::count_kept` (3), their copies through `strict_behaviour`'s callers
+(5), and `x - 1` after `assert!(x > 0)` in `strict_gaps::checked_dec` (1). Left (see
+the self-check table): 14 overflow notes on unguarded arithmetic (real) and 10
+bounds notes in `fip_core::slice::swap_lt`, safe only under its caller's
+precondition `i < j < len`, which an intraprocedural analysis does not see.
+
+Fixtures: `implicit::get_guarded` passes now (one error less); the new fixture
+`guards` has the requested cases (guarded index, `while i < xs.len()`,
+`for i in 0..xs.len()`, unguarded index reported, `i + 1` under `i < u32::MAX`, guard
+on another variable reported) and more passes and reports (table above).
+
+Not proved, by design or for now: `usize::from(i)` and other conversions through
+calls (the value is a call's result); iterator adapters (`(0..n).rev()`,
+`0..=n`, slice iterators); facts that hold only through a callee's contract or a
+caller's guard (interprocedural); bodies with more than 128 tracked values or
+`blocks × values² > 2²²` (none in this workspace: at most 22 values, 25 blocks).
 
 ## Fixed 2026-11-01: dependencies that declare `fip::export`
 

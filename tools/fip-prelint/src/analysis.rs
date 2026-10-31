@@ -24,7 +24,9 @@
 //! **Events.** Allocation and deallocation entry points, `Drop` terminators on types
 //! with drop glue (possible frees), `Assert` terminators and panic entry points
 //! (panic paths), and everything that cannot be resolved or has no usable MIR
-//! (`⊤`, with the reason). Tables: `fip_lint_rules::mir`.
+//! (`⊤`, with the reason). Tables: `fip_lint_rules::mir`. An `Assert` that the
+//! value analysis of its body ([`crate::value`]) proves unable to fire on every path
+//! reaching it is not a panic path.
 //!
 //! **Declared parameter bounds at call sites.** A call whose resolved callee carries
 //! `fip::mark(.., param(g = K))` passes, for `g`, a value of the callee's generic type
@@ -964,9 +966,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
 
     fn scan_body(&mut self, inst: Instance<'tcx>, body: &'tcx Body<'tcx>) -> BodyInfo {
         let tcx = self.tcx;
+        let env = self.env;
         let n = body.basic_blocks.len();
         let mut blocks: Vec<Vec<Site>> = (0..n).map(|_| Vec::new()).collect();
         let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+        // Asserts proved unable to fire by the value analysis, computed on demand.
+        let mut proved: Option<Vec<bool>> = None;
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup {
                 continue;
@@ -1036,9 +1041,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     msg,
                     ..
                 } => {
-                    let cannot_fire = self
+                    let mut cannot_fire = self
                         .eval_in_block(data, cond)
                         .is_some_and(|v| (v != 0) == *expected);
+                    if !cannot_fire && !is_ub_check_assert(msg) {
+                        let p = proved.get_or_insert_with(|| {
+                            crate::value::asserts_that_cannot_fire(tcx, env, body)
+                        });
+                        cannot_fire = p.get(b).copied().unwrap_or(false);
+                    }
                     if !cannot_fire && !is_ub_check_assert(msg) {
                         blocks[b].push(Site {
                             item: Item::Ev(Ev::Panic(describe_assert(msg))),

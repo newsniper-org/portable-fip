@@ -180,6 +180,22 @@ budget the argument broke; reproducer and measurements: `TODOs/fip-prelint.md`,
 
 Fixture `param_bounds`; on this workspace 16 call sites are checked, none violates.
 
+## Amendment 2026-11-01: value analysis for `Assert` terminators
+
+Item 6 ("`Assert` terminators ... count as panic paths") gains an exception: an
+`Assert` that an intraprocedural value analysis of its body proves unable to fire on
+every path reaching it is not a panic path (`tools/fip-prelint/src/value.rs`).
+Domain: difference bounds between integer locals, slice lengths, checked-operation
+results and `Range<integer>`/`Option<integer>` parts, refined by `SwitchInt` on
+comparisons and by successful checks, widened at loop heads; `Range::next` and
+`into_iter` are modelled from their `core` contract. Locals whose address is taken
+are never tracked (shared borrows of places without interior mutability, and a
+`Range` borrowed only by `next`, excepted); calls forget only their destination;
+anything unknown keeps the assert. Measured on this workspace: 64 → 40 notes (48 →
+24 overflow/bounds notes; the rest are unguarded arithmetic or behind `swap_lt`'s
+caller precondition). Fixture `guards`; details `TODOs/fip-prelint.md`, "Resolved
+2026-11-01: path-insensitive panics".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

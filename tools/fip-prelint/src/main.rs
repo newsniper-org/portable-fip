@@ -35,6 +35,7 @@ extern crate rustc_span;
 mod analysis;
 mod marks;
 mod report;
+mod value;
 
 use std::path::Path;
 use std::process::Command;

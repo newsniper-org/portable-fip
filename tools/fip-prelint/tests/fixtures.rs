@@ -108,6 +108,16 @@ fn implicit() {
     check("implicit");
 }
 
+/// Bounds, overflow and division checks behind guards (value analysis): guarded
+/// index, `while i < xs.len()` and `for i in 0..xs.len()` loops, a second counter
+/// bounded by the first, `x - 1` after `x == 0` returns, `d != 0` division pass;
+/// unguarded, off-by-one, guards on another variable, a local changed through
+/// `&mut`, a replaced slice, `0..=len`, signed `i - 1` under `i < 0` are reported.
+#[test]
+fn guards() {
+    check("guards");
+}
+
 /// Generic instantiation, closure arguments, higher-order roots, `fip(N)` bounds and
 /// the loop rule, recursion through two functions.
 #[test]

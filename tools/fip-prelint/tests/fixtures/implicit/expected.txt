@@ -3,8 +3,7 @@ exit: failure
 calls/src/lib.rs:19:5: error: fip-prelint: `sum` is #[fbip] but may allocate 1 time(s), at most 0 allowed: `sum` -> `<Big as core::ops::arith::Add>::add` (calls/src/lib.rs:19) -> `alloc::boxed::Box::<u64>::new` (calls/src/lib.rs:12) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
 calls/src/lib.rs:41:5: error: fip-prelint: `get` is #[fip(strict = true)]: reachable panic path: `get`: index out of bounds (bounds check) (calls/src/lib.rs:41) (`panic_macros = false`)
 calls/src/lib.rs:47:5: note: fip-prelint: `get_noted` is #[fip(strict = true)]: reachable panic path: `get_noted`: index out of bounds (bounds check) (calls/src/lib.rs:47)
-calls/src/lib.rs:63:23: error: fip-prelint: `get_guarded` is #[fip(strict = true)]: reachable panic path: `get_guarded`: index out of bounds (bounds check) (calls/src/lib.rs:63) (`panic_macros = false`)
 calls/src/lib.rs:94:5: error: fip-prelint: `method_boxing` is #[fip] but may allocate 1 time(s), at most 0 allowed: `method_boxing` -> `Boxing::value` (calls/src/lib.rs:94) -> `alloc::boxed::Box::<u32>::new` (calls/src/lib.rs:81) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
 gaps/src/lib.rs:13:1: error: fip-prelint: `consume` is #[fip] but may free: `consume`: drop of `std::boxed::Box<u8>` (gaps/src/lib.rs:13)
-note: fip-prelint: crate `calls`: 8 roots, 4 passed, 4 errors, 0 warnings, 1 notes
+note: fip-prelint: crate `calls`: 8 roots, 5 passed, 3 errors, 0 warnings, 1 notes
 note: fip-prelint: crate `gaps`: 2 roots, 1 passed, 1 errors, 0 warnings, 0 notes
