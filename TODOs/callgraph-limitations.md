@@ -22,6 +22,9 @@ positive**), or is a lexer **bug**.
 All results below were measured on 2026-10-31 by calling `fip_cycles_in` on the
 snippet shown (probe crate `/tmp/cgprobe`).
 
+Follow-up design that builds on this checker (interprocedural `#[fip(N)]`
+allocation summaries): `TODOs/callgraph-fip-summaries.md`.
+
 ## Summary
 
 | # | item | kind | measured result | priority |
