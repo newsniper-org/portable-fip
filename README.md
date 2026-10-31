@@ -92,7 +92,8 @@ generic instantiations under `cargo check`, and `use` aliases. `fip-prelint` (be
 catches implicit calls and `use` aliases on MIR (`crates/fip-macros/tests/strict_gaps.rs`
 with `tools/fip-prelint/tests/selfcheck.expected` pins the implicit-call cases). It does
 **not** check a call site's argument against the callee's declared `param(g = K)`
-bound; that stays a post-monomorphisation check of a full build. `assert_fip!` catches
+bound; that is checked by a full build (post-monomorphisation assertion) and by the
+token-level `fip_testkit::summaries` (`ArgumentExceedsDeclared`). `assert_fip!` catches
 implicit calls at run time. See `docs/decisions/2026-11-01-strict-core-table.md`.
 
 ## `fip-prelint`

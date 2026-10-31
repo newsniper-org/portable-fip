@@ -188,9 +188,9 @@ tests: `crates/fip-testkit/src/summaries/tests.rs` (27 tests). Agreement with
 - **Addition:** every call of a function with `param(g = K)` is checked: an argument
   whose bound is not ≤ K (including `⊤`) is a violation
   `ArgumentExceedsDeclared` (`arguments_are_checked_against_declared_bounds`).
-- **New `fip-lint-rules` tables:** `ALLOC_FREE_MACROS`, `PANIC_MACROS` (same list as the
-  strict mode's macro allowlist, which still has its own copy in
-  `fip-macros/src/strict.rs`), `FN_TRAITS`, `DROP_FUNCTIONS` with `is_drop_function`.
+- **New `fip-lint-rules` tables:** `ALLOC_FREE_MACROS`, `PANIC_MACROS` (also the strict
+  mode's macro allowlist: `fip-macros/src/strict.rs` imports it since `e6cb630`),
+  `FN_TRAITS`, `DROP_FUNCTIONS` with `is_drop_function`.
 
 ### Acceptance, measured 2026-10-31
 
