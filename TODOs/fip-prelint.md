@@ -166,6 +166,12 @@ warn `unexpected_cfgs`, so plain builds now get no extra token at all.
   bound 0; `⊤`: one error per distinct unresolved leaf; `strict`: panic paths are
   errors with `panic_macros = false`, notes otherwise. `FIP_PRELINT_WARN_ONLY=1`
   (`--warn-only`) reports errors as warnings tagged `[error]`.
+- **Declared parameter bounds at call sites** (added 2026-11-01, section "Resolved"
+  below): every call whose resolved callee carries `param(g = K)` is checked against
+  the bound of one call of the argument passed for `g`; `⊤` or more than `K` is an
+  error at the call site. Checked in every body a root's analysis explores in an
+  analysed crate (with that root's instantiation) and in every other local function
+  and closure (identity arguments).
 
 ### Allocator entry points on rustc 1.99.1 (measured with `FIP_PRELINT_DUMP=1`)
 
@@ -188,8 +194,8 @@ tables for direct calls and other toolchains; `exchange_malloc` is not on any pa
 ### Tests (`just prelint`, measured 2026-11-01)
 
 `RUSTC_BOOTSTRAP=1 cargo +1.99.1 test` in `tools/fip-prelint`: 7 unit tests (lattice,
-path maximum, Tarjan order, mark parser), 5 fixture workspaces, 1 self-check; about
-5 s from an empty `target/tmp`, deterministic (also with `CARGO_BUILD_JOBS=1`).
+path maximum, Tarjan order, mark parser), 8 fixture workspaces, 1 self-check;
+deterministic (also with `CARGO_BUILD_JOBS=1`).
 
 | fixture | cases (expected result) |
 |---|---|
@@ -198,6 +204,8 @@ path maximum, Tarjan order, mark parser), 5 fixture workspaces, 1 self-check; ab
 | `generics` | `produce::<Stack>` (pass) / `produce::<Heap>` (violation); generic root `produce_any<T>` (warning `alloc(<T as Make>::make)`); allocation-free closure (pass) / `Box::new` closure called in a loop (∞); higher-order root without `param` (warning `∞·alloc(g)`), with `param(g = 0)` (pass); `fip(2)` with two allocations (pass), `fip(1)` with two (violation, both chains), one allocation per branch under `fip(1)` (pass), allocating call in a loop under `fip(3)` (∞); `even`/`odd` recursion (violation), the same under `fbip` (pass) |
 | `bad_attr` | `#![cfg_attr(fip_prelint, fip::exprot)]`, `fip::mrak(..)`, `kind = "fop"` (three errors) |
 | `clean` | `#[fip]`, `#[fip(1)]`, `#[fbip]` (recursive), `#[fip(strict = true, param(g = 0))]` from `fip-macros`: all pass, exit status 0 |
+| `param_bounds` | declared parameter bounds at call sites: the reproducer below (`non_root_caller`, `root_caller`, `root_caller_budget1` pass an allocating `fip_fn!` for `param(g = 0)`: three argument errors; `root_caller` also exceeds its own budget); allocation-free `fip_fn!` and closure (pass); allocating closure, named function (through its `Fn` shim), function pointer (`⊤`), all errors; generic non-root `forward` (term `alloc(h)`, not reported) instantiated from a `fip(1)` root with an allocating closure (error at the call in `forward::<{closure}>`, counted for that root); a root's own `param(h = 1)` forwarded to `param(g = 0)` (error), `param(h = 0)` forwarded (pass); a call inside a closure (error) |
+| `export_unencoded`, `nonmember_export` | exported dependencies without MIR (hard error) and outside the workspace (analysed): see the decision record |
 
 ### Self-check: the portable-fip workspace (`cargo fip-prelint`, all targets)
 
@@ -225,6 +233,15 @@ constant asserts that cannot fail are skipped. Without `--warn-only` the run exi
 101 (the `strict_gaps` test crate fails to check, as intended); nothing else changes,
 because the errors are in a leaf crate.
 
+Declared parameter bounds (since 2026-11-01): 16 call sites of callees with
+`param(..)` are checked (`FIP_PRELINT_DUMP=1`): 11 in `strict_behaviour` into
+`fip_core::strict::{compact, dedup_by, compact_map, map_in_place, update}` and the
+root `count_and_compact`, 5 in `strict_accept` into `count_kept`, `make_once`,
+`apply4`. 5 come from root analyses (`pipeline` 4; `count_and_compact` 1, whose
+argument `alloc(keep)` is instantiated by its own `param(keep = 0)`), 11 from test
+functions and closures that are not roots. All are within their bounds;
+`selfcheck.expected` is unchanged.
+
 ### Comparison with the token-level checker (`fip_testkit::summaries`)
 
 | scope | token-level (2026-10-31) | `fip-prelint` |
@@ -240,11 +257,10 @@ because the errors are in a leaf crate.
 2. **Function pointers and trait objects** whose target is not in the analysed MIR are
    `⊤` (as the decision record says), also when they are the root's own parameter
    (`g: fn(u8) -> u8`, `g: &dyn Fn(..)`); the token-level design made those terms.
-3. **Declared parameter bounds at call sites.** `param(g = K)` is used for the
-   callee's own verdict; a caller passing a closure is analysed with the actual
-   closure (exact), but a non-root caller passing one above `K` is not reported
-   (`fip_testkit::summaries` reports `ArgumentExceedsDeclared`; for `FipFn` the strict
-   mode's `FipBound` check covers it at compile time).
+3. ~~**Declared parameter bounds at call sites.**~~ **Resolved** 2026-11-01: every
+   call site of a callee with `param(g = K)` is checked, in roots, in what they reach
+   and in local bodies that are not roots (section "Resolved: declared parameter
+   bounds at call sites" below; fixture `param_bounds`).
 4. **Drops of generic values** are terms (`drop(T)`, `drop(Option<T>)`), also when the
    type frees for every instantiation (`Vec<T>`); reported as warnings, never passed.
 5. **`format!`**: `alloc::fmt::format::format_inner` has no MIR, so `format!` is `⊤` in
@@ -265,11 +281,11 @@ because the errors are in a leaf crate.
   `register_tool(fip)` is a compile error.
 - The token-level gaps of strict mode for implicit `Drop`, operator impls and `use`
   aliases are caught by the driver (`TODOs/strict-open-items.md` items 5 and 10).
-  Item 7 is **not** (next section).
+  Item 7 is checked since the resolution in the next section.
 
-## Open: declared parameter bounds at call sites
+## Resolved 2026-11-01: declared parameter bounds at call sites
 
-Measured 2026-11-01 (`/tmp/item7`, `fip-strict` as an exported workspace member):
+Measured first (`/tmp/item7`, `fip-strict` as an exported workspace member):
 
 ```rust
 #[fip_macros::fip(strict = true, param(g = 0))]
@@ -284,17 +300,48 @@ pub fn root_caller() -> u8 { f(fip_macros::fip_fn!(|x: u8| Box::new(x))) }
 pub fn root_caller_budget1() -> u8 { f(fip_macros::fip_fn!(|x: u8| Box::new(x))) }
 ```
 
-| caller | reported by `cargo fip-prelint` |
-|---|---|
-| `non_root_caller` | nothing |
-| `root_caller` (`#[fip]`) | may allocate 1, at most 0 (its own budget); may free |
-| `root_caller_budget1` (`#[fip(1)]`) | may free only. The argument exceeding `f`'s `param(g = 0)` is **not** reported |
-| `f` | may free (`*g.call(..)` drops the `Box`), which is a real finding about the example |
+| caller | before (`cargo fip-prelint`) | after (fixture `param_bounds`) |
+|---|---|---|
+| `non_root_caller` | nothing | error at the call: the argument `Certified<1, {closure}>` may allocate 1 time per call, `f` declares `param(g = 0)`; chain `<Certified<..> as FipFn<(u8,)>>::call` → closure → `Box::new` |
+| `root_caller` (`#[fip]`) | may allocate 1, at most 0 (its own budget); may free | the same two errors, plus the argument error |
+| `root_caller_budget1` (`#[fip(1)]`) | may free only | may free, plus the argument error |
+| `f` | may free (`*g.call(..)` drops the `Box`), a real finding about the example | unchanged |
 
 Plain `cargo check` accepts the file; a full build rejects it through the
-post-monomorphisation assertion. To close this, the driver would check every call
-site whose callee carries `fip::mark(.., param(g = K))`, in any analysed function
-and not only roots, against the argument's computed bound.
+post-monomorphisation assertion. The driver now rejects it under `cargo check`.
+
+**Rule** (port of `fip_testkit::summaries`' `ArgumentExceedsDeclared`). At a call
+whose resolved callee carries `fip::mark(.., param(g = K))`, `g`'s declared type is
+a generic type parameter `F` (`g: F`, `&F`, `&mut F`); the argument is the actual `T`
+for `F` at the call site. Its bound is that of one call: the callable methods of
+`F`'s bounds in the callee's `param_env` (`FipFn::call`, `Fn::call`,
+`FnMut::call_mut`, `FnOnce::call_once`, elaborated) are resolved for `T` and analysed
+like any callee, maximum over them. So a closure is its body, a `fip_fn!` value
+(`Certified<N, C>`) is `Certified::call` and the closure in it (the computed bound,
+not the claimed `N`), a named function is its `Fn` shim and the function, a function
+pointer is `⊤`. A `T` that is a generic parameter of the analysed function is the term
+`alloc(h)`, instantiated by that function's own `param(h = K')`. Violation: `⊤`, or no
+terms left and the bound above `K`; reported at the call site with the argument's
+allocation chain. Terms left (a generic caller without `param`) are not reported:
+that caller's instantiations are checked where they are analysed, as in the token
+rule. A `g` whose type is not a generic parameter is `⊤` at every call; a generic
+parameter without a callable bound bounds no call and is skipped.
+
+**Which call sites.** (1) Every body a root's analysis explores in the local crate or
+in a crate declaring `fip::export`, with the root's instantiation: this catches calls
+in generic helpers instantiated with a concrete argument (`through_forward` →
+`forward::<{closure}>` → `apply`), and the error counts against that root. (2) Every
+other local function, method and closure with MIR (`mir_keys`), with identity
+arguments; only the arguments' entry points are explored there, not the body's other
+callees. A violation found from several roots or by both is reported once.
+
+**Rendering.** Chains through sources outside the analysed workspace (absolute paths,
+e.g. `fip-strict` used as a path dependency) now show the step without its
+machine-dependent location instead of `path:line`; nothing in the existing expected
+files had such a path.
+
+**Self-check:** 16 call sites checked, 0 violations, `selfcheck.expected` unchanged
+(see "Self-check" above).
 
 ## Fixed 2026-11-01: dependencies that declare `fip::export`
 

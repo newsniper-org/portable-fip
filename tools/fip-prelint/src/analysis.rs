@@ -25,6 +25,21 @@
 //! with drop glue (possible frees), `Assert` terminators and panic entry points
 //! (panic paths), and everything that cannot be resolved or has no usable MIR
 //! (`⊤`, with the reason). Tables: `fip_lint_rules::mir`.
+//!
+//! **Declared parameter bounds at call sites.** A call whose resolved callee carries
+//! `fip::mark(.., param(g = K))` passes, for `g`, a value of the callee's generic type
+//! parameter `F` (`g: F`, `g: &F`, `g: &mut F`). The argument's bound is the bound of
+//! one call of it: the instances of the callable methods of `F`'s bounds
+//! (`<T as FipFn<A>>::call`, `<T as Fn*<A>>::call*`) for the actual `T` at the call
+//! site, analysed like any callee (a closure body, `Certified<N, C>::call` and the
+//! closure inside it, a function item through its `Fn` shim), maximum over them. A
+//! `T` that is a generic parameter of the analysed function is the term `alloc(h)`,
+//! instantiated by that function's own `param(h = K')`. The call site is a violation
+//! when the bound is `⊤` or, without terms left, above `K`. Call sites are taken
+//! from every body the analysis of a root explores in an analysed crate (the local
+//! crate and crates declaring `fip::export`), with that root's instantiation, and
+//! from every local function and closure body with identity arguments
+//! ([`Analysis::arguments_in`]), so callers that are not roots are checked too.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -38,6 +53,8 @@ use rustc_middle::ty::{
     TypeFoldable, TypeVisitableExt, TypingEnv,
 };
 use rustc_span::{DUMMY_SP, Span};
+
+use crate::marks::{self, Mark};
 
 /// Explored instances per root before the rest is `⊤` ("analysis limit").
 const MAX_NODES: usize = 20_000;
@@ -361,6 +378,8 @@ pub struct Crates {
     /// and no MIR in their metadata: built without `-Zalways-encode-mir`, i.e. not by
     /// the driver. Value: the first such function found.
     unencoded: HashMap<CrateNum, String>,
+    /// `fip::mark` of functions in the local crate and in exported crates.
+    marks: HashMap<DefId, Mark>,
 }
 
 impl Crates {
@@ -371,6 +390,7 @@ impl Crates {
         }
         exported.insert(LOCAL_CRATE, true);
         let mut unencoded = HashMap::new();
+        let mut marks = HashMap::new();
         for krate in rustc_public::external_crates() {
             let Some(&cnum) = tcx
                 .crates(())
@@ -388,16 +408,39 @@ impl Crates {
                 if def_id.krate != cnum || !has_source_body(tcx, def_id) {
                     continue;
                 }
-                if !tcx.is_mir_available(def_id) {
+                if !unencoded.contains_key(&cnum) && !tcx.is_mir_available(def_id) {
                     unencoded.insert(cnum, tcx.def_path_str(def_id));
-                    break;
+                }
+                // Malformed marks were reported where that crate was checked.
+                for attr in rustc_public::CrateDef::all_tool_attrs(&f) {
+                    if let Some(args) = marks::mark_args_of_printed(attr.as_str())
+                        && let Ok(m) = marks::parse_mark(args)
+                    {
+                        marks.insert(def_id, m);
+                    }
                 }
             }
         }
         Crates {
             exported,
             unencoded,
+            marks,
         }
+    }
+    /// Adds the marks of the local crate (the roots).
+    pub fn add_local_marks(&mut self, roots: &[(DefId, Mark)]) {
+        for (d, m) in roots {
+            self.marks.insert(*d, m.clone());
+        }
+    }
+    /// `true` if some known function declares `param(..)`: only then can a call site
+    /// violate a declared parameter bound.
+    pub fn has_param_marks(&self) -> bool {
+        self.marks.values().any(|m| !m.params.is_empty())
+    }
+    /// The mark of `def_id` if it declares `param(..)`.
+    fn param_mark(&self, def_id: DefId) -> Option<&Mark> {
+        self.marks.get(&def_id).filter(|m| !m.params.is_empty())
     }
     fn exported(&self, c: CrateNum) -> bool {
         self.exported.get(&c).copied().unwrap_or(false)
@@ -511,6 +554,11 @@ pub struct Analysis<'a, 'tcx> {
     queue: Vec<usize>,
     param_names: HashMap<u32, String>,
     param_types: Vec<(String, String)>,
+    /// `param(..)` of the analysed function (the root's mark; empty for a body
+    /// scanned by [`Analysis::arguments_in`]).
+    owner_params: Vec<(String, u64)>,
+    /// Call sites of callees with `param(..)` found in explored bodies.
+    arg_sites: Vec<ArgSite>,
 }
 
 /// Result for one root.
@@ -519,6 +567,56 @@ pub struct RootResult {
     pub label: String,
     /// Value parameter name → its generic type parameter (`g` → `F` for `g: F`).
     pub param_types: Vec<(String, String)>,
+    /// Call sites in the explored bodies that violate a callee's `param(g = K)`.
+    pub args: Vec<ArgViolation>,
+}
+
+/// A call site whose callee declares `param(g = K)`, with the argument's callable
+/// entry points resolved.
+struct ArgSite {
+    caller: String,
+    span: Span,
+    /// `true` if the call site lies in the local crate.
+    local: bool,
+    callee: String,
+    param: String,
+    declared: u64,
+    /// The argument's type.
+    arg: String,
+    /// Label and item of each callable entry point of the argument
+    /// (`<T as FipFn<A>>::call`, `<T as Fn<A>>::call`, ..).
+    items: Vec<(String, Item)>,
+}
+
+/// A call site passing, for a parameter declared `param(g = K)`, an argument whose
+/// bound per call is `⊤` or, with no terms left, above `K`.
+pub struct ArgViolation {
+    /// The function or closure containing the call.
+    pub caller: String,
+    /// The call site.
+    pub span: Span,
+    /// `true` if the call site lies in the local crate.
+    pub local: bool,
+    pub callee: String,
+    pub param: String,
+    pub declared: u64,
+    /// The argument's type (a closure, `Certified<N, C>`, a function item, ..).
+    pub arg: String,
+    /// Allocations per call of the argument, after the analysed function's own
+    /// `param(..)`.
+    pub bound: Cost,
+    /// The argument's events: allocation witnesses, unresolved calls (`⊤`), terms.
+    pub summary: Summary,
+}
+
+impl ArgViolation {
+    /// Identifies the same violation found from several roots or bodies.
+    pub fn key(&self) -> String {
+        format!(
+            "{:?}|{}|{}|{}",
+            self.span, self.callee, self.param, self.arg
+        )
+    }
 }
 
 fn def_path(tcx: TyCtxt<'_>, def_id: DefId) -> String {
@@ -557,8 +655,8 @@ fn describe_assert(msg: &AssertKind<Operand<'_>>) -> String {
 }
 
 impl<'a, 'tcx> Analysis<'a, 'tcx> {
-    pub fn run(tcx: TyCtxt<'tcx>, crates: &'a Crates, root: DefId) -> RootResult {
-        let env = TypingEnv::post_analysis(tcx, root);
+    fn new(tcx: TyCtxt<'tcx>, crates: &'a Crates, owner: DefId) -> Analysis<'a, 'tcx> {
+        let env = TypingEnv::post_analysis(tcx, tcx.typeck_root_def_id(owner));
         let mut a = Analysis {
             tcx,
             env,
@@ -568,10 +666,23 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             queue: Vec::new(),
             param_names: HashMap::new(),
             param_types: Vec::new(),
+            owner_params: Vec::new(),
+            arg_sites: Vec::new(),
         };
-        a.collect_param_names(root);
-        let args = tcx.erase_and_anonymize_regions(GenericArgs::identity_for_item(tcx, root));
-        let inst = Instance::new_raw(root, args);
+        a.collect_param_names(owner);
+        a
+    }
+
+    fn identity(&self, owner: DefId) -> Instance<'tcx> {
+        let tcx = self.tcx;
+        let args = tcx.erase_and_anonymize_regions(GenericArgs::identity_for_item(tcx, owner));
+        Instance::new_raw(owner, args)
+    }
+
+    pub fn run(tcx: TyCtxt<'tcx>, crates: &'a Crates, root: DefId, mark: &Mark) -> RootResult {
+        let mut a = Analysis::new(tcx, crates, root);
+        a.owner_params = mark.params.clone();
+        let inst = a.identity(root);
         let r = a.node_for(inst);
         while let Some(i) = a.queue.pop() {
             a.classify(i);
@@ -580,11 +691,55 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             a.dump();
         }
         let sums = a.evaluate();
+        a.dump_args(&sums);
         RootResult {
             summary: sums[r].clone(),
             label: a.nodes[r].label.clone(),
             param_types: a.param_types.clone(),
+            args: a.arg_violations(&sums),
         }
+    }
+
+    /// Declared parameter bounds at the call sites of one local function or closure
+    /// body (identity arguments, its own typing environment). Only the arguments'
+    /// entry points are explored, not the body's other callees. Used for every local
+    /// body that is not a root, so that callers which are not roots are checked.
+    pub fn arguments_in(tcx: TyCtxt<'tcx>, crates: &'a Crates, owner: DefId) -> Vec<ArgViolation> {
+        let mut a = Analysis::new(tcx, crates, owner);
+        let inst = a.identity(owner);
+        let body = tcx.instance_mir(inst.def);
+        for data in body.basic_blocks.iter() {
+            if data.is_cleanup {
+                continue;
+            }
+            let term = data.terminator();
+            let (TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. }) =
+                &term.kind
+            else {
+                continue;
+            };
+            let Some(fty) = a.subst(inst, func.ty(&body.local_decls, tcx)) else {
+                continue;
+            };
+            let ty::FnDef(def_id, args) = *fty.kind() else {
+                continue;
+            };
+            let Some(args) = args.no_bound_vars() else {
+                continue;
+            };
+            if let Ok(Some(callee)) = Instance::try_resolve(tcx, a.env, def_id, args) {
+                a.note_arg_site(inst, term.source_info.span, callee);
+            }
+        }
+        if a.arg_sites.is_empty() {
+            return Vec::new();
+        }
+        while let Some(i) = a.queue.pop() {
+            a.classify(i);
+        }
+        let sums = a.evaluate();
+        a.dump_args(&sums);
+        a.arg_violations(&sums)
     }
 
     /// Value-parameter names of the root's parameters whose type is a generic
@@ -827,6 +982,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             match &term.kind {
                 TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. } => {
                     let item = self.call_item(inst, body, func);
+                    // Call sites in analysed crates (local, `fip::export`) are checked
+                    // against the callee's declared parameter bounds.
+                    if let Item::Call(j) = item
+                        && matches!(inst.def, InstanceKind::Item(_))
+                        && self.crates.exported(inst.def_id().krate)
+                    {
+                        let callee = self.nodes[j].inst;
+                        self.note_arg_site(inst, span, callee);
+                    }
                     blocks[b].push(Site { item, span });
                 }
                 TerminatorKind::Drop { place, .. } => {
@@ -1072,6 +1236,188 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         )))
     }
 
+    /// Records the call of `callee` at `span` in `caller` if the callee declares
+    /// `param(g = K)`: for each such `g`, the argument's callable entry points are
+    /// resolved and become nodes of the graph.
+    fn note_arg_site(&mut self, caller: Instance<'tcx>, span: Span, callee: Instance<'tcx>) {
+        let InstanceKind::Item(def_id) = callee.def else {
+            return;
+        };
+        let crates = self.crates;
+        let Some(mark) = crates.param_mark(def_id) else {
+            return;
+        };
+        let caller_label = self.label(caller);
+        let callee_label = def_path(self.tcx, def_id);
+        for (g, declared) in &mark.params {
+            let Some((arg, items)) = self.argument_items(def_id, callee.args, g) else {
+                continue;
+            };
+            self.arg_sites.push(ArgSite {
+                caller: caller_label.clone(),
+                span,
+                local: caller.def_id().is_local(),
+                callee: callee_label.clone(),
+                param: g.clone(),
+                declared: *declared,
+                arg,
+                items,
+            });
+        }
+    }
+
+    /// The type passed for `g` to `callee` (instantiated with `args`) and the
+    /// callable methods (`call`, `call_mut`, `call_once`) of every callable bound
+    /// (`Fn*`, `FipFn`) of `g`'s generic type parameter, resolved for that type.
+    /// `None` if the parameter has no callable bound: then `param(g = K)` bounds no
+    /// call.
+    fn argument_items(
+        &mut self,
+        callee: DefId,
+        args: GenericArgsRef<'tcx>,
+        g: &str,
+    ) -> Option<(String, Vec<(String, Item)>)> {
+        let tcx = self.tcx;
+        let pos = tcx
+            .fn_arg_idents(callee)
+            .iter()
+            .position(|i| i.is_some_and(|i| i.name.as_str() == g));
+        let Some(pos) = pos else {
+            let what = format!(
+                "`{}` declares `param({g} = ..)` but has no parameter `{g}`",
+                def_path(tcx, callee)
+            );
+            return Some((
+                "?".to_string(),
+                vec![(what.clone(), Item::Ev(Ev::Unknown(what)))],
+            ));
+        };
+        let input = tcx.fn_sig(callee).skip_binder().skip_binder().inputs()[pos];
+        let ty::Param(p) = *input.peel_refs().kind() else {
+            let shown = with_no_visible_paths!(with_no_trimmed_paths!(input.to_string()));
+            let what = format!(
+                "parameter `{g}: {shown}` is not of a generic type: the function it holds is not determined at the call site"
+            );
+            return Some((shown, vec![(what.clone(), Item::Ev(Ev::Unknown(what)))]));
+        };
+        let arg_ty = args.type_at(p.index as usize);
+        let arg = with_no_visible_paths!(with_no_trimmed_paths!(arg_ty.to_string()));
+        let mut items: Vec<(String, Item)> = Vec::new();
+        for clause in tcx.param_env(callee).caller_bounds() {
+            let Some(pred) = clause.as_trait_clause() else {
+                continue;
+            };
+            let pred = tcx.instantiate_bound_regions_with_erased(pred);
+            let on_p = matches!(pred.self_ty().kind(), ty::Param(q) if q.index == p.index);
+            if !on_p || !self.is_callable_trait(pred.def_id()) {
+                continue;
+            }
+            for m in tcx.associated_items(pred.def_id()).in_definition_order() {
+                if !m.is_fn() || !tcx.generics_of(m.def_id).own_params.is_empty() {
+                    continue;
+                }
+                let margs = EarlyBinder::bind(tcx, pred.trait_ref.args).instantiate(tcx, args);
+                let (label, item) = match tcx.try_normalize_erasing_regions(self.env, margs) {
+                    Ok(margs) => (
+                        def_path_args(tcx, m.def_id, margs),
+                        self.resolve(m.def_id, margs),
+                    ),
+                    Err(_) => {
+                        let label = def_path(tcx, m.def_id);
+                        let what = format!("`{label}` for `{arg}` (not normalizable)");
+                        (label, Item::Ev(Ev::Unknown(what)))
+                    }
+                };
+                if items.iter().all(|(l, _)| *l != label) {
+                    items.push((label, item));
+                }
+            }
+        }
+        if items.is_empty() {
+            None
+        } else {
+            Some((arg, items))
+        }
+    }
+
+    /// The recorded call sites whose argument violates the declared bound: `⊤`, or
+    /// above `K` once the analysed function's own `param(..)` are instantiated (an
+    /// argument still relative to generic parameters is checked where those are
+    /// instantiated).
+    fn arg_violations(&self, sums: &[Summary]) -> Vec<ArgViolation> {
+        let mut out = Vec::new();
+        for site in &self.arg_sites {
+            let mut s = Summary::default();
+            let mut cost = Cost::default();
+            // The entry points are alternatives (`call`, `call_mut`, `call_once` of
+            // one value): allocation witnesses come from one with the largest bound.
+            let mut best: Option<(usize, B)> = None;
+            for (_, item) in &site.items {
+                if let Item::Call(j) = item
+                    && best.is_none_or(|(_, c)| sums[*j].alloc.c > c)
+                {
+                    best = Some((*j, sums[*j].alloc.c));
+                }
+            }
+            for (label, item) in &site.items {
+                let unknown = |what: &String| Witness {
+                    steps: Vec::new(),
+                    what: what.clone(),
+                    span: DUMMY_SP,
+                    in_loop: false,
+                };
+                match item {
+                    Item::Call(j) => {
+                        let mut cs = sums[*j].clone();
+                        cost = cost.max(&cs.alloc);
+                        if best.is_some_and(|(b, _)| b != *j) {
+                            cs.alloc_w.clear();
+                        }
+                        let step = Step {
+                            label: self.nodes[*j].label.clone(),
+                            span: DUMMY_SP,
+                            in_loop: false,
+                        };
+                        s.merge_events(&cs, std::slice::from_ref(&step));
+                    }
+                    Item::Term(k) => {
+                        cost = cost.max(&Cost::term(k));
+                        let what = match self.owner_params.iter().find(|(g, _)| g == k) {
+                            Some((g, n)) => {
+                                format!(
+                                    "call of parameter `{g}` (`{label}`), declared `param({g} = {n})`"
+                                )
+                            }
+                            None => format!("call of `{k}` (`{label}`)"),
+                        };
+                        s.terms_w.entry(k.clone()).or_insert_with(|| unknown(&what));
+                    }
+                    Item::Ev(Ev::Alloc(w) | Ev::Free(w) | Ev::Panic(w) | Ev::Unknown(w)) => {
+                        push_w(&mut s.unknown, unknown(w), MAX_UNKNOWN, key_what);
+                    }
+                }
+            }
+            s.alloc = cost.clone();
+            let bound = cost.instantiate(&self.owner_params, &self.param_types);
+            let violated =
+                !s.unknown.is_empty() || (bound.terms.is_empty() && bound.c.exceeds(site.declared));
+            if violated {
+                out.push(ArgViolation {
+                    caller: site.caller.clone(),
+                    span: site.span,
+                    local: site.local,
+                    callee: site.callee.clone(),
+                    param: site.param.clone(),
+                    declared: site.declared,
+                    arg: site.arg.clone(),
+                    bound,
+                    summary: s,
+                });
+            }
+        }
+        out
+    }
+
     fn call_edges(&self, i: usize) -> Vec<usize> {
         match &self.nodes[i].kind {
             NodeKind::Body(info) => {
@@ -1294,6 +1640,38 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     eprintln!("  [{i}] {} : body {}", node.label, items.join(", "));
                 }
             }
+        }
+    }
+
+    /// With `FIP_PRELINT_DUMP=1`: every checked call site of a callee with
+    /// `param(..)`, the argument and its bound before the analysed function's own
+    /// `param(..)`.
+    fn dump_args(&self, sums: &[Summary]) {
+        if std::env::var_os("FIP_PRELINT_DUMP").is_none() {
+            return;
+        }
+        for site in &self.arg_sites {
+            let mut cost = Cost::default();
+            let mut unknown = false;
+            for (_, item) in &site.items {
+                match item {
+                    Item::Call(j) => {
+                        cost = cost.max(&sums[*j].alloc);
+                        unknown |= !sums[*j].unknown.is_empty();
+                    }
+                    Item::Term(k) => cost = cost.max(&Cost::term(k)),
+                    Item::Ev(_) => unknown = true,
+                }
+            }
+            let bound = if unknown {
+                "⊤".to_string()
+            } else {
+                cost.display()
+            };
+            eprintln!(
+                "fip-prelint dump: argument: `{}` -> `{}` for `{}` (param {} = {}): `{}`, bound {bound}",
+                site.caller, site.callee, site.param, site.param, site.declared, site.arg
+            );
         }
     }
 }

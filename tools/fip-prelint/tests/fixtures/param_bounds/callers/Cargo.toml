@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+[package]
+name = "callers"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+fip-macros = { path = "../../../../../../crates/fip-macros" }
+fip-strict = { path = "../../../../../../crates/fip-strict" }

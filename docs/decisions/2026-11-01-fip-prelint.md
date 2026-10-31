@@ -145,9 +145,40 @@ got `fip-core`/`fip-strict` compiled without `--cfg fip_prelint` and without
 | `RUSTC_WRAPPER` with roles (after) | 3 passed, 0 errors |
 
 Fixture `nonmember_export` keeps this tested.
+
 - Function pointers, closures and trait objects whose target is not determined in
   the analysed MIR are ⊤.
 - It is still a check, not a proof. Proofs remain with Verus.
+
+## Amendment 2026-11-01: declared parameter bounds at call sites
+
+Item 6 gains a rule, the port of `fip_testkit::summaries`' `ArgumentExceedsDeclared`
+(before, `param(g = K)` was used only for the declaring function's own verdict, and a
+caller passing an argument above `K` was reported only if it was a root whose own
+budget the argument broke; reproducer and measurements: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-01: declared parameter bounds at call sites").
+
+- **Rule.** At a call whose resolved callee carries `fip::mark(.., param(g = K))`,
+  the argument for `g` is the actual type `T` of `g`'s generic type parameter `F`.
+  Its bound is the bound of one call: the callable methods of `F`'s bounds
+  (`FipFn::call`, `Fn::call`, `FnMut::call_mut`, `FnOnce::call_once`, from the
+  callee's `param_env`) resolved for `T` and analysed like any callee, maximum over
+  them. For `fip_fn!` values (`Certified<N, C>`) this is the computed bound of the
+  closure, not the claimed `N`. A `T` that is a generic parameter of the analysed
+  function is the term `alloc(h)`, instantiated by that function's own
+  `param(h = K')`. Error at the call site when the bound is `⊤`, or has no terms left
+  and exceeds `K`; terms left are not reported (checked where the caller is
+  instantiated). A `g` whose type is not a generic parameter is `⊤`.
+- **Scope.** Call sites in every body that a root's analysis explores in the local
+  crate or a crate declaring `fip::export` (with the root's instantiation; the error
+  counts against that root), and in every other local function, method and closure
+  (identity arguments; only the arguments' entry points are explored). Each violation
+  is reported once.
+- **Rendering.** Calls made in sources outside the analysed workspace (absolute
+  paths, e.g. a path dependency on `fip-strict`) are shown in witness chains without
+  their machine-dependent location.
+
+Fixture `param_bounds`; on this workspace 16 call sites are checked, none violates.
 
 ## What would reopen this
 

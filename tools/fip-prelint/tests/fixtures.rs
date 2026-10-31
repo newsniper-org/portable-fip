@@ -137,6 +137,17 @@ fn nonmember_export() {
     check("nonmember_export");
 }
 
+/// Declared parameter bounds at call sites (`param(g = K)`): the reproducer of
+/// `TODOs/fip-prelint.md` (a non-root caller, a `#[fip]` and a `#[fip(1)]` root passing
+/// an allocating `fip_fn!` for `param(g = 0)`), and the argument kinds: allocation-free
+/// and allocating closures, a named function, a function pointer (`⊤`), a generic
+/// forwarder instantiated from a root, a root's own `param(h = K)` forwarded, a call
+/// inside a closure.
+#[test]
+fn param_bounds() {
+    check("param_bounds");
+}
+
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.
 #[test]
 fn clean() {

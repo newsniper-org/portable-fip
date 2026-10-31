@@ -16,7 +16,8 @@
 //!   compiler that built the driver);
 //! - `FIP_PRELINT_WARN_ONLY=1`: report violations as warnings, so that dependants are
 //!   still compiled and checked (used for whole-workspace surveys);
-//! - `FIP_PRELINT_DUMP=1`: print every root's explored call graph to stderr.
+//! - `FIP_PRELINT_DUMP=1`: print every root's explored call graph to stderr, and every
+//!   checked call site of a callee with `param(..)` with the argument's bound.
 
 #![feature(rustc_private)]
 

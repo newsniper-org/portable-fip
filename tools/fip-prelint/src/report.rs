@@ -11,9 +11,12 @@
 //! | panic path, `strict = true` with `panic_macros = false` | error |
 //! | panic path, `strict = true` otherwise | note |
 //! | terms left: callable parameters without `param(..)`, trait methods on generic parameters, drops of generic values | warning |
+//! | a call site passing, for a callee's `param(g = K)`, an argument that may allocate more than `K` times per call, or `⊤` (in any analysed body: roots, what they reach in analysed crates, every local function and closure) | error, at the call site |
 //! | unknown name under `fip::`, misplaced or malformed attribute | error |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
+
+use std::collections::HashSet;
 
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
@@ -22,7 +25,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_public::CrateDef;
 use rustc_span::Span;
 
-use crate::analysis::{Analysis, Crates, RootResult, Witness};
+use crate::analysis::{Analysis, ArgViolation, Crates, RootResult, Witness};
 use crate::marks::{self, Kind, Mark};
 
 struct Out<'tcx> {
@@ -64,40 +67,70 @@ impl<'tcx> Out<'tcx> {
     }
 }
 
-/// `file:line` of a span in the analysed sources; `None` for the standard library
-/// and the cargo registry, whose paths and lines depend on the toolchain.
-fn user_location(tcx: TyCtxt<'_>, span: Span) -> Option<String> {
+/// Where a span lies.
+enum Loc {
+    /// The standard library, the cargo registry, or no source: elided in chains.
+    Std,
+    /// A source outside the analysed workspace, given by absolute path (a path or
+    /// git dependency such as `fip-strict` used by another project): shown in chains
+    /// without its machine-dependent path.
+    External,
+    /// `file:line` in the analysed workspace (relative path).
+    User(String),
+}
+
+fn locate(tcx: TyCtxt<'_>, span: Span) -> Loc {
     if span.is_dummy() {
-        return None;
+        return Loc::Std;
     }
     let sp = span.source_callsite();
     let s = tcx.sess.source_map().span_to_diagnostic_string(sp);
     let file_line = s.split(": ").next().unwrap_or(&s);
     let mut parts = file_line.rsplitn(3, ':');
     let _col = parts.next();
-    let line = parts.next()?;
-    let file = parts.next()?;
+    let (Some(line), Some(file)) = (parts.next(), parts.next()) else {
+        return Loc::Std;
+    };
     if file.starts_with("/rustc/")
         || file.contains("/.rustup/")
         || file.contains("/.cargo/registry/")
         || file.starts_with('<')
     {
-        return None;
+        return Loc::Std;
     }
-    Some(format!("{file}:{line}"))
+    if std::path::Path::new(file).is_absolute() {
+        return Loc::External;
+    }
+    Loc::User(format!("{file}:{line}"))
+}
+
+/// `file:line` of a span in the analysed sources; `None` for the standard library
+/// and the cargo registry, whose paths and lines depend on the toolchain, and for
+/// sources outside the workspace (absolute paths).
+fn user_location(tcx: TyCtxt<'_>, span: Span) -> Option<String> {
+    match locate(tcx, span) {
+        Loc::User(l) => Some(l),
+        Loc::Std | Loc::External => None,
+    }
 }
 
 /// `root -> a (file:line) -> b (in loop) (file:line): what (file:line)`: each call
 /// with its call site when that lies in the analysed sources. Calls made inside the
-/// standard library are elided as `…`, except the last one.
+/// standard library are elided as `…`, except the last one; calls made in sources
+/// outside the workspace are shown without a location.
 fn render(tcx: TyCtxt<'_>, root: &str, w: &Witness) -> String {
     let mut parts = vec![format!("`{root}`")];
     let n = w.steps.len();
     let mut elided = false;
     let mut elided_loop = false;
     for (k, s) in w.steps.iter().enumerate() {
-        let loc = user_location(tcx, s.span);
-        if k == 0 || loc.is_some() || k + 1 == n {
+        let place = locate(tcx, s.span);
+        let shown = !matches!(place, Loc::Std);
+        let loc = match place {
+            Loc::User(l) => Some(l),
+            Loc::Std | Loc::External => None,
+        };
+        if k == 0 || shown || k + 1 == n {
             if elided {
                 parts.push(if elided_loop {
                     "… (in loop)".to_string()
@@ -309,7 +342,80 @@ fn verdict(out: &mut Out<'_>, def_id: DefId, mark: &Mark, r: &RootResult) {
     }
 }
 
-/// Entry point after analysis: validate attributes, analyse every root, report.
+/// A call site whose argument violates the callee's `param(g = K)`.
+fn report_argument(out: &mut Out<'_>, fallback: Span, v: &ArgViolation) {
+    let tcx = out.tcx;
+    let sp = if v.local && !v.span.is_dummy() {
+        v.span.source_callsite()
+    } else {
+        fallback
+    };
+    let declared = format!("`param({} = {})`", v.param, v.declared);
+    let mut chains: Vec<String> = Vec::new();
+    if !v.summary.unknown.is_empty() {
+        for w in &v.summary.unknown {
+            let c = render(tcx, &v.arg, w);
+            if chains.len() < 3 && !chains.contains(&c) {
+                chains.push(c);
+            }
+        }
+        out.error(
+            sp,
+            &format!(
+                "cannot check the argument for `{}` that `{}` passes to `{}` (declared {declared}): unresolved: {}",
+                v.param,
+                v.caller,
+                v.callee,
+                chains.join("; ")
+            ),
+        );
+        return;
+    }
+    // One chain per place in the analysed sources where the argument's allocations
+    // start (the paths below `Box::new` differ only inside the standard library).
+    let mut places: Vec<String> = Vec::new();
+    for w in v.summary.alloc_w.iter().chain(v.summary.terms_w.values()) {
+        let c = render(tcx, &v.arg, w);
+        let place = w
+            .spans()
+            .into_iter()
+            .find_map(|sp| user_location(tcx, sp))
+            .unwrap_or_else(|| c.clone());
+        if chains.len() < 3 && !places.contains(&place) {
+            places.push(place);
+            chains.push(c);
+        }
+    }
+    out.error(
+        sp,
+        &format!(
+            "`{}` passes to `{}` an argument for `{}` that may allocate {} time(s) per call, but `{}` declares {declared}: {}",
+            v.caller,
+            v.callee,
+            v.param,
+            v.bound.c,
+            v.callee,
+            chains.join("; ")
+        ),
+    );
+}
+
+/// Local functions, methods and closures with MIR, in definition order.
+fn local_bodies(tcx: TyCtxt<'_>) -> Vec<DefId> {
+    tcx.mir_keys(())
+        .iter()
+        .map(|d| d.to_def_id())
+        .filter(|&d| {
+            matches!(
+                tcx.def_kind(d),
+                DefKind::Fn | DefKind::AssocFn | DefKind::Closure
+            ) && tcx.is_mir_available(d)
+        })
+        .collect()
+}
+
+/// Entry point after analysis: validate attributes, analyse every root, check the
+/// declared parameter bounds at every call site, report.
 pub fn check_crate(tcx: TyCtxt<'_>) {
     let mut out = Out {
         tcx,
@@ -319,7 +425,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         notes: 0,
     };
     validate_tool_attrs(&mut out);
-    let crates = Crates::new(tcx);
+    let mut crates = Crates::new(tcx);
     // A dependency that declares `fip::export` but carries no MIR would otherwise look
     // opted in while giving no bodies: a hard error, whether or not a root calls it.
     for (krate, func) in crates.unencoded(tcx) {
@@ -332,17 +438,41 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         ));
     }
     let roots = roots(tcx, &mut out);
-    if roots.is_empty() {
-        return;
-    }
+    crates.add_local_marks(&roots);
+    // A violation reached from several roots (or also found in the body scan below) is
+    // reported once, for the first root in source order.
+    let mut seen: HashSet<String> = HashSet::new();
     let mut passed = 0usize;
     for (def_id, mark) in &roots {
         let before = (out.errors, out.warnings);
-        let r = Analysis::run(tcx, &crates, *def_id);
+        let r = Analysis::run(tcx, &crates, *def_id, mark);
         verdict(&mut out, *def_id, mark, &r);
+        for v in &r.args {
+            if seen.insert(v.key()) {
+                report_argument(&mut out, tcx.def_span(*def_id), v);
+            }
+        }
         if (out.errors, out.warnings) == before {
             passed += 1;
         }
+    }
+    // Callers that are not roots: every other local body, with identity arguments.
+    let mut outside_roots = 0usize;
+    if crates.has_param_marks() {
+        for owner in local_bodies(tcx) {
+            if roots.iter().any(|(d, _)| *d == owner) {
+                continue;
+            }
+            for v in Analysis::arguments_in(tcx, &crates, owner) {
+                if seen.insert(v.key()) {
+                    report_argument(&mut out, tcx.def_span(owner), &v);
+                    outside_roots += 1;
+                }
+            }
+        }
+    }
+    if roots.is_empty() && outside_roots == 0 {
+        return;
     }
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
