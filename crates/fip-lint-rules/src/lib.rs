@@ -89,7 +89,7 @@ pub const CORE_TABLE: &[&str] = &[
 
 /// rustc versions whose `core` sources were read for [`CORE_TABLE`]. A build with
 /// any other version is not covered by the audit (`fip-macros` tests fail on it).
-pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.99.1"];
+pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1"];
 
 /// Method names the crate-wide checker treats as allocation-free **by name** when no
 /// method of that name is defined in the scanned sources: the slice/integer methods

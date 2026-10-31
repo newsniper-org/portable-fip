@@ -37,26 +37,35 @@ cross:
     cargo check -p fip-arch --target aarch64-apple-darwin
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
-verify: verify-core verify-alloc verify-compose verify-negative
+verify: verify-strict verify-core verify-alloc verify-compose verify-negative
 
-# fip-core proofs, no trusted items (--no-cheating).
-verify-core:
-    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating crates/fip-core/src/lib.rs
+# Verus metadata and library of fip-strict, imported where `FipFn` specs are needed.
+verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern fip_strict=target/verus-strict/libfip_strict.rlib"
+
+# fip-strict proofs (`FipFn` with `pre`/`post`, `Certified`), no trusted items;
+# exports the Verus metadata that fip-core and verify-compose import.
+verify-strict:
+    rm -rf target/verus-strict && mkdir -p target/verus-strict
+    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --crate-name fip_strict --no-cheating crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict
+
+# fip-core proofs, no trusted items (--no-cheating); imports fip-strict's Verus build.
+verify-core: verify-strict
+    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating crates/fip-core/src/lib.rs {{verus_strict}}
 
 # fip-alloc proofs, no trusted items (--no-cheating).
 verify-alloc:
     VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating crates/fip-alloc/src/lib.rs
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
-verify-compose:
+# Strict functions with `FipFn` parameters verify against fip-strict's Verus build.
+verify-compose: verify-strict
     #!/usr/bin/env bash
     set -euo pipefail
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build -q -p fip-macros -p fip-strict --target-dir target/verus-macros
+    cargo +"$tc" build -q -p fip-macros --target-dir target/verus-macros
     deps=target/verus-macros/debug/deps
     so=$(ls -t $deps/libfip_macros-*.so | head -1)
-    rl=$(ls -t $deps/libfip_strict-*.rlib | head -1)
-    run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" --extern fip_strict="$rl" -L "$deps" "$1"; }
+    run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
     run verify/compose.rs
     run verify/compose_strict.rs
     out=target/verify-compose; mkdir -p "$out"
@@ -73,11 +82,16 @@ verify-compose:
     printf 'pub fn plain(a: &mut u32, b: &mut u32) { core::mem::swap(a, b) }\n' >> "$out/strict_bad.rs"
     if run "$out/strict_bad.rs" 2> "$out/strict_bad.err"; then echo "FAIL: uncertified callee accepted under verus"; exit 1; fi
     grep -q "__fip_strict_plain" "$out/strict_bad.err"
+    # A `FipFn` parameter promises only its `post`: claiming the negation must fail.
+    sed 's/^    keep.call((&x,))$/    !keep.call((\&x,))/' verify/compose_strict.rs > "$out/strict_post.rs"
+    if cmp -s verify/compose_strict.rs "$out/strict_post.rs"; then echo "FAIL: mutation strict_post did not apply"; exit 1; fi
+    if run "$out/strict_post.rs" 2> "$out/strict_post.err" > "$out/strict_post.out"; then echo "FAIL: wrong FipFn result accepted under verus"; exit 1; fi
+    grep -q "postcondition not satisfied" "$out/strict_post.err" "$out/strict_post.out"
     echo "verify-compose: ok"
 
 # Mutated copies must FAIL; a gate that cannot fail proves nothing.
 # Each mutation is scoped to one function with a sed address range.
-verify-negative:
+verify-negative: verify-strict
     #!/usr/bin/env bash
     set -euo pipefail
     out=target/verify-negative; rm -rf "$out"; mkdir -p "$out"
@@ -89,7 +103,7 @@ verify-negative:
     }
     expect_verus_fail() {  # name, crate, file, sed script, expected log regex
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating "$d/src/lib.rs" > "$d/log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
       grep -Eq "$5" "$d/log" || { echo "FAIL: mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
@@ -106,6 +120,16 @@ verify-negative:
     expect_verus_fail compact-map-no-swap  fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^                swap_lt(xs, w, r);$//' "$errs"
     expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$errs"
     expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    core::mem::swap(&mut \*cell, &mut prev);$//' "$errs"
+    # Strict variants (`FipFn` callables), same mutations.
+    expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$errs"
+    expect_verus_fail strict-map-skips-store     fip-core strict.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$errs"
+    expect_verus_fail strict-update-keeps-old    fip-core strict.rs '/^pub fn update</,/^}/ s/^    let next = f.call((prev,));$/    let next = prev; let _ = \&f;/' "$errs"
+    expect_verus_fail strict-dedup-wrong-compare fip-core strict.rs '/^pub fn dedup_by</,/^}/ s/same.call((&xs\[w - 1\], &xs\[r\]))/same.call((\&xs[r - 1], \&xs[r]))/' "$errs"
+    expect_verus_fail strict-compact-map-invert  fip-core strict.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$errs"
+    # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
+    expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
+    # fip-strict: `Certified::pre` must be the closure's `requires`.
+    expect_verus_fail certified-pre-true         fip-strict lib.rs  's/^                self.inner().requires(args)$/                true/' "$errs"
     # Stack bound: recursion without `decreases` is rejected.
     expect_verus_fail swap-recursive       fip-core  slice.rs '/^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        swap(xs, lo, lo);/' 'recursive function must have a decreases clause'
     # Source gates (fip_testkit::surface) must fail on mutated sources.
@@ -119,6 +143,13 @@ verify-negative:
     }
     expect_test_fail surface-unspecified fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/{/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/,/^))\]$/d}' every_function_is_specified
     expect_test_fail surface-decreases   fip-core slot.rs '0,/^    ensures$/ s/^    ensures$/    decreases 0nat,\n    ensures/' no_function_may_recurse
+    # Drift gate (fip-strict): the Verus `FipFn::call` must match the plain one.
+    d=$(mutate drift-call fip-strict lib.rs 's/^    fn call(&self, args: Args) -> (r: Self::Output)$/    fn call(\&self, args: Args, extra: u8) -> (r: Self::Output)/')
+    if FIP_DRIFT_SRC="$PWD/$d/src/lib.rs" cargo test -q -p fip-strict --test verus_drift > "$d/log" 2>&1; then
+      echo "FAIL: drift mutant passed"; exit 1
+    fi
+    grep -q "test result: FAILED" "$d/log" || { echo "FAIL: drift mutant failed for another reason"; cat "$d/log"; exit 1; }
+    echo "mutant drift-call rejected by the drift test"
     echo "verify-negative: ok"
 
 # CACHE_LINE override: supported values take effect, others are rejected.

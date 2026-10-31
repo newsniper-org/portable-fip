@@ -8,20 +8,30 @@
 //!    (or carry a hand-written certificate, as `fip-core` and `fip-alloc` do via
 //!    `fip_strict::certs`).
 //!
-//! Every strict function `f` gets a companion constant `__fip_strict_f: u64`: an upper
-//! bound on the allocations one call of `f` performs. It is defined as `f`'s own
-//! allocation sites plus the companion constants of its callees, so:
+//! Every strict function `f` gets a certificate `__fip_strict_f: fip_strict::Cert`
+//! naming `f` and carrying an upper bound on the allocations one call of `f`
+//! performs. The bound is `f`'s own allocation sites plus the certificates of its
+//! callees, so:
 //!
-//! - a call to a function without a companion constant does not compile;
+//! - a call to a function without a certificate does not compile;
 //! - the bound of `f` is checked at compile time (`<= N`, `N = 0` for `#[fip]`);
 //! - a callee called inside a loop must have bound 0;
 //! - recursion through strict functions makes the constants refer to each other,
 //!   which rustc rejects as a cycle in constant evaluation.
 //!
+//! Certificates are named after the callee as written: `f(..)` / `a::f(..)` use
+//! `__fip_strict_f`; `Type::m(..)` / `a::Type::m(..)` / `<Type<..>>::m(..)` use
+//! `__fip_strict_Type__m` (module-level, emitted by `#[fip_impl]`); `<Type as Tr>::m(..)`
+//! uses `__fip_strict_Type__Tr__m`; `Self` stands for the `#[fip_impl]` type. The bound
+//! is read through `Cert::allocs_for("<name>")`, so a certificate imported under
+//! another function's name fails constant evaluation.
+//!
 //! What a token-level macro cannot resolve is rejected rather than trusted: method
-//! calls (`x.m()`), calls through expressions (`(f)(x)`, `a[i](x)`), qualified paths
-//! (`<T as Tr>::f`), generic arguments inside a callee path, the `?` operator, and
-//! macros outside a small allowlist.
+//! calls (`x.m()`), calls through expressions (`(f)(x)`, `a[i](x)`), generic arguments
+//! inside a callee path (`Foo::<u8>::m`; write `<Foo<u8>>::m`), generic traits in a
+//! qualified path, the `?` operator, and macros outside a small allowlist. A
+//! `fip_fn!(..)` argument is skipped: `fip_fn!` checks its closure itself, and a call
+//! of it is bounded by the `param(..)` of the function it is passed to.
 
 use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 
@@ -29,7 +39,8 @@ use crate::{GHOST_MACROS, HEAP_CONSTRUCTORS, HEAP_TYPES, is_group, is_ident, is_
 use fip_lint_rules::CORE_TABLE;
 
 /// Macros a strict body may invoke. Their arguments are still checked; what they
-/// expand to on the panic path is outside the guarantee (see crate docs).
+/// expand to on the panic path is outside the guarantee (see crate docs). All of them
+/// panic; `panic_macros = false` rejects them.
 const ALLOWED_MACROS: &[&str] = &[
     "assert",
     "assert_eq",
@@ -64,12 +75,28 @@ pub(crate) struct ParamCall {
     in_loop: bool,
 }
 
-/// A call to a function that must carry a companion constant.
+/// A call to a function that must carry a certificate.
 pub(crate) struct Call {
-    /// Path tokens before the function name, including the trailing `::`.
-    prefix: Vec<TokenTree>,
-    name: Ident,
+    /// Module path before the certificate identifier, including the trailing `::`.
+    cert_prefix: Vec<TokenTree>,
+    /// Certificate name: `f`, `Type__m` or `Type__Trait__m`.
+    cert_name: String,
+    /// The callee as written, for messages.
+    shown: String,
+    span: Span,
     in_loop: bool,
+}
+
+/// How a callee is named.
+enum Callee {
+    /// `a::b::name` / `name`: the path tokens before the name, with the trailing `::`.
+    Path(Vec<TokenTree>),
+    /// `<Ty as Tr>::name` / `<Ty>::name`: the type path without generic arguments,
+    /// and the trait's last segment.
+    Qualified {
+        ty: Vec<TokenTree>,
+        tr: Option<Ident>,
+    },
 }
 
 #[derive(Default)]
@@ -78,14 +105,23 @@ pub(crate) struct StrictScan {
     pub(crate) calls: Vec<Call>,
     pub(crate) param_calls: Vec<ParamCall>,
     pub(crate) errors: Vec<(Span, String)>,
+    /// Name of `Self` inside a `#[fip_impl]` block.
+    pub(crate) self_ty: Option<String>,
+    /// `panic_macros = false`: reject the panicking macros of [`ALLOWED_MACROS`].
+    pub(crate) no_panic_macros: bool,
 }
 
 fn param_index(params: &[Param], name: &str) -> Option<usize> {
     params.iter().position(|p| p.name == name)
 }
 
-fn upper_initial(s: &str) -> bool {
+pub(crate) fn upper_initial(s: &str) -> bool {
     s.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// An identifier as used inside a certificate name (`r#fn` becomes `fn`).
+pub(crate) fn bare(id: &str) -> &str {
+    id.strip_prefix("r#").unwrap_or(id)
 }
 
 impl StrictScan {
@@ -146,13 +182,23 @@ impl StrictScan {
                 .get(i + 2)
                 .is_some_and(|n| matches!(n, TokenTree::Group(_)))
         {
-            if GHOST_MACROS.contains(&s.as_str()) {
+            // Ghost code, and `fip_fn!` closures: those are checked by `fip_fn!` itself
+            // and their calls are bounded through the callee's `param(..)`.
+            if GHOST_MACROS.contains(&s.as_str()) || s == "fip_fn" {
                 return 3;
             }
-            if !ALLOWED_MACROS.contains(&s.as_str()) && s != "vec" && s != "format" {
+            let panicking = ALLOWED_MACROS.contains(&s.as_str());
+            if !panicking && s != "vec" && s != "format" {
                 self.err(
                     id.span(),
                     &format!("macro `{s}!` cannot be checked (its expansion is not visible)"),
+                );
+            } else if panicking && self.no_panic_macros {
+                self.err(
+                    id.span(),
+                    &format!(
+                        "`{s}!` may panic, and `panic_macros = false` rejects panicking macros"
+                    ),
                 );
             }
             // Arguments are scanned when the group is reached.
@@ -173,9 +219,12 @@ impl StrictScan {
                 );
             }
         } else {
-            match path_prefix(toks, i) {
+            match callee_path(toks, i) {
                 Err((sp, msg)) => self.err(sp, &msg),
-                Ok(prefix) => self.on_path_call(toks, paren, prefix, id, in_loop),
+                Ok(Callee::Path(prefix)) => self.on_path_call(toks, paren, prefix, id, in_loop),
+                Ok(Callee::Qualified { ty, tr }) => {
+                    self.on_qualified_call(&ty, tr.as_ref(), id, in_loop);
+                }
             }
         }
         1
@@ -205,6 +254,56 @@ impl StrictScan {
         );
     }
 
+    /// The name of the type `ty` (the last path segment), with `Self` resolved.
+    fn type_name(&mut self, ty: &Ident, callee: &str) -> Option<String> {
+        let t = ty.to_string();
+        if t != "Self" {
+            return Some(bare(&t).to_string());
+        }
+        if self.self_ty.is_none() {
+            self.err(
+                ty.span(),
+                &format!(
+                    "`{callee}`: `Self` in a strict function needs `#[fip_impl]` on the `impl` block (certificates are named after the type)"
+                ),
+            );
+        }
+        self.self_ty.clone()
+    }
+
+    /// `<Ty as Tr>::name(..)` / `<Ty>::name(..)`.
+    fn on_qualified_call(
+        &mut self,
+        ty: &[TokenTree],
+        tr: Option<&Ident>,
+        id: &Ident,
+        in_loop: bool,
+    ) {
+        let s = id.to_string();
+        let Some((TokenTree::Ident(last), module)) = ty.split_last() else {
+            self.err(id.span(), "expected a type path in `<Type as Trait>::f`");
+            return;
+        };
+        let shown = match tr {
+            Some(t) => format!("<{last} as {t}>::{s}"),
+            None => format!("<{last}>::{s}"),
+        };
+        let Some(ty_name) = self.type_name(last, &shown) else {
+            return;
+        };
+        let cert_name = match tr {
+            Some(t) => format!("{ty_name}__{}__{}", bare(&t.to_string()), bare(&s)),
+            None => format!("{ty_name}__{}", bare(&s)),
+        };
+        self.calls.push(Call {
+            cert_prefix: module.to_vec(),
+            cert_name,
+            shown,
+            span: id.span(),
+            in_loop,
+        });
+    }
+
     /// `path::name(..)` / `name(..)`.
     fn on_path_call(
         &mut self,
@@ -231,28 +330,7 @@ impl StrictScan {
                 .nth(2)
                 .is_some_and(|t| is_ident(t, "FipFn"))
         {
-            // `FipFn::call(&param, (..))`
-            let arg0: Vec<TokenTree> = match toks.get(paren) {
-                Some(TokenTree::Group(g)) => g.stream().into_iter().take(2).collect(),
-                _ => Vec::new(),
-            };
-            let param = match arg0.as_slice() {
-                [amp, TokenTree::Ident(recv)] if is_punct(amp, '&') => {
-                    param_index(&self.params, &recv.to_string())
-                }
-                _ => None,
-            };
-            match param {
-                Some(p) => self.param_calls.push(ParamCall {
-                    param: p,
-                    span: id.span(),
-                    in_loop,
-                }),
-                None => self.err(
-                    id.span(),
-                    "`FipFn::call` must be applied to `&param` of a parameter declared with `param(name = K)`",
-                ),
-            }
+            self.on_fipfn_call(toks, paren, id, in_loop);
             return;
         }
         let segs: Vec<String> = prefix
@@ -266,12 +344,62 @@ impl StrictScan {
             .last()
             .is_some_and(|l| HEAP_TYPES.contains(&l.as_str()))
             && HEAP_CONSTRUCTORS.contains(&s.as_str());
-        if !heap_ctor && !in_core_table(&segs, &s) {
-            self.calls.push(Call {
-                prefix,
-                name: id.clone(),
+        if heap_ctor || in_core_table(&segs, &s) {
+            return;
+        }
+        let shown: String = prefix
+            .iter()
+            .map(ToString::to_string)
+            .chain([s.clone()])
+            .collect();
+        // `Type::m` / `Self::m`: the certificate sits next to the type's module path.
+        let type_seg = match prefix.len().checked_sub(3).map(|k| &prefix[k]) {
+            Some(TokenTree::Ident(t)) if upper_initial(&t.to_string()) => Some(t.clone()),
+            _ => None,
+        };
+        let (cert_prefix, cert_name) = match type_seg {
+            Some(t) => {
+                let Some(ty_name) = self.type_name(&t, &shown) else {
+                    return;
+                };
+                (
+                    prefix[..prefix.len() - 3].to_vec(),
+                    format!("{ty_name}__{}", bare(&s)),
+                )
+            }
+            None => (prefix, bare(&s).to_string()),
+        };
+        self.calls.push(Call {
+            cert_prefix,
+            cert_name,
+            shown,
+            span: id.span(),
+            in_loop,
+        });
+    }
+
+    /// `FipFn::call(&param, (..))`.
+    fn on_fipfn_call(&mut self, toks: &[TokenTree], paren: usize, id: &Ident, in_loop: bool) {
+        let arg0: Vec<TokenTree> = match toks.get(paren) {
+            Some(TokenTree::Group(g)) => g.stream().into_iter().take(2).collect(),
+            _ => Vec::new(),
+        };
+        let param = match arg0.as_slice() {
+            [amp, TokenTree::Ident(recv)] if is_punct(amp, '&') => {
+                param_index(&self.params, &recv.to_string())
+            }
+            _ => None,
+        };
+        match param {
+            Some(p) => self.param_calls.push(ParamCall {
+                param: p,
+                span: id.span(),
                 in_loop,
-            });
+            }),
+            None => self.err(
+                id.span(),
+                "`FipFn::call` must be applied to `&param` of a parameter declared with `param(name = K)`",
+            ),
         }
     }
 
@@ -327,18 +455,19 @@ fn slice_qualified(toks: &[TokenTree], i: usize) -> bool {
         && is_punct(&toks[i - 5], '<')
 }
 
-/// Path tokens before `toks[i]` (`a::b::` in `a::b::f`), with a leading `::` if any.
-fn path_prefix(toks: &[TokenTree], i: usize) -> Result<Vec<TokenTree>, (Span, String)> {
+/// How the callee at `toks[i]` is named: `a::b::f` (path tokens before it, with a
+/// leading `::` if any), or `<Ty as Tr>::f`.
+fn callee_path(toks: &[TokenTree], i: usize) -> Result<Callee, (Span, String)> {
     let mut start = i;
     loop {
         if start >= 2 && is_punct(&toks[start - 1], ':') && is_punct(&toks[start - 2], ':') {
             match toks.get(start.wrapping_sub(3)) {
                 Some(TokenTree::Ident(_)) if start >= 3 => start -= 3,
                 Some(t) if start >= 3 && is_punct(t, '>') => {
-                    return Err((
-                        t.span(),
-                        "generic arguments or a qualified path (`<T as Tr>::f`) in a callee path cannot be resolved; name the function by a plain path".to_string(),
-                    ));
+                    if start != i {
+                        return Err((t.span(), GENERIC_PATH.to_string()));
+                    }
+                    return qualified(toks, start - 3);
                 }
                 _ => {
                     // Leading `::` (absolute path).
@@ -350,7 +479,97 @@ fn path_prefix(toks: &[TokenTree], i: usize) -> Result<Vec<TokenTree>, (Span, St
             break;
         }
     }
-    Ok(toks[start..i].to_vec())
+    Ok(Callee::Path(toks[start..i].to_vec()))
+}
+
+const GENERIC_PATH: &str = "generic arguments in a callee path cannot be resolved; write `Type::f(..)` or `<Type<..>>::f(..)`";
+
+/// `<Ty as Tr>` / `<Ty>` ending with the `>` at `toks[gt]`.
+fn qualified(toks: &[TokenTree], gt: usize) -> Result<Callee, (Span, String)> {
+    let gt_span = toks[gt].span();
+    let mut depth = 0_i32;
+    let mut lt = None;
+    for k in (0..=gt).rev() {
+        let arrow = k > 0 && is_punct(&toks[k - 1], '-');
+        if is_punct(&toks[k], '>') && !arrow {
+            depth += 1;
+        } else if is_punct(&toks[k], '<') {
+            depth -= 1;
+            if depth == 0 {
+                lt = Some(k);
+                break;
+            }
+        }
+    }
+    let Some(lt) = lt else {
+        return Err((gt_span, GENERIC_PATH.to_string()));
+    };
+    if lt > 0 {
+        let prev = &toks[lt - 1];
+        let path_like = is_punct(prev, ':')
+            || matches!(prev, TokenTree::Ident(id) if !KEYWORDS.contains(&id.to_string().as_str()));
+        if path_like {
+            // `Foo::<u8>::f`: generic arguments inside a path.
+            return Err((gt_span, GENERIC_PATH.to_string()));
+        }
+    }
+    let inner = &toks[lt + 1..gt];
+    let as_at = {
+        let mut d = 0_i32;
+        let mut found = None;
+        for (k, t) in inner.iter().enumerate() {
+            if is_punct(t, '<') {
+                d += 1;
+            } else if is_punct(t, '>') {
+                d -= 1;
+            } else if d == 0 && is_ident(t, "as") {
+                found = Some(k);
+                break;
+            }
+        }
+        found
+    };
+    let (ty_part, trait_part) = match as_at {
+        Some(k) => (&inner[..k], Some(&inner[k + 1..])),
+        None => (inner, None),
+    };
+    // The type: a path, optionally followed by one `<..>` argument list.
+    let path_end = ty_part
+        .iter()
+        .position(|t| is_punct(t, '<'))
+        .unwrap_or(ty_part.len());
+    let plain_path = |ts: &[TokenTree]| {
+        !ts.is_empty()
+            && matches!(ts.last(), Some(TokenTree::Ident(_)))
+            && ts
+                .iter()
+                .all(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':'))
+    };
+    let args_ok = path_end == ty_part.len()
+        || (is_punct(&ty_part[path_end], '<') && ty_part.last().is_some_and(|t| is_punct(t, '>')));
+    if !plain_path(&ty_part[..path_end]) || !args_ok {
+        return Err((
+            gt_span,
+            "the type in a qualified callee path must be a named type (`<Type as Trait>::f`, `<Type<..>>::f`)".to_string(),
+        ));
+    }
+    let tr = match trait_part {
+        None => None,
+        Some(t) if plain_path(t) => match t.last() {
+            Some(TokenTree::Ident(id)) => Some(id.clone()),
+            _ => None,
+        },
+        Some(_) => {
+            return Err((
+                gt_span,
+                "a generic trait in `<Type as Trait<..>>::f` cannot be resolved to one impl; strict calls support traits without generic arguments".to_string(),
+            ));
+        }
+    };
+    Ok(Callee::Qualified {
+        ty: ty_part[..path_end].to_vec(),
+        tr,
+    })
 }
 
 fn in_core_table(segs: &[String], name: &str) -> bool {
@@ -373,19 +592,15 @@ fn brace(inner: TokenStream) -> TokenTree {
     TokenTree::Group(Group::new(Delimiter::Brace, inner))
 }
 
-fn marker_ident(name: &str, span: Span) -> Ident {
-    Ident::new(&format!("__fip_strict_{name}"), span)
-}
-
-/// `prefix::__fip_strict_name.allocs()`, with the call's spans so a missing
+/// `prefix::__fip_strict_name.allocs_for("name")`, with the call's span so a missing
 /// certificate is reported at the call site.
 fn term(c: &Call) -> TokenStream {
-    let mut out: TokenStream = c.prefix.iter().cloned().collect();
-    out.extend([TokenTree::Ident(marker_ident(
-        &c.name.to_string(),
-        c.name.span(),
+    let mut out: TokenStream = c.cert_prefix.iter().cloned().collect();
+    out.extend([TokenTree::Ident(Ident::new(
+        &format!("__fip_strict_{}", c.cert_name),
+        c.span,
     ))]);
-    out.extend(ts(".allocs()"));
+    out.extend(ts(&format!(".allocs_for({:?})", c.cert_name)));
     out
 }
 
@@ -431,19 +646,22 @@ impl StrictScan {
     /// Statements asserting the bound and the loop rule.
     fn checks(&self, tag: &str, n: u64, local: u64, with_params: bool) -> TokenStream {
         let mut body = TokenStream::new();
-        let mut a = self.sum_expr(local);
-        a.extend(ts(&format!(
-            " <= {n}u64, {:?}",
-            format!("{tag}: the callees may allocate more than {n} times in total")
-        )));
-        body.extend(ts("::core::assert!"));
-        body.extend([paren(a)]);
-        body.extend(ts(";"));
+        // `n == u64::MAX` (a `fip_fn!` closure): no total to check.
+        if n < u64::MAX {
+            let mut a = self.sum_expr(local);
+            a.extend(ts(&format!(
+                " <= {n}u64, {:?}",
+                format!("{tag}: the callees may allocate more than {n} times in total")
+            )));
+            body.extend(ts("::core::assert!"));
+            body.extend([paren(a)]);
+            body.extend(ts(";"));
+        }
         for c in self.calls.iter().filter(|c| c.in_loop) {
             let mut a = term(c);
             a.extend(ts(&format!(
                 " == 0u64, {:?}",
-                format!("{tag}: `{}` is called in a loop and may allocate", c.name)
+                format!("{tag}: `{}` is called in a loop and may allocate", c.shown)
             )));
             body.extend(ts("::core::assert!"));
             body.extend([paren(a)]);
@@ -473,31 +691,33 @@ impl StrictScan {
         body
     }
 
-    /// Items emitted before a strict function, and the statement inserted at the
-    /// start of its body.
+    /// Items emitted before a strict function (or, for `#[fip_impl]`, before its
+    /// `impl` block), and the statement inserted at the start of its body.
+    /// `cert_name` is `f`, `Type__m` or `Type__Trait__m`.
     pub(crate) fn emit_fn(
         &self,
         tag: &str,
-        fn_name: &str,
+        cert_name: &str,
         vis: &[TokenTree],
         n: u64,
         local: u64,
     ) -> (TokenStream, TokenStream) {
-        let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, dead_code, clippy::all, clippy::pedantic)]";
+        let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)]";
         let mut items = ts(attrs);
         items.extend(vis.iter().cloned());
         items.extend(ts(&format!(
-            "const __fip_strict_{fn_name}: ::fip_strict::Cert = unsafe"
+            "const __fip_strict_{cert_name}: ::fip_strict::Cert = unsafe"
         )));
         let mut ctor = ts("::fip_strict::Cert::assume");
-        ctor.extend([paren(self.sum_expr(local))]);
+        let mut args = ts(&format!("{cert_name:?},"));
+        args.extend(self.sum_expr(local));
+        ctor.extend([paren(args)]);
         items.extend([brace(ctor)]);
         items.extend(ts(";"));
-        // Evaluated eagerly at module level (also by `cargo check`); inside an `impl`
-        // an associated constant is lazy, so the checks are repeated in the body,
-        // together with the checks on generic parameters (post-monomorphisation).
+        // Evaluated eagerly at module level (also by `cargo check`); the checks on
+        // generic parameters are in the body (post-monomorphisation).
         items.extend(ts(attrs));
-        items.extend(ts(&format!("const __fip_strict_check_{fn_name}: () = ")));
+        items.extend(ts(&format!("const __fip_strict_check_{cert_name}: () = ")));
         items.extend([brace(self.checks(tag, n, local, false))]);
         items.extend(ts(";"));
 
@@ -509,14 +729,11 @@ impl StrictScan {
         (items, stmt)
     }
 
-    /// `const ALLOCS: u64 = { checks; sum };` for a `fip_fn!` wrapper.
-    pub(crate) fn emit_allocs_const(&self, local: u64) -> TokenStream {
+    /// `checks; sum`: the body of the const argument giving a `fip_fn!` closure's bound.
+    pub(crate) fn emit_fip_fn_bound(&self, local: u64) -> TokenStream {
         let mut body = self.checks("fip_fn!", u64::MAX, local, false);
         body.extend(self.sum_expr(local));
-        let mut out = ts("#[allow(clippy::all, clippy::pedantic)] const ALLOCS: u64 = ");
-        out.extend([brace(body)]);
-        out.extend(ts(";"));
-        out
+        body
     }
 }
 

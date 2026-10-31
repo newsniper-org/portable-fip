@@ -3,6 +3,7 @@
 
 //! Specification helpers. Compiled only under the `verus` driver.
 
+use fip_strict::FipFn;
 use vstd::prelude::*;
 
 verus! {
@@ -114,7 +115,10 @@ pub open spec fn eq_rel(a: u8, b: u8, r: bool) -> bool {
 }
 
 /// Accepts the intended answer: `[1, 1, 2]` → `[1, 2 | 1]`, `w = 2`.
-pub proof fn lemma_dedup_spec_accepts_intended() {
+pub proof fn lemma_dedup_spec_accepts_intended()
+    ensures
+        dedup_post(seq![1u8, 1u8, 2u8], seq![1u8, 2u8, 1u8], 2, |a: u8, b: u8, r: bool| eq_rel(a, b, r), seq![0int, 2int], seq![0int, 0int, 1int]),
+{
     let old = seq![1u8, 1u8, 2u8];
     let new = seq![1u8, 2u8, 1u8];
     lemma_swap_multiset(old, 1, 2);
@@ -261,7 +265,11 @@ pub open spec fn times10_keep_odd(a: u8, b: u8, k: bool) -> bool {
 }
 
 /// Accepts the intended answer: `[1, 2, 3]` → `[10, 30 | 20]`, `w = 2`.
-pub proof fn lemma_compact_map_spec_accepts_intended() {
+pub proof fn lemma_compact_map_spec_accepts_intended()
+    ensures
+        compact_map_post(seq![1u8, 2u8, 3u8], seq![10u8, 30u8, 20u8], 2, |a: u8, b: u8, k: bool| times10_keep_odd(a, b, k),
+            seq![10u8, 20u8, 30u8], seq![true, false, true], seq![0int, 2int], seq![0int, -1int, 1int]),
+{
     let old = seq![1u8, 2u8, 3u8];
     let ys = seq![10u8, 20u8, 30u8];
     let ks = seq![true, false, true];
@@ -320,6 +328,159 @@ pub proof fn lemma_compact_map_spec_rejects_unmapped(
         assert(0 <= idx[0] < 3);
         assert(times10_keep_odd(old[idx[0]], ys[idx[0]], ks[idx[0]]));
     }
+}
+
+// ---- Specifications of the strict variants (`crate::strict`), whose callables are
+// `fip_strict::FipFn` values: the relation is `FipFn::post` instead of a closure's
+// `ensures`. Written and pre-verified before `crate::strict` was implemented.
+
+/// Postcondition of `compact` on `old` → `new` with result `w`, where `keep(a, r)`
+/// means "the predicate may return `r` on `a`": `new` is a permutation of `old`;
+/// `keep` returned `true` before `w` and `false` from `w` on; the first `w` elements
+/// are `old[idx[0]], old[idx[1]], ..` with `idx` strictly increasing.
+pub open spec fn compact_post<A>(old: Seq<A>, new: Seq<A>, w: int, keep: spec_fn(A, bool) -> bool) -> bool {
+    &&& 0 <= w <= old.len()
+    &&& new.len() == old.len()
+    &&& new.to_multiset() == old.to_multiset()
+    &&& forall|i: int| 0 <= i < w ==> keep(#[trigger] new[i], true)
+    &&& forall|i: int| w <= i < new.len() ==> keep(#[trigger] new[i], false)
+    &&& exists|idx: Seq<int>| idx.len() == w
+        && #[trigger] strictly_increasing_below(idx, old.len() as int)
+        && forall|i: int| 0 <= i < w ==> new[i] == old[idx[i]]
+}
+
+/// `compact_post` for a `FipFn` predicate.
+pub open spec fn compact_fip_post<A, F: for<'a> FipFn<(&'a A,), Output = bool>>(
+    old: Seq<A>,
+    new: Seq<A>,
+    w: int,
+    keep: F,
+) -> bool {
+    compact_post(old, new, w, |a: A, r: bool| keep.post((&a,), r))
+}
+
+/// `dedup_post` for a `FipFn` predicate.
+pub open spec fn dedup_fip_post<A, F: for<'a, 'b> FipFn<(&'a A, &'b A), Output = bool>>(
+    old: Seq<A>,
+    new: Seq<A>,
+    w: int,
+    same: F,
+    idx: Seq<int>,
+    src: Seq<int>,
+) -> bool {
+    dedup_post(old, new, w, |a: A, b: A, r: bool| same.post((&a, &b), r), idx, src)
+}
+
+/// `compact_map_post` for a `FipFn` function.
+pub open spec fn compact_map_fip_post<A, F: FipFn<(A,), Output = (A, bool)>>(
+    old: Seq<A>,
+    new: Seq<A>,
+    w: int,
+    f: F,
+    ys: Seq<A>,
+    ks: Seq<bool>,
+    idx: Seq<int>,
+    pos: Seq<int>,
+) -> bool {
+    compact_map_post(old, new, w, |a: A, b: A, k: bool| f.post((a,), (b, k)), ys, ks, idx, pos)
+}
+
+/// Example predicate: "is even".
+pub open spec fn even_rel(a: u8, r: bool) -> bool {
+    r == (a % 2 == 0)
+}
+
+/// `compact_post` accepts the intended answer: `[1, 2, 3, 4]` → `[2, 4 | 3, 1]`.
+pub proof fn lemma_compact_spec_accepts_intended()
+    ensures
+        compact_post(seq![1u8, 2u8, 3u8, 4u8], seq![2u8, 4u8, 3u8, 1u8], 2, |a: u8, r: bool| even_rel(a, r)),
+{
+    let old = seq![1u8, 2u8, 3u8, 4u8];
+    let mid = seq![2u8, 1u8, 3u8, 4u8];
+    let new = seq![2u8, 4u8, 3u8, 1u8];
+    lemma_swap_multiset(old, 0, 1);
+    assert(mid =~= old.update(0, old[1]).update(1, old[0]));
+    lemma_swap_multiset(mid, 1, 3);
+    assert(new =~= mid.update(1, mid[3]).update(3, mid[1]));
+    let idx = seq![1int, 3int];
+    assert(strictly_increasing_below(idx, 4));
+    assert(compact_post(old, new, 2, |a: u8, r: bool| even_rel(a, r)));
+}
+
+/// Rejects the unchanged slice with `w = 2` (an implementation that never swaps).
+pub proof fn lemma_compact_spec_rejects_unmoved()
+    ensures
+        !compact_post(seq![1u8, 2u8, 3u8, 4u8], seq![1u8, 2u8, 3u8, 4u8], 2, |a: u8, r: bool| even_rel(a, r)),
+{
+    let s = seq![1u8, 2u8, 3u8, 4u8];
+    if compact_post(s, s, 2, |a: u8, r: bool| even_rel(a, r)) {
+        assert(even_rel(s[0], true));
+    }
+}
+
+/// Rejects the kept elements out of order: `[4, 2 | 1, 3]`.
+pub proof fn lemma_compact_spec_rejects_reordered()
+    ensures
+        !compact_post(seq![1u8, 2u8, 3u8, 4u8], seq![4u8, 2u8, 1u8, 3u8], 2, |a: u8, r: bool| even_rel(a, r)),
+{
+    let old = seq![1u8, 2u8, 3u8, 4u8];
+    let new = seq![4u8, 2u8, 1u8, 3u8];
+    if compact_post(old, new, 2, |a: u8, r: bool| even_rel(a, r)) {
+        let idx = choose|idx: Seq<int>| idx.len() == 2
+            && #[trigger] strictly_increasing_below(idx, 4)
+            && forall|i: int| 0 <= i < 2 ==> new[i] == old[idx[i]];
+        assert(new[0] == old[idx[0]] && new[1] == old[idx[1]]);
+        assert(0 <= idx[0] < 4 && 0 <= idx[1] < 4 && idx[0] < idx[1]);
+        assert(old[0] == 1 && old[1] == 2 && old[2] == 3 && old[3] == 4);
+        assert(idx[0] == 3);
+    }
+}
+
+/// The `FipFn` forms are the relational specs with `post` as the relation: for a
+/// predicate whose `post` is "is even" / "equal", `compact_fip_post` and
+/// `dedup_fip_post` accept and reject exactly what `compact_post` / `dedup_post` do
+/// on the cases above.
+pub proof fn lemma_fip_specs_follow_post<
+    K: for<'a> FipFn<(&'a u8,), Output = bool>,
+    S: for<'a, 'b> FipFn<(&'a u8, &'b u8), Output = bool>,
+>(keep: K, same: S, new: Seq<u8>, idx: Seq<int>, src: Seq<int>)
+    requires
+        forall|a: u8, r: bool| #[trigger] keep.post((&a,), r) == even_rel(a, r),
+        forall|a: u8, b: u8, r: bool| #[trigger] same.post((&a, &b), r) == eq_rel(a, b, r),
+    ensures
+        compact_fip_post(seq![1u8, 2u8, 3u8, 4u8], seq![2u8, 4u8, 3u8, 1u8], 2, keep),
+        !compact_fip_post(seq![1u8, 2u8, 3u8, 4u8], seq![1u8, 2u8, 3u8, 4u8], 2, keep),
+        !compact_fip_post(seq![1u8, 2u8, 3u8, 4u8], seq![4u8, 2u8, 1u8, 3u8], 2, keep),
+        dedup_fip_post(seq![1u8, 1u8, 2u8], seq![1u8, 2u8, 1u8], 2, same, seq![0int, 2int], seq![0int, 0int, 1int]),
+        !dedup_fip_post(seq![1u8, 1u8, 2u8], new, 3, same, idx, src),
+        !dedup_fip_post(seq![1u8, 2u8], new, 1, same, idx, src),
+{
+    assert((|a: u8, r: bool| keep.post((&a,), r)) =~= (|a: u8, r: bool| even_rel(a, r)));
+    assert((|a: u8, b: u8, r: bool| same.post((&a, &b), r)) =~= (|a: u8, b: u8, r: bool| eq_rel(a, b, r)));
+    lemma_compact_spec_accepts_intended();
+    lemma_compact_spec_rejects_unmoved();
+    lemma_compact_spec_rejects_reordered();
+    lemma_dedup_spec_accepts_intended();
+    lemma_dedup_spec_rejects_kept_duplicate(new, idx, src);
+    lemma_dedup_spec_rejects_wrong_merge(new, idx, src);
+}
+
+/// Same for `compact_map_fip_post` with `post` = "times 10, keep odd inputs".
+pub proof fn lemma_compact_map_fip_spec_follows_post<F: FipFn<(u8,), Output = (u8, bool)>>(
+    f: F, new: Seq<u8>, ys: Seq<u8>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>,
+)
+    requires
+        forall|a: u8, b: u8, k: bool| #[trigger] f.post((a,), (b, k)) == times10_keep_odd(a, b, k),
+    ensures
+        compact_map_fip_post(seq![1u8, 2u8, 3u8], seq![10u8, 30u8, 20u8], 2, f,
+            seq![10u8, 20u8, 30u8], seq![true, false, true], seq![0int, 2int], seq![0int, -1int, 1int]),
+        !compact_map_fip_post(seq![1u8, 2u8, 3u8], new, 3, f, ys, ks, idx, pos),
+        !compact_map_fip_post(seq![1u8, 2u8, 3u8], new, 1, f, ys, ks, idx, pos),
+{
+    assert((|a: u8, b: u8, k: bool| f.post((a,), (b, k))) =~= (|a: u8, b: u8, k: bool| times10_keep_odd(a, b, k)));
+    lemma_compact_map_spec_accepts_intended();
+    lemma_compact_map_spec_rejects_extra(new, ys, ks, idx, pos);
+    lemma_compact_map_spec_rejects_missing(new, ys, ks, idx, pos);
 }
 
 } // verus!

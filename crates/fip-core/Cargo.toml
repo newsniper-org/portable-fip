@@ -3,7 +3,7 @@
 
 [package]
 name = "fip-core"
-description = "Allocation-free, in-place building blocks (no_std, no alloc, no deps), verified with Verus."
+description = "Allocation-free, in-place building blocks (no_std, no alloc, workspace deps only), verified with Verus."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ publish.workspace = true
 
 [dependencies]
 fip-strict = { path = "../fip-strict" }
+fip-macros = { path = "../fip-macros" }
 
 [dev-dependencies]
 fip-testkit = { path = "../fip-testkit" }

@@ -13,14 +13,16 @@ use vstd::prelude::*;
 
 /// Swaps `xs[i]` and `xs[j]` for `i < j`, built only from `vstd`-specified primitives
 /// (`split_at_mut`, `core::mem::swap`); `<[T]>::swap` has no `vstd` specification.
+/// Strict (certificate `__fip_strict_swap_lt`), so `crate::strict` can call it.
+#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true))]
 #[cfg_attr(verus_keep_ghost, verus_spec(
     requires
         i < j < old(xs)@.len(),
     ensures
         final(xs)@ == old(xs)@.update(i as int, old(xs)@[j as int]).update(j as int, old(xs)@[i as int]),
 ))]
-fn swap_lt<T>(xs: &mut [T], i: usize, j: usize) {
-    let (a, b) = xs.split_at_mut(j);
+pub(crate) fn swap_lt<T>(xs: &mut [T], i: usize, j: usize) {
+    let (a, b) = <[T]>::split_at_mut(xs, j);
     core::mem::swap(&mut a[i], &mut b[0]);
     proof! {
         assert(final(xs)@ =~= old(xs)@.update(i as int, old(xs)@[j as int]).update(j as int, old(xs)@[i as int]));

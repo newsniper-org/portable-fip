@@ -27,6 +27,30 @@ pub fn replace<T>(slot: &mut T, new: T) -> T { /* … */ }
 - `#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]` is required:
   attribute macros on loops are unstable syntax, enabled only for the verifier.
 
+### Amendment (2026-10-31): `fip-strict` is verified and imported by `fip-core`
+
+`fip-core`'s strict variants take `fip_strict::FipFn` callables, whose `pre`/`post`
+specifications exist only in `fip-strict`'s Verus declarations
+(`#[cfg(verus_keep_ghost)] verus! { .. }`, plain declarations otherwise;
+`fip-strict/tests/verus_drift.rs` compares them). So Verus checks the two crates
+together:
+
+- `just verify-strict`: `verus --crate-type=lib --crate-name fip_strict --no-cheating
+  crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile
+  --out-dir target/verus-strict`;
+- `just verify-core` (depends on it): `verus --crate-type=lib --no-cheating
+  crates/fip-core/src/lib.rs --import fip_strict=target/verus-strict/fip_strict.vir
+  --extern fip_strict=target/verus-strict/libfip_strict.rlib`. The bare
+  `verus crates/fip-core/src/lib.rs` no longer resolves `fip_strict`;
+- `verify-negative` passes the same flags to every mutant, and `verify-compose`
+  uses the Verus build of `fip_strict` (so `verify/compose_strict.rs` can verify a
+  strict function with a `FipFn` parameter and a verified caller using `fip_fn!`).
+
+`vstd` is still not a build dependency: the Verus declarations of `fip-strict` are
+compiled only by the `verus` driver, which supplies `vstd`. `fip-core` gains the
+workspace proc-macro `fip-macros` as a dependency (applied only in plain builds via
+`cfg_attr(not(verus_keep_ghost), fip_macros::fip(..))`).
+
 ## Why
 
 The crates must be consumable by kernel crates that keep `[dependencies]` empty,
@@ -48,6 +72,16 @@ The attribute syntax keeps one body, verified as written.
   surface-gate mutants rejected (`just verify-negative`).
 - Plain builds: `x86_64-unknown-none` with rustc 1.97.1 and 1.94.0
   (`--ignore-rust-version`), and `cargo test --workspace` on both.
+
+## Measured (2026-10-31, after the amendment)
+
+Same Verus and Singular: `fip-strict` 7 verified, `fip-core` 36 verified (including
+the pre-verification lemmas of `compact_post` and the `FipFn` forms), `fip-alloc`
+1 verified, `verify/compose.rs` 2 and `verify/compose_strict.rs` 4 verified, all with
+`--no-cheating`. 17 Verus mutants rejected (the 10 above, 5 on `fip_core::strict`,
+1 on the `FipFn` spec relation, 1 on `Certified::pre`); `verify-compose` rejects a
+strict function claiming the negation of `FipFn::post`; the drift test rejects a
+mutated `FipFn::call` declaration.
 
 ## Gaps this layout creates, and how they are closed
 

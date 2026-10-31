@@ -10,7 +10,7 @@
     clippy::unnecessary_box_returns
 )]
 
-use fip_macros::{fip, fip_fn};
+use fip_macros::{fip, fip_fn, fip_impl};
 use fip_strict::FipFn;
 use fip_testkit::{assert_fip, assert_fip_n};
 
@@ -61,8 +61,10 @@ pub struct Counter {
     n: u32,
 }
 
+#[fip_impl]
 impl Counter {
-    /// Strict method; its certificate is an associated constant.
+    /// Strict method; its certificate is `__fip_strict_Counter__bump`, emitted before
+    /// the `impl` block by `#[fip_impl]`.
     #[fip(strict = true)]
     pub fn bump(&mut self) -> u32 {
         let old = core::mem::replace(&mut self.n, 0);
@@ -104,6 +106,18 @@ where
     FipFn::call(&make, (x,))
 }
 
+/// `panic_macros = false`: the body may not use `assert!`, `panic!`, ...
+#[fip(strict = true, panic_macros = false)]
+fn checked_halve(x: u32) -> Option<u32> {
+    if x & 1 == 0 { Some(x >> 1) } else { None }
+}
+
+/// A four-parameter certified closure (the largest arity `fip_fn!` supports).
+#[fip(strict = true, param(g = 0))]
+fn apply4<F: FipFn<(u8, u8, u8, u8), Output = u8>>(g: F) -> u8 {
+    g.call((1, 2, 3, 4))
+}
+
 #[test]
 fn strict_functions_run_with_their_bounds() {
     let (mut a, mut b, mut c) = (1, 2, 3);
@@ -118,6 +132,10 @@ fn strict_functions_run_with_their_bounds() {
     assert_eq!((*cell, prev), (2, 1));
     let mut ctr = Counter { n: 5 };
     assert_eq!(assert_fip!(Counter::bump_twice(&mut ctr)), 6);
+    assert_eq!(__fip_strict_Counter__bump.name(), "Counter__bump");
+    assert_eq!(__fip_strict_Counter__bump_twice.allocs(), 0);
+    assert_eq!(assert_fip!(checked_halve(8)), Some(4));
+    assert_eq!(__fip_strict_two_boxes.allocs_for("two_boxes"), 2);
 }
 
 #[test]
@@ -132,4 +150,10 @@ fn certified_closures_and_declared_parameter_bounds() {
     // A certified closure calling a strict function.
     let via = fip_fn!(|x: u32| boxed(x));
     assert_eq!(*make_once(via, 4), 4);
+    let sum4 = fip_fn!(|a: u8, b: u8, c: u8, d: u8| a + b + c + d);
+    assert_eq!(assert_fip!(apply4(sum4)), 10);
+    assert_eq!(
+        <fip_strict::Certified<0, fn()> as fip_strict::FipBound>::ALLOCS,
+        0
+    );
 }
