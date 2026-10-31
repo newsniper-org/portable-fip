@@ -5,7 +5,9 @@
 //! allocated, cloned or dropped.
 
 #[cfg(verus_keep_ghost)]
-use crate::spec::{compact_map_by_post, dedup_by_post, dedup_src_ok, strictly_increasing_below};
+use crate::spec::{
+    compact_map_by_post, dedup_by_post, dedup_src_ok, prefix_ok, strictly_increasing_below,
+};
 #[cfg(verus_keep_ghost)]
 use vstd::prelude::*;
 
@@ -313,18 +315,13 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
             xs@.subrange(0, r as int).to_multiset() == ys.to_multiset(),
             idx.len() == w,
             strictly_increasing_below(idx, r as int),
-            forall|i: int| 0 <= i < w ==> #[trigger] xs@[i] == ys[idx[i]] && ks[idx[i]],
+            prefix_ok(xs@, ys, ks, idx, w as int),
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
         decreases len - r,
     ))]
     while r < len {
         proof_decl! { let ghost pre = xs@; let ghost pys = ys; let ghost pks = ks; }
-        proof! {
-            assert forall|i: int| 0 <= i < w implies #[trigger] pre[i] == pys[idx[i]] && pks[idx[i]] by {
-                assert(xs@[i] == ys[idx[i]] && ks[idx[i]]);
-            };
-        }
         let item = crate::slot::replace(&mut xs[r], spare);
         let (mapped, keep) = f(item);
         spare = crate::slot::replace(&mut xs[r], mapped);
@@ -338,11 +335,7 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
             ys = pys.push(mapped);
             ks = pks.push(keep);
             assert(stored.subrange(0, r as int + 1).to_multiset() == ys.to_multiset());
-            assert(forall|i: int| 0 <= i < w ==> #[trigger] stored[i] == pre[i]);
-            assert(forall|i: int| 0 <= i < w ==> 0 <= #[trigger] idx[i] < r);
-            assert(forall|i: int| 0 <= i < w ==> #[trigger] ys[idx[i]] == pys[idx[i]]);
-            assert(forall|i: int| 0 <= i < w ==> #[trigger] ks[idx[i]] == pks[idx[i]]);
-            assert(forall|i: int| 0 <= i < w ==> #[trigger] stored[i] == ys[idx[i]] && ks[idx[i]]);
+            crate::spec::lemma_prefix_frame(pre, stored, pys, pks, ys, ks, idx, w as int, mapped, keep);
             assert forall|j: int| 0 <= j < r + 1 && #[trigger] ks[j] implies 0 <= pos[j] < w && idx[pos[j]] == j || j == r by {
                 if j < r { assert(ks[j] == pks[j]); }
             };
@@ -359,7 +352,7 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
             }
             proof! {
                 assert(xs@[w as int] == mapped);
-                assert forall|i: int| 0 <= i < w implies #[trigger] xs@[i] == stored[i] by {};
+                crate::spec::lemma_prefix_push(stored, xs@, ys, ks, idx, w as int, r as int);
                 pos = pos.push(w as int);
                 idx = idx.push(r as int);
             }

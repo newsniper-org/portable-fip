@@ -65,9 +65,16 @@ pub open spec fn dedup_post<A>(
     &&& strictly_increasing_below(idx, old.len() as int)
     &&& (w > 0 ==> idx[0] == 0)
     &&& forall|i: int| 0 <= i < w ==> #[trigger] new[i] == old[idx[i]]
-    &&& forall|i: int| 0 < i < w ==> same(new[i - 1], #[trigger] new[i], false)
+    &&& forall|i: int| 0 < i < w ==> #[trigger] adjacent_distinct(new, same, i)
     &&& src.len() == old.len()
     &&& forall|j: int| 0 <= j < old.len() ==> dedup_src_ok(old, w, same, idx, #[trigger] src[j], j)
+}
+
+/// Retained neighbours `new[i - 1]`, `new[i]` were found different. A named predicate
+/// so the quantifier in `dedup_post` triggers on it rather than on `new[i]`, which
+/// would match its own instance's `new[i - 1]` again (a matching loop).
+pub open spec fn adjacent_distinct<A>(new: Seq<A>, same: spec_fn(A, A, bool) -> bool, i: int) -> bool {
+    same(new[i - 1], new[i], false)
 }
 
 /// Original element `j` is accounted for by retained slot `k`.
@@ -117,6 +124,7 @@ pub proof fn lemma_dedup_spec_accepts_intended() {
     assert(dedup_src_ok(old, 2, |a: u8, b: u8, r: bool| eq_rel(a, b, r), idx, src[0], 0));
     assert(dedup_src_ok(old, 2, |a: u8, b: u8, r: bool| eq_rel(a, b, r), idx, src[1], 1));
     assert(dedup_src_ok(old, 2, |a: u8, b: u8, r: bool| eq_rel(a, b, r), idx, src[2], 2));
+    assert(adjacent_distinct(new, |a: u8, b: u8, r: bool| eq_rel(a, b, r), 1));
     assert(dedup_post(old, new, 2, |a: u8, b: u8, r: bool| eq_rel(a, b, r), idx, src));
 }
 
@@ -130,6 +138,7 @@ pub proof fn lemma_dedup_spec_rejects_kept_duplicate(new: Seq<u8>, idx: Seq<int>
         assert(idx[0] < idx[1] && idx[1] < idx[2] && idx[2] < 3);
         assert(idx[0] == 0 && idx[1] == 1);
         assert(new[0] == old[idx[0]] && new[1] == old[idx[1]]);
+        assert(adjacent_distinct(new, |a: u8, b: u8, r: bool| eq_rel(a, b, r), 1));
         assert(eq_rel(new[0], new[1], false));
     }
 }
@@ -194,6 +203,53 @@ pub open spec fn compact_map_by_post<A, F: Fn(A) -> (A, bool)>(
     pos: Seq<int>,
 ) -> bool {
     compact_map_post(old, new, w, |a: A, b: A, k: bool| f.ensures((a,), (b, k)), ys, ks, idx, pos)
+}
+
+/// The first `w` elements of `s` are `ys[idx[i]]`, each with `ks[idx[i]]`.
+/// Loop invariant of `compact_map`, named so that its frame reasoning lives in the
+/// two lemmas below rather than in assertions spread over the loop body.
+pub open spec fn prefix_ok<A>(s: Seq<A>, ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, w: int) -> bool {
+    forall|i: int| 0 <= i < w ==> #[trigger] s[i] == ys[idx[i]] && ks[idx[i]]
+}
+
+/// Frame: overwriting positions at or beyond `w` and appending one entry to `ys`/`ks`
+/// keeps the prefix, provided every `idx[i]` points into the old `ys`.
+pub proof fn lemma_prefix_frame<A>(
+    pre: Seq<A>, stored: Seq<A>, pys: Seq<A>, pks: Seq<bool>,
+    ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, w: int, y: A, k: bool,
+)
+    requires
+        prefix_ok(pre, pys, pks, idx, w),
+        forall|i: int| 0 <= i < w ==> #[trigger] stored[i] == pre[i],
+        forall|i: int| 0 <= i < w ==> 0 <= #[trigger] idx[i] < pys.len(),
+        pks.len() == pys.len(),
+        ys == pys.push(y),
+        ks == pks.push(k),
+    ensures
+        prefix_ok(stored, ys, ks, idx, w),
+{
+    assert(forall|i: int| 0 <= i < w ==> #[trigger] pre[i] == pys[idx[i]] && pks[idx[i]]);
+    assert(forall|i: int| 0 <= i < w ==> #[trigger] ys[idx[i]] == pys[idx[i]]);
+    assert(forall|i: int| 0 <= i < w ==> #[trigger] ks[idx[i]] == pks[idx[i]]);
+}
+
+/// Extending the prefix by one retained element `ys[r]` (with `ks[r]`) at slot `w`.
+pub proof fn lemma_prefix_push<A>(
+    old_s: Seq<A>, new_s: Seq<A>, ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, w: int, r: int,
+)
+    requires
+        prefix_ok(old_s, ys, ks, idx, w),
+        idx.len() == w,
+        forall|i: int| 0 <= i < w ==> #[trigger] new_s[i] == old_s[i],
+        new_s[w] == ys[r],
+        ks[r],
+    ensures
+        prefix_ok(new_s, ys, ks, idx.push(r), w + 1),
+{
+    let idx2 = idx.push(r);
+    assert(forall|i: int| 0 <= i < w ==> #[trigger] old_s[i] == ys[idx[i]] && ks[idx[i]]);
+    assert(forall|i: int| 0 <= i < w ==> #[trigger] idx2[i] == idx[i]);
+    assert(idx2[w] == r);
 }
 
 // ---- Pre-verification of the `compact_map_post` specification (written and verified

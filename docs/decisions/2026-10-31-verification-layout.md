@@ -42,7 +42,7 @@ The attribute syntax keeps one body, verified as written.
 
 ## Measured (2026-10-31)
 
-- Verus 0.2026.10.18.7d82994 (upstream main), Singular 4.4.1: `fip-core` 20 verified
+- Verus 0.2026.10.18.7d82994 (upstream main), Singular 4.4.1: `fip-core` 22 verified
   (including 7 pre-verification lemmas on the `dedup_by`/`compact_map` specs),
   `fip-alloc` 1 verified, both with `--no-cheating`; 10 Verus mutants and 2
   surface-gate mutants rejected (`just verify-negative`).
