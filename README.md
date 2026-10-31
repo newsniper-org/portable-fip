@@ -89,8 +89,10 @@ other compiler) rather than machine-proved, except that "no allocation" follows 
 Not covered by the attribute macro (measured, see `TODOs/strict-open-items.md`):
 implicit calls (`Drop`, operators, `Deref`, `Index`), panics other than the macros,
 generic instantiations under `cargo check`, and `use` aliases. `fip-prelint` (below)
-catches the first three on MIR; `crates/fip-macros/tests/strict_gaps.rs` with
-`tools/fip-prelint/tests/selfcheck.expected` pins that. `assert_fip!` catches
+catches implicit calls and `use` aliases on MIR (`crates/fip-macros/tests/strict_gaps.rs`
+with `tools/fip-prelint/tests/selfcheck.expected` pins the implicit-call cases). It does
+**not** check a call site's argument against the callee's declared `param(g = K)`
+bound; that stays a post-monomorphisation check of a full build. `assert_fip!` catches
 implicit calls at run time. See `docs/decisions/2026-11-01-strict-core-table.md`.
 
 ## `fip-prelint`

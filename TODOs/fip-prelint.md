@@ -263,7 +263,37 @@ because the errors are in a leaf crate.
   (decision record item 5; fixture `export_unencoded`). The driver no longer adds
   flags that are already on the command line, because a repeated
   `register_tool(fip)` is a compile error.
-- The token-level gaps of strict mode (implicit `Drop`, operator impls, generic
-  instances under `cargo check`, `use` aliases) are caught by the driver; see
-  `TODOs/strict-open-items.md` items 5, 7 and 10.
+- The token-level gaps of strict mode for implicit `Drop`, operator impls and `use`
+  aliases are caught by the driver (`TODOs/strict-open-items.md` items 5 and 10).
+  Item 7 is **not** (next section).
+
+## Open: declared parameter bounds at call sites
+
+Measured 2026-11-01 (`/tmp/item7`, `fip-strict` as an exported workspace member):
+
+```rust
+#[fip_macros::fip(strict = true, param(g = 0))]
+pub fn f<F: FipFn<(u8,), Output = Box<u8>>>(g: F) -> u8 { *g.call((1,)) }
+
+pub fn non_root_caller() -> u8 { f(fip_macros::fip_fn!(|x: u8| Box::new(x))) }
+
+#[fip_macros::fip]
+pub fn root_caller() -> u8 { f(fip_macros::fip_fn!(|x: u8| Box::new(x))) }
+
+#[fip_macros::fip(1)]
+pub fn root_caller_budget1() -> u8 { f(fip_macros::fip_fn!(|x: u8| Box::new(x))) }
+```
+
+| caller | reported by `cargo fip-prelint` |
+|---|---|
+| `non_root_caller` | nothing |
+| `root_caller` (`#[fip]`) | may allocate 1, at most 0 (its own budget); may free |
+| `root_caller_budget1` (`#[fip(1)]`) | may free only. The argument exceeding `f`'s `param(g = 0)` is **not** reported |
+| `f` | may free (`*g.call(..)` drops the `Box`), which is a real finding about the example |
+
+Plain `cargo check` accepts the file; a full build rejects it through the
+post-monomorphisation assertion. To close this, the driver would check every call
+site whose callee carries `fip::mark(.., param(g = K))`, in any analysed function
+and not only roots, against the argument's computed bound.
+
 
