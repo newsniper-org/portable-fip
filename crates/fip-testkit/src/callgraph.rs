@@ -70,34 +70,6 @@ fn lex(src: &str) -> Vec<Tok> {
                     i += 1;
                 }
             }
-        } else if ch == 'r' && (c.get(i + 1) == Some(&'"') || c.get(i + 1) == Some(&'#')) {
-            // raw string r"..." / r#"..."#
-            let mut j = i + 1;
-            let mut hashes = 0;
-            while c.get(j) == Some(&'#') {
-                hashes += 1;
-                j += 1;
-            }
-            if c.get(j) == Some(&'"') {
-                j += 1;
-                'outer: while j < c.len() {
-                    if c[j] == '"' {
-                        let mut k = 0;
-                        while k < hashes && c.get(j + 1 + k) == Some(&'#') {
-                            k += 1;
-                        }
-                        if k == hashes {
-                            j += 1 + hashes;
-                            break 'outer;
-                        }
-                    }
-                    j += 1;
-                }
-                i = j;
-            } else {
-                out.push(Tok::Ident("r".into()));
-                i += 1;
-            }
         } else if ch == '"' {
             i += 1;
             while i < c.len() && c[i] != '"' {
@@ -125,10 +97,27 @@ fn lex(src: &str) -> Vec<Tok> {
             }
         } else if ch.is_alphabetic() || ch == '_' {
             let s = i;
-            while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_') {
+            while i < c.len() && is_ident_continue(c[i]) {
                 i += 1;
             }
-            out.push(Tok::Ident(c[s..i].iter().collect()));
+            let word: String = c[s..i].iter().collect();
+            if let Some(end) = literal_after_prefix(&c, &word, i) {
+                // `b"..."`, `br#"..."#`, `c"..."`, `cr"..."`, `r"..."`, `b'x'`
+                i = end;
+            } else if word == "r"
+                && c.get(i) == Some(&'#')
+                && c.get(i + 1).is_some_and(|&n| n.is_alphabetic() || n == '_')
+            {
+                // raw identifier `r#name`: the identifier is `name`
+                let s = i + 1;
+                i = s;
+                while i < c.len() && is_ident_continue(c[i]) {
+                    i += 1;
+                }
+                out.push(Tok::Ident(c[s..i].iter().collect()));
+            } else {
+                out.push(Tok::Ident(word));
+            }
         } else if ch.is_ascii_digit() {
             while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '.') {
                 if c[i] == '.' && !c.get(i + 1).is_some_and(char::is_ascii_digit) {
@@ -142,6 +131,57 @@ fn lex(src: &str) -> Vec<Tok> {
         }
     }
     out
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+/// If `word` (ending at `c[i]`) is a literal prefix and a literal follows, the index
+/// just past that literal. Prefixes: `r`, `br`, `cr` (raw strings, `#`s allowed),
+/// `b`, `c` (strings), `b` (byte character `b'x'`).
+fn literal_after_prefix(c: &[char], word: &str, i: usize) -> Option<usize> {
+    match (word, c.get(i)) {
+        ("r" | "br" | "cr", Some('"' | '#')) => skip_raw_string(c, i),
+        ("b" | "c", Some('"')) => Some(skip_quoted(c, i, '"')),
+        ("b", Some('\'')) => Some(skip_quoted(c, i, '\'')),
+        _ => None,
+    }
+}
+
+/// `c[i]` is the opening quote; returns the index past the closing one, honouring
+/// backslash escapes.
+fn skip_quoted(c: &[char], i: usize, quote: char) -> usize {
+    let mut j = i + 1;
+    while j < c.len() && c[j] != quote {
+        if c[j] == '\\' {
+            j += 1;
+        }
+        j += 1;
+    }
+    j + 1
+}
+
+/// `c[i]` is the first `#` or the `"` of a raw string body; returns the index past
+/// the closing `"##..`, or `None` if this is not a raw string (e.g. `r#ident`).
+fn skip_raw_string(c: &[char], i: usize) -> Option<usize> {
+    let mut j = i;
+    let mut hashes = 0;
+    while c.get(j) == Some(&'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if c.get(j) != Some(&'"') {
+        return None;
+    }
+    j += 1;
+    while j < c.len() {
+        if c[j] == '"' && (0..hashes).all(|k| c.get(j + 1 + k) == Some(&'#')) {
+            return Some(j + 1 + hashes);
+        }
+        j += 1;
+    }
+    Some(j)
 }
 
 fn ident(t: Option<&Tok>) -> Option<&str> {
@@ -619,6 +659,46 @@ mod tests {
     fn unrelated_identifiers_are_not_edges() {
         let c = cycles("#[fip]\nfn a(n: u32) -> u32 { let m: u32 = n; S::k(m) }\nstruct S;\n");
         assert_eq!(c, Vec::<Cycle>::new());
+    }
+
+    // TODOs/callgraph-limitations.md #6
+    #[test]
+    fn raw_identifiers_keep_their_name() {
+        let c = cycles("#[fip]\nfn a() { r#b() }\nfn r#b() { a() }\n");
+        assert_eq!(c, vec![vec!["a".to_string(), "b".into(), "a".into()]]);
+    }
+
+    #[test]
+    fn distinct_raw_identifiers_do_not_collide() {
+        let c = cycles("#[fip]\nfn a() { r#x() }\nfn r#x() {}\nfn r#y() { a() }\n");
+        assert_eq!(c, Vec::<Cycle>::new());
+    }
+
+    // TODOs/callgraph-limitations.md #7
+    #[test]
+    fn byte_and_c_string_literals_are_not_identifiers() {
+        for lit in [
+            "b\"b()\"",
+            "br\"b()\"",
+            "br#\"b() \" b()\"#",
+            "c\"b()\"",
+            "cr\"b()\"",
+            "cr##\"b()\"##",
+            "b'b'",
+            "b'\\''",
+            "r\"b()\"",
+            "r#\"b()\"#",
+        ] {
+            let src = format!("#[fip]\nfn a() {{ let _s = {lit}; }}\nfn b() {{ a() }}\n");
+            assert_eq!(cycles(&src), Vec::<Cycle>::new(), "literal {lit}");
+        }
+    }
+
+    #[test]
+    fn literals_do_not_hide_following_calls() {
+        let c =
+            cycles("#[fip]\nfn a() { let _s = b\"x\"; let _t = br#\"y\"#; b() }\nfn b() { a() }\n");
+        assert_eq!(c, vec![vec!["a".to_string(), "b".into(), "a".into()]]);
     }
 
     #[test]

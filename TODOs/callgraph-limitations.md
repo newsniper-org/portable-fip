@@ -3,7 +3,8 @@
 
 # TODO: limitations of `fip_testkit::callgraph`
 
-**Status:** OPEN. **Recorded:** 2026-10-31, against commit `43a671b`.
+**Status:** OPEN (items 6 and 7 fixed 2026-11-01). **Recorded:** 2026-10-31,
+against commit `43a671b`.
 **Component:** `crates/fip-testkit/src/callgraph.rs` (`fip_cycles`, `fip_cycles_in`).
 
 ## Context
@@ -34,11 +35,11 @@ allocation summaries): `TODOs/callgraph-fip-summaries.md`.
 | 3 | `include!`d source files | false negative | `[]` | medium |
 | 4 | indirect calls whose target is not named in the caller | false negative | `[]` | medium (inherent) |
 | 5 | functions outside the scanned directory / other crates | false negative | — | medium (inherent) |
-| 6 | raw identifiers `r#name` | bug | named `r` instead of `name` | high |
-| 7 | byte / C string literals `b"…"`, `br"…"`, `c"…"` | bug → false positive | `[["a", "b", "a"]]` | high |
+| 6 | raw identifiers `r#name` | bug | ~~named `r` instead of `name`~~ **FIXED** 2026-11-01 | — |
+| 7 | byte / C string literals `b"…"`, `br"…"`, `c"…"` | bug → false positive | ~~`[["a", "b", "a"]]`~~ **FIXED** 2026-11-01 | — |
 | 8 | same-named functions in different modules or types | false positive | `[["a", "f", "a"]]` | low (by design) |
 | 9 | calls through a generic parameter `T::f()` | false positive | `[["a", "f", "a"]]` | low (by design) |
-| 10 | no regression test for the false negatives above | test gap | — | high |
+| 10 | no regression test for the false negatives above | test gap | tests added for 6, 7; 1–4 still open | high |
 
 What already works (kept here so a fix does not regress it): closures stored
 then called (`let k = || b(); k()`), trait-object dispatch to a local method
@@ -141,7 +142,12 @@ into `a`.
 workspace can be checked as a whole. Dependencies outside the workspace remain
 inherent.
 
-## 6. Raw identifiers `r#name` (bug, high)
+## 6. Raw identifiers `r#name` (bug) — FIXED 2026-11-01
+
+**Fixed:** `lex` reads the identifier after `r#` when it starts with a letter or
+`_` (`r#"…"` is still a raw string). After the fix the snippet reports
+`[["a", "b", "a"]]`. Tests: `raw_identifiers_keep_their_name`,
+`distinct_raw_identifiers_do_not_collide`.
 
 ```rust
 #[fip]
@@ -159,7 +165,13 @@ after `r#` (e.g. `b`).
 **Accept:** the snippet reports `[["a", "b", "a"]]`; `fn r#x() {}` and `fn r#y() {}`
 do not collide.
 
-## 7. Byte and C string literals (bug → false positive, high)
+## 7. Byte and C string literals (bug → false positive) — FIXED 2026-11-01
+
+**Fixed:** after lexing an identifier, the prefixes `r`, `br`, `cr` followed by `"`
+or `#"` and `b`, `c` followed by `"` (and `b` followed by `'`) are lexed as one
+literal (`literal_after_prefix`). After the fix the snippet reports `[]`. Tests:
+`byte_and_c_string_literals_are_not_identifiers` (10 literal forms including escapes
+and `#`-delimited raw strings), `literals_do_not_hide_following_calls`.
 
 ```rust
 #[fip]
@@ -217,6 +229,7 @@ The unit tests in `callgraph.rs` only pin what the checker currently detects.
 Items 1–4 and 6–7 have no test, so a fix could not be shown and a regression would
 not be caught.
 
-**Do:** add each snippet above as a unit test. Mark the ones not yet fixed
+**Done for 6 and 7** (tests listed there). **Remaining:** add each snippet of 1–4
+as a unit test. Mark the ones not yet fixed
 `#[ignore = "TODOs/callgraph-limitations.md #N"]` with the expected (correct)
 result, so fixing an item means removing `#[ignore]`.

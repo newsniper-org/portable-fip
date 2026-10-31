@@ -4,8 +4,8 @@
 # TODO: interprocedural `#[fip]` / `#[fip(N)]` checking over the call graph
 
 **Status:** PROPOSED, not started. **Recorded:** 2026-10-31.
-**Depends on:** `TODOs/callgraph-limitations.md` items 6, 7, 10 (lexer bugs and
-regression tests) first; the check is only as exhaustive as the extracted graph.
+**Depends on:** `TODOs/callgraph-limitations.md` item 10 (regression tests; the
+lexer bugs 6 and 7 are fixed) first; the check is only as exhaustive as the extracted graph.
 
 ## Proposal (user, 2026-10-31)
 
@@ -109,7 +109,7 @@ equivalent to exhaustive FSM exploration. Rules:
 
 ## Order
 
-1. `callgraph-limitations.md` 6, 7, 10.
+1. `callgraph-limitations.md` 6, 7 (done 2026-11-01), 10 (remaining part).
 2. `fip-lint-rules` shared crate.
 3. Summary fixpoint (`fip_violations`) with witnesses.
 4. `callgraph-limitations.md` 1–3.
