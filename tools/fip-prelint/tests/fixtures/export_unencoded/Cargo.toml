@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-# Fixture for tools/fip-prelint/tests/fixtures.rs: a dependency that declares
-# `fip::export` but is not a workspace member, so cargo compiles it with plain rustc
-# (RUSTFLAGS give it the cfg and the registered tool, but no `-Zalways-encode-mir`).
+# Fixture for tools/fip-prelint/tests/fixtures.rs: defence in depth. A dependency
+# whose `fip::export` is active although it was compiled without
+# `-Zalways-encode-mir`. Through `cargo fip-prelint` alone this cannot happen (a
+# dependency declaring `fip::export` in its source is compiled with the driver's
+# flags), so the fixture injects the attribute from RUSTFLAGS
+# (`-Zcrate-attr=fip::export`) into a non-member whose source does not declare it:
+# the driver passes it through to the real rustc, and it ends up claiming export
+# without MIR.
 [workspace]
 resolver = "3"
 members = ["app"]

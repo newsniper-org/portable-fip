@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: path dependencies that are NOT
+# workspace members (how other projects consume portable-fip). The one declaring
+# `fip::export` must be analysable; the other stays unresolved.
+[workspace]
+resolver = "3"
+members = ["app"]
+exclude = ["dep_export_nm", "dep_plain_nm"]

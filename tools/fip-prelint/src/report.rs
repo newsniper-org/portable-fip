@@ -326,8 +326,9 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         out.errors += 1;
         tcx.dcx().err(format!(
             "fip-prelint: crate `{krate}` declares `fip::export` but `{func}` has no MIR: \
-             it was built without `-Zalways-encode-mir`. Build it through `cargo fip-prelint` \
-             (as a workspace member) or remove `fip::export`"
+             it was built without `-Zalways-encode-mir`. Declare `fip::export` in the crate's \
+             source (`#![cfg_attr(fip_prelint, fip::export)]`) so that `cargo fip-prelint` \
+             compiles it with the driver, or remove `fip::export`"
         ));
     }
     let roots = roots(tcx, &mut out);

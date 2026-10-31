@@ -102,7 +102,10 @@ toolchain 1.99.1 with `rustc-dev`) that checks `#[fip]`, `#[fip(N)]` and `#[fbip
 functions on MIR, after type checking. It sees what the token-level tools cannot:
 implicit `Drop`, operator and trait-impl calls resolved to their implementations,
 generic instances, `use` aliases. `cargo fip-prelint` runs `cargo check` with the
-driver as `RUSTC_WORKSPACE_WRAPPER`.
+driver as `RUSTC_WRAPPER`: workspace members are analysed; dependencies whose source
+declares `fip::export` (e.g. portable-fip crates used as git or path dependencies by
+another project) are compiled with the driver's flags so their MIR is usable; all other
+crates are compiled by the real rustc and stay ⊤.
 
 - Roots come from `#[cfg_attr(fip_prelint, fip::mark(..))]`, which `fip-macros` emits
   only when expanded inside the driver, so plain builds are unchanged.

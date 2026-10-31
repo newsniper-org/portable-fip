@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+app/src/lib.rs:21:5: error: fip-prelint: cannot check `pure_plain` (#[fip]): unresolved: `pure_plain` -> `dep_plain_nm::twice` (app/src/lib.rs:21): `dep_plain_nm::twice` (crate `dep_plain_nm` does not declare `fip::export`)
+app/src/lib.rs:9:5: error: fip-prelint: `via_export` is #[fip] but may allocate 1 time(s), at most 0 allowed: `via_export` -> `dep_export_nm::make` (app/src/lib.rs:9) -> `alloc::boxed::Box::<u32>::new` (dep_export_nm/src/lib.rs:9) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+note: fip-prelint: crate `app`: 3 roots, 1 passed, 2 errors, 0 warnings, 0 notes

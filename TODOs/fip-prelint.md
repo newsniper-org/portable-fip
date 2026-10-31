@@ -115,7 +115,7 @@ Control: a `dep` built with the flag by 1.99.1 and read by rustc 1.97.1 fails wi
 
 | part | where |
 |---|---|
-| driver `fip-prelint` (`RUSTC_WORKSPACE_WRAPPER`; drops `argv[1]`, adds the flags of the decision record, validates `fip::` attributes, analyses after type checking) | `tools/fip-prelint/src/main.rs`, `report.rs` |
+| driver `fip-prelint` (`RUSTC_WRAPPER` with per-crate roles since the amendment in the decision record; drops `argv[1]`, adds the flags of the decision record, validates `fip::` attributes, analyses after type checking) | `tools/fip-prelint/src/main.rs`, `report.rs` |
 | analysis: instance graph, summaries, SCC widening, terms, witnesses | `tools/fip-prelint/src/analysis.rs` |
 | `fip::mark(..)` parser | `tools/fip-prelint/src/marks.rs` |
 | `cargo fip-prelint [--warn-only]` (`cargo check --workspace --all-targets --keep-going` into `target/fip-prelint` on 1.99.1, `RUSTC_BOOTSTRAP=1`, `LD_LIBRARY_PATH=<sysroot>/lib`) | `tools/fip-prelint/src/bin/cargo-fip-prelint.rs` |
@@ -296,4 +296,13 @@ post-monomorphisation assertion. To close this, the driver would check every cal
 site whose callee carries `fip::mark(.., param(g = K))`, in any analysed function
 and not only roots, against the argument's computed bound.
 
+## Fixed 2026-11-01: dependencies that declare `fip::export`
+
+Non-member dependencies (git or path) were compiled without the driver, so their
+`fip::export` was inactive and every call into them was ⊤. `cargo fip-prelint` now uses
+`RUSTC_WRAPPER`, and the driver compiles any crate whose source declares `fip::export`
+with its flags. Measured before/after and fixture `nonmember_export`: see the
+decision record's amendment. The `export_unencoded` fixture now injects `fip::export`
+through RUSTFLAGS into a crate whose source does not declare it, the only remaining
+way to get an active `fip::export` without MIR.
 

@@ -21,8 +21,17 @@
    (through `run_driver!(.., with_tcx)`) only where `rustc_public` has no
    equivalent; measured: crate-root attributes.
 4. **Invocation.** `cargo fip-prelint` runs `cargo check` into its own target
-   directory, with `RUSTC_WORKSPACE_WRAPPER` set to the driver. For every workspace
-   crate the driver adds
+   directory, with `RUSTC_WRAPPER` set to the driver, so every crate goes through it
+   (amended 2026-11-01, see below). Per crate the driver chooses a role:
+   - **primary** (`CARGO_PRIMARY_PACKAGE`, i.e. the workspace members): flags,
+     attribute validation, analysis;
+   - **exported dependency** (any other crate whose root source contains
+     `#![cfg_attr(fip_prelint, fip::export)]` or `#![fip::export]`): flags only, so
+     its MIR and marks are encoded for downstream crates; no verdicts;
+   - **pass-through** (everything else, and version probes): the real rustc,
+     unchanged.
+
+   The flags it adds
    `-Zalways-encode-mir -Copt-level=0 --cfg fip_prelint`,
    `-Zcrate-attr=feature(register_tool)`,
    `-Zcrate-attr=feature(custom_inner_attributes)` and
@@ -118,8 +127,24 @@ Implementation: `tools/fip-prelint`; results and open items: `TODOs/fip-prelint.
 
 ## Not covered, and why
 
-- Crates outside the workspace (crates.io) are compiled by plain rustc under
-  `RUSTC_WORKSPACE_WRAPPER` and cannot declare `fip::export`, so they are ⊤.
+- Dependencies whose source does not declare `fip::export` (e.g. crates.io crates)
+  are passed through to the real rustc, so they are ⊤.
+
+## Amendment 2026-11-01: `RUSTC_WRAPPER` instead of `RUSTC_WORKSPACE_WRAPPER`
+
+With `RUSTC_WORKSPACE_WRAPPER` only workspace members went through the driver. A
+project that consumes portable-fip as a git or path dependency (Y4, rIC3) therefore
+got `fip-core`/`fip-strict` compiled without `--cfg fip_prelint` and without
+`-Zalways-encode-mir`. Their `fip::export` was inactive and every call into them was
+⊤. Measured with a consumer workspace (`/tmp/consumer`) depending on `fip-core`,
+`fip-macros` and `fip-strict` by path:
+
+| wrapper | 3 `#[fip]` roots calling `fip_core::swap`, `fip_core::replace`, `fip_core::strict::compact` with `fip_fn!` |
+|---|---|
+| `RUSTC_WORKSPACE_WRAPPER` (before) | 1 passed, 4 errors, all ⊤ ("crate `fip_core` does not declare `fip::export`") |
+| `RUSTC_WRAPPER` with roles (after) | 3 passed, 0 errors |
+
+Fixture `nonmember_export` keeps this tested.
 - Function pointers, closures and trait objects whose target is not determined in
   the analysed MIR are ⊤.
 - It is still a check, not a proof. Proofs remain with Verus.

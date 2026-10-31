@@ -3,10 +3,12 @@
 
 //! # `fip-prelint` — the rustc driver
 //!
-//! Used as `RUSTC_WORKSPACE_WRAPPER` (by `cargo fip-prelint`): `argv[1]` is the real
-//! `rustc`, which is dropped; the driver is that compiler (same version, same
-//! sysroot) plus an analysis after type checking. For every crate it compiles it
-//! adds `-Zalways-encode-mir -Copt-level=0 --cfg fip_prelint` and registers the tool
+//! Used as `RUSTC_WRAPPER` (by `cargo fip-prelint`): `argv[1]` is the real `rustc`.
+//! Per crate the driver picks a [`Role`]: workspace members are compiled by the driver
+//! itself and analysed; dependencies whose source declares `fip::export` are compiled
+//! by the driver without analysis; every other crate is handed to the real `rustc`
+//! unchanged. The driver is that compiler (same version, same sysroot) plus an
+//! analysis after type checking. For every crate it compiles itself it adds `-Zalways-encode-mir -Copt-level=0 --cfg fip_prelint` and registers the tool
 //! `fip` (decision record `docs/decisions/2026-11-01-fip-prelint.md`, item 4).
 //!
 //! Environment:
@@ -122,11 +124,111 @@ fn sysroot(real_rustc: Option<&str>) -> String {
     built.to_string()
 }
 
+/// How the driver treats the crate being compiled.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Role {
+    /// A package selected by the cargo invocation (`CARGO_PRIMARY_PACKAGE`, i.e. the
+    /// workspace members under `--workspace`): driver flags, attribute validation and
+    /// analysis.
+    Primary,
+    /// A dependency whose crate root declares `fip::export`: driver flags so its MIR
+    /// and marks are encoded for downstream crates; no analysis, no verdicts.
+    ExportedDependency,
+    /// Any other crate (other dependencies, version probes): the real rustc, unchanged.
+    PassThrough,
+}
+
+/// The crate root source file: the `.rs` argument that is not an option value.
+fn crate_root(args: &[String]) -> Option<&str> {
+    const TAKES_VALUE: &[&str] = &[
+        "--crate-name",
+        "--crate-type",
+        "--edition",
+        "--emit",
+        "--out-dir",
+        "-o",
+        "-L",
+        "--extern",
+        "--cfg",
+        "--check-cfg",
+        "--cap-lints",
+        "--target",
+        "--error-format",
+        "--json",
+        "--sysroot",
+        "-C",
+        "-Z",
+        "-A",
+        "-W",
+        "-D",
+        "-F",
+        "--remap-path-prefix",
+        "--print",
+        "--explain",
+        "--diagnostic-width",
+    ];
+    let mut skip = false;
+    let mut found = None;
+    for a in args.iter().skip(1) {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if TAKES_VALUE.contains(&a.as_str()) {
+            skip = true;
+            continue;
+        }
+        if !a.starts_with('-') && Path::new(a).extension().is_some_and(|e| e == "rs") {
+            found = Some(a.as_str());
+        }
+    }
+    found
+}
+
+/// `true` if the crate root's inner attributes contain `fip::export`, either as
+/// `#![cfg_attr(fip_prelint, fip::export)]` or as `#![fip::export]` (whitespace
+/// ignored). Only the source text is available before compilation.
+fn declares_export_in_source(root: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root) else {
+        return false;
+    };
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("#![cfg_attr(fip_prelint,fip::export)]") || compact.contains("#![fip::export]")
+}
+
+fn role(args: &[String]) -> Role {
+    if !args.iter().any(|a| a == "--crate-name") {
+        return Role::PassThrough;
+    }
+    if std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some() {
+        return Role::Primary;
+    }
+    match crate_root(args) {
+        Some(root) if declares_export_in_source(Path::new(root)) => Role::ExportedDependency,
+        _ => Role::PassThrough,
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
     let mut real_rustc = None;
     if args.len() > 1 && is_rustc_path(&args[1]) {
         real_rustc = Some(args.remove(1));
+    }
+    let role = role(&args);
+    if role == Role::PassThrough
+        && let Some(rustc) = &real_rustc
+    {
+        // Unchanged compilation by the real rustc.
+        return match Command::new(rustc).args(&args[1..]).status() {
+            Ok(st) => {
+                std::process::ExitCode::from(u8::try_from(st.code().unwrap_or(1)).unwrap_or(1))
+            }
+            Err(e) => {
+                eprintln!("fip-prelint: cannot run {rustc}: {e}");
+                std::process::ExitCode::from(1)
+            }
+        };
     }
     if !args
         .iter()
@@ -135,8 +237,7 @@ fn main() -> std::process::ExitCode {
         args.push("--sysroot".to_string());
         args.push(sysroot(real_rustc.as_deref()));
     }
-    // Version queries (`-vV`) and `--print` probes have no crate to analyse.
-    let compiles = args.iter().any(|a| a == "--crate-name");
+    let compiles = role != Role::PassThrough;
     if compiles {
         // Skip flags already present (e.g. from RUSTFLAGS): a repeated
         // `register_tool(fip)` is an error.
@@ -162,6 +263,11 @@ fn main() -> std::process::ExitCode {
     // SAFETY: single-threaded here, before the compiler starts any thread.
     unsafe { std::env::set_var(MARK_ENV, "1") };
     rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&args, &mut Prelint { analyse: compiles });
+        rustc_driver::run_compiler(
+            &args,
+            &mut Prelint {
+                analyse: role == Role::Primary,
+            },
+        );
     })
 }

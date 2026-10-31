@@ -1,5 +1,6 @@
 # Applied to every crate, members and non-members alike. The driver adds the rest
-# (`-Zalways-encode-mir`, ...) to members only; it skips flags already present.
+# (`-Zalways-encode-mir`, ...) to the crates it takes part in; it skips flags already
+# present. `fip::export` is injected here, so it is not visible in any source file.
 [build]
 rustflags = [
     "--cfg", "fip_prelint",
@@ -7,5 +8,6 @@ rustflags = [
     "-Zcrate-attr=feature(register_tool)",
     "-Zcrate-attr=feature(custom_inner_attributes)",
     "-Zcrate-attr=register_tool(fip)",
+    "-Zcrate-attr=fip::export",
     "-Aunused_features",
 ]

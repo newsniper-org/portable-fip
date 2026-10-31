@@ -6,7 +6,7 @@
 //! Runs `cargo check --workspace --all-targets --keep-going` on the pinned toolchain
 //! (`FIP_PRELINT_TOOLCHAIN`, default `1.99.1`) into `<workspace>/target/fip-prelint`
 //! (or `FIP_PRELINT_TARGET_DIR`), with the driver `fip-prelint` (next to this binary,
-//! or `FIP_PRELINT_DRIVER_PATH`) as `RUSTC_WORKSPACE_WRAPPER`, `RUSTC_BOOTSTRAP=1`, and
+//! or `FIP_PRELINT_DRIVER_PATH`) as `RUSTC_WRAPPER`, `RUSTC_BOOTSTRAP=1`, and
 //! `LD_LIBRARY_PATH` pointing at the toolchain's `lib` directory.
 //!
 //! `--warn-only` reports violations as warnings, so every crate is checked even if a
@@ -130,11 +130,15 @@ fn main() -> ExitCode {
     let mut cmd = Command::new("cargo");
     cmd.env("RUSTUP_TOOLCHAIN", &toolchain)
         .env("FIP_PRELINT_DRIVER_ID", driver_id(&driver))
-        .env("RUSTC_WORKSPACE_WRAPPER", &driver)
+        // Every crate goes through the driver, dependencies included: a dependency
+        // that declares `fip::export` (e.g. `fip-core` used as a git or path
+        // dependency by another project) must be compiled with the driver's flags so
+        // its MIR is readable. The driver decides per crate (see `src/main.rs`).
+        .env("RUSTC_WRAPPER", &driver)
         .env("RUSTC_BOOTSTRAP", "1")
         .env("LD_LIBRARY_PATH", ld)
         .env("FIP_PRELINT_SYSROOT", &sysroot)
-        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("RUSTC")
         .env_remove("CARGO_TARGET_DIR")
         .arg("check");

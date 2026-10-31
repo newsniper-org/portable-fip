@@ -121,12 +121,20 @@ fn bad_attr() {
     check("bad_attr");
 }
 
-/// A dependency that declares `fip::export` but was compiled without
-/// `-Zalways-encode-mir` (a non-member, built by plain rustc): a hard error naming the
+/// Defence in depth: a dependency whose `fip::export` is active (injected by RUSTFLAGS)
+/// although it was compiled without `-Zalways-encode-mir`: a hard error naming the
 /// crate, and the call is unresolved, never 0.
 #[test]
 fn export_unencoded() {
     check("export_unencoded");
+}
+
+/// Path dependencies that are not workspace members, as other projects consume
+/// portable-fip: the one declaring `fip::export` is compiled with the driver's flags
+/// and analysed (allocation found, allocation-free callee passes); the other is ⊤.
+#[test]
+fn nonmember_export() {
+    check("nonmember_export");
 }
 
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.
