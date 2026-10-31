@@ -40,7 +40,7 @@ each property here has its own mechanism, and the strength differs:
 | property | mechanism | strength |
 |---|---|---|
 | `fip-core` cannot allocate | it does not link `alloc` | by construction |
-| functions do what their spec says | Verus, `--no-cheating`; specs pre-verified against concrete accept/reject cases; 9 functional mutants must fail | proof (Verus trust base) |
+| functions do what their spec says | Verus, `--no-cheating`; specs pre-verified against concrete accept/reject cases; 16 functional mutants (plus 1 recursive, 2 surface-gate and 1 spec-drift mutant) must fail | proof (Verus trust base) |
 | no allocation in a `#[fip]` body | `fip-macros` token scan | heuristic: blind to callees, trait methods, macros |
 | no allocation when the code runs | `fip-testkit` counts (per thread, or process-wide) | evidence for the tested inputs |
 | bounded stack, verified crates | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases`; a recursive mutant must fail | proof that the call graph is acyclic (closures passed in excluded) |
@@ -160,8 +160,9 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
   generic and fully specified.
 - `CACHE_LINE` override: `RUSTFLAGS='--cfg fip_cache_line="128"'` (32, 64, 128).
 - `fip-testkit` sees only the Rust global allocator.
-- Known limitations of `fip_testkit::callgraph` (false negatives, false positives,
-  lexer bugs) are tracked with reproducers in `TODOs/callgraph-limitations.md`.
+- Limitations of `fip_testkit::callgraph` and `summaries` (remaining false negatives
+  and false positives; the two lexer bugs are fixed) are tracked with reproducers in
+  `TODOs/callgraph-limitations.md` and `TODOs/callgraph-fip-summaries.md`.
 
 ## Acknowledgements
 
