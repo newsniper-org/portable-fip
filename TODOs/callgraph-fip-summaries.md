@@ -35,7 +35,7 @@ whether a `#[fip]` or `#[fip(N)]` violation is reachable through indirect calls.
    (or a self-loop) reachable from a `#[fip]` / `#[fip(N)]` root is a recursion
    violation, as now.
 2. Visit SCCs in reverse topological order and compute, per function `f`, a summary:
-   - `alloc(f)` ∈ {0, 1, …, N_max, ∞}:
+   - `alloc(f)` ∈ {0, 1, …, N_max, ∞, ⊤} (⊤ = unknown; see below):
      `alloc(f) = local_sites(f) + Σ_{call sites c} w(c)`, where
      `w(c) = alloc(callee)` outside loops, and `w(c) = ∞` inside a loop if
      `alloc(callee) > 0`.
@@ -48,6 +48,33 @@ whether a `#[fip]` or `#[fip(N)]` violation is reachable through indirect calls.
 4. On a violation, report a witness: the call chain from the root to the
    allocation site, with loop markers
    (`a → b (in loop) → c: Box::new at file:line`).
+
+### Unresolved callees: ⊤, never 0
+
+Today the graph silently drops calls to names it does not define (`dfs` skips
+them). Summarising those as 0 would let every higher-order `#[fip]` function pass.
+`fip-core`'s own `compact` (`keep(&xs[r])`) and `compact_map` (`f(item)`) call
+their closure parameters exactly like that, and the result would no longer be
+equivalent to exhaustive FSM exploration. Rules:
+
+- **`⊤` absorbs:** any sum involving `⊤` is `⊤`. A `#[fip]`/`#[fip(N)]`/`#[fbip]`
+  root whose summary is `⊤` is **reported** ("cannot check: unresolved call to
+  `name` at file:line"), never passed.
+- **Unresolved callees are `⊤`:** names not defined in the scanned sources, trait
+  methods without a unique local impl, calls through expressions (`(h.f)()`),
+  calls into other crates.
+- **Known external functions:** an explicit table in `fip-lint-rules` gives
+  summaries for external functions (e.g. `core::mem::swap` = 0, `<[T]>::len` = 0,
+  `Box::new` = 1), each with a reason. Anything not in the table stays `⊤`.
+- **Parameters (FP²'s second-order functions):** a call to a function parameter
+  `g` (closure or `fn` pointer) contributes a **symbolic term** `alloc(g)`. A
+  summary is then `c + Σ kᵢ·alloc(gᵢ)`, with `kᵢ = ∞` for calls inside loops.
+  At each call site the caller instantiates `gᵢ` with the argument's summary: a
+  named function's summary, a closure's body summary, or `⊤` if unknown. The
+  obligation moves to the caller, as in FP², where functions passed from Σ are
+  checked where they are defined. A root that is itself higher-order (parameters
+  not instantiated) is reported as "fip relative to its parameters" with the
+  symbolic summary, never as an unconditional pass.
 
 ## Prerequisites and constraints
 
@@ -70,6 +97,11 @@ whether a `#[fip]` or `#[fip(N)]` violation is reachable through indirect calls.
   - `#[fip(1)]` calling that helper twice: violation (2 > 1);
   - `#[fip(N)]` calling an allocating helper inside a loop: violation (∞);
   - helper allocation only under `#[fbip]` callers: unaffected;
+  - `#[fip]` calling an undefined function not in the table: reported unknown
+    (`⊤`), not passed;
+  - higher-order `#[fip]` calling its closure parameter in a loop: summary
+    `∞·alloc(g)`; with an allocation-free closure it passes, with
+    `|x| Box::new(x)` it is a violation;
   - every case from `callgraph-limitations.md` keeps its current or fixed result.
 - `fip-macros` and the checker agree on every `compile_fail` / accept example
   (shared rule crate).
