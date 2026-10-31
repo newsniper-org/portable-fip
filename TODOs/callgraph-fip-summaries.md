@@ -3,9 +3,12 @@
 
 # TODO: interprocedural `#[fip]` / `#[fip(N)]` checking over the call graph
 
-**Status:** PROPOSED, not started. **Recorded:** 2026-10-31.
-**Depends on:** `TODOs/callgraph-limitations.md` item 10 (regression tests; the
-lexer bugs 6 and 7 are fixed) first; the check is only as exhaustive as the extracted graph.
+**Status:** IMPLEMENTED 2026-10-31 as `fip_testkit::summaries` (`fip_violations`,
+`fip_violations_dir`, `fip_violations_in`, `fip_violations_in_crates`); see
+"Implementation" at the end for what was built, deviations and what is not covered.
+**Recorded:** 2026-10-31.
+**Depends on:** `TODOs/callgraph-limitations.md` (items 1–3, 6–10 fixed, 4–5 partly);
+the check is only as exhaustive as the extracted graph.
 
 ## Proposal (user, 2026-10-31)
 
@@ -109,7 +112,118 @@ equivalent to exhaustive FSM exploration. Rules:
 
 ## Order
 
-1. `callgraph-limitations.md` 6, 7 (done 2026-11-01), 10 (remaining part).
-2. `fip-lint-rules` shared crate.
-3. Summary fixpoint (`fip_violations`) with witnesses.
-4. `callgraph-limitations.md` 1–3.
+1. `callgraph-limitations.md` 6, 7 (done 2026-11-01), 10 (done 2026-10-31).
+2. `fip-lint-rules` shared crate (done).
+3. Summary fixpoint (`fip_violations`) with witnesses (done 2026-10-31).
+4. `callgraph-limitations.md` 1–3 (done 2026-10-31).
+
+## Implementation (2026-10-31)
+
+Code: `crates/fip-testkit/src/summaries.rs` (lattice, fixpoint, verdicts, witnesses),
+on the front end `crates/fip-testkit/src/srcmodel/` shared with `callgraph`. Unit
+tests: `crates/fip-testkit/src/summaries/tests.rs` (27 tests). Agreement with
+`fip-macros`: `crates/fip-macros/tests/checker_agreement.rs`.
+
+### What was built
+
+- **Lattice** `Bound = Finite(n) | Infinite | Unknown` (`0 … N, ∞, ⊤`); `⊤` absorbs in
+  sums and products, `0·x = 0` (so `∞·0 = 0`), `∞·⊤ = ⊤`.
+- **Summaries** `c + Σ kᵢ·alloc(gᵢ)` per function and per closure literal, computed
+  per strongly connected component (Tarjan) in reverse topological order; recursive
+  components iterate, and from the third round every component that still grows is
+  widened to `∞` (a safety cap sets a component still changing after 64 rounds
+  to `⊤`).
+- **Events and costs** as listed in the module documentation: allocation sites from
+  `HEAP_TYPES`×`HEAP_CONSTRUCTORS`, `ALLOC_MACROS`, `ALLOC_METHODS` (1 each; a method
+  site is the maximum of 1 and the scanned methods of that name), `CORE_TABLE` via
+  `in_core_table` (0), `GHOST_MACROS` skipped, `ALLOC_FREE_METHODS` (0 when no scanned
+  method of that name exists), everything unknown `⊤`. In loop bodies and `while`
+  conditions a cost is multiplied by `∞`.
+- **Parameters:** a parameter is callable if its type is `impl`/`dyn` of a trait in
+  `FN_TRAITS` (`Fn`, `FnMut`, `FnOnce`, `FipFn`), a `fn(..)` pointer, or a generic
+  bounded by one of them (in `<..>` or `where`). Calls `g(..)`, `(g)(..)`, `g.call(..)`,
+  `g.call_mut/once(..)`, `FipFn::call(&g, ..)` are the term `alloc(g)`. At a call site
+  the term is instantiated with the argument: a closure literal or `fip_fn!(..)` /
+  `fip_macros::fip_fn!(..)` (directly or through a `let`), a named function without
+  parameter terms, or the caller's own callable parameter (the term moves to the
+  caller); anything else is `⊤`. `param(g = K)` instantiates `g` with `K` for the
+  root's verdict.
+- **Verdicts:** `#[fip]` bound 0 and no cycle, `#[fip(N)]` bound ≤ N and no cycle,
+  `#[fbip]` bound 0. A root with parameter terms left is reported in
+  `Report::conditional` with its symbolic summary (e.g. `∞·alloc(g)`), never passed.
+  `Report::roots` lists every marked function with its bound and `may_free`.
+- **Witnesses:** one per violation, e.g. ``a -> b (in loop) -> c: allocation site
+  `Box::new` at x.rs:5``; through closure arguments
+  ``bad -> each -> {closure@x.rs:13} (argument for `g`) (in loop): …``; for `⊤` every
+  distinct unresolved leaf is a violation of its own (``a -> b: unresolved call `m1`
+  at x.rs:3``); for recursion the chain from the root into the cycle
+  (`a -> b -> c -> b`).
+- **Crates:** several crates at once keyed by crate name; `crate_name::f` follows the
+  module tree and `pub use` re-exports of that crate, else matches by name within
+  that crate.
+
+### Deviations from the design, and additions
+
+- **Name-only matches are `⊤`.** When a path cannot be resolved (external crate,
+  `use ext::f`), the call graph still links every same-named function (conservative
+  for cycles), but the summary of such a call is `⊤`
+  (`name_only_matches_are_unknown_for_bounds`). A name match inside another *scanned*
+  crate (`crate_name::f`) counts as that function, as specified.
+- **Method calls** use the maximum over all scanned methods of that name (as the task
+  specified), not "`⊤` unless there is a unique local impl"; `T::f()` for a generic
+  `T` uses the unique scanned `impl`/`trait` member if there is exactly one, `⊤` if
+  there are several. Both miss implementations outside the scanned sources.
+- **Escaping closures** cost nothing where they escape: a closure stored or passed to
+  a non-callable parameter can only be called later through an expression, a local
+  or a parameter, and those calls are `⊤` or instantiated where they happen.
+- **`while` conditions** count as in-loop (`fip-macros` counts only loop bodies);
+  **`for` loops** over anything but a range literal add the implicit `.into_iter()` and
+  in-loop `.next()` calls, resolved like method calls (`for x in xs` is `⊤`).
+- **`?`** is `⊤` (it calls `From::from` on the error path); external macros outside
+  `ALLOC_FREE_MACROS` / `PANIC_MACROS` are `⊤`; capitalised callees that are not defined
+  functions are constructors (0) — an assumption from Rust naming, not checked.
+- **`may_free`** is computed (explicit `drop` / `mem::drop` reachable, through
+  `DROP_FUNCTIONS`) and reported per root, but is not part of any verdict, as in the
+  design's verdict list.
+- **Addition:** every call of a function with `param(g = K)` is checked: an argument
+  whose bound is not ≤ K (including `⊤`) is a violation
+  `ArgumentExceedsDeclared` (`arguments_are_checked_against_declared_bounds`).
+- **New `fip-lint-rules` tables:** `ALLOC_FREE_MACROS`, `PANIC_MACROS` (same list as the
+  strict mode's macro allowlist, which still has its own copy in
+  `fip-macros/src/strict.rs`), `FN_TRAITS`, `DROP_FUNCTIONS` with `is_drop_function`.
+
+### Acceptance, measured 2026-10-31
+
+| acceptance item | result | test |
+|---|---|---|
+| `#[fip]` → helper with `Box::new` | violation, witness ``a -> helper: allocation site `Box::new` at x.rs:2`` | `allocation_in_a_callee_violates_fip` |
+| `#[fip(1)]` → helper with one `Box::new` | pass, bound 1 | `fip_one_with_one_allocating_call_passes` |
+| `#[fip(1)]` calling it twice | violation, bound 2 > 1 | `fip_one_with_two_allocating_calls_is_two` |
+| `#[fip(N)]` calling it in a loop | violation, bound ∞ | `allocating_call_in_a_loop_is_unbounded`, `witness_marks_the_loop_on_the_chain` |
+| helper allocation under `#[fbip]` callers only | `#[fip]` root unaffected (bound 0); the `#[fbip]` caller is reported (bound ∞ after widening its recursion) | `allocation_under_fbip_callers_only_does_not_affect_fip_roots` |
+| `#[fip]` calling an undefined function | `⊤`, reported with `file:line`, not passed | `undefined_function_is_unknown_not_zero`, `every_unresolved_leaf_is_listed` |
+| higher-order `#[fip]` calling its parameter in a loop | conditional `∞·alloc(g)`; with `\|x\| x + 1` pass, with a `Box::new` closure violation ∞ | `higher_order_root_is_conditional`, `closure_arguments_instantiate_the_parameter` |
+| `callgraph-limitations.md` cases | current or fixed result | `callgraph::tests` (34 tests) |
+| `fip-macros` and the checker agree | the 7 non-strict behaviour `compile_fail` examples of `fip-macros/src/lib.rs` (allocation sites, `vec!`, `.to_vec()`, direct recursion, `fip(1)` loop, two sites over `fip(1)`, `fbip` with `format!`) are violations, each asserted verbatim in `src/lib.rs`; `tests/accept.rs` (8 roots) has no violation | `checker_agreement.rs`: `snippets_are_the_ones_in_the_crate_docs`, `rejected_examples_are_violations`, `accepted_examples_are_not_violations` |
+| runs on `crates/fip-macros/tests` | together with `fip_core`, `fip_alloc`, `fip_strict`: 39 roots, 0 violations, 0 conditional (every higher-order root there declares `param(..)`) | `tests_and_called_crates_have_no_violation` |
+
+The strict-mode `compile_fail` examples (certificates, `param`, `?`, macros) are not
+part of the agreement test: they are about the strict mode's certificate rules, not
+about behaviour the checker models.
+
+Scanning all eleven source and test directories of the workspace at once (0.31 s):
+41 roots, 718 violations in 16 roots, all from by-name method resolution and from
+item 4 edges into the checker's own sources (see `callgraph-limitations.md`). Scan the
+crates a root calls.
+
+### Not covered (still a check, not a proof)
+
+- implicit calls: drop glue (and so implicit frees), overloaded operators, `Deref`,
+  `Index` on user types (the conversion behind `?` is reported as `⊤`);
+- panic paths (`PANIC_MACROS`, indexing, overflow) and their allocations;
+- methods and trait implementations outside the scanned sources when a scanned
+  method of the same name exists; receiver types in general;
+- functions generated by macros, macros defined outside the scanned sources (`⊤`);
+- function pointers and closures created outside the scanned sources;
+- a numeric stack bound.
+

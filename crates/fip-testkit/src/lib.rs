@@ -43,6 +43,8 @@
 
 pub mod callgraph;
 pub mod certs;
+mod srcmodel;
+pub mod summaries;
 pub mod surface;
 
 use std::alloc::{GlobalAlloc, Layout, System};

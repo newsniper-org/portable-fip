@@ -97,6 +97,51 @@ pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1"];
 /// another crate with an allocating method of the same name is not seen).
 pub const ALLOC_FREE_METHODS: &[&str] = &["len", "is_empty", "swap", "split_at", "split_at_mut"];
 
+/// Macros that expand to compile-time values or plain control flow and call nothing
+/// at run time beyond their arguments (which the checker scans as code).
+/// `fip_testkit::summaries` treats them as allocation-free; every other macro not
+/// defined by `macro_rules!` in the scanned sources is unknown (`⊤`).
+pub const ALLOC_FREE_MACROS: &[&str] = &[
+    "cfg",
+    "column",
+    "compile_error",
+    "concat",
+    "env",
+    "file",
+    "include_bytes",
+    "include_str",
+    "line",
+    "matches",
+    "module_path",
+    "option_env",
+    "stringify",
+];
+
+/// Macros that allocate only on the panic path. Panic paths are outside what
+/// `#[fip]`, the strict mode and the crate-wide checker count (implicit panics such as
+/// indexing or overflow are not seen either), so their arguments are scanned and the
+/// panic machinery is not. Same list as the strict mode's macro allowlist.
+pub const PANIC_MACROS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "unreachable",
+    "panic",
+];
+
+/// Traits whose bound makes a parameter a callable value for the checker (`F: Fn(..)`,
+/// `impl FnMut(..)`, `&dyn FnOnce(..)`, `F: FipFn<..>`); calls to such a parameter
+/// are symbolic terms of the caller's summary.
+pub const FN_TRAITS: &[&str] = &["Fn", "FnMut", "FnOnce", "FipFn"];
+
+/// Explicit drops: `core::mem::drop` (also reachable as the prelude `drop`). They
+/// free and never allocate; the checker records them as frees with allocation count
+/// 0. The `Drop` impl that runs is not inspected, exactly like an implicit drop.
+pub const DROP_FUNCTIONS: &[&str] = &["mem::drop"];
+
 /// `true` if `root::rest::name` names an entry of [`CORE_TABLE`].
 #[must_use]
 pub fn in_core_table(root: &str, rest: &[&str], name: &str) -> bool {
@@ -104,6 +149,26 @@ pub fn in_core_table(root: &str, rest: &[&str], name: &str) -> bool {
         return false;
     }
     CORE_TABLE.iter().any(|entry| {
+        let mut parts = entry.split("::");
+        let mut ok = true;
+        for seg in rest {
+            ok &= parts.next() == Some(seg);
+        }
+        ok && parts.next() == Some(name) && parts.next().is_none()
+    })
+}
+
+/// `true` if `root::rest::name` names an entry of [`DROP_FUNCTIONS`] under the roots
+/// `core` or `std`, or is the prelude `drop` (`root` and `rest` empty).
+#[must_use]
+pub fn is_drop_function(root: &str, rest: &[&str], name: &str) -> bool {
+    if root.is_empty() {
+        return rest.is_empty() && name == "drop";
+    }
+    if root != "core" && root != "std" {
+        return false;
+    }
+    DROP_FUNCTIONS.iter().any(|entry| {
         let mut parts = entry.split("::");
         let mut ok = true;
         for seg in rest {
@@ -125,5 +190,15 @@ mod tests {
         assert!(!in_core_table("core", &["mem"], "take"));
         assert!(!in_core_table("core", &[], "swap"));
         assert!(!in_core_table("core", &["mem", "x"], "swap"));
+    }
+
+    #[test]
+    fn drop_lookup() {
+        assert!(is_drop_function("core", &["mem"], "drop"));
+        assert!(is_drop_function("std", &["mem"], "drop"));
+        assert!(is_drop_function("", &[], "drop"));
+        assert!(!is_drop_function("", &["m"], "drop"));
+        assert!(!is_drop_function("core", &["mem"], "forget"));
+        assert!(!is_drop_function("alloc", &["mem"], "drop"));
     }
 }
