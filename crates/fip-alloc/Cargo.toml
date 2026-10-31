@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+[package]
+name = "fip-alloc"
+description = "Explicit heap-cell reuse for FIP-style code (no_std + alloc, no deps), verified with Verus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+fip-testkit = { path = "../fip-testkit" }
+
+[lints]
+workspace = true

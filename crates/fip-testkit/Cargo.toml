@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+[package]
+name = "fip-testkit"
+description = "Per-thread allocation counting and assert_fip!/assert_fbip!/assert_fip_n! for tests (std, no deps)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+fip-core = { path = "../fip-core" }
+
+[lints]
+workspace = true

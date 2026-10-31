@@ -1,0 +1,105 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN) -->
+
+# portable-fip
+
+Building blocks, lints and test tools for writing Rust in the style of
+**FP²: Fully in-Place Functional Programming** (Lorenzen, Leijen, Swierstra,
+ICFP 2023): owned values are consumed and their memory is reused in place, so a
+function neither allocates nor frees.
+
+Portable means: `no_std` where possible, no dependencies, stable rustc, and no
+build-time dependency on the verifier. The same crates serve a hosted program and
+a kernel.
+
+## Crates
+
+| crate | `no_std` | `alloc` | `unsafe` | what it is |
+|---|---|---|---|---|
+| `fip-core` | yes | **no** | forbidden | `replace`, `update`, `swap`, `compact`, `map_in_place` on `&mut` slots and slices; Verus-verified |
+| `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
+| `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE`, `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
+| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]`: syntactic lints |
+| `fip-testkit` | no (tests) | — | 1 `impl` | per-thread counting allocator; `assert_fip!`, `assert_fbip!`, `assert_fip_n!` |
+
+All crates have empty `[dependencies]`.
+
+## What is guaranteed, and by what
+
+FP²'s `fip` result (no allocation, no deallocation, constant stack) is a theorem
+about a linear calculus, checked by Koka's compiler. Rust has no such checker, so
+each property here has its own mechanism, and the strength differs:
+
+| property | mechanism | strength |
+|---|---|---|
+| `fip-core` cannot allocate | it does not link `alloc` | by construction |
+| functions do what their spec says | Verus, `--no-cheating`, + 5 mutants that must fail | proof (Verus trust base) |
+| no allocation in a `#[fip]` body | `fip-macros` token scan | heuristic: blind to callees, trait methods, macros |
+| no allocation when the code runs | `fip-testkit` counts | evidence for the tested inputs |
+| bounded stack | `#[fip]` rejects direct self-recursion; loops have proved `decreases` | heuristic + termination |
+
+Nothing in this repository says "proved zero-allocation" about code that only the
+lint or the tests checked. `#[fip]` adds a `# FIP` doc section stating exactly what
+it checked.
+
+## Verification
+
+Specifications are written in Verus's attribute syntax and are compiled only by the
+`verus` driver (`cfg(verus_keep_ghost)`); plain builds do not see them. See
+`docs/decisions/2026-10-31-verification-layout.md`.
+
+```rust
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    ensures *final(slot) == new, r == *old(slot),
+))]
+pub fn replace<T>(slot: &mut T, new: T) -> T { /* … */ }
+```
+
+`compact` is specified as: the slice is permuted (equal multisets), `keep` returned
+`true` for every element before the returned length and `false` after it, and the
+retained elements keep their original order.
+
+Requirements: upstream Verus (`verus-lang/verus`) and Singular
+(`VERUS_SINGULAR_PATH`, default `/usr/bin/Singular`).
+
+## Gates
+
+`just ci` runs all of them:
+
+| recipe | checks |
+|---|---|
+| `fmt-check`, `lint` | rustfmt; clippy with `all = deny`, `pedantic = warn`, `-D warnings` |
+| `test` | unit, integration, doc tests (allocation tests run in parallel) |
+| `msrv` | the same on rustc 1.97.1 |
+| `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch` (only `core`/`alloc` exist there) |
+| `cross` | `aarch64` and `riscv64gc` checks |
+| `verify` | Verus proofs; `#[fip]` + `verus_spec` composition; 5 mutants must fail verification |
+| `compile-fail-reasons` | each `compile_fail` example of `fip-macros` fails because of the lint, not another error |
+
+## Usage notes
+
+- Write `#[fip]` **above** `verus_spec`. Below it, the macro sees Verus's rewritten
+  item and reports an error.
+- `update` and `map_in_place` take a `hole` value and return it: no `Default`
+  bound, nothing is manufactured. A capability-like type never has to be minted
+  as a placeholder.
+- `fip_testkit::install!()` once per test binary; the assertion macros panic if
+  it is missing, so a missing allocator cannot give a vacuous pass.
+
+## Open items
+
+- `dedup` and a `compact` variant whose predicate mutates elements are not yet
+  provided: Verus support for `FnMut` closures taking `&mut T` needs a probe first.
+- `CACHE_LINE` has no override for 128-byte-line cores.
+- No proof of a stack bound; recursion through other functions is not detected.
+- `fip-testkit` counts only the Rust global allocator, per thread.
+
+## Acknowledgements
+
+Ideas, not code: FP² (ICFP 2023), Perceus (PLDI 2021), Frame-Limited Reuse
+(ICFP 2022), Koka's `fip`/`fbip`. The scope of each guarantee is shaped by the
+reviews of two earlier in-house FIP implementations.
+
+## License
+
+Apache-2.0. See `LICENSE`.

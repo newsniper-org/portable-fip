@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/fip-core",
+    "crates/fip-alloc",
+    "crates/fip-arch",
+    "crates/fip-macros",
+    "crates/fip-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+authors = ["윤병익 (BYUNG-IK YEUN) <yeun0908@gmail.com>"]
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+# `verus_keep_ghost` is set by the `verus` driver; plain cargo builds never see it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)"] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.release]
+debug = 1
