@@ -16,17 +16,16 @@ a kernel.
 
 | crate | `no_std` | `alloc` | `unsafe` | what it is |
 |---|---|---|---|---|
-| `fip-core` | yes | **no** | 2 certificates | `replace`, `update`, `swap`, `compact`, `dedup_by`, `compact_map`, `map_in_place` on `&mut` slots and slices; Verus-verified |
-| `fip-alloc` | yes | yes | 1 certificate | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
+| `fip-core` | yes | **no** | forbidden | `replace`, `update`, `swap`, `compact`, `dedup_by`, `compact_map`, `map_in_place` on `&mut` slots and slices; Verus-verified |
+| `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
 | `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
 | `fip-strict` | yes | no | 2 declarations | `Cert`, `FipBound`, `FipFn`: allocation certificates for strict mode |
 | `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints; `strict = true` mode; `fip_fn!` |
 | `fip-testkit` | no (tests) | — | 1 `impl` | counting allocator (`assert_fip!`, `assert_fbip!`, `assert_fip_n!`, `assert_fip_all_threads!`); `callgraph` (recursion through other functions); `surface` (spec coverage of verified crates) |
 
-No external dependencies. `fip-core` and `fip-alloc` depend on `fip-strict` (for
-their hand-written certificates); everything else has empty `[dependencies]`.
-"Certificate" in the `unsafe` column means: `unsafe` appears only to make a
-documented, test-pinned certificate (`Cert::assume`), never as an `unsafe` operation.
+No external dependencies. Within the workspace, `fip-core` and `fip-alloc` depend on
+`fip-strict`, which holds their strict certificates (`fip_strict::certs`, re-exported
+next to each function); everything else has empty `[dependencies]`.
 
 ## What is guaranteed, and by what
 
@@ -67,7 +66,9 @@ count_kept(&xs, fip_fn!(|v: &u8| *v > 1));
 Certificates are claims, so hand-writing one requires `unsafe` (`Cert::assume`,
 `unsafe impl FipBound`); in a `#![forbid(unsafe_code)]` crate it is impossible while
 generated certificates still compile. `fip_testkit::certs::hand_written` lists every
-hand-written one; this repository pins its three. The `core` table is **audited**
+hand-written one. The only certificates made without `unsafe` are the three in
+`fip_strict::certs` (for `fip-core` and `fip-alloc`, built inside the crate that
+defines `Cert`), pinned by a test. The `core` table is **audited**
 (at rustc 1.99.1) rather than machine-proved, except that "no allocation" follows
 from `core` having no allocator; only `mem::swap` also has a `vstd` specification.
 Not covered: implicit calls (`Drop`, operators, `Deref`, `Index`), panic paths, and

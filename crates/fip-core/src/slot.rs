@@ -55,17 +55,7 @@ pub fn update<T, F: FnOnce(T) -> T>(slot: &mut T, hole: T, f: F) -> T {
     replace(slot, next)
 }
 
-/// Strict certificate for [`replace`] (`#[fip(strict = true)]` callers may call it).
-///
-/// Hand-written. Justification: this crate does not link `alloc`, so `replace` cannot
-/// allocate or free heap memory (crate boundary); it drops no value of type `T`
-/// (it only moves and swaps); it calls no user code; and Verus rejects recursion
-/// without `decreases`, which no function here has (`tests/verified_surface.rs`).
+/// Strict certificate for [`replace`]; made and justified in `fip_strict::certs`.
 #[cfg(not(verus_keep_ghost))]
 #[doc(hidden)]
-#[allow(
-    unsafe_code,
-    non_upper_case_globals,
-    reason = "hand-written strict certificate"
-)]
-pub const __fip_strict_replace: fip_strict::Cert = unsafe { fip_strict::Cert::assume(0) };
+pub use fip_strict::certs::__fip_strict_replace;

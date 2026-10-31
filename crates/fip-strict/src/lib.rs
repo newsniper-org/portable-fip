@@ -29,6 +29,14 @@
 //!
 //! `#![no_std]`, no `alloc`, no dependencies. `unsafe` appears only in the two
 //! declarations above; there is no `unsafe` block or impl in this crate.
+//!
+//! ## Certificates for other portable-fip crates
+//!
+//! [`certs`] holds the hand-written certificates for functions of `fip-core` and
+//! `fip-alloc`, which re-export them. Being in this crate, they are built without
+//! `Cert::assume`, so those two crates keep `#![forbid(unsafe_code)]`. That makes
+//! [`certs`] the one place where a certificate is made without `unsafe`; its
+//! contents are pinned by a test and justified entry by entry.
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -95,4 +103,25 @@ pub trait FipFn<Args>: FipBound {
     type Output;
     /// Calls the wrapped function.
     fn call(&self, args: Args) -> Self::Output;
+}
+
+/// Hand-written certificates for `fip-core` and `fip-alloc` functions, re-exported by
+/// those crates next to the functions. Each entry states its justification.
+#[doc(hidden)]
+#[allow(non_upper_case_globals)]
+pub mod certs {
+    use super::Cert;
+
+    /// `fip_core::swap`: `fip-core` does not link `alloc`, so it cannot allocate or
+    /// free heap memory; `swap` drops no `T`, calls no user code, and Verus rejects
+    /// recursion without `decreases`, which no `fip-core` function has.
+    pub const __fip_strict_swap: Cert = Cert { allocs: 0 };
+
+    /// `fip_core::replace`: same reasons as `__fip_strict_swap`.
+    pub const __fip_strict_replace: Cert = Cert { allocs: 0 };
+
+    /// `fip_alloc::refill`: the body calls only `core::mem::swap` (audited `core`
+    /// table), moves the `Box` without dropping it, and does not recurse;
+    /// allocation-free behaviour is also measured (`fip-alloc/tests/reuse.rs`).
+    pub const __fip_strict_refill: Cert = Cert { allocs: 0 };
 }

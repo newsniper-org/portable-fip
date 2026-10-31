@@ -61,13 +61,16 @@ A certificate is a claim. Writing one by hand needs `unsafe`
   identifier in source, which also catches re-exporting one function's certificate
   under another's name).
 
-The hand-written certificates in this repository, each with its justification in a
-doc comment, pinned by tests:
+The hand-written certificates in this repository live in `fip_strict::certs` and are
+re-exported by `fip-core` and `fip-alloc` next to the functions, so those crates keep
+`#![forbid(unsafe_code)]`. Being inside the crate that defines `Cert`, they are built
+without `Cert::assume`; that module is the only place where this is possible, and a
+test pins its exact contents (plus the re-exports in each crate):
 
-| crate | certificate | justification |
+| for | certificate | justification |
 |---|---|---|
-| `fip-core` | `__fip_strict_swap`, `__fip_strict_replace` | crate links no `alloc`; drops nothing; calls no user code; Verus rejects recursion |
-| `fip-alloc` | `__fip_strict_refill` | body is `core::mem::swap` only; moves the `Box`; allocation-free behaviour measured |
+| `fip_core::swap`, `fip_core::replace` | `__fip_strict_swap`, `__fip_strict_replace` | `fip-core` links no `alloc`; drops nothing; calls no user code; Verus rejects recursion |
+| `fip_alloc::refill` | `__fip_strict_refill` | body is `core::mem::swap` only; moves the `Box`; allocation-free behaviour measured |
 
 ## What strict does not cover
 

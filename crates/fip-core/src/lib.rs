@@ -11,10 +11,9 @@
 //! - **No heap allocation, by construction.** The crate is `#![no_std]`, does not
 //!   link `alloc`, and has no dependencies. There is no allocator API it could call.
 //!   This is a crate-boundary guarantee, not a lint.
-//! - **No `unsafe` operation.** The crate is `#![deny(unsafe_code)]`; the only
-//!   `unsafe` tokens are the two hand-written strict certificates
-//!   (`__fip_strict_swap`, `__fip_strict_replace`), each with its justification.
-//!   They exist in plain builds only; Verus never sees them.
+//! - **No `unsafe`** (`#![forbid(unsafe_code)]`). The strict certificates of `swap`
+//!   and `replace` are made in `fip-strict` (`fip_strict::certs`) and re-exported
+//!   here, in plain builds only; Verus never sees them.
 //! - **Functional correctness, by proof.** Every public function carries a Verus
 //!   specification (`#[cfg_attr(verus_keep_ghost, verus_spec(..))]`) and is verified
 //!   with `verus --no-cheating`. A plain `cargo` build never sees the specifications:
@@ -41,7 +40,7 @@
 //! to be minted just to satisfy a placeholder.
 
 #![no_std]
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
 // Plain builds: proof-only blocks expand to nothing. Under `verus` the real macros
@@ -65,7 +64,4 @@ pub use slot::{replace, update};
 
 #[cfg(not(verus_keep_ghost))]
 #[doc(hidden)]
-pub use slice::__fip_strict_swap;
-#[cfg(not(verus_keep_ghost))]
-#[doc(hidden)]
-pub use slot::__fip_strict_replace;
+pub use fip_strict::certs::{__fip_strict_replace, __fip_strict_swap};

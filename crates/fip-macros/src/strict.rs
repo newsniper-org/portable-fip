@@ -3,9 +3,10 @@
 
 //! `strict = true`: a function may call only
 //!
-//! 1. functions from the table of proved `core` functions ([`CORE_TABLE`]), or
+//! 1. functions from the table of audited `core` functions ([`CORE_TABLE`]), or
 //! 2. functions that are themselves `#[fip(strict = true)]` / `#[fip(N, strict = true)]`
-//!    (or carry a hand-written marker with the same meaning, as `fip-core` does).
+//!    (or carry a hand-written certificate, as `fip-core` and `fip-alloc` do via
+//!    `fip_strict::certs`).
 //!
 //! Every strict function `f` gets a companion constant `__fip_strict_f: u64`: an upper
 //! bound on the allocations one call of `f` performs. It is defined as `f`'s own
