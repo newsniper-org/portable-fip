@@ -18,6 +18,9 @@ proc-macro = true
 
 [dev-dependencies]
 fip-testkit = { path = "../fip-testkit" }
+fip-strict = { path = "../fip-strict" }
+fip-core = { path = "../fip-core" }
+fip-alloc = { path = "../fip-alloc" }
 
 [lints]
 workspace = true

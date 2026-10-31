@@ -24,16 +24,16 @@ test:
 
 # Builds and tests on the lowest supported toolchain.
 msrv:
-    cargo +{{msrv}} test --workspace
+    cargo +{{msrv}} test --workspace --target-dir target/msrv
 
 # Real no_std evidence: this target ships only core/alloc, so any std use fails to link.
 nostd:
-    cargo +{{msrv}} build --release --target x86_64-unknown-none -p fip-core -p fip-alloc -p fip-arch
+    cargo +{{msrv}} build --release --target x86_64-unknown-none -p fip-core -p fip-alloc -p fip-arch -p fip-strict
 
 # Other ISAs the arch module realises (incl. Apple aarch64, whose default line is 128 B).
 cross:
-    cargo check -p fip-core -p fip-alloc -p fip-arch --target aarch64-unknown-linux-gnu
-    cargo check -p fip-core -p fip-alloc -p fip-arch --target riscv64gc-unknown-linux-gnu
+    cargo check -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target aarch64-unknown-linux-gnu
+    cargo check -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target riscv64gc-unknown-linux-gnu
     cargo check -p fip-arch --target aarch64-apple-darwin
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
@@ -52,10 +52,13 @@ verify-compose:
     #!/usr/bin/env bash
     set -euo pipefail
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build -q -p fip-macros --target-dir target/verus-macros
-    so=$(ls -t target/verus-macros/debug/deps/libfip_macros-*.so | head -1)
-    run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" "$1"; }
+    cargo +"$tc" build -q -p fip-macros -p fip-strict --target-dir target/verus-macros
+    deps=target/verus-macros/debug/deps
+    so=$(ls -t $deps/libfip_macros-*.so | head -1)
+    rl=$(ls -t $deps/libfip_strict-*.rlib | head -1)
+    run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" --extern fip_strict="$rl" -L "$deps" "$1"; }
     run verify/compose.rs
+    run verify/compose_strict.rs
     out=target/verify-compose; mkdir -p "$out"
     sed 's/^#\[fip\]$//; s/^pub fn count/#[fip]\npub fn count/' verify/compose.rs > "$out/below.rs"
     if run "$out/below.rs" 2> "$out/below.err"; then echo "FAIL: #[fip] below verus_spec was accepted"; exit 1; fi
@@ -65,6 +68,11 @@ verify-compose:
       | awk '{print} /feature\(proc_macro_hygiene\)/ {print "extern crate alloc;"} /^        i \+= 1;$/ {print "        let _b = alloc::boxed::Box::new(i);"}' > "$out/alloc.rs"
     if run "$out/alloc.rs" 2> "$out/alloc.err"; then echo "FAIL: allocation inside #[fip] was accepted"; exit 1; fi
     grep -q "allocation site \`Box::new\`" "$out/alloc.err"
+    # strict + Verus: an uncertified callee is still rejected under `verus`.
+    sed 's/^    swap2(a, b);$/    plain(a, b);/' verify/compose_strict.rs > "$out/strict_bad.rs"
+    printf 'pub fn plain(a: &mut u32, b: &mut u32) { core::mem::swap(a, b) }\n' >> "$out/strict_bad.rs"
+    if run "$out/strict_bad.rs" 2> "$out/strict_bad.err"; then echo "FAIL: uncertified callee accepted under verus"; exit 1; fi
+    grep -q "__fip_strict_plain" "$out/strict_bad.err"
     echo "verify-compose: ok"
 
 # Mutated copies must FAIL; a gate that cannot fail proves nothing.
@@ -127,7 +135,9 @@ arch-override:
     done
     echo "arch-override: ok"
 
-# Every compile_fail doctest of fip-macros fails because of the lint, not another error.
+# Every compile_fail doctest of fip-macros fails for its stated reason, not another error.
+# Own target dir: the script needs exactly one build of each crate, by the ambient rustc.
 compile-fail-reasons:
-    cargo build -q -p fip-macros
-    uv run --no-project python verify/compile_fail_reasons.py "$(ls -t target/debug/deps/libfip_macros-*.so | head -1)"
+    rm -rf target/compile-fail
+    cargo build -q -p fip-macros -p fip-strict --target-dir target/compile-fail
+    uv run --no-project python verify/compile_fail_reasons.py target/compile-fail

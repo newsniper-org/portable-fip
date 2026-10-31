@@ -12,6 +12,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+fip-strict = { path = "../fip-strict" }
 
 [dev-dependencies]
 fip-testkit = { path = "../fip-testkit" }

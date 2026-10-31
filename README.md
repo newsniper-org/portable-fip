@@ -16,13 +16,17 @@ a kernel.
 
 | crate | `no_std` | `alloc` | `unsafe` | what it is |
 |---|---|---|---|---|
-| `fip-core` | yes | **no** | forbidden | `replace`, `update`, `swap`, `compact`, `dedup_by`, `compact_map`, `map_in_place` on `&mut` slots and slices; Verus-verified |
-| `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
+| `fip-core` | yes | **no** | 2 certificates | `replace`, `update`, `swap`, `compact`, `dedup_by`, `compact_map`, `map_in_place` on `&mut` slots and slices; Verus-verified |
+| `fip-alloc` | yes | yes | 1 certificate | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
 | `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
-| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]`: syntactic lints |
+| `fip-strict` | yes | no | 2 declarations | `Cert`, `FipBound`, `FipFn`: allocation certificates for strict mode |
+| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints; `strict = true` mode; `fip_fn!` |
 | `fip-testkit` | no (tests) | — | 1 `impl` | counting allocator (`assert_fip!`, `assert_fbip!`, `assert_fip_n!`, `assert_fip_all_threads!`); `callgraph` (recursion through other functions); `surface` (spec coverage of verified crates) |
 
-All crates have empty `[dependencies]`.
+No external dependencies. `fip-core` and `fip-alloc` depend on `fip-strict` (for
+their hand-written certificates); everything else has empty `[dependencies]`.
+"Certificate" in the `unsafe` column means: `unsafe` appears only to make a
+documented, test-pinned certificate (`Cert::assume`), never as an `unsafe` operation.
 
 ## What is guaranteed, and by what
 
@@ -42,6 +46,33 @@ each property here has its own mechanism, and the strength differs:
 Nothing in this repository says "proved zero-allocation" about code that only the
 lint or the tests checked. `#[fip]` adds a `# FIP` doc section stating exactly what
 it checked.
+
+## Strict mode
+
+`#[fip(strict = true)]` and `#[fip(N, strict = true)]` restrict a function to calling
+(1) an audited table of `core` functions, by full path, and (2) functions carrying a
+certificate, which strict functions generate. The total allocation bound is summed
+over callees and checked at compile time, callees in loops must have bound 0, and
+recursion through strict functions is rejected as a cycle in constant evaluation.
+Higher-order functions take `fip_strict::FipFn` parameters with declared bounds
+(`param(g = K)`); arguments are certified closures from `fip_fn!(|x: T| ..)`.
+
+```rust
+#[fip(strict = true, param(keep = 0))]
+fn count_kept<F: for<'a> FipFn<(&'a u8,), Output = bool>>(xs: &[u8], keep: F) -> usize { /* … */ }
+
+count_kept(&xs, fip_fn!(|v: &u8| *v > 1));
+```
+
+Certificates are claims, so hand-writing one requires `unsafe` (`Cert::assume`,
+`unsafe impl FipBound`); in a `#![forbid(unsafe_code)]` crate it is impossible while
+generated certificates still compile. `fip_testkit::certs::hand_written` lists every
+hand-written one; this repository pins its three. The `core` table is **audited**
+(at rustc 1.99.1) rather than machine-proved, except that "no allocation" follows
+from `core` having no allocator; only `mem::swap` also has a `vstd` specification.
+Not covered: implicit calls (`Drop`, operators, `Deref`, `Index`), panic paths, and
+generic instantiations under `cargo check` (they are checked when built). See
+`docs/decisions/2026-11-01-strict-core-table.md`.
 
 ## Verification
 
@@ -84,8 +115,8 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 | `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch` (only `core`/`alloc` exist there) |
 | `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks |
 | `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected |
-| `verify` | Verus proofs; `#[fip]` + `verus_spec` composition; 10 Verus mutants (incl. one recursive) and 2 surface-gate mutants must fail |
-| `compile-fail-reasons` | each `compile_fail` example of `fip-macros` fails because of the lint, not another error |
+| `verify` | Verus proofs; `#[fip]` and `#[fip(strict = true)]` composition with `verus_spec` (an uncertified callee is still rejected under `verus`); 10 Verus mutants (incl. one recursive) and 2 surface-gate mutants must fail |
+| `compile-fail-reasons` | each of the 30 `compile_fail` examples of `fip-macros` (18 of them strict) fails for its stated reason (`# // expect:`), not another error |
 
 ## Usage notes
 

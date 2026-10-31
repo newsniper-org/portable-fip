@@ -42,6 +42,7 @@
 #![deny(unsafe_code)]
 
 pub mod callgraph;
+pub mod certs;
 pub mod surface;
 
 use std::alloc::{GlobalAlloc, Layout, System};

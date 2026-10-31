@@ -30,8 +30,11 @@ fn all_threads_counts_child_work_and_per_thread_does_not() {
     let ((), with_all) = measure_all_threads(|| spawn_and_join(N));
     let ((), with_one) = measure(|| spawn_and_join(N));
 
+    // The child's 100 allocations and frees all happen before the join returns. Some
+    // thread-teardown frees may land after the join, so frees are compared with N, not
+    // with the baseline.
     assert!(
-        with_all.allocs >= base_all.allocs + N && with_all.frees >= base_all.frees + N,
+        with_all.allocs >= base_all.allocs + N && with_all.frees >= N,
         "process-wide counting missed the child's work: base {base_all:?}, with {with_all:?}"
     );
     assert!(

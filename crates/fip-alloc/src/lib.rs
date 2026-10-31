@@ -9,7 +9,9 @@
 //! `Box::new` may or may not return the same block. This crate makes the reuse
 //! explicit instead: the matched `Box` is kept and refilled.
 //!
-//! - `#![no_std]`, links `alloc` (it handles `Box`), no dependencies, no `unsafe`.
+//! - `#![no_std]`, links `alloc` (it handles `Box`), no `unsafe` operation
+//!   (`#![deny(unsafe_code)]`; the only `unsafe` token is the hand-written strict
+//!   certificate `__fip_strict_refill`). Depends only on `fip-strict`.
 //! - The functions here never allocate or free; that is checked by allocation-count
 //!   tests (`fip-testkit`), not by proof.
 //! - Every function carries a Verus specification and is verified with
@@ -18,7 +20,7 @@
 //! Use `fip-core` instead where no heap is involved: that crate cannot allocate at all.
 
 #![no_std]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
 extern crate alloc;
@@ -50,3 +52,18 @@ pub fn refill<T>(cell: Box<T>, value: T) -> (Box<T>, T) {
     core::mem::swap(&mut *cell, &mut prev);
     (cell, prev)
 }
+
+/// Strict certificate for [`refill`] (`#[fip(strict = true)]` callers may call it).
+///
+/// Hand-written. Justification: the body calls only `core::mem::swap` (in the
+/// audited `core` table of `fip-macros`), moves the `Box` without dropping it, and
+/// does not recurse. Allocation-free behaviour is also measured
+/// (`tests/reuse.rs`, `refill_reuses_the_same_block`).
+#[cfg(not(verus_keep_ghost))]
+#[doc(hidden)]
+#[allow(
+    unsafe_code,
+    non_upper_case_globals,
+    reason = "hand-written strict certificate"
+)]
+pub const __fip_strict_refill: fip_strict::Cert = unsafe { fip_strict::Cert::assume(0) };
