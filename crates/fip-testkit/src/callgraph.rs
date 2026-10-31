@@ -26,6 +26,7 @@
 //! - functions outside the scanned directory.
 //!
 //! It is a check, not a proof, and it does not give a stack bound for unverified code.
+//! Known gaps and lexer bugs, with reproducers: `TODOs/callgraph-limitations.md`.
 //!
 //! For crates verified with Verus, a stronger guarantee exists: Verus rejects any
 //! recursion among verified functions without `decreases`, and

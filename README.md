@@ -108,6 +108,8 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
   generic and fully specified.
 - `CACHE_LINE` override: `RUSTFLAGS='--cfg fip_cache_line="128"'` (32, 64, 128).
 - `fip-testkit` sees only the Rust global allocator.
+- Known limitations of `fip_testkit::callgraph` (false negatives, false positives,
+  lexer bugs) are tracked with reproducers in `TODOs/callgraph-limitations.md`.
 
 ## Acknowledgements
 
