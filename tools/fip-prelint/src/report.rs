@@ -16,6 +16,9 @@
 //! | a FIP mark (`fip::mark`) on an allocation/free source, including `GlobalAlloc`/`Allocator` methods | error |
 //! | a call site that does not establish the callee's `fip::requires(..)`, a function with `fip::requires(..)` used as a function value | panic path (above) |
 //! | a malformed or unsatisfiable `fip::requires(..)` | error |
+//! | an implementation (in this crate) of a trait method whose declaration carries `fip::mark` (a contract) that breaks it | error, as for a root (also when the driver compiles a dependency that declares `fip::export`) |
+//! | an implementation of a contracted trait method in a crate without `fip::export` | error (`⊤`), at the implementation |
+//! | `param(..)` in a trait method contract | error |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
 //! The per-crate summary note ends with the number of declared sources when the crate
@@ -313,22 +316,27 @@ fn local_requires(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Requires)> 
 }
 
 /// Verdicts of one root (`requires`: its declared precondition, under which it is
-/// analysed).
+/// analysed; `contract`: the trait method whose contract an implementation is
+/// checked against).
 fn verdict(
     out: &mut Out<'_>,
     def_id: DefId,
     mark: &Mark,
     requires: Option<&Requires>,
+    contract: Option<&str>,
     r: &RootResult,
 ) {
     let label = r.label.as_str();
     let s = &r.summary;
     let tcx = out.tcx;
     let fspan = tcx.def_span(def_id);
-    let tag = match requires {
+    let mut tag = match requires {
         Some(req) => format!("{} under `fip::requires({})`", mark.tag(), req.text),
         None => mark.tag(),
     };
+    if let Some(c) = contract {
+        tag = format!("{tag} (contract of `{c}`)");
+    }
     let bound = s.alloc.instantiate(&mark.params, &r.param_types);
     let allowed = match mark.kind {
         Kind::Fip => mark.n,
@@ -456,6 +464,25 @@ fn report_argument(out: &mut Out<'_>, fallback: Span, v: &ArgViolation) {
         );
         return;
     }
+    // An event the callee's mark forbids, for a function pointer or trait object
+    // parameter whose calls the callee counts by its declaration.
+    if !v.bound.c.exceeds(v.declared)
+        && let Some((what, w)) = &v.forbidden
+    {
+        out.error(
+            sp,
+            &format!(
+                "`{}` passes to `{}` an argument for `{}` that {what}, but `{}` counts calls of `{}` by its declaration {declared} and its mark forbids that: {}",
+                v.caller,
+                v.callee,
+                v.param,
+                v.callee,
+                v.param,
+                render(tcx, &v.arg, w)
+            ),
+        );
+        return;
+    }
     // One chain per place in the analysed sources where the argument's allocations
     // start (the paths below `Box::new` differ only inside the standard library).
     let mut places: Vec<String> = Vec::new();
@@ -522,17 +549,35 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
              compiles it with the driver, or remove `fip::export`"
         ));
     }
-    let roots = roots(tcx, &mut out);
-    crates.add_local_marks(&roots);
+    let marked = roots(tcx, &mut out);
+    crates.add_local_marks(&marked);
     let sources = local_sources(tcx, &mut out);
     crates.add_local_sources(&sources);
     let requires = local_requires(tcx, &mut out);
     crates.add_local_requires(&requires);
+    // A mark on a trait method declaration is a contract of every implementation, not
+    // a root; a declaration with a default body is also checked as a root (the
+    // default body, for any `Self`).
+    let mut roots: Vec<(DefId, Mark)> = Vec::new();
+    for (def_id, mark) in &marked {
+        let decl = tcx.trait_of_assoc(*def_id).is_some();
+        if decl && !mark.params.is_empty() {
+            out.error(
+                tcx.def_span(*def_id),
+                "`param(..)` is not supported in the contract of a trait method: its dynamic calls are `⊤`",
+            );
+        }
+        if !decl || tcx.defaultness(*def_id).has_value() {
+            roots.push((*def_id, mark.clone()));
+        }
+    }
     // A violation reached from several roots (or also found in the body scan below) is
     // reported once, for the first root in source order.
     let mut seen: HashSet<String> = HashSet::new();
     let mut passed = 0usize;
+    let mut checked = 0usize;
     for (def_id, mark) in &roots {
+        checked += 1;
         // The body of an allocation or free source is outside FIP and never analysed:
         // a verdict on it would be vacuous, and would contradict its callers, which
         // count it as an allocation or a free.
@@ -555,7 +600,14 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         }
         let before = (out.errors, out.warnings);
         let r = Analysis::run(tcx, &crates, *def_id, mark);
-        verdict(&mut out, *def_id, mark, crates.requires_of(*def_id), &r);
+        verdict(
+            &mut out,
+            *def_id,
+            mark,
+            crates.requires_of(*def_id),
+            None,
+            &r,
+        );
         for v in &r.args {
             if seen.insert(v.key()) {
                 report_argument(&mut out, tcx.def_span(*def_id), v);
@@ -563,6 +615,35 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         }
         if (out.errors, out.warnings) == before {
             passed += 1;
+        }
+    }
+    let (c, p) = check_local_implementations(&mut out, &crates, &mut seen);
+    checked += c;
+    passed += p;
+    // Implementations in other crates: one in a crate compiled by the driver (the
+    // local crate's dependencies that declare `fip::export`) was checked against the
+    // contract where it was compiled; one in any other crate cannot be checked (`⊤`),
+    // whether or not this crate calls the method dynamically (a value of that type
+    // may reach a dynamic call through a function of this crate).
+    for (method, mark) in crates.contracts(tcx) {
+        for impl_def in implementations(tcx, method) {
+            let krate = impl_def.krate;
+            if impl_def.is_local()
+                || crates.exported(krate)
+                || crate::analysis::is_std_crate(tcx.crate_name(krate).as_str())
+            {
+                continue;
+            }
+            out.error(
+                tcx.def_span(impl_def),
+                &format!(
+                    "cannot check the contract `{}` of `{}`: its implementation for `{}` is in crate `{}`, which does not declare `fip::export`, so dynamic calls of the method are not covered by the contract (⊤)",
+                    mark.tag(),
+                    tcx.def_path_str(method),
+                    tcx.type_of(impl_def).skip_binder(),
+                    tcx.crate_name(krate)
+                ),
+            );
         }
     }
     // Callers that are not roots: every other local body, with identity arguments.
@@ -580,7 +661,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             }
         }
     }
-    if roots.is_empty() && outside_roots == 0 && sources.is_empty() {
+    if marked.is_empty() && checked == 0 && outside_roots == 0 && sources.is_empty() {
         return;
     }
     // Source marks are trusted declarations (they hide a body): their number is part
@@ -593,9 +674,157 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
         "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}",
-        roots.len(),
+        checked,
         out.errors,
         out.warnings,
         out.notes
     ));
+}
+
+/// Every implementation in the local crate of a trait method with a contract
+/// (declared here or in an exported crate) is checked against it, as a root.
+/// Returns the number of implementations checked and of those that passed.
+fn check_local_implementations(
+    out: &mut Out<'_>,
+    crates: &Crates,
+    seen: &mut HashSet<String>,
+) -> (usize, usize) {
+    let tcx = out.tcx;
+    let (mut checked, mut passed) = (0, 0);
+    for (method, mark) in crates.contracts(tcx) {
+        for impl_def in implementations(tcx, method) {
+            if !impl_def.is_local() {
+                continue;
+            }
+            checked += 1;
+            let before = (out.errors, out.warnings);
+            if let Some(r) = check_implementation(out, crates, impl_def, method, &mark) {
+                for v in &r.args {
+                    if seen.insert(v.key()) {
+                        report_argument(out, tcx.def_span(impl_def), v);
+                    }
+                }
+            }
+            if (out.errors, out.warnings) == before {
+                passed += 1;
+            }
+        }
+    }
+    (checked, passed)
+}
+
+/// A dependency that declares `fip::export`, compiled by the driver without roots
+/// and verdicts: only its implementations of trait methods with a contract are
+/// checked (dynamic calls in other crates rely on them). Silent unless one fails.
+pub fn check_dependency(tcx: TyCtxt<'_>) {
+    let mut out = Out {
+        tcx,
+        warn_only: std::env::var("FIP_PRELINT_WARN_ONLY").is_ok_and(|v| v == "1"),
+        errors: 0,
+        warnings: 0,
+        notes: 0,
+    };
+    let mut crates = Crates::new(tcx);
+    // Malformed attributes are not reported here (the crate is not checked); only
+    // well-formed marks and sources are used.
+    let marked: Vec<(DefId, Mark)> = rustc_public::local_crate()
+        .fn_defs()
+        .iter()
+        .filter_map(|f| {
+            let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
+            f.all_tool_attrs().iter().find_map(|a| {
+                let args = marks::mark_args_of_printed(a.as_str())?;
+                marks::parse_mark(args).ok().map(|m| (def_id, m))
+            })
+        })
+        .collect();
+    crates.add_local_marks(&marked);
+    let sources: Vec<(DefId, Source)> = rustc_public::local_crate()
+        .fn_defs()
+        .iter()
+        .filter_map(|f| {
+            let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
+            let attrs: Vec<String> = f
+                .all_tool_attrs()
+                .iter()
+                .map(|a| a.as_str().to_string())
+                .collect();
+            marks::source_of_printed(attrs.iter().map(String::as_str))
+                .ok()
+                .flatten()
+                .map(|s| (def_id, s))
+        })
+        .collect();
+    crates.add_local_sources(&sources);
+    let mut seen = HashSet::new();
+    let (checked, passed) = check_local_implementations(&mut out, &crates, &mut seen);
+    if checked > 0 && out.errors + out.warnings > 0 {
+        let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
+        tcx.dcx().note(format!(
+            "fip-prelint: dependency `{crate_name}`: {checked} implementations of trait methods with a contract, {passed} passed, {} errors, {} warnings",
+            out.errors, out.warnings
+        ));
+    }
+}
+
+/// The implementations of the trait that declares `method`, over the whole crate
+/// graph of the crate being checked, in a stable order.
+fn implementations(tcx: TyCtxt<'_>, method: DefId) -> Vec<DefId> {
+    let Some(trait_id) = tcx.trait_of_assoc(method) else {
+        return Vec::new();
+    };
+    let mut impls: Vec<DefId> = tcx.all_impls(trait_id).collect();
+    impls.sort_by_key(|d| (d.krate, tcx.def_path_str(*d)));
+    impls
+}
+
+/// Checks the implementation of `method` in `impl_def` against the method's contract
+/// `mark`, as a root: the impl's own method, or the trait's default body for that
+/// impl. `None` if neither has MIR here (an error).
+fn check_implementation(
+    out: &mut Out<'_>,
+    crates: &Crates,
+    impl_def: DefId,
+    method: DefId,
+    mark: &Mark,
+) -> Option<RootResult> {
+    let tcx = out.tcx;
+    let contract = tcx.def_path_str(method);
+    let item = tcx
+        .impl_item_implementor_ids(impl_def)
+        .get(&method)
+        .copied();
+    let r = match item {
+        Some(item) if tcx.is_mir_available(item) => {
+            let r = Analysis::run(tcx, crates, item, mark);
+            verdict(
+                out,
+                item,
+                mark,
+                crates.requires_of(item),
+                Some(&contract),
+                &r,
+            );
+            Some(r)
+        }
+        Some(_) => None,
+        None => {
+            let r = Analysis::run_default(tcx, crates, impl_def, method, mark);
+            if let Some(r) = &r {
+                verdict(out, impl_def, mark, None, Some(&contract), r);
+            }
+            r
+        }
+    };
+    if r.is_none() {
+        out.error(
+            tcx.def_span(impl_def),
+            &format!(
+                "cannot check the implementation of `{contract}` for `{}` against its contract `{}`: no MIR",
+                tcx.type_of(impl_def).skip_binder(),
+                mark.tag()
+            ),
+        );
+    }
+    r
 }

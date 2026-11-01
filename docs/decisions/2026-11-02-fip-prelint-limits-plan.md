@@ -421,6 +421,24 @@ statics, FFI), and `dyn` values from unanalysed crates without a contract. They 
 
 **Effort.** L (3–4 days). No dependency; before L6.
 
+**Implemented** (item 7 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: function pointers, trait objects and trait method contracts").
+(1)–(3) as proposed, with fixtures `indirect`, `contract_dep` and the `param_bounds`
+variants (declared bound passes, data-loaded pointer `⊤`). Deviations, from
+measurement or soundness: implementations in other crates are checked in their own
+crate, not re-enumerated per primary crate; for that, a dependency declaring
+`fip::export` (compiled without roots) now checks its own implementations when the
+driver compiles it, and only an implementation in a crate without `fip::export` is
+reported (`⊤`, an error at the implementation) in every analysed crate that sees it,
+not in the summary line (rustc loads an `--extern` crate only when a path names it);
+a call through a declared parameter also carries the permissions of the function's
+mark (`fbip`: free and recursion; not strict: panic), and the call site checks the
+argument against them as well as against `K` (otherwise a `fip` root calling an `fbip`
+function with a freeing argument would pass); `param(..)` in a contract is rejected;
+`Box<dyn ..>` receivers are not followed. M3's `via_fn_ptr`/`via_dyn` stay `⊤` as
+written (undeclared parameters); with `param(g = 0)` and a contract on `area` they
+pass.
+
 ### L5. Drops of generic values are terms or warnings
 
 **Current.**

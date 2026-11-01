@@ -796,3 +796,93 @@ the self-check unchanged (23 notes).
 `Take`, `Skip` (no fixture needs them), `Enumerate`/`Zip` over ranges or nested
 adapters, and slice iterators whose position is unknown when adapted (their
 remaining length is then not tracked); `zip`'s `size_of` assert for a generic `T`.
+
+## Resolved 2026-11-02: function pointers, trait objects and trait method contracts (limits plan L4)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L4 (item 7 of its order).
+Every call through a function pointer and every `dyn` call was `⊤`, a `param(g = K)`
+on a non-generic parameter was `⊤` at every call site, and a `fip::mark` on a trait
+method declaration was analysed as a root without a body (`⊤`, "no MIR").
+
+**(1) Origin in the body** (`analysis::origin_of`, a must-analysis): the value of a
+function pointer or `&dyn` receiver is followed through copies, moves, reborrows `&*p`
+and upcasts to the assignments that can produce it; if all of them reify the same
+function item or closure (`ReifyFnPointer`, `ClosureFnPointer`), or unsize a pointer
+to the same concrete type (`Unsize`), the call is that function, or that type's method
+(resolved with `Self` replaced). A local borrowed mutably, written in a field, or the
+destination of a call is not followed; a parameter is its own origin. Two origins, a
+pointer loaded from memory, a call result: `⊤` as before. `Box<dyn ..>` receivers are
+not followed (their dereference is elaborated into raw-pointer projections).
+
+**(2) `param(g = K)` on function pointers and `&dyn Fn*`/`&dyn FipFn`.** Inside the
+function, a call through `g` counts `K` allocations plus what the function's own mark
+allows (`fbip`: a possible free and recursion; not strict: a panic path), so a `fip`
+caller of an `fbip` function sees the frees its argument may do. At every analysed
+call site the argument's origin in the caller must be known: a reified function or
+closure, a closure or other value unsized to the trait object (its `call*` methods),
+or a parameter of the caller declared `param(h = K')` (its declaration); anything else
+is `⊤` at the call site. The argument must allocate at most `K` times per call and,
+for a `fip` callee, must not free or recurse (for `strict = true, panic_macros =
+false`: not panic), because the callee counts the call by its declaration only.
+
+**(3) Contracts on trait methods.** `#[cfg_attr(fip_prelint, fip::mark(..))]` on a
+trait method declaration (written by hand; also read from exported crates) is a
+contract: a `dyn` call of the method costs the declared bound (`n`; for `fbip` also a
+free and recursion; a panic path unless `strict = true, panic_macros = false`).
+Every implementation is checked against it as a root in the crate that contains it
+(the trait's default body for an impl that keeps it, in the impl's typing
+environment); a dependency that declares `fip::export` (compiled by the driver without
+roots) checks its own implementations too. An implementation in a crate without
+`fip::export` is `⊤`, an error in every analysed crate whose crate graph contains it.
+`param(..)` in a contract is rejected (its dynamic calls stay `⊤`). Without a
+contract, `dyn` calls of unknown origin stay `⊤`. No closed-world candidate list.
+
+**Measured** (before = driver of `03e7e24`):
+
+| fixture | before | after |
+|---|---|---|
+| `param_bounds` (`callers`, with the new L4 roots and callers) | 14 roots, 3 passed, 30 errors | 14 roots, 7 passed, 23 errors |
+| new `indirect`, `--warn-only` | `shapes` 3 roots, 1 passed, 2 errors (contract declarations analysed as roots: `⊤`); `app` 14 roots, 0 passed, 14 errors | `shapes` 4 roots, 4 passed; `app` 15 roots, 7 passed, 12 errors |
+| new `indirect`, as in the test | `shapes` fails, `app` not checked | `shapes` passes; `app` 12 errors (all intended) |
+| new `contract_dep` | `broken`'s contract-breaking impl not checked (compiled without analysis); `user`: 1 error (`⊤` dynamic call) | `broken` rejected where it is compiled (1 error) |
+
+`param_bounds` details: the pre-existing 14 errors are unchanged line for line
+(`fn_pointer` stays `⊤`: its `p` has no `param(..)`, and a generic `G` instantiated
+with a function pointer still calls through the `Fn` shim); new: `apply_ptr` and
+`apply_dyn` (roots with `param(..)`) pass, `ptr_ok`/`dyn_ok` pass, `ptr_alloc`,
+`dyn_alloc`, `ptr_forward` (`param(q = 1)` for `param(p = 0)`), `ptr_frees`,
+`ptr_recursive` are reported, `ptr_from_data` and `ptr_param` are `⊤` at the call site,
+`fip_through_fbip` may free and recurses. `indirect`: `local_reify`,
+`local_closure_ptr`, `local_dyn` pass; `local_reify_alloc` and `local_dyn_alloc`
+report the resolved callee's allocation; `two_origins`, `from_table`, `uncontracted`
+are `⊤`; `contract_call`, `grow_call_budget`, `from_dependencies` pass; `grow_call`
+(contract `n = 1` under `#[fip]`) and `contract_call_strict` (non-strict contract) are
+reported; `Circle` passes and `Leaky` breaks the contract; `Legacy` (crate without
+`fip::export`) is `⊤`; `param(..)` in a contract is an error.
+
+M3 probe `limits`: unchanged as written (13 roots, 7 passed, 7 errors): `via_fn_ptr`
+and `via_dyn` take undeclared parameters, which stay `⊤`. With the declarations of
+this item added in a copy (`param(g = 0)` on `via_fn_ptr`, a contract on
+`Shape::area`): before 14 roots, 7 passed, 8 errors (the contract declaration itself
+was a `⊤` root); after 13 roots, 9 passed, 5 errors. Self-check unchanged
+(`selfcheck.expected` identical, 23 notes): the workspace has no function-pointer or
+`dyn` calls in roots.
+
+**Deviations from the plan:** implementations in other crates are not enumerated per
+primary crate with `all_impls` and re-checked there; each is checked in its own crate
+(an exported dependency now runs that check when the driver compiles it), and only
+the `⊤` for crates without `fip::export` is reported in every analysed crate that sees
+them, as an error at the implementation (not in the summary line). rustc loads an
+`--extern` crate only when a path uses it, so a dependency nothing names is not seen;
+an analysed crate that names it reports it. A call through a declared parameter
+carries the function mark's permissions (frees, recursion, panics), and the call site
+checks the argument against them as well as against `K` (the plan named only the
+bound); found while writing the fixture: otherwise a `fip` root calling an `fbip`
+function with a freeing argument would pass.
+
+**Open:** `Box<dyn ..>` receivers and parameters; a generic `F` instantiated with a
+function pointer (the `Fn` shim calls through the pointer, `⊤`); pointers stored in
+fields, tables or statics; interprocedural origins (a pointer passed down without
+`param(..)`); contracts with `param(..)`; `#[fip]` on a trait method declaration is rejected
+by `fip-macros` ("FIP attributes apply only to functions with a body", measured), so
+contracts are written as `#[cfg_attr(fip_prelint, fip::mark(..))]` by hand.

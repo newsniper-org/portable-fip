@@ -332,6 +332,24 @@ unchanged. The differential test showed that `RangeInclusive`'s `start` wraps af
 the last item on rustc 1.99.1; the contract does not use it. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-02: iterator contracts".
 
+## Amendment 2026-11-02: function pointers, trait objects and contracts (limits plan L4)
+
+Indirect calls are no longer `⊤` by construction. A function pointer or `&dyn`
+receiver whose value comes, on every path of its body, from one reified function or
+closure or one unsized concrete type is resolved to it (a must-analysis over the
+body's assignments). `param(g = K)` is accepted for function-pointer and
+`&dyn Fn*`/`&dyn FipFn` parameters: a call through `g` counts `K` and what the
+function's mark allows, and every analysed call site must pass a function known
+there that meets them (else `⊤` at the call site). A `fip::mark` on a trait method
+declaration is a contract: a `dyn` call costs it, every implementation is checked
+against it in its own crate (the driver now also checks the implementations of an
+exported dependency it compiles), and one in a crate without `fip::export` is `⊤`.
+No closed-world candidate sets. Measured: fixtures `param_bounds` (3 → 7 passed,
+30 → 23 errors on the extended fixture), `indirect` and `contract_dep` (new), M3
+probe unchanged as written and 8 → 5 errors with the declarations added; self-check
+unchanged. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: function pointers,
+trait objects and trait method contracts".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

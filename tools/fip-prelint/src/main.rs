@@ -6,7 +6,8 @@
 //! Used as `RUSTC_WRAPPER` (by `cargo fip-prelint`): `argv[1]` is the real `rustc`.
 //! Per crate the driver picks a [`Role`]: workspace members are compiled by the driver
 //! itself and analysed; dependencies whose source declares `fip::export` are compiled
-//! by the driver without analysis; every other crate is handed to the real `rustc`
+//! by the driver without roots (only their implementations of trait methods with a
+//! contract are checked); every other crate is handed to the real `rustc`
 //! unchanged. The driver is that compiler (same version, same sysroot) plus an
 //! analysis after type checking. For every crate it compiles itself it adds `-Zalways-encode-mir -Copt-level=0 --cfg fip_prelint` and registers the tool
 //! `fip` (decision record `docs/decisions/2026-11-01-fip-prelint.md`, item 4).
@@ -67,7 +68,7 @@ const CRATE_FLAGS: &[&str] = &[
 ];
 
 struct Prelint {
-    analyse: bool,
+    role: Role,
 }
 
 /// Environment variables that change the driver's output; recorded in the dep-info
@@ -92,12 +93,17 @@ impl Callbacks for Prelint {
     }
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
-        if self.analyse {
-            let run = rustc_public::rustc_internal::run(tcx, || report::check_crate(tcx));
-            if run.is_err() {
-                tcx.dcx()
-                    .err("fip-prelint: internal error: rustc_public context failed");
-            }
+        let check = match self.role {
+            Role::Primary => report::check_crate,
+            // An exported dependency's implementations of trait methods with a
+            // contract are checked where they are compiled (limits plan L4).
+            Role::ExportedDependency => report::check_dependency,
+            Role::PassThrough => return Compilation::Continue,
+        };
+        let run = rustc_public::rustc_internal::run(tcx, || check(tcx));
+        if run.is_err() {
+            tcx.dcx()
+                .err("fip-prelint: internal error: rustc_public context failed");
         }
         Compilation::Continue
     }
@@ -137,7 +143,8 @@ enum Role {
     /// analysis.
     Primary,
     /// A dependency whose crate root declares `fip::export`: driver flags so its MIR
-    /// and marks are encoded for downstream crates; no analysis, no verdicts.
+    /// and marks are encoded for downstream crates; no roots, no verdicts, except that
+    /// its implementations of trait methods with a contract are checked.
     ExportedDependency,
     /// Any other crate (other dependencies, version probes): the real rustc, unchanged.
     PassThrough,
@@ -268,11 +275,6 @@ fn main() -> std::process::ExitCode {
     // SAFETY: single-threaded here, before the compiler starts any thread.
     unsafe { std::env::set_var(MARK_ENV, "1") };
     rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(
-            &args,
-            &mut Prelint {
-                analyse: role == Role::Primary,
-            },
-        );
+        rustc_driver::run_compiler(&args, &mut Prelint { role });
     })
 }

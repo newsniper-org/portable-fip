@@ -109,3 +109,97 @@ pub fn in_closure(x: u32) -> u32 {
     let c = |y: u32| apply(|v| *Box::new(v), y);
     c(x)
 }
+
+// Function pointers and callable trait objects with a declared bound (limits plan L4).
+
+/// Allocation-free.
+pub fn plus_one(v: u32) -> u32 {
+    v.wrapping_add(1)
+}
+
+/// Declares `param(p = 0)` for a function pointer: the call through `p` costs 0, so
+/// this root passes; every call site must pass a function known there.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", param(p = 0)))]
+pub fn apply_ptr(p: fn(u32) -> u32, x: u32) -> u32 {
+    p(x)
+}
+
+/// An allocation-free function reified at the call site: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn ptr_ok(x: u32) -> u32 {
+    apply_ptr(plus_one, x)
+}
+
+/// An allocating function: reported at the call site.
+pub fn ptr_alloc(x: u32) -> u32 {
+    apply_ptr(boxed_value, x)
+}
+
+/// A pointer loaded from data: `⊤` at the call site.
+pub fn ptr_from_data(x: u32, t: &[fn(u32) -> u32; 2]) -> u32 {
+    apply_ptr(t[0], x)
+}
+
+/// A parameter without `param(..)` passed on: `⊤` at the call site.
+pub fn ptr_param(x: u32, q: fn(u32) -> u32) -> u32 {
+    apply_ptr(q, x)
+}
+
+/// Passes on `q`, declared `param(q = 1)`, for `param(p = 0)`: reported; its own
+/// `fip(1)` holds (the call through `apply_ptr` costs 0).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1, param(q = 1)))]
+pub fn ptr_forward(q: fn(u32) -> u32, x: u32) -> u32 {
+    apply_ptr(q, x)
+}
+
+/// Declares `param(d = 0)` for a callable trait object: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", param(d = 0)))]
+pub fn apply_dyn(d: &dyn Fn(u32) -> u32, x: u32) -> u32 {
+    d(x)
+}
+
+/// An allocation-free closure behind `&dyn Fn`: passes.
+pub fn dyn_ok(x: u32) -> u32 {
+    apply_dyn(&|v: u32| v ^ 1, x)
+}
+
+/// An allocating closure behind `&dyn Fn`: reported.
+pub fn dyn_alloc(x: u32) -> u32 {
+    apply_dyn(&|v: u32| *Box::new(v), x)
+}
+
+/// Allocation-free, but may free (the drop glue of `Option<Box<u32>>`).
+pub fn frees(v: u32) -> u32 {
+    let b: Option<Box<u32>> = None;
+    drop(b);
+    v
+}
+
+/// Allocation-free, but recursive.
+pub fn countdown(v: u32) -> u32 {
+    if v == 0 { 0 } else { countdown(v / 2) }
+}
+
+/// A function that may free, for `param(p = 0)` of a `#[fip]` function: reported
+/// (`apply_ptr` counts the call by its declaration, and `fip` forbids frees).
+pub fn ptr_frees(x: u32) -> u32 {
+    apply_ptr(frees, x)
+}
+
+/// A recursive function, likewise: reported.
+pub fn ptr_recursive(x: u32) -> u32 {
+    apply_ptr(countdown, x)
+}
+
+/// `fbip` with `param(p = 0)`: the call through `p` may free and recurse.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", param(p = 0)))]
+pub fn apply_ptr_fbip(p: fn(u32) -> u32, x: u32) -> u32 {
+    p(x)
+}
+
+/// A `#[fip]` root calling it: may free and recurses (as `apply_ptr_fbip` allows its
+/// argument), reported; the argument itself is fine for `fbip`.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn fip_through_fbip(x: u32) -> u32 {
+    apply_ptr_fbip(frees, x)
+}

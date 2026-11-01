@@ -9,7 +9,10 @@
 //!   `fip-macros`. Arguments, all optional except `kind`:
 //!   `kind = "fip" | "fbip"`, `n = N` (allocation bound, default 0),
 //!   `strict = true | false` (default false), `panic_macros = true | false`
-//!   (default true), `param(name = K, ..)` (declared bounds of callable parameters).
+//!   (default true), `param(name = K, ..)` (declared bounds of callable parameters:
+//!   of a generic type, a function pointer or `&dyn Fn*`/`&dyn FipFn`). On a trait
+//!   method declaration (written by hand): a contract that every implementation is
+//!   checked against and that dynamic calls of the method cost.
 //! - `#[cfg_attr(fip_prelint, fip::alloc_source)]`, `fip::alloc_source(n = N)`
 //!   (`N ≥ 1`, default 1) and `#[cfg_attr(fip_prelint, fip::free_source)]`
 //!   (functions, methods, trait method declarations, foreign functions): a declared

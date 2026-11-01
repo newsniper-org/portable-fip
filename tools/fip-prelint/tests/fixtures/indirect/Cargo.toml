@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: function pointers and trait objects
+# resolved from their origin in the body, and contracts on trait methods (limits plan L4).
+[workspace]
+resolver = "3"
+members = ["shapes", "app"]
+exclude = ["legacy", "plugins"]

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+broken = { path = "../broken" }
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

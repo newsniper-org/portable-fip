@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: a dependency that declares
+# `fip::export` (not a workspace member, compiled by the driver without roots) whose
+# implementation breaks a trait method's contract (limits plan L4).
+[workspace]
+resolver = "3"
+members = ["user"]
+exclude = ["broken"]

@@ -62,6 +62,15 @@
 //! crate and crates declaring `fip::export`), with that root's instantiation, and
 //! from every local function and closure body with identity arguments
 //! ([`Analysis::arguments_in`]), so callers that are not roots are checked too.
+//!
+//! **Indirect calls.** A call through a function pointer, and a dynamic call, is
+//! resolved when the pointer's origin in the body is one reified function or closure,
+//! or one unsized concrete type, on every path ([`origin_of`]). A parameter declared
+//! `param(g = K)` of function-pointer or `&dyn Fn*`/`&dyn FipFn` type counts `K` and
+//! what the function's mark allows; its call sites must pass a function known there
+//! that meets them. A dynamic call of a trait method whose declaration carries a
+//! `fip::mark` costs that contract ([`Crates::contract_of`]); every implementation
+//! is checked against it in its own crate (`crate::report`). Anything else is `⊤`.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -75,6 +84,7 @@ use rustc_middle::ty::{
     self, EarlyBinder, GenericArgs, GenericArgsRef, Instance, InstanceKind, ShimKind, Ty, TyCtxt,
     TypeFoldable, TypeVisitableExt, TypingEnv,
 };
+use rustc_span::Spanned;
 use rustc_span::{DUMMY_SP, Span};
 
 use crate::marks::{self, Mark, Source};
@@ -360,6 +370,12 @@ enum Ev {
     Free(String),
     Panic(String),
     Unknown(String),
+    /// A declared bound of `k` allocations: a call through a parameter declared
+    /// `param(g = K)` (a function pointer or `&dyn Fn*`), or a dynamic call of a
+    /// trait method whose declaration carries a contract (`fip::mark`).
+    Bound(u64, String),
+    /// Possible recursion declared by a contract (`fbip` allows it).
+    Recurse(String),
 }
 
 #[derive(Clone, Debug)]
@@ -367,6 +383,9 @@ enum Item {
     Call(usize),
     Term(String),
     Ev(Ev),
+    /// Several events of one call: a call through a parameter declared
+    /// `param(g = K)`, which may do what the function's own mark allows.
+    Evs(Vec<Ev>),
 }
 
 #[derive(Clone, Debug)]
@@ -576,11 +595,15 @@ impl Crates {
                         },
                     );
                 }
-                if !has_source_body(tcx, def_id) {
-                    continue;
-                }
-                if !unencoded.contains_key(&cnum) && !tcx.is_mir_available(def_id) {
+                // A mark on a trait method declaration is a contract of every
+                // implementation (dynamic calls use it); it may have no body.
+                let contract = tcx.trait_of_assoc(def_id).is_some();
+                let body = has_source_body(tcx, def_id);
+                if body && !unencoded.contains_key(&cnum) && !tcx.is_mir_available(def_id) {
                     unencoded.insert(cnum, tcx.def_path_str(def_id));
+                }
+                if !body && !contract {
+                    continue;
                 }
                 for attr in &attrs {
                     if let Some(args) = marks::mark_args_of_printed(attr)
@@ -666,6 +689,24 @@ impl Crates {
     /// The mark of `def_id` if it declares `param(..)`.
     fn param_mark(&self, def_id: DefId) -> Option<&Mark> {
         self.marks.get(&def_id).filter(|m| !m.params.is_empty())
+    }
+    /// The contract of a trait method: the `fip::mark` on its declaration (local
+    /// crate or an exported crate). A dynamic call of the method costs the contract;
+    /// every implementation is checked against it. A contract with `param(..)` is
+    /// rejected where it is declared and not used.
+    pub fn contract_of(&self, tcx: TyCtxt<'_>, def_id: DefId) -> Option<&Mark> {
+        tcx.trait_of_assoc(def_id)?;
+        self.marks.get(&def_id).filter(|m| m.params.is_empty())
+    }
+    /// Every trait method with a contract, in a stable order.
+    pub fn contracts(&self, tcx: TyCtxt<'_>) -> Vec<(DefId, Mark)> {
+        let mut v: Vec<(DefId, Mark)> = self
+            .marks
+            .keys()
+            .filter_map(|&d| self.contract_of(tcx, d).map(|m| (d, m.clone())))
+            .collect();
+        v.sort_by_key(|(d, _)| def_path(tcx, *d));
+        v
     }
     pub(crate) fn exported(&self, c: CrateNum) -> bool {
         self.exported.get(&c).copied().unwrap_or(false)
@@ -815,6 +856,11 @@ struct ArgSite {
     /// Label and item of each callable entry point of the argument
     /// (`<T as FipFn<A>>::call`, `<T as Fn<A>>::call`, ..).
     items: Vec<(String, Item)>,
+    /// For a function pointer or callable trait object parameter: the callee's mark.
+    /// Its body counts a call through the parameter by the declaration alone, so the
+    /// argument must also respect what the mark forbids (a free or recursion under
+    /// `fip`, a panic path under `strict = true, panic_macros = false`).
+    indirect: Option<Mark>,
 }
 
 /// A call site passing, for a parameter declared `param(g = K)`, an argument whose
@@ -836,6 +882,10 @@ pub struct ArgViolation {
     pub bound: Cost,
     /// The argument's events: allocation witnesses, unresolved calls (`⊤`), terms.
     pub summary: Summary,
+    /// For a function pointer or callable trait object parameter: an event of the
+    /// argument that the callee's mark forbids (`may free`, `recurses`, `may panic`)
+    /// and its witness.
+    pub forbidden: Option<(String, Witness)>,
 }
 
 impl ArgViolation {
@@ -885,7 +935,18 @@ fn describe_assert(msg: &AssertKind<Operand<'_>>) -> String {
 
 impl<'a, 'tcx> Analysis<'a, 'tcx> {
     fn new(tcx: TyCtxt<'tcx>, crates: &'a Crates, owner: DefId) -> Analysis<'a, 'tcx> {
-        let env = TypingEnv::post_analysis(tcx, tcx.typeck_root_def_id(owner));
+        Analysis::new_in(tcx, crates, owner, owner)
+    }
+
+    /// Analysis of `owner`'s body in the typing environment of `env_owner` (the
+    /// implementation, for a trait method's default body checked for one impl).
+    fn new_in(
+        tcx: TyCtxt<'tcx>,
+        crates: &'a Crates,
+        env_owner: DefId,
+        owner: DefId,
+    ) -> Analysis<'a, 'tcx> {
+        let env = TypingEnv::post_analysis(tcx, tcx.typeck_root_def_id(env_owner));
         let mut a = Analysis {
             tcx,
             env,
@@ -911,9 +972,38 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     }
 
     pub fn run(tcx: TyCtxt<'tcx>, crates: &'a Crates, root: DefId, mark: &Mark) -> RootResult {
-        let mut a = Analysis::new(tcx, crates, root);
-        a.owner_params = mark.params.clone();
+        let a = Analysis::new(tcx, crates, root);
         let inst = a.identity(root);
+        a.run_root(root, inst, mark)
+    }
+
+    /// The default body of the trait method `method` as `impl_def` uses it (the impl
+    /// does not override it), analysed as a root in the impl's typing environment;
+    /// `None` if it does not resolve to that body.
+    pub fn run_default(
+        tcx: TyCtxt<'tcx>,
+        crates: &'a Crates,
+        impl_def: DefId,
+        method: DefId,
+        mark: &Mark,
+    ) -> Option<RootResult> {
+        let a = Analysis::new_in(tcx, crates, impl_def, method);
+        let trait_ref = tcx
+            .impl_trait_ref(impl_def)
+            .instantiate_identity()
+            .skip_norm_wip();
+        let args = tcx.erase_and_anonymize_regions(trait_ref.args);
+        let inst = Instance::try_resolve(tcx, a.env, method, args).ok()??;
+        if inst.def != InstanceKind::Item(method) {
+            return None;
+        }
+        Some(a.run_root(method, inst, mark))
+    }
+
+    fn run_root(self, root: DefId, inst: Instance<'tcx>, mark: &Mark) -> RootResult {
+        let crates = self.crates;
+        let mut a = self;
+        a.owner_params = mark.params.clone();
         // A root is analysed under its own precondition (checked at its callers).
         let ctx = crates
             .requires_of(root)
@@ -949,8 +1039,16 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 continue;
             }
             let term = data.terminator();
-            let (TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. }) =
-                &term.kind
+            let (TerminatorKind::Call {
+                func,
+                args: call_args,
+                ..
+            }
+            | TerminatorKind::TailCall {
+                func,
+                args: call_args,
+                ..
+            }) = &term.kind
             else {
                 continue;
             };
@@ -964,7 +1062,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 continue;
             };
             if let Ok(Some(callee)) = Instance::try_resolve(tcx, a.env, def_id, args) {
-                a.note_arg_site(inst, term.source_info.span, callee);
+                a.note_arg_site(inst, body, term.source_info.span, callee, call_args);
             }
         }
         if a.arg_sites.is_empty() {
@@ -1071,13 +1169,19 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 def_path(tcx, def_id)
             ))]),
             // A dynamic call of a source's trait method is that source in every
-            // implementation (declared on the trait, or an allocator trait).
+            // implementation (declared on the trait, or an allocator trait). A
+            // dynamic call of a method whose declaration carries a contract costs the
+            // contract (every implementation is checked against it); any other
+            // dynamic call is `⊤`.
             InstanceKind::Virtual(def_id, _) => match self.source_leaf(def_id) {
                 Some(leaf) => leaf,
-                None => NodeKind::Leaf(vec![Ev::Unknown(format!(
-                    "dynamic call to `{}` (trait object)",
-                    def_path_args(tcx, def_id, inst.args)
-                ))]),
+                None => match self.crates.contract_of(tcx, def_id) {
+                    Some(m) => NodeKind::Leaf(contract_events(&def_path(tcx, def_id), m)),
+                    None => NodeKind::Leaf(vec![Ev::Unknown(format!(
+                        "dynamic call to `{}` (trait object)",
+                        def_path_args(tcx, def_id, inst.args)
+                    ))]),
+                },
             },
             InstanceKind::Shim(ShimKind::DropGlue(_, None)) => NodeKind::Leaf(Vec::new()),
             InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty)))
@@ -1314,7 +1418,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 TerminatorKind::Call { func, args, .. }
                 | TerminatorKind::TailCall { func, args, .. } => {
                     let here = proved.contexts.get(&b);
-                    let item = self.call_item(inst, body, func, here, depth);
+                    let item = self.call_item(inst, body, func, args, here, depth);
                     if let Item::Call(j) = item {
                         // Call sites in analysed crates (local, `fip::export`) are
                         // checked against the callee's declared parameter bounds.
@@ -1322,7 +1426,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         if matches!(inst.def, InstanceKind::Item(_))
                             && self.crates.exported(inst.def_id().krate)
                         {
-                            self.note_arg_site(inst, span, callee);
+                            self.note_arg_site(inst, body, span, callee, args);
                         }
                         // And against its declared precondition: the state here must
                         // entail it, else the call is a panic path (a broken contract).
@@ -1508,12 +1612,16 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// The callee of a call in `inst`'s body. A callee whose body may use it
     /// (`Summaries::wants_context`) is entered in the context `here` (the caller's
     /// state projected onto the arguments), unless contexts are nested
-    /// [`MAX_CONTEXT_DEPTH`] deep or the call is direct recursion.
+    /// [`MAX_CONTEXT_DEPTH`] deep or the call is direct recursion. A call through a
+    /// function pointer, and a dynamic call, is resolved when the pointer comes from
+    /// one function (or one concrete type) on every path in this body
+    /// ([`origin_of`]), or is a parameter declared `param(g = K)`.
     fn call_item(
         &mut self,
         inst: Instance<'tcx>,
         body: &'tcx Body<'tcx>,
         func: &Operand<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
         here: Option<&Vec<Fact>>,
         depth: u8,
     ) -> Item {
@@ -1524,8 +1632,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             )));
         };
         match *fty.kind() {
-            ty::FnDef(def_id, args) => match args.no_bound_vars() {
-                Some(args) => match Instance::try_resolve(self.tcx, self.env, def_id, args) {
+            ty::FnDef(def_id, fargs) => match fargs.no_bound_vars() {
+                Some(fargs) => match Instance::try_resolve(self.tcx, self.env, def_id, fargs) {
                     Ok(Some(callee))
                         if depth < MAX_CONTEXT_DEPTH
                             && !self.on_path(callee)
@@ -1536,15 +1644,131 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         let ctx = here.cloned().unwrap_or_default();
                         Item::Call(self.node_in(callee, ctx, depth + 1))
                     }
-                    _ => self.resolve(def_id, args),
+                    Ok(Some(callee)) if matches!(callee.def, InstanceKind::Virtual(..)) => {
+                        match args.first() {
+                            Some(recv) => self
+                                .devirtualize(inst, body, callee, &recv.node)
+                                .unwrap_or_else(|| Item::Call(self.node_for(callee))),
+                            None => Item::Call(self.node_for(callee)),
+                        }
+                    }
+                    _ => self.resolve(def_id, fargs),
                 },
                 None => Item::Ev(Ev::Unknown(format!("callee `{fty}` with bound variables"))),
             },
-            ty::FnPtr(..) => Item::Ev(Ev::Unknown(format!(
-                "call through a function pointer `{fty}`"
-            ))),
+            ty::FnPtr(..) => self.pointer_target(inst, body, func).unwrap_or_else(|| {
+                Item::Ev(Ev::Unknown(format!(
+                    "call through a function pointer `{fty}`"
+                )))
+            }),
             _ => Item::Ev(Ev::Unknown(format!("call of `{fty}`"))),
         }
+    }
+
+    /// The function a function pointer `op` in `inst`'s body calls: the function item
+    /// or closure it is reified from on every path, or the declared bound of a
+    /// parameter `param(g = K)`. `None`: not known here (`⊤`).
+    fn pointer_target(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> Option<Item> {
+        match origin_of(self.tcx, body, op)? {
+            Origin::Fn(t) => self.function_item(inst, t),
+            Origin::Arg(l) => self.declared_param_call(inst, body, l),
+            Origin::Pointee(_) => None,
+        }
+    }
+
+    /// The callee for a value of the function item or closure type `t` (of `inst`'s
+    /// MIR) called through a function pointer.
+    fn function_item(&mut self, inst: Instance<'tcx>, t: Ty<'tcx>) -> Option<Item> {
+        let t = self.subst(inst, t)?;
+        match *t.kind() {
+            ty::FnDef(d, a) => Some(self.resolve(d, a.no_bound_vars()?)),
+            ty::Closure(d, a) => {
+                let callee = Instance::resolve_closure(self.tcx, d, a, ty::ClosureKind::FnOnce);
+                Some(Item::Call(self.node_for(callee)))
+            }
+            _ => None,
+        }
+    }
+
+    /// A dynamic call (`callee` is `Virtual`) whose receiver `recv` is, on every path
+    /// in `inst`'s body, a pointer unsized from one concrete type: the method of that
+    /// type. A receiver that is a parameter declared `param(g = K)` of a callable
+    /// trait object (`&dyn Fn*`, `&dyn FipFn`): the declared bound.
+    fn devirtualize(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        callee: Instance<'tcx>,
+        recv: &Operand<'tcx>,
+    ) -> Option<Item> {
+        let tcx = self.tcx;
+        let InstanceKind::Virtual(def_id, _) = callee.def else {
+            return None;
+        };
+        match origin_of(tcx, body, recv)? {
+            Origin::Pointee(t) => {
+                let t = self.subst(inst, t)?;
+                if !t.is_sized(tcx, self.env) {
+                    return None;
+                }
+                let args = tcx
+                    .mk_args_from_iter(std::iter::once(t.into()).chain(callee.args.iter().skip(1)));
+                match Instance::try_resolve(tcx, self.env, def_id, args) {
+                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                        Some(Item::Call(self.node_for(c)))
+                    }
+                    _ => None,
+                }
+            }
+            Origin::Arg(l) => {
+                let trait_id = tcx.trait_of_assoc(def_id)?;
+                if !self.is_callable_trait(trait_id) {
+                    return None;
+                }
+                self.declared_param_call(inst, body, l)
+            }
+            Origin::Fn(_) => None,
+        }
+    }
+
+    /// A call through the parameter in local `l` of `inst` (a function pointer or a
+    /// callable trait object) whose function declares `param(g = K)` for it: `K`
+    /// allocations, checked at every call site of the function.
+    fn declared_param_call(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        l: mir::Local,
+    ) -> Option<Item> {
+        let InstanceKind::Item(d) = inst.def else {
+            return None;
+        };
+        let (g, k) = self.declared_param(d, body, l)?;
+        let mark = self.crates.param_mark(d)?;
+        Some(Item::Evs(param_events(&g, k, mark)))
+    }
+
+    /// The name and declared bound of the parameter in local `l` of `d`'s body, if
+    /// `d` declares `param(g = K)` for it.
+    fn declared_param(&self, d: DefId, body: &Body<'tcx>, l: mir::Local) -> Option<(String, u64)> {
+        let tcx = self.tcx;
+        if !matches!(tcx.def_kind(d), DefKind::Fn | DefKind::AssocFn) {
+            return None;
+        }
+        let pos = l.as_usize().checked_sub(1)?;
+        if pos >= body.arg_count {
+            return None;
+        }
+        let ident = (*tcx.fn_arg_idents(d).get(pos)?)?;
+        let g = ident.name.to_string();
+        let mark = self.crates.param_mark(d)?;
+        let k = mark.params.iter().find(|(n, _)| *n == g)?.1;
+        Some((g, k))
     }
 
     /// `true` if `inst` is the node being classified or one of the nodes through
@@ -1661,10 +1885,18 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         )))
     }
 
-    /// Records the call of `callee` at `span` in `caller` if the callee declares
-    /// `param(g = K)`: for each such `g`, the argument's callable entry points are
-    /// resolved and become nodes of the graph.
-    fn note_arg_site(&mut self, caller: Instance<'tcx>, span: Span, callee: Instance<'tcx>) {
+    /// Records the call of `callee` at `span` in `caller` (whose MIR is `body`, the
+    /// call's arguments `call_args`) if the callee declares `param(g = K)`: for each
+    /// such `g`, the argument's callable entry points are resolved and become nodes
+    /// of the graph.
+    fn note_arg_site(
+        &mut self,
+        caller: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        span: Span,
+        callee: Instance<'tcx>,
+        call_args: &[Spanned<Operand<'tcx>>],
+    ) {
         let InstanceKind::Item(def_id) = callee.def else {
             return;
         };
@@ -1675,9 +1907,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let caller_label = self.label(caller);
         let callee_label = def_path(self.tcx, def_id);
         for (g, declared) in &mark.params {
-            let Some((arg, items)) = self.argument_items(def_id, callee.args, g) else {
+            let Some((arg, items, indirect)) =
+                self.argument_items(caller, body, call_args, def_id, callee.args, g)
+            else {
                 continue;
             };
+            let indirect = indirect.then(|| mark.clone());
             self.arg_sites.push(ArgSite {
                 caller: caller_label.clone(),
                 span,
@@ -1687,6 +1922,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 declared: *declared,
                 arg,
                 items,
+                indirect,
             });
         }
     }
@@ -1694,14 +1930,19 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// The type passed for `g` to `callee` (instantiated with `args`) and the
     /// callable methods (`call`, `call_mut`, `call_once`) of every callable bound
     /// (`Fn*`, `FipFn`) of `g`'s generic type parameter, resolved for that type.
-    /// `None` if the parameter has no callable bound: then `param(g = K)` bounds no
-    /// call.
+    /// For `g` a function pointer or a callable trait object (`&dyn Fn*`,
+    /// `&dyn FipFn`): the function the argument holds, found in the caller's body
+    /// ([`Analysis::indirect_argument`]). `None` if the parameter has no callable
+    /// bound: then `param(g = K)` bounds no call.
     fn argument_items(
         &mut self,
+        caller: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        call_args: &[Spanned<Operand<'tcx>>],
         callee: DefId,
         args: GenericArgsRef<'tcx>,
         g: &str,
-    ) -> Option<(String, Vec<(String, Item)>)> {
+    ) -> Option<(String, Vec<(String, Item)>, bool)> {
         let tcx = self.tcx;
         let pos = tcx
             .fn_arg_idents(callee)
@@ -1715,15 +1956,25 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             return Some((
                 "?".to_string(),
                 vec![(what.clone(), Item::Ev(Ev::Unknown(what)))],
+                false,
             ));
         };
         let input = tcx.fn_sig(callee).skip_binder().skip_binder().inputs()[pos];
+        if input.is_fn_ptr() || self.callable_dyn(input).is_some() {
+            let op = call_args.get(pos).map(|a| &a.node);
+            let (arg, items) = self.indirect_argument(caller, body, op, g, input);
+            return Some((arg, items, true));
+        }
         let ty::Param(p) = *input.peel_refs().kind() else {
             let shown = with_no_visible_paths!(with_no_trimmed_paths!(input.to_string()));
             let what = format!(
-                "parameter `{g}: {shown}` is not of a generic type: the function it holds is not determined at the call site"
+                "parameter `{g}: {shown}` is neither of a generic type, a function pointer nor a reference to a callable trait object: the function it holds is not determined at the call site"
             );
-            return Some((shown, vec![(what.clone(), Item::Ev(Ev::Unknown(what)))]));
+            return Some((
+                shown,
+                vec![(what.clone(), Item::Ev(Ev::Unknown(what)))],
+                false,
+            ));
         };
         let arg_ty = args.type_at(p.index as usize);
         let arg = with_no_visible_paths!(with_no_trimmed_paths!(arg_ty.to_string()));
@@ -1761,7 +2012,134 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if items.is_empty() {
             None
         } else {
-            Some((arg, items))
+            Some((arg, items, false))
+        }
+    }
+
+    /// The principal trait of `t = &dyn Tr` or `&mut dyn Tr` if `Tr` is callable
+    /// (`Fn*`, `FipFn`).
+    fn callable_dyn(&self, t: Ty<'tcx>) -> Option<ty::Binder<'tcx, ty::ExistentialTraitRef<'tcx>>> {
+        let ty::Ref(_, inner, _) = *t.kind() else {
+            return None;
+        };
+        let ty::Dynamic(preds, ..) = *inner.kind() else {
+            return None;
+        };
+        let principal = preds.principal()?;
+        self.is_callable_trait(principal.def_id())
+            .then_some(principal)
+    }
+
+    /// The argument passed at a call site in `caller`'s `body` (`op`) for a
+    /// parameter `g` declared `param(g = K)` whose type `input` is a function pointer
+    /// or a reference to a callable trait object: the function it holds when its
+    /// origin in the body is one function item or closure (function pointer) or one
+    /// concrete type (trait object), [`origin_of`]; the caller's own declared bound
+    /// when it passes on a parameter declared `param(h = K')`; else `⊤` at the call
+    /// site (a pointer loaded from data, a call result, two origins).
+    fn indirect_argument(
+        &mut self,
+        caller: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: Option<&Operand<'tcx>>,
+        g: &str,
+        input: Ty<'tcx>,
+    ) -> (String, Vec<(String, Item)>) {
+        let tcx = self.tcx;
+        let shown = |t: Ty<'tcx>| with_no_visible_paths!(with_no_trimmed_paths!(t.to_string()));
+        let unknown = |what: String| vec![(what.clone(), Item::Ev(Ev::Unknown(what)))];
+        let not_known = format!(
+            "the function passed for `{g}` is not known at this call site: it is not reified or unsized from one function or type on every path (a pointer loaded from data, a call result, or two origins)"
+        );
+        let Some(op) = op else {
+            return (shown(input), unknown(not_known));
+        };
+        match origin_of(tcx, body, op) {
+            Some(Origin::Fn(t)) if input.is_fn_ptr() => {
+                let label = self.subst(caller, t).map_or_else(|| shown(t), shown);
+                match self.function_item(caller, t) {
+                    Some(item) => (label.clone(), vec![(label, item)]),
+                    None => (label, unknown(not_known)),
+                }
+            }
+            Some(Origin::Pointee(t)) => {
+                let Some(principal) = self.callable_dyn(input) else {
+                    return (shown(input), unknown(not_known));
+                };
+                let Some(t) = self.subst(caller, t) else {
+                    return (shown(t), unknown(not_known));
+                };
+                let label = shown(t);
+                let trait_ref = tcx
+                    .instantiate_bound_regions_with_erased(principal)
+                    .with_self_ty(tcx, t);
+                let mut items = Vec::new();
+                for m in tcx.associated_items(trait_ref.def_id).in_definition_order() {
+                    if !m.is_fn() || !tcx.generics_of(m.def_id).own_params.is_empty() {
+                        continue;
+                    }
+                    let item = match tcx.try_normalize_erasing_regions(
+                        self.env,
+                        ty::Unnormalized::new(trait_ref.args),
+                    ) {
+                        Ok(margs) => self.resolve(m.def_id, margs),
+                        Err(_) => Item::Ev(Ev::Unknown(format!(
+                            "`{}` for `{label}` (not normalizable)",
+                            def_path(tcx, m.def_id)
+                        ))),
+                    };
+                    items.push((def_path(tcx, m.def_id), item));
+                }
+                if items.is_empty() {
+                    return (label, unknown(not_known));
+                }
+                (label, items)
+            }
+            Some(Origin::Arg(l)) => {
+                let declared = match caller.def {
+                    InstanceKind::Item(d) => self.declared_param(d, body, l),
+                    _ => None,
+                };
+                let label = shown(input);
+                match declared {
+                    Some((h, k)) => {
+                        let what = format!("call of parameter `{h}`, declared `param({h} = {k})`");
+                        let evs = match caller.def {
+                            InstanceKind::Item(d) => self
+                                .crates
+                                .param_mark(d)
+                                .map(|m| param_events(&h, k, m))
+                                .unwrap_or_default(),
+                            _ => Vec::new(),
+                        };
+                        (label, vec![(what, Item::Evs(evs))])
+                    }
+                    None => {
+                        let name = l
+                            .as_usize()
+                            .checked_sub(1)
+                            .and_then(|i| match caller.def {
+                                InstanceKind::Item(d)
+                                    if matches!(
+                                        tcx.def_kind(d),
+                                        DefKind::Fn | DefKind::AssocFn
+                                    ) =>
+                                {
+                                    tcx.fn_arg_idents(d).get(i).copied().flatten()
+                                }
+                                _ => None,
+                            })
+                            .map_or_else(|| "?".to_string(), |i| i.name.to_string());
+                        (
+                            label,
+                            unknown(format!(
+                                "the function passed for `{g}` is the parameter `{name}` of the caller, which declares no `param({name} = ..)`"
+                            )),
+                        )
+                    }
+                }
+            }
+            _ => (shown(input), unknown(not_known)),
         }
     }
 
@@ -1817,15 +2195,46 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         };
                         s.terms_w.entry(k.clone()).or_insert_with(|| unknown(&what));
                     }
-                    Item::Ev(Ev::Alloc(w) | Ev::Free(w) | Ev::Panic(w) | Ev::Unknown(w)) => {
+                    Item::Ev(Ev::Unknown(w)) => {
                         push_w(&mut s.unknown, unknown(w), MAX_UNKNOWN, key_what);
+                    }
+                    // A parameter of the caller passed on: what the caller declares for
+                    // it (`param(h = K')` and the caller's mark).
+                    Item::Ev(ev) => cost = cost.max(&local_event(&mut s, ev, unknown)),
+                    Item::Evs(evs) => {
+                        let mut c = Cost::default();
+                        for ev in evs {
+                            c = c.add(&local_event(&mut s, ev, unknown));
+                        }
+                        cost = cost.max(&c);
                     }
                 }
             }
             s.alloc = cost.clone();
             let bound = cost.instantiate(&self.owner_params, &self.param_types);
-            let violated =
-                !s.unknown.is_empty() || (bound.terms.is_empty() && bound.c.exceeds(site.declared));
+            // A call through a function pointer or trait object parameter is counted
+            // by the declaration in the callee's body: the argument must not do what
+            // the callee's mark forbids either.
+            let forbidden = site.indirect.as_ref().and_then(|m| {
+                if m.kind == crate::marks::Kind::Fip {
+                    if let Some(w) = s.free.first() {
+                        return Some(("may free".to_string(), w.clone()));
+                    }
+                    if let Some(w) = &s.recursion {
+                        return Some(("recurses".to_string(), w.clone()));
+                    }
+                }
+                if m.strict
+                    && !m.panic_macros
+                    && let Some(w) = s.panics.first()
+                {
+                    return Some(("may panic".to_string(), w.clone()));
+                }
+                None
+            });
+            let violated = !s.unknown.is_empty()
+                || (bound.terms.is_empty() && bound.c.exceeds(site.declared))
+                || forbidden.is_some();
             if violated {
                 out.push(ArgViolation {
                     caller: site.caller.clone(),
@@ -1837,6 +2246,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     arg: site.arg.clone(),
                     bound,
                     summary: s,
+                    forbidden,
                 });
             }
         }
@@ -1943,6 +2353,20 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         Ev::Free(what) => s.free.push(w(what)),
                         Ev::Panic(what) => s.panics.push(w(what)),
                         Ev::Unknown(what) => s.unknown.push(w(what)),
+                        Ev::Bound(k, what) => {
+                            s.alloc = s.alloc.add(&Cost {
+                                c: B::Fin(*k),
+                                terms: BTreeMap::new(),
+                            });
+                            if *k > 0 && s.alloc_w.iter().all(|x| x.what != *what) {
+                                s.alloc_w.push(w(what));
+                            }
+                        }
+                        Ev::Recurse(what) => {
+                            if s.recursion.is_none() {
+                                s.recursion = Some(w(what));
+                            }
+                        }
                     }
                 }
             }
@@ -1983,18 +2407,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                     .entry(k.clone())
                                     .or_insert_with(|| local(&format!("call of `{k}`")));
                             }
-                            Item::Ev(Ev::Alloc(what)) => {
-                                bcost[b] = bcost[b].add(&Cost::one().looped(in_loop));
-                                push_w(&mut s.alloc_w, local(what), MAX_WITNESSES, key_site);
+                            Item::Ev(ev) => {
+                                bcost[b] =
+                                    bcost[b].add(&local_event(&mut s, ev, local).looped(in_loop));
                             }
-                            Item::Ev(Ev::Free(what)) => {
-                                push_w(&mut s.free, local(what), MAX_WITNESSES, key_site);
-                            }
-                            Item::Ev(Ev::Panic(what)) => {
-                                push_w(&mut s.panics, local(what), MAX_WITNESSES, key_site);
-                            }
-                            Item::Ev(Ev::Unknown(what)) => {
-                                push_w(&mut s.unknown, local(what), MAX_UNKNOWN, key_what);
+                            Item::Evs(evs) => {
+                                for ev in evs {
+                                    bcost[b] = bcost[b]
+                                        .add(&local_event(&mut s, ev, local).looped(in_loop));
+                                }
                             }
                         }
                     }
@@ -2062,6 +2483,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                 Item::Call(j) => items.push(format!("call [{j}]{l}")),
                                 Item::Term(k) => items.push(format!("term {k}{l}")),
                                 Item::Ev(e) => items.push(format!("{e:?}{l}")),
+                                Item::Evs(es) => items.push(format!("{es:?}{l}")),
                             }
                         }
                     }
@@ -2102,6 +2524,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if std::env::var_os("FIP_PRELINT_DUMP").is_none() {
             return;
         }
+        let wit = |what: &String| Witness {
+            steps: Vec::new(),
+            what: what.clone(),
+            span: DUMMY_SP,
+            in_loop: false,
+        };
         for site in &self.arg_sites {
             let mut cost = Cost::default();
             let mut unknown = false;
@@ -2112,7 +2540,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         unknown |= !sums[*j].unknown.is_empty();
                     }
                     Item::Term(k) => cost = cost.max(&Cost::term(k)),
-                    Item::Ev(_) => unknown = true,
+                    Item::Ev(Ev::Unknown(_)) => unknown = true,
+                    Item::Ev(ev) => cost = cost.max(&local_event(&mut Summary::default(), ev, wit)),
+                    Item::Evs(evs) => {
+                        let mut c = Cost::default();
+                        for ev in evs {
+                            c = c.add(&local_event(&mut Summary::default(), ev, wit));
+                        }
+                        cost = cost.max(&c);
+                    }
                 }
             }
             let bound = if unknown {
@@ -2124,6 +2560,251 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 "fip-prelint dump: argument: `{}` -> `{}` for `{}` (param {} = {}): `{}`, bound {bound}",
                 site.caller, site.callee, site.param, site.param, site.declared, site.arg
             );
+        }
+    }
+}
+
+/// The events of a call through the parameter `g` declared `param(g = k)` by a
+/// function marked `m`: `k` allocations and what `m` allows (a free and recursion for
+/// `fbip`, panics unless strict). Every call site checks its argument against them.
+fn param_events(g: &str, k: u64, m: &Mark) -> Vec<Ev> {
+    let mut evs = declared_events(
+        &format!("call of parameter `{g}`"),
+        &format!("`param({g} = {k})` of `{}`", m.tag()),
+        m,
+        k,
+    );
+    if k == 0 {
+        // Keeps the call visible in dumps; costs nothing.
+        evs.insert(
+            0,
+            Ev::Bound(
+                0,
+                format!("call of parameter `{g}`, declared `param({g} = 0)`"),
+            ),
+        );
+    }
+    evs
+}
+
+/// Adds one event found in a body (witness `w`) to `s`; returns its allocation cost.
+fn local_event(s: &mut Summary, ev: &Ev, w: impl Fn(&String) -> Witness) -> Cost {
+    match ev {
+        Ev::Alloc(what) => {
+            push_w(&mut s.alloc_w, w(what), MAX_WITNESSES, key_site);
+            return Cost::one();
+        }
+        Ev::Free(what) => push_w(&mut s.free, w(what), MAX_WITNESSES, key_site),
+        Ev::Panic(what) => push_w(&mut s.panics, w(what), MAX_WITNESSES, key_site),
+        Ev::Unknown(what) => push_w(&mut s.unknown, w(what), MAX_UNKNOWN, key_what),
+        Ev::Bound(k, what) => {
+            if *k > 0 {
+                push_w(&mut s.alloc_w, w(what), MAX_WITNESSES, key_site);
+            }
+            return Cost {
+                c: B::Fin(*k),
+                terms: BTreeMap::new(),
+            };
+        }
+        Ev::Recurse(what) => {
+            if s.recursion.is_none() {
+                s.recursion = Some(w(what));
+            }
+        }
+    }
+    Cost::default()
+}
+
+/// The events of a call whose behaviour is declared rather than analysed (`what`
+/// describes the call, `by` the declaration): `n` allocations; for `fbip`, a possible
+/// free and recursion; panic paths unless `strict = true, panic_macros = false`. Used
+/// for a dynamic call of a trait method with a contract (`m` is the contract) and for
+/// a call through a parameter declared `param(g = K)` (`m` is the function's mark,
+/// `n = K`); in both cases what is declared is checked elsewhere (every
+/// implementation, every call site).
+fn declared_events(what: &str, by: &str, m: &Mark, n: u64) -> Vec<Ev> {
+    let mut evs = Vec::new();
+    if n > 0 {
+        evs.push(Ev::Bound(
+            n,
+            format!("{what}: {n} allocation(s) declared by {by}"),
+        ));
+    }
+    if m.kind == marks::Kind::Fbip {
+        evs.push(Ev::Free(format!("{what}: {by} allows frees (`fbip`)")));
+        evs.push(Ev::Recurse(format!(
+            "{what}: {by} allows recursion (`fbip`)"
+        )));
+    }
+    if !m.strict {
+        evs.push(Ev::Panic(format!(
+            "{what}: {by} is not strict, it may panic"
+        )));
+    } else if m.panic_macros {
+        evs.push(Ev::Panic(format!(
+            "{what}: {by} allows panic paths (`panic_macros = true`)"
+        )));
+    }
+    evs
+}
+
+/// The events of a dynamic call of the trait method `path` whose declaration carries
+/// the contract `m`.
+fn contract_events(path: &str, m: &Mark) -> Vec<Ev> {
+    let n = if m.kind == marks::Kind::Fip { m.n } else { 0 };
+    declared_events(
+        &format!("dynamic call of `{path}`"),
+        &format!("its contract `{}`", m.tag()),
+        m,
+        n,
+    )
+}
+
+/// Where a function pointer or a pointer to a trait object in one body comes from,
+/// when it is the same on every path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin<'tcx> {
+    /// Reified from a function item or a closure (its type, in the body's MIR).
+    Fn(Ty<'tcx>),
+    /// Unsized from a pointer to this concrete type (in the body's MIR).
+    Pointee(Ty<'tcx>),
+    /// The value of a parameter of the body, never reassigned.
+    Arg(mir::Local),
+}
+
+/// Locals whose value may change other than by an assignment of the whole local:
+/// a mutable borrow, a write to a field, a call or `asm!` destination. Writes through
+/// a dereference (`*p = ..`, `&mut *p`) change the pointee, not the pointer.
+struct Unstable(Vec<bool>);
+
+impl<'tcx> mir::visit::Visitor<'tcx> for Unstable {
+    fn visit_place(
+        &mut self,
+        place: &mir::Place<'tcx>,
+        ctx: mir::visit::PlaceContext,
+        _: mir::Location,
+    ) {
+        use mir::visit::{MutatingUseContext, PlaceContext};
+        let PlaceContext::MutatingUse(m) = ctx else {
+            return;
+        };
+        let through_deref = place.projection.first() == Some(&mir::ProjectionElem::Deref);
+        let whole = place.projection.is_empty()
+            && matches!(m, MutatingUseContext::Store | MutatingUseContext::Drop);
+        if !through_deref && !whole {
+            self.0[place.local.as_usize()] = true;
+        }
+    }
+}
+
+/// A must-analysis over one body: the origin of `op` if every assignment that can
+/// produce its value (through copies, moves and reborrows `&*p`) is the same
+/// reification of one function or closure, the same unsizing of one concrete type,
+/// or the unchanged parameter. Anything else (two origins, a value loaded from
+/// memory, a call result, a local changed in place) is `None`.
+fn origin_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    op: &Operand<'tcx>,
+) -> Option<Origin<'tcx>> {
+    use mir::visit::Visitor;
+    let n = body.local_decls.len();
+    let mut unstable = Unstable(vec![false; n]);
+    unstable.visit_body(body);
+    let mut writes: Vec<Vec<&mir::Rvalue<'tcx>>> = vec![Vec::new(); n];
+    for data in body.basic_blocks.iter() {
+        for st in &data.statements {
+            if let mir::StatementKind::Assign(assign) = &st.kind
+                && assign.0.projection.is_empty()
+            {
+                writes[assign.0.local.as_usize()].push(&assign.1);
+            }
+        }
+    }
+    let cx = OriginCx {
+        tcx,
+        body,
+        unstable: unstable.0,
+        writes,
+    };
+    cx.operand(op, 0)
+}
+
+struct OriginCx<'b, 'tcx> {
+    tcx: TyCtxt<'tcx>,
+    body: &'b Body<'tcx>,
+    unstable: Vec<bool>,
+    writes: Vec<Vec<&'b mir::Rvalue<'tcx>>>,
+}
+
+impl<'tcx> OriginCx<'_, 'tcx> {
+    const MAX_DEPTH: usize = 32;
+
+    fn operand(&self, op: &Operand<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
+        match op {
+            Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => {
+                self.local(p.local, depth)
+            }
+            _ => None,
+        }
+    }
+
+    fn local(&self, l: mir::Local, depth: usize) -> Option<Origin<'tcx>> {
+        if depth > Self::MAX_DEPTH || self.unstable[l.as_usize()] {
+            return None;
+        }
+        let writes = &self.writes[l.as_usize()];
+        if (1..=self.body.arg_count).contains(&l.as_usize()) {
+            return writes.is_empty().then_some(Origin::Arg(l));
+        }
+        let mut found = None;
+        for rv in writes {
+            let o = self.rvalue(rv, depth + 1)?;
+            if found.is_some_and(|f| f != o) {
+                return None;
+            }
+            found = Some(o);
+        }
+        found
+    }
+
+    fn rvalue(&self, rv: &mir::Rvalue<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
+        use rustc_middle::ty::adjustment::PointerCoercion;
+        let ty_of = |op: &Operand<'tcx>| op.ty(&self.body.local_decls, self.tcx);
+        match rv {
+            mir::Rvalue::Use(op, ..) => self.operand(op, depth),
+            mir::Rvalue::CopyForDeref(p) if p.projection.is_empty() => self.local(p.local, depth),
+            mir::Rvalue::Cast(
+                mir::CastKind::PointerCoercion(
+                    PointerCoercion::ReifyFnPointer(_) | PointerCoercion::ClosureFnPointer(_),
+                    _,
+                ),
+                op,
+                _,
+            ) => {
+                let t = ty_of(op);
+                matches!(t.kind(), ty::FnDef(..) | ty::Closure(..)).then_some(Origin::Fn(t))
+            }
+            mir::Rvalue::Cast(
+                mir::CastKind::PointerCoercion(PointerCoercion::Unsize, _),
+                op,
+                _,
+            ) => {
+                let pointee = ty_of(op).builtin_deref(true)?;
+                if matches!(pointee.kind(), ty::Dynamic(..)) {
+                    // An upcast keeps the concrete type of the original pointer.
+                    self.operand(op, depth)
+                } else {
+                    Some(Origin::Pointee(pointee))
+                }
+            }
+            // `&*p`: the same pointee (and metadata) as `p`.
+            mir::Rvalue::Ref(_, _, p) | mir::Rvalue::RawPtr(_, p)
+                if p.projection.as_slice() == [mir::ProjectionElem::Deref] =>
+            {
+                self.local(p.local, depth)
+            }
+            _ => None,
         }
     }
 }
@@ -2218,6 +2899,34 @@ mod tests {
         };
         let costs = vec![Cost::default(), Cost::one(), Cost::one(), Cost::one()];
         assert_eq!(longest_path(&info, &costs).c, B::Fin(2));
+    }
+
+    #[test]
+    fn contract_events_follow_the_mark() {
+        let kinds = |m: &str| -> Vec<String> {
+            let mark = marks::parse_mark(m).expect("mark");
+            contract_events("T::m", &mark)
+                .iter()
+                .map(|e| match e {
+                    Ev::Alloc(_) => "alloc".to_string(),
+                    Ev::Free(_) => "free".to_string(),
+                    Ev::Panic(_) => "panic".to_string(),
+                    Ev::Unknown(_) => "top".to_string(),
+                    Ev::Bound(k, _) => format!("bound {k}"),
+                    Ev::Recurse(_) => "recurse".to_string(),
+                })
+                .collect()
+        };
+        assert_eq!(kinds(r#"kind = "fip""#), vec!["panic"]);
+        assert_eq!(
+            kinds(r#"kind = "fip", n = 2, strict = true, panic_macros = false"#),
+            vec!["bound 2"]
+        );
+        assert_eq!(kinds(r#"kind = "fip", strict = true"#), vec!["panic"]);
+        assert_eq!(
+            kinds(r#"kind = "fbip", strict = true, panic_macros = false"#),
+            vec!["free", "recurse"]
+        );
     }
 
     #[test]

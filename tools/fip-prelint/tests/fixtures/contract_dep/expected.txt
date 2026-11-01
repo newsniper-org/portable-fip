@@ -1,0 +1,4 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+broken/src/lib.rs:18:20: error: fip-prelint: `<Boxed as Area>::area` is #[fip] (contract of `Area::area`) but may allocate 1 time(s), at most 0 allowed: `<Boxed as Area>::area` -> `alloc::boxed::Box::<u32>::new` (broken/src/lib.rs:18) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+note: fip-prelint: dependency `broken`: 2 implementations of trait methods with a contract, 1 passed, 1 errors, 0 warnings

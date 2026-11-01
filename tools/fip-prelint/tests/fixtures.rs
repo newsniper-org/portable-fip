@@ -162,7 +162,13 @@ fn nonmember_export() {
 /// an allocating `fip_fn!` for `param(g = 0)`), and the argument kinds: allocation-free
 /// and allocating closures, a named function, a function pointer (`⊤`), a generic
 /// forwarder instantiated from a root, a root's own `param(h = K)` forwarded, a call
-/// inside a closure.
+/// inside a closure. Function pointers and `&dyn Fn` with a declared bound (limits plan
+/// L4): the call through the parameter costs `K`; a function reified or a closure
+/// unsized at the call site is checked (passes or is reported), a pointer loaded from
+/// data or an undeclared parameter is `⊤` at the call site, a declared one passed on is
+/// checked against its own bound; an argument that frees or recurses under a `fip`
+/// callee is reported, and a `fip` root calling an `fbip` callee inherits the frees and
+/// recursion `fbip` allows its argument.
 #[test]
 fn param_bounds() {
     check("param_bounds");
@@ -198,6 +204,26 @@ fn preconditions() {
 #[test]
 fn cells() {
     check("cells");
+}
+
+/// Function pointers and trait objects (limits plan L4): resolved from one origin on
+/// every path of the body (a reified function or closure, an unsized concrete type),
+/// `⊤` for two origins, data or an unknown receiver; contracts on trait methods: a
+/// dynamic call costs the contract (`n`, panic paths of a non-strict contract), every
+/// implementation is checked in its crate (a default body for each impl keeping it),
+/// one in a crate without `fip::export` is `⊤`, `param(..)` in a contract is
+/// rejected.
+#[test]
+fn indirect() {
+    check("indirect");
+}
+
+/// A dependency declaring `fip::export` (not a workspace member, compiled without
+/// roots) whose implementation breaks a trait method's contract: rejected where it
+/// is compiled (limits plan L4).
+#[test]
+fn contract_dep() {
+    check("contract_dep");
 }
 
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.
