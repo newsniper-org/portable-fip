@@ -237,6 +237,8 @@ fn item_declares(
 /// Parses `src` (a crate root) and decides; `None` if it does not parse.
 pub fn declares_in(src: String, edition: Edition, cfgs: &Cfgs) -> Option<bool> {
     rustc_span::create_session_globals_then(edition, &[], None, || {
+        // `ParseSess` takes an `Arc`; the parser runs on this one thread.
+        #[allow(clippy::arc_with_non_send_sync)]
         let sm = Arc::new(SourceMap::new(FilePathMapping::empty()));
         let psess = ParseSess::with_dcx(DiagCtxt::new(Box::new(SilentEmitter)), sm);
         let mut parser = match rustc_parse::new_parser_from_source_str(

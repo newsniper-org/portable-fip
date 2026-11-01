@@ -3011,7 +3011,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             NodeKind::Body(info) => {
                 let n = info.blocks.len();
                 let mut bcost = vec![Cost::default(); n];
-                for b in 0..n {
+                for (b, cost) in bcost.iter_mut().enumerate() {
                     if !info.reachable[b] {
                         continue;
                     }
@@ -3036,23 +3036,22 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                     span: site.span,
                                     in_loop,
                                 };
-                                bcost[b] = bcost[b].add(&cs.alloc.looped(in_loop));
+                                *cost = cost.add(&cs.alloc.looped(in_loop));
                                 s.merge_events(cs, std::slice::from_ref(&step));
                             }
                             Item::Term(k) => {
-                                bcost[b] = bcost[b].add(&Cost::term(k).looped(in_loop));
+                                *cost = cost.add(&Cost::term(k).looped(in_loop));
                                 s.terms_w
                                     .entry(k.clone())
                                     .or_insert_with(|| local(&format!("call of `{k}`")));
                             }
                             Item::Ev(ev) => {
-                                bcost[b] =
-                                    bcost[b].add(&local_event(&mut s, ev, local).looped(in_loop));
+                                *cost = cost.add(&local_event(&mut s, ev, local).looped(in_loop));
                             }
                             Item::Evs(evs) => {
                                 for ev in evs {
-                                    bcost[b] = bcost[b]
-                                        .add(&local_event(&mut s, ev, local).looped(in_loop));
+                                    *cost =
+                                        cost.add(&local_event(&mut s, ev, local).looped(in_loop));
                                 }
                             }
                             // Flattened by `scan_body`; never stored.

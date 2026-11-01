@@ -242,11 +242,12 @@ compile-fail-reasons:
     uv run --no-project python verify/compile_fail_reasons.py target/compile-fail
 
 # MIR-level checker `fip-prelint` (tools/fip-prelint, a rustc driver on the Verus toolchain
-# with `rustc-dev`): builds the driver, runs the fixture workspaces and the workspace
+# with `rustc-dev`): rustfmt and clippy (`-D warnings`) on the driver, builds it, runs the fixture workspaces and the workspace
 # self-check against `tools/fip-prelint/tests/*.expected`. Report-only run on the
 # workspace: `tools/fip-prelint/target/debug/cargo-fip-prelint --warn-only`.
 prelint:
     cd tools/fip-prelint && cargo +{{prelint_tc}} fmt --check
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} clippy --all-targets -- -D warnings
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test
 
 # Moves `fip-prelint` to another rustc (limits plan L10a): toolchain and components,

@@ -32,6 +32,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+/// A bound and its longest path (labels with frames), or why there is none.
+type Found = Result<(u64, Vec<(String, u64)>), String>;
+
 /// Return address pushed by a call (x86_64).
 pub const RETURN_ADDRESS: u64 = 8;
 const EM_X86_64: u16 = 62;
@@ -442,7 +445,7 @@ impl Build {
 
     /// The bound of the function `sym` and its longest path (labels with frames), or
     /// why there is none.
-    pub fn bound(&self, sym: &str) -> Result<(u64, Vec<(String, u64)>), String> {
+    pub fn bound(&self, sym: &str) -> Found {
         if let Some(u) = self.unreadable.first() {
             return Err(format!("an object of the build could not be read: {u}"));
         }
@@ -452,7 +455,7 @@ impl Build {
                     .to_string(),
             );
         }
-        let mut memo: HashMap<String, Result<(u64, Vec<(String, u64)>), String>> = HashMap::new();
+        let mut memo: HashMap<String, Found> = HashMap::new();
         let mut on_path: Vec<String> = Vec::new();
         self.visit(sym, &mut memo, &mut on_path)
     }
@@ -460,9 +463,9 @@ impl Build {
     fn visit(
         &self,
         sym: &str,
-        memo: &mut HashMap<String, Result<(u64, Vec<(String, u64)>), String>>,
+        memo: &mut HashMap<String, Found>,
         on_path: &mut Vec<String>,
-    ) -> Result<(u64, Vec<(String, u64)>), String> {
+    ) -> Found {
         if let Some(r) = memo.get(sym) {
             return r.clone();
         }
@@ -482,9 +485,9 @@ impl Build {
     fn visit_new(
         &self,
         sym: &str,
-        memo: &mut HashMap<String, Result<(u64, Vec<(String, u64)>), String>>,
+        memo: &mut HashMap<String, Found>,
         on_path: &mut Vec<String>,
-    ) -> Result<(u64, Vec<(String, u64)>), String> {
+    ) -> Found {
         if !self.defined.contains(sym) {
             return Err(format!(
                 "`{}` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)",
