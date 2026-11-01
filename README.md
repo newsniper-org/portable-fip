@@ -40,7 +40,7 @@ each property here has its own mechanism, and the strength differs:
 | property | mechanism | strength |
 |---|---|---|
 | `fip-core` cannot allocate | it does not link `alloc` | by construction |
-| functions do what their spec says | Verus, `--no-cheating`; specs pre-verified against concrete accept/reject cases; 22 functional mutants (plus 1 recursive, 2 surface-gate and 1 spec-drift mutant) and 2 wrong-final-state claims of verified callers must fail | proof (Verus trust base) |
+| functions do what their spec says | Verus, `--no-cheating`; specs pre-verified against concrete accept/reject cases; 32 functional mutants (plus 1 recursive, 2 surface-gate and 1 spec-drift mutant) and 7 wrong claims of verified callers (final states, missing or unpreserved state invariants) must fail | proof (Verus trust base) |
 | no allocation in a `#[fip]` body | `fip-macros` token scan | heuristic: blind to callees, trait methods, macros |
 | no allocation when the code runs | `fip-testkit` counts (per thread, or process-wide) | evidence for the tested inputs |
 | bounded stack, verified crates | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases`; a recursive mutant must fail | proof that the call graph is acyclic (closures passed in excluded) |
@@ -152,13 +152,34 @@ Their postconditions (`map_st_by_post`, `compact_map_st_by_post` in
 ks[k])`, plus everything `compact_map` guarantees). There are no `FnMut` variants:
 Verus 0.2026.10.18 rejects closures that capture a local mutably and, after a
 `FnMut` call, proves the closure unchanged, so such a proof says nothing about the
-state. The trace is an existential (callers `choose` it, `verify/compose_state.rs`),
-not a ghost output: attribute-mode `verus_spec(with -> ..)` generates an
-`external_body` twin of the function, which `--no-cheating` rejects (measured).
+state.
 
-Measured (Verus 0.2026.10.18.7d82994, `--no-cheating`): `fip-strict` 7, `fip-core` 51
-(36 before the state-passing variants), `fip-alloc` 1, `verify/compose.rs` 2,
-`verify/compose_strict.rs` 4, `verify/compose_state.rs` 4 verified.
+- **Named trace.** The postcondition names its witnesses with spec functions,
+  `map_st_by_trace(old, new, f, s0, s)` and `compact_map_st_by_witnesses(..)`
+  (defined with `choose`), so callers use them directly instead of choosing a trace.
+  Not a ghost output: every attribute-mode `verus_spec(with ..)` (ghost inputs,
+  `-> Ghost` outputs, `Tracked<&mut ..>` parameters) generates an `external_body`
+  twin of the function, which `--no-cheating` rejects (measured on both Verus builds
+  below).
+- **State invariants.** `f` need not accept every state: the precondition
+  (`map_st_by_ok`) also holds when the caller proves an invariant
+  `map_st_by_inv(xs, f, s0, inv)`, where `inv(k, s)` means "state `s` before call `k`":
+  it holds on `s0`, `f` accepts `xs[k]` with every state satisfying it before call `k`,
+  and every call preserves it. The postcondition then gives `inv(k, ss[k])` along the
+  trace. `verify/compose_state.rs` numbers a slice of any length below 990 with a step
+  that requires the count below 1000 (invariant `c == 10 + k`); without the invariant
+  the call is rejected.
+- **Strict forms.** `fip_core::strict::*_st` have the same specifications with
+  `FipFn::pre` / `post`. A verified caller passes a named function as a `FipFn` value
+  (`Certified::assume(tick_checked)`, bounded by the function's generated
+  certificate): `fip_fn!` takes only closures, and an attribute-mode closure has no
+  `ensures`, so its `post` would say nothing.
+
+Measured (`--no-cheating`, Verus 0.2026.10.18.7d82994 and Y4's fork
+0.2026.10.31.559ac52, identical counts): `fip-strict` 7, `fip-core` 56 (51 before
+the invariants and named traces, 36 before the state-passing variants), `fip-alloc`
+1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4, `verify/compose_state.rs` 9
+(4 before).
 
 **Pre-verification → implementation → post-verification.** For `dedup_by` and
 `compact_map` the postcondition was first written as a spec predicate
@@ -189,7 +210,7 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 | `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch`, `fip-strict` (only `core`/`alloc` exist there) |
 | `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks |
 | `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected |
-| `verify` | Verus proofs of `fip-strict`, `fip-core` (imports `fip-strict`), `fip-alloc`; `#[fip]` and strict composition with `verus_spec`; verified callers of the state-passing variants (imports `fip-core`); 23 Verus mutants (incl. one recursive), 2 wrong-final-state controls, 2 surface-gate mutants and 1 spec-drift mutant must fail |
+| `verify` | Verus proofs of `fip-strict`, `fip-core` (imports `fip-strict`), `fip-alloc`; `#[fip]` and strict composition with `verus_spec`; verified callers of the state-passing variants (imports `fip-core`); 33 Verus mutants (incl. one recursive), 7 wrong claims of verified callers, 2 surface-gate mutants and 1 spec-drift mutant must fail |
 | `prelint` | `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, bad attributes) and a self-check of this workspace against `selfcheck.expected` |
 | `compile-fail-reasons` | each of the 43 `compile_fail` examples of `fip-macros` (31 of them strict) fails for its stated reason (`# // expect:`), not another error |
 

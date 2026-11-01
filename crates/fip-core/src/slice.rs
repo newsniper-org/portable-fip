@@ -5,7 +5,11 @@
 //! allocated, cloned or dropped.
 
 #[cfg(verus_keep_ghost)]
-use crate::spec::state::{compact_map_st_by_post, map_st_by_post};
+use crate::spec::state::{
+    compact_map_st_by_inv, compact_map_st_by_ok, compact_map_st_by_post,
+    compact_map_st_by_witnesses, map_st_by_inv, map_st_by_ok, map_st_by_post, map_st_by_trace,
+    st_trace_inv,
+};
 #[cfg(verus_keep_ghost)]
 use crate::spec::{
     compact_map_by_post, dedup_by_post, dedup_src_ok, prefix_ok, strictly_increasing_below,
@@ -189,11 +193,18 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
 /// The state is passed by value instead of being captured mutably by an `FnMut`
 /// closure, so Verus can state what the calls did to it.
 ///
-/// Verified (`map_st_by_post` in `spec::state`): there is a state trace `ss` with
-/// `ss[0] == s0` and `ss[len]` the returned state, and call `k` took
-/// `(ss[k], old xs[k])` to `(ss[k + 1], new xs[k])`: `f` was called once per element,
-/// in index order, each time on the state the previous call returned.
-/// `f` must accept every element with any state.
+/// Verified (`spec::state`): the returned state ends the trace
+/// `ss = map_st_by_trace(old xs, new xs, f, s0, state)`, with `ss[0] == s0`, and call
+/// `k` took `(ss[k], old xs[k])` to `(ss[k + 1], new xs[k])` (`map_st_by_post`): `f`
+/// was called once per element, in index order, each time on the state the previous
+/// call returned. Every invariant `inv` of the calls (`map_st_by_inv`) holds along the
+/// trace: `inv(k, ss[k])`.
+///
+/// Precondition (`map_st_by_ok`): `f` accepts every element with any state, or there is
+/// an invariant `inv(k, s)` ("state `s` before call `k`") that holds on `s0`, under
+/// which `f` accepts `old xs[k]`, and which every call preserves. A caller states its
+/// invariant by proving `map_st_by_inv(xs, f, s0, inv)`, e.g. `c == s0 + k` for a
+/// counter that must not overflow.
 ///
 /// # Panics
 ///
@@ -209,10 +220,12 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
-        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.requires((s, old(xs)@[i])),
+        map_st_by_ok(old(xs)@, f, s0),
     ensures
         r.1 == hole,
-        exists|ss: Seq<S>| #[trigger] map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, ss),
+        map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0)),
+        forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv)
+            ==> st_trace_inv(map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
 ))]
 pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S, f: F) -> (S, T) {
     let n = xs.len();
@@ -231,7 +244,8 @@ pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S
             ss[i as int] == s,
             forall|k: int| i <= k < n ==> xs@[k] == old(xs)@[k],
             forall|k: int| 0 <= k < i ==> f.ensures((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
-            forall|s: S, k: int| 0 <= k < n ==> #[trigger] f.requires((s, old(xs)@[k])),
+            map_st_by_ok(old(xs)@, f, s0),
+            forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
         decreases n - i,
     ))]
     while i < n {
@@ -239,7 +253,13 @@ pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S
         let (s1, next) = f(s, prev);
         spare = crate::slot::replace(&mut xs[i], next);
         s = s1;
-        proof! { ss = ss.push(s); }
+        proof_decl! { let ghost pss = ss; }
+        proof! {
+            ss = pss.push(s);
+            assert forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv) implies st_trace_inv(ss, inv) by {
+                crate::spec::state::lemma_st_trace_inv_push(pss, s, inv);
+            };
+        }
         i += 1;
     }
     proof_decl! { let ghost last = s; }
@@ -391,6 +411,9 @@ pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
             #[trigger] compact_map_by_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
+// Own Z3 process: measured, this proof verifies alone and on 7 seeds, but failed when an
+// earlier query of the same module failed (mutants of `map_in_place_st`).
+#[cfg_attr(verus_keep_ghost, verifier::spinoff_prover)]
 pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (usize, T) {
     let len = xs.len();
     let mut spare = hole;
@@ -487,11 +510,15 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
 /// The state is passed by value instead of being captured mutably by an `FnMut`
 /// closure, so Verus can state what the calls did to it.
 ///
-/// Verified (`compact_map_st_by_post` in `spec::state`): everything
-/// [`compact_map`] guarantees, and a state trace `ss` with `ss[0] == s0` and
-/// `ss[len]` the returned state such that call `j` took `(ss[j], old xs[j])` to
-/// `(ss[j + 1], ys[j], ks[j])`, where `ys[j]`, `ks[j]` are the value and keep flag
-/// it returned. `f` must accept every element with any state.
+/// Verified (`spec::state`): everything [`compact_map`] guarantees, with the witnesses
+/// `(ss, ys, ks, idx, pos) = compact_map_st_by_witnesses(old xs, new xs, n, f, s0, state)`
+/// (`compact_map_st_by_post`): `ys[j]`, `ks[j]` are the value and keep flag call `j`
+/// returned, and the state trace `ss` (`ss[0] == s0`, `ss[len]` the returned state)
+/// says call `j` took `(ss[j], old xs[j])` to `(ss[j + 1], ys[j], ks[j])`. Every
+/// invariant `inv` of the calls (`compact_map_st_by_inv`) holds along `ss`.
+///
+/// Precondition (`compact_map_st_by_ok`): as for [`map_in_place_st`], `f` accepts every
+/// element with any state, or with every state an invariant allows before its call.
 ///
 /// # Panics
 ///
@@ -510,13 +537,19 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
-        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.requires((s, old(xs)@[i])),
+        compact_map_st_by_ok(old(xs)@, f, s0),
     ensures
         r.2 == hole,
-        exists|ss: Seq<S>, ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
-            #[trigger] compact_map_st_by_post(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1, ss, ys, ks, idx, pos),
+        ({
+            let (ss, ys, ks, idx, pos) = compact_map_st_by_witnesses(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1);
+            &&& compact_map_st_by_post(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1, ss, ys, ks, idx, pos)
+            &&& forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old(xs)@, f, s0, inv)
+                ==> st_trace_inv(ss, inv)
+        }),
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
+// Own Z3 process, as `compact_map` (measured: failed after a failing `map_in_place_st`).
+#[cfg_attr(verus_keep_ghost, verifier::spinoff_prover)]
 pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
     xs: &mut [T],
     hole: T,
@@ -543,7 +576,8 @@ pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
             xs@.len() == len,
             spare == hole,
             forall|k: int| r <= k < len ==> xs@[k] == old(xs)@[k],
-            forall|s: S, i: int| 0 <= i < len ==> #[trigger] f.requires((s, old(xs)@[i])),
+            compact_map_st_by_ok(old(xs)@, f, s0),
+            forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
             ss.len() == r + 1,
             ss[0] == s0,
             ss[r as int] == s,
@@ -585,6 +619,8 @@ pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
                 }
             };
             assert(ys[r as int] == mapped && ks[r as int] == keep);
+            assert forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old(xs)@, f, s0, inv)
+                implies st_trace_inv(ss, inv) by { crate::spec::state::lemma_st_trace_inv_push(pss, s, inv); };
         }
         if keep {
             if w < r {
@@ -610,13 +646,10 @@ pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
         }
         r += 1;
     }
-    proof! {
-        assert(xs@.subrange(0, len as int) =~= xs@);
-        assert(compact_map_st_by_post(old(xs)@, xs@, w as int, f, s0, s, ss, ys, ks, idx, pos));
-    }
     proof_decl! { let ghost last = s; }
     let res = (w, s, spare);
     proof! {
+        assert(xs@.subrange(0, len as int) =~= xs@);
         assert(res.0 == w && res.1 == last);
         assert(compact_map_st_by_post(old(xs)@, xs@, res.0 as int, f, s0, res.1, ss, ys, ks, idx, pos));
     }

@@ -66,7 +66,8 @@ verify-alloc:
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
 # Strict functions with `FipFn` parameters verify against fip-strict's Verus build.
-# Callers of the state-passing combinators verify against fip-core's Verus build.
+# Callers of the state-passing combinators (incl. a strict one, so with fip-macros)
+# verify against fip-core's Verus build.
 verify-compose: verify-strict verify-core
     #!/usr/bin/env bash
     set -euo pipefail
@@ -77,7 +78,8 @@ verify-compose: verify-strict verify-core
     run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
     run verify/compose.rs
     run verify/compose_strict.rs
-    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating {{verus_strict}} {{verus_core}} verify/compose_state.rs
+    run_state() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$1"; }
+    run_state verify/compose_state.rs
     out=target/verify-compose; mkdir -p "$out"
     sed 's/^#\[fip\]$//; s/^pub fn count/#[fip]\npub fn count/' verify/compose.rs > "$out/below.rs"
     if run "$out/below.rs" 2> "$out/below.err"; then echo "FAIL: #[fip] below verus_spec was accepted"; exit 1; fi
@@ -105,15 +107,22 @@ verify-negative: verify-strict verify-core
     #!/usr/bin/env bash
     set -euo pipefail
     out=target/verify-negative; rm -rf "$out"; mkdir -p "$out"
+    tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
+    cargo +"$tc" build -q -p fip-macros --target-dir target/verus-macros
+    deps=target/verus-macros/debug/deps
+    so=$(ls -t $deps/libfip_macros-*.so | head -1)
     mutate() {  # name, crate dir, file, sed script -> prints mutant dir
       local d="$out/$1"; cp -r "crates/$2" "$d"
       sed -i "$4" "$d/src/$3"
       if cmp -s "crates/$2/src/$3" "$d/src/$3"; then echo "FAIL: mutation $1 did not apply" >&2; exit 1; fi
       echo "$d"
     }
+    # `--multiple-errors 8`: report up to 8 failing checks per function (default 2), so the
+    # regex finds the intended failure even when an earlier check fails too (e.g. a
+    # reversed loop now fails `f`'s indexed precondition before the state chain).
     expect_verus_fail() {  # name, crate, file, sed script, expected log regex
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --multiple-errors 8 "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
       grep -Eq "$5" "$d/log" || { echo "FAIL: mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
@@ -146,16 +155,40 @@ verify-negative: verify-strict verify-core
     expect_verus_fail strict-compact-map-st-not-threaded fip-core strict.rs '/^pub fn compact_map_st</,/^}/ { s/^pub fn compact_map_st<S, /pub fn compact_map_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     # Pre-verified state spec: without the state chain, the rejecting lemmas fail.
     expect_verus_fail spec-st-no-chain fip-core spec.rs '/^    pub open spec fn map_st_post</,/^    }/ s/^        &&& forall|k: int| 0 <= k < old.len() ==> step(.*$/        \&\&\& true/' "$errs"
-    # Verified callers (verify/compose_state.rs): a wrong final state must be rejected.
-    for c in 's/^        r == 13,$/        r == 14,/' 's/^        r == 2,$/        r == 3,/'; do
-      sed "$c" verify/compose_state.rs > "$out/state_wrong.rs"
-      if cmp -s verify/compose_state.rs "$out/state_wrong.rs"; then echo "FAIL: control $c did not apply"; exit 1; fi
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating {{verus_strict}} {{verus_core}} "$out/state_wrong.rs" > "$out/state_wrong.log" 2>&1; then
-        echo "FAIL: wrong final state accepted ($c)"; exit 1
+    # State invariants and named traces (`spec::state`). A weakened invariant spec must
+    # fail the pre-verification lemma that rejects the case it no longer excludes; a trace
+    # chosen for another run must fail the postcondition that names it; an
+    # implementation that stops carrying the invariants must fail `f`'s precondition at
+    # the call.
+    expect_verus_fail spec-st-inv-no-preserve           fip-core spec.rs   '/^    pub open spec fn map_st_by_inv</,/^    }/ s/(s2, y)) ==> inv(k + 1, s2)$/(s2, y)) ==> true/' '!map_st_by_inv\(seq!\[0u8, 0u8, 0u8\], f, 10u8, \|k: int, c: u8\| c < 13\)'
+    expect_verus_fail spec-st-fip-inv-no-start          fip-core spec.rs   '/^    pub open spec fn map_st_fip_inv</,/^    }/ s/^        &&& inv(0, s0)$/        \&\&\& true/' 'assert\(inv\(3, 13u8\)\)'
+    expect_verus_fail spec-compact-st-inv-no-require    fip-core spec.rs   '/^    pub open spec fn compact_map_st_by_inv</,/^    }/ s/==> #\[trigger\] f.requires((s, old\[k\]))$/==> #[trigger] f.requires((s, old[k])) || true/' '!compact_map_st_by_inv\(old4, f, 10u8, inv\)'
+    expect_verus_fail spec-compact-st-fip-inv-no-preserve fip-core spec.rs '/^    pub open spec fn compact_map_st_fip_inv</,/^    }/ s/(s2, y, b)) ==> inv(k + 1, s2)$/(s2, y, b)) ==> true/' '!compact_map_st_fip_inv\(seq!\[1u8, 2u8, 3u8\], c, 10u8, \|k: int, c: u8\| c < 13\)'
+    expect_verus_fail spec-st-ok-vacuous                fip-core spec.rs   '/^    pub open spec fn map_st_by_ok</,/^    }/ s/#\[trigger\] map_st_by_inv(old, f, s0, inv)$/#[trigger] map_st_by_inv(old, f, s0, inv) || true/' '!map_st_by_ok\(seq!\[0u8, 0u8, 0u8, 0u8\], f, 10u8\)'
+    expect_verus_fail spec-st-trace-inv-drops-last      fip-core spec.rs   '/^    pub open spec fn st_trace_inv</,/^    }/ s/0 <= k < ss.len() ==>/0 <= k < ss.len() - 1 ==>/' '!st_trace_inv\(seq!\[10u8, 11u8, 12u8, 14u8\]'
+    expect_verus_fail spec-st-trace-other-run           fip-core spec.rs   '/^    pub open spec fn map_st_by_trace</,/^    }/ s/map_st_by_post(old, new, f, s0, s, ss)$/map_st_by_post(old, old, f, s0, s, ss)/' 'map_st_by_post\(old\(xs\)@, final\(xs\)@, f, s0, r.0, map_st_by_trace'
+    expect_verus_fail spec-compact-st-fip-witnesses-other-run fip-core spec.rs '/^    pub open spec fn compact_map_st_fip_witnesses</,/^    }/ s/compact_map_st_fip_post(old, new, w, f, s0, s, ss, ys, ks, idx, pos)$/compact_map_st_fip_post(old, old, w, f, s0, s, ss, ys, ks, idx, pos)/' 'compact_map_st_fip_witnesses\(old\(xs\)@, final\(xs\)@'
+    expect_verus_fail map-st-inv-not-carried            fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { /^            forall|inv: spec_fn(int, S) -> bool| #\[trigger\] map_st_by_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),$/d }' 'let \(s1, next\) = f\(s, prev\);'
+    expect_verus_fail strict-compact-map-st-inv-not-carried fip-core strict.rs '/^pub fn compact_map_st</,/^}/ { /^            forall|inv: spec_fn(int, S) -> bool| #\[trigger\] compact_map_st_fip_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),$/d }' 'let \(s1, mapped, keep\) = f\.call\(\(s, item\)\);'
+    # Verified callers (verify/compose_state.rs): wrong final claims, a missing
+    # invariant and an invariant the step does not preserve must be rejected.
+    state_fail() {  # name, sed script, expected log regex
+      local f="$out/state_$1.rs"
+      sed "$2" verify/compose_state.rs > "$f"
+      if cmp -s verify/compose_state.rs "$f"; then echo "FAIL: control $1 did not apply"; exit 1; fi
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$f" > "$out/state_$1.log" 2>&1; then
+        echo "FAIL: control $1 verified"; exit 1
       fi
-      grep -q "postcondition not satisfied" "$out/state_wrong.log" || { echo "FAIL: control $c failed for another reason"; cat "$out/state_wrong.log"; exit 1; }
-      echo "control $c rejected by Verus"
-    done
+      grep -Eq "$3" "$out/state_$1.log" || { echo "FAIL: control $1 failed for another reason"; cat "$out/state_$1.log"; exit 1; }
+      echo "control $1 rejected by Verus"
+    }
+    state_fail wrong-final-map      's/^        r == 13,$/        r == 14,/' 'postcondition not satisfied'
+    state_fail wrong-final-compact  's/^        r == 2,$/        r == 3,/' 'postcondition not satisfied'
+    state_fail inv-missing          '/^pub fn number_from_11(/,/^}/ { /^    proof! { assert(map_st_by_inv(/d }' 'precondition not satisfied'
+    state_fail inv-not-preserved    '/^pub fn number_from_11(/,/^}/ s/|k: int, c: u32| c == 10 + k)); }$/|k: int, c: u32| c < 1000)); }/' 'c: u32\| c < 1000\)\); \}'
+    state_fail strict-inv-missing   '/^pub fn number_from_11_strict(/,/^}/ { /^    proof! { assert(map_st_fip_inv(/d }' 'precondition not satisfied'
+    state_fail strict-wrong-final   '/^\/\/\/ `number_from_11` through/,/^}/ s/^        r == 10 + old(xs)@.len(),$/        r == 11 + old(xs)@.len(),/' 'postcondition not satisfied'
+    state_fail keep-odd-inv-missing '/^pub fn keep_odd(/,/^}/ { /^    proof! { assert(compact_map_st_by_inv(/d }' 'precondition not satisfied'
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.

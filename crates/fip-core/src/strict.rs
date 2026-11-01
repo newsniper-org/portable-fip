@@ -11,8 +11,9 @@
 //! of a closure's `requires` / `ensures`; `compact`, `dedup_by` and `compact_map` use
 //! the pre-verified predicates `compact_fip_post`, `dedup_fip_post` and
 //! `compact_map_fip_post` (`spec.rs`), and `map_in_place_st` / `compact_map_st` use
-//! `map_st_fip_post` / `compact_map_st_fip_post` (`spec::state`). Verified with
-//! `--no-cheating`.
+//! `map_st_fip_post` / `compact_map_st_fip_post`, their invariants `map_st_fip_inv` /
+//! `compact_map_st_fip_inv` and the named traces `map_st_fip_trace` /
+//! `compact_map_st_fip_witnesses` (`spec::state`). Verified with `--no-cheating`.
 //!
 //! The strict check runs in plain builds only (`cfg_attr(not(verus_keep_ghost))`);
 //! under `verus` the bodies are verified as written.
@@ -32,7 +33,11 @@
 use fip_strict::FipFn;
 
 #[cfg(verus_keep_ghost)]
-use crate::spec::state::{compact_map_st_fip_post, map_st_fip_post};
+use crate::spec::state::{
+    compact_map_st_fip_inv, compact_map_st_fip_ok, compact_map_st_fip_post,
+    compact_map_st_fip_witnesses, map_st_fip_inv, map_st_fip_ok, map_st_fip_post, map_st_fip_trace,
+    st_trace_inv,
+};
 #[cfg(verus_keep_ghost)]
 use crate::spec::{
     compact_fip_post, compact_map_fip_post, dedup_fip_post, dedup_src_ok, prefix_ok,
@@ -113,7 +118,9 @@ pub fn map_in_place<T, F: FipFn<(T,), Output = T>>(xs: &mut [T], hole: T, f: F) 
 /// `s` through the calls in index order, and returns the final state and `hole`.
 /// Strict variant of [`crate::map_in_place_st`].
 ///
-/// Verified (`map_st_fip_post`).
+/// Verified: as [`crate::map_in_place_st`], with `FipFn::pre` / `FipFn::post` in place of
+/// `requires` / `ensures` (`map_st_fip_ok`, `map_st_fip_post`, `map_st_fip_trace`,
+/// `map_st_fip_inv`).
 ///
 /// # Panics
 ///
@@ -128,10 +135,12 @@ pub fn map_in_place<T, F: FipFn<(T,), Output = T>>(xs: &mut [T], hole: T, f: F) 
 #[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true, param(f = 0)))]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
-        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.pre((s, old(xs)@[i])),
+        map_st_fip_ok(old(xs)@, f, s0),
     ensures
         r.1 == hole,
-        exists|ss: Seq<S>| #[trigger] map_st_fip_post(old(xs)@, final(xs)@, f, s0, r.0, ss),
+        map_st_fip_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0)),
+        forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv)
+            ==> st_trace_inv(map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
 ))]
 pub fn map_in_place_st<S, T, F: FipFn<(S, T), Output = (S, T)>>(
     xs: &mut [T],
@@ -155,7 +164,8 @@ pub fn map_in_place_st<S, T, F: FipFn<(S, T), Output = (S, T)>>(
             ss[i as int] == s,
             forall|k: int| i <= k < n ==> xs@[k] == old(xs)@[k],
             forall|k: int| 0 <= k < i ==> f.post((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
-            forall|s: S, k: int| 0 <= k < n ==> #[trigger] f.pre((s, old(xs)@[k])),
+            map_st_fip_ok(old(xs)@, f, s0),
+            forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
         decreases n - i,
     ))]
     while i < n {
@@ -163,7 +173,13 @@ pub fn map_in_place_st<S, T, F: FipFn<(S, T), Output = (S, T)>>(
         let (s1, next) = f.call((s, prev));
         spare = crate::slot::replace(&mut xs[i], next);
         s = s1;
-        proof! { ss = ss.push(s); }
+        proof_decl! { let ghost pss = ss; }
+        proof! {
+            ss = pss.push(s);
+            assert forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv) implies st_trace_inv(ss, inv) by {
+                crate::spec::state::lemma_st_trace_inv_push(pss, s, inv);
+            };
+        }
         i += 1;
     }
     proof_decl! { let ghost last = s; }
@@ -457,7 +473,9 @@ pub fn compact_map<T, F: FipFn<(T,), Output = (T, bool)>>(
 /// original order. Returns how many are kept, the final state, and `hole`. Strict
 /// variant of [`crate::compact_map_st`].
 ///
-/// Verified (`compact_map_st_fip_post`).
+/// Verified: as [`crate::compact_map_st`], with `FipFn::pre` / `FipFn::post` in place
+/// of `requires` / `ensures` (`compact_map_st_fip_ok`, `compact_map_st_fip_post`,
+/// `compact_map_st_fip_witnesses`, `compact_map_st_fip_inv`).
 ///
 /// # Panics
 ///
@@ -474,11 +492,15 @@ pub fn compact_map<T, F: FipFn<(T,), Output = (T, bool)>>(
 #[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true, param(f = 0)))]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
-        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.pre((s, old(xs)@[i])),
+        compact_map_st_fip_ok(old(xs)@, f, s0),
     ensures
         r.2 == hole,
-        exists|ss: Seq<S>, ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
-            #[trigger] compact_map_st_fip_post(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1, ss, ys, ks, idx, pos),
+        ({
+            let (ss, ys, ks, idx, pos) = compact_map_st_fip_witnesses(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1);
+            &&& compact_map_st_fip_post(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1, ss, ys, ks, idx, pos)
+            &&& forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old(xs)@, f, s0, inv)
+                ==> st_trace_inv(ss, inv)
+        }),
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
 pub fn compact_map_st<S, T, F: FipFn<(S, T), Output = (S, T, bool)>>(
@@ -507,7 +529,8 @@ pub fn compact_map_st<S, T, F: FipFn<(S, T), Output = (S, T, bool)>>(
             xs@.len() == len,
             spare == hole,
             forall|k: int| r <= k < len ==> xs@[k] == old(xs)@[k],
-            forall|s: S, i: int| 0 <= i < len ==> #[trigger] f.pre((s, old(xs)@[i])),
+            compact_map_st_fip_ok(old(xs)@, f, s0),
+            forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
             ss.len() == r + 1,
             ss[0] == s0,
             ss[r as int] == s,
@@ -549,6 +572,8 @@ pub fn compact_map_st<S, T, F: FipFn<(S, T), Output = (S, T, bool)>>(
                 }
             };
             assert(ys[r as int] == mapped && ks[r as int] == keep);
+            assert forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old(xs)@, f, s0, inv)
+                implies st_trace_inv(ss, inv) by { crate::spec::state::lemma_st_trace_inv_push(pss, s, inv); };
         }
         if keep {
             if w < r {
@@ -574,13 +599,10 @@ pub fn compact_map_st<S, T, F: FipFn<(S, T), Output = (S, T, bool)>>(
         }
         r += 1;
     }
-    proof! {
-        assert(xs@.subrange(0, len as int) =~= xs@);
-        assert(compact_map_st_fip_post(old(xs)@, xs@, w as int, f, s0, s, ss, ys, ks, idx, pos));
-    }
     proof_decl! { let ghost last = s; }
     let res = (w, s, spare);
     proof! {
+        assert(xs@.subrange(0, len as int) =~= xs@);
         assert(res.0 == w && res.1 == last);
         assert(compact_map_st_fip_post(old(xs)@, xs@, res.0 as int, f, s0, res.1, ss, ys, ks, idx, pos));
     }

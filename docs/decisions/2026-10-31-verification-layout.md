@@ -102,13 +102,57 @@ Two findings constrain how the specs are written:
   unverified callers marked `external_body` with `requires false`
   (`builtin_macros/src/attr_rewrite.rs`, `rewrite_unverified_func`), and
   `--no-cheating` rejects every `external_body` outside `vstd`
-  (`vir/src/well_formed.rs`). The trace is therefore existential, in named `*_post`
-  predicates triggered on the elements, and callers `choose` it.
+  (`vir/src/well_formed.rs`). The trace was therefore existential, in named `*_post`
+  predicates triggered on the elements, and callers `choose` it (superseded by the
+  named traces below).
 - **Per-module SMT context.** Verus gives each module's queries all of that module's
   definitions. With the new predicates added to `spec`, Z3 failed the existing
   `lemma_compact_map_spec_rejects_extra` deterministically (5 seeds); each wrapper
   alone did not. The new predicates live in the submodule `spec::state`, which leaves
   the context of `spec` as it was.
+
+## Measured (2026-11-01, state invariants and named traces)
+
+Two open points of the state-passing variants: `f` had to accept every element with
+any state, and callers had to `choose` the trace. Both Verus builds, `--no-cheating`:
+upstream 0.2026.10.18.7d82994 and Y4's fork 0.2026.10.31.559ac52
+(`VERUS=$HOME/Y4/verus-fork/source/target-verus/release/verus VERUS_Z3_PATH=/usr/bin/z3
+just verify`), identical results: `fip-strict` 7, `fip-core` 56 (51 before),
+`fip-alloc` 1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4,
+`verify/compose_state.rs` 9 (4 before) verified; `fip-core` also verifies with
+`smt.random_seed` 1–7 on both. 33 Verus mutants (23 before) and 7 wrong claims of
+verified callers (2 before) are rejected for their stated reason.
+
+Encodings tried (probes outside the repository on both builds, except where marked):
+
+| open point | encoding | result |
+|---|---|---|
+| invariant | ghost parameter `verus_spec(with Ghost(inv): Ghost<Inv>, ..)` | verifies without `--no-cheating`; rejected with it on both builds (`external_body/assume_specification not allowed with --no-cheating`): any `with` clause makes the macro emit the twin (`rewrite_verus_spec_on_fun_or_loop`, same code in `/opt/verus` and the fork) |
+| invariant | trait `StInv<S>` with `spec fn inv(&self, k: int, s: S)`, passed as a value, with a `NoInv` default | verifies on both builds (probe, 4 verified). Not adopted: functions cannot have default type parameters, so it needs new functions, and the trait and every caller's invariant type must be declared twice (plain and `verus!`), as `FipFn` is |
+| invariant | precondition over reachable states (`reachable(k, s) ==> f.requires(..)`) | not measured. As strong as the adopted form with `inv = reachable`, but each caller has to prove reachability by induction (a recursive lemma) |
+| invariant | **adopted:** `requires map_st_by_ok(xs, f, s0)`: `f` accepts any state, or some `inv` satisfies `map_st_by_inv` (holds on `s0`; `f` accepts `xs[k]` with every state satisfying `inv(k, _)`; every call preserves it); `ensures`: every such `inv` holds along the trace | verifies on both builds; signatures unchanged; callers whose `f` has no precondition prove the first case as before; a caller states its invariant by proving `map_st_by_inv` for a concrete `inv` |
+| trace | `with -> trace: Ghost<..>`, `with Tracked(out): Tracked<&mut Ghost<..>>` | rejected under `--no-cheating` on both builds (same twin) |
+| trace | ghost field of the result type | not measured: the results are tuples; a struct would change the plain-build signature |
+| trace | **adopted:** spec fn `map_st_by_trace(old, new, f, s0, s)` = `choose` of a trace satisfying the postcondition along which every invariant holds; the `ensures` states the postcondition for it (`compact_map_st_by_witnesses` returns `(ss, ys, ks, idx, pos)`) | verifies on both builds; callers bind it with `let`, no `choose` and no lemma call |
+| strict caller | `fip_fn!(\|c: u32, x: u32\| tick_checked(c, x))` in place of the `Certified` value below | rejected (upstream): the closure has no `requires`, so its call of `tick_checked` fails "precondition not satisfied", and `map_st_fip_inv` is unprovable because the closure's `requires` / `ensures` are unspecified. `fip_fn!` accepts only `\|args\| body`, so no spec can be attached |
+| strict caller | **adopted:** `unsafe { Certified::<{ __fip_strict_tick_checked.allocs_for("tick_checked") }, _>::assume(tick_checked) }` in `verify/compose_state.rs` | verifies on both builds; `pre` / `post` are the named function's `requires` / `ensures`; the bound is its generated certificate. `verify/` is outside every crate's `src`, so the certificate gate does not see it |
+
+Findings:
+
+- **`spec_fn` applications are not triggers.** A quantifier whose only candidate was
+  `inv(k, s)` failed with "Could not automatically infer triggers". The invariant
+  quantifiers trigger on `f.requires` / `f.ensures` (`pre` / `post`) and `ss[k]`.
+- **Z3 session state.** With the new definitions, `compact_map`'s and
+  `compact_map_st`'s proofs verified alone and on 7 seeds but failed whenever an
+  earlier query of module `slice` had failed (mutants of `map_in_place_st`);
+  `verifier::spinoff_prover` gives each its own Z3 process, after which those mutants
+  fail only where intended.
+- **Error budget of mutants.** A reversed `map_in_place_st` loop now first fails
+  `f`'s indexed precondition; with Verus's default of 2 extra errors per function
+  the state-chain invariant was not reported. Mutants run with `--multiple-errors 8`.
+
+Still open: `fip_fn!` cannot wrap a closure with Verus `ensures`, so a strict verified
+caller passes a named function through `Certified::assume` by hand.
 
 ## Gaps this layout creates, and how they are closed
 

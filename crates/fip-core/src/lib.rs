@@ -51,7 +51,10 @@
 //! captured state (after the call it proves the closure unchanged) and rejects
 //! closures capturing a local mutably, so an `FnMut` variant's proof would say nothing
 //! about the state. Passed by value, every intermediate state is named in the
-//! postcondition (`spec::state`).
+//! postcondition (`spec::state`): the trace is a spec function of the call
+//! (`map_st_by_trace`, `compact_map_st_by_witnesses`), and `f` need only accept the
+//! states a caller-chosen invariant `inv(k, s)` allows before call `k`
+//! (`map_st_by_inv`), which then holds along the trace.
 //!
 //! ## Panics
 //!

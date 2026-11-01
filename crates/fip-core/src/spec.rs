@@ -737,5 +737,322 @@ pub mod state {
         lemma_compact_map_st_spec_rejects_wrong_final(new, w, ss, ys, ks, idx, pos);
     }
 
+    // ---- Caller-chosen state invariants, and the trace as a spec function. Written and
+    // pre-verified (lemmas below) before the functions used them.
+    //
+    // `inv(k, s)` reads "state `s` before call `k`": an invariant may depend on the
+    // index, so a counter `c == s0 + k` stays bounded on a bounded slice. Applications
+    // of a `spec_fn` cannot be triggers (measured: Verus cannot infer a trigger for a
+    // quantifier whose only candidate is `inv(k, s)`), so the quantifiers trigger on the
+    // callable's `requires` / `ensures` (`pre` / `post`) and on trace indexing.
+
+    /// `inv` holds along the trace `ss`: `inv(k, ss[k])` for every `k`.
+    pub open spec fn st_trace_inv<S>(ss: Seq<S>, inv: spec_fn(int, S) -> bool) -> bool {
+        forall|k: int| 0 <= k < ss.len() ==> inv(k, #[trigger] ss[k])
+    }
+
+    /// Pre-verification: `c == 10 + k` holds along `[10, 11, 12, 13]`, not along
+    /// `[10, 11, 12, 14]` (the last state counts).
+    pub proof fn lemma_st_trace_inv_spec()
+        ensures
+            st_trace_inv(seq![10u8, 11u8, 12u8, 13u8], |k: int, c: u8| c == 10 + k),
+            !st_trace_inv(seq![10u8, 11u8, 12u8, 14u8], |k: int, c: u8| c == 10 + k),
+    {
+        let good = seq![10u8, 11u8, 12u8, 13u8];
+        let bad = seq![10u8, 11u8, 12u8, 14u8];
+        assert(good[0] == 10 && good[1] == 11 && good[2] == 12 && good[3] == 13);
+        assert(bad[3] == 14);
+    }
+
+    /// Extending a trace by a state that satisfies `inv` at the next index keeps
+    /// `st_trace_inv` (the loop step of the state-passing functions).
+    pub proof fn lemma_st_trace_inv_push<S>(ss: Seq<S>, s: S, inv: spec_fn(int, S) -> bool)
+        requires
+            st_trace_inv(ss, inv),
+            inv(ss.len() as int, s),
+        ensures
+            st_trace_inv(ss.push(s), inv),
+    {
+        assert forall|k: int| 0 <= k < ss.len() + 1 implies inv(k, #[trigger] ss.push(s)[k]) by {
+            if k < ss.len() {
+                assert(ss.push(s)[k] == ss[k]);
+            }
+        };
+    }
+
+    /// `inv` is an invariant of `map_in_place_st`'s calls of `f` on `old` from `s0`: it
+    /// holds on `s0` before call 0; `f` accepts element `old[k]` with every state that
+    /// satisfies it before call `k`; and every state call `k` may return from such a
+    /// state satisfies it before call `k + 1`.
+    pub open spec fn map_st_by_inv<S, A, F: Fn(S, A) -> (S, A)>(
+        old: Seq<A>,
+        f: F,
+        s0: S,
+        inv: spec_fn(int, S) -> bool,
+    ) -> bool {
+        &&& inv(0, s0)
+        &&& forall|k: int, s: S| 0 <= k < old.len() && inv(k, s) ==> #[trigger] f.requires((s, old[k]))
+        &&& forall|k: int, s: S, s2: S, y: A|
+            0 <= k < old.len() && inv(k, s) && #[trigger] f.ensures((s, old[k]), (s2, y)) ==> inv(k + 1, s2)
+    }
+
+    /// Precondition of `map_in_place_st`: `f` accepts every element with any state, or
+    /// some invariant (`map_st_by_inv`) makes it accept each element with the state it
+    /// is called with. The first case is the second with `inv` always true, kept so that
+    /// callers whose `f` has no precondition need no proof.
+    pub open spec fn map_st_by_ok<S, A, F: Fn(S, A) -> (S, A)>(old: Seq<A>, f: F, s0: S) -> bool {
+        ||| forall|s: S, i: int| 0 <= i < old.len() ==> #[trigger] f.requires((s, old[i]))
+        ||| exists|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old, f, s0, inv)
+    }
+
+    /// The state trace of `map_in_place_st` from `old` to `new`, `s0` to `s`: one trace
+    /// satisfying `map_st_by_post` along which every invariant holds. Its postcondition
+    /// names this trace, so callers use it without a `choose`.
+    pub open spec fn map_st_by_trace<S, A, F: Fn(S, A) -> (S, A)>(
+        old: Seq<A>,
+        new: Seq<A>,
+        f: F,
+        s0: S,
+        s: S,
+    ) -> Seq<S> {
+        choose|ss: Seq<S>| #[trigger] map_st_by_post(old, new, f, s0, s, ss)
+            && forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old, f, s0, inv) ==> st_trace_inv(ss, inv)
+    }
+
+    /// `map_st_by_inv` for a `FipFn` function (`pre` / `post`).
+    pub open spec fn map_st_fip_inv<S, A, F: FipFn<(S, A), Output = (S, A)>>(
+        old: Seq<A>,
+        f: F,
+        s0: S,
+        inv: spec_fn(int, S) -> bool,
+    ) -> bool {
+        &&& inv(0, s0)
+        &&& forall|k: int, s: S| 0 <= k < old.len() && inv(k, s) ==> #[trigger] f.pre((s, old[k]))
+        &&& forall|k: int, s: S, s2: S, y: A|
+            0 <= k < old.len() && inv(k, s) && #[trigger] f.post((s, old[k]), (s2, y)) ==> inv(k + 1, s2)
+    }
+
+    /// `map_st_by_ok` for a `FipFn` function.
+    pub open spec fn map_st_fip_ok<S, A, F: FipFn<(S, A), Output = (S, A)>>(old: Seq<A>, f: F, s0: S) -> bool {
+        ||| forall|s: S, i: int| 0 <= i < old.len() ==> #[trigger] f.pre((s, old[i]))
+        ||| exists|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old, f, s0, inv)
+    }
+
+    /// `map_st_by_trace` for a `FipFn` function.
+    pub open spec fn map_st_fip_trace<S, A, F: FipFn<(S, A), Output = (S, A)>>(
+        old: Seq<A>,
+        new: Seq<A>,
+        f: F,
+        s0: S,
+        s: S,
+    ) -> Seq<S> {
+        choose|ss: Seq<S>| #[trigger] map_st_fip_post(old, new, f, s0, s, ss)
+            && forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old, f, s0, inv) ==> st_trace_inv(ss, inv)
+    }
+
+    /// `map_st_by_inv` for `compact_map_st` (calls return a keep flag too).
+    pub open spec fn compact_map_st_by_inv<S, A, F: Fn(S, A) -> (S, A, bool)>(
+        old: Seq<A>,
+        f: F,
+        s0: S,
+        inv: spec_fn(int, S) -> bool,
+    ) -> bool {
+        &&& inv(0, s0)
+        &&& forall|k: int, s: S| 0 <= k < old.len() && inv(k, s) ==> #[trigger] f.requires((s, old[k]))
+        &&& forall|k: int, s: S, s2: S, y: A, b: bool|
+            0 <= k < old.len() && inv(k, s) && #[trigger] f.ensures((s, old[k]), (s2, y, b)) ==> inv(k + 1, s2)
+    }
+
+    /// Precondition of `compact_map_st` (as `map_st_by_ok`).
+    pub open spec fn compact_map_st_by_ok<S, A, F: Fn(S, A) -> (S, A, bool)>(old: Seq<A>, f: F, s0: S) -> bool {
+        ||| forall|s: S, i: int| 0 <= i < old.len() ==> #[trigger] f.requires((s, old[i]))
+        ||| exists|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old, f, s0, inv)
+    }
+
+    /// The witnesses `(ss, ys, ks, idx, pos)` of `compact_map_st` from `old` to `new`
+    /// with result `w`, `s0` to `s`: one tuple satisfying `compact_map_st_by_post`, with
+    /// every invariant holding along `ss`. Its postcondition names these witnesses.
+    pub open spec fn compact_map_st_by_witnesses<S, A, F: Fn(S, A) -> (S, A, bool)>(
+        old: Seq<A>,
+        new: Seq<A>,
+        w: int,
+        f: F,
+        s0: S,
+        s: S,
+    ) -> (Seq<S>, Seq<A>, Seq<bool>, Seq<int>, Seq<int>) {
+        choose|ss: Seq<S>, ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
+            #[trigger] compact_map_st_by_post(old, new, w, f, s0, s, ss, ys, ks, idx, pos)
+            && forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old, f, s0, inv) ==> st_trace_inv(ss, inv)
+    }
+
+    /// `compact_map_st_by_inv` for a `FipFn` function.
+    pub open spec fn compact_map_st_fip_inv<S, A, F: FipFn<(S, A), Output = (S, A, bool)>>(
+        old: Seq<A>,
+        f: F,
+        s0: S,
+        inv: spec_fn(int, S) -> bool,
+    ) -> bool {
+        &&& inv(0, s0)
+        &&& forall|k: int, s: S| 0 <= k < old.len() && inv(k, s) ==> #[trigger] f.pre((s, old[k]))
+        &&& forall|k: int, s: S, s2: S, y: A, b: bool|
+            0 <= k < old.len() && inv(k, s) && #[trigger] f.post((s, old[k]), (s2, y, b)) ==> inv(k + 1, s2)
+    }
+
+    /// `compact_map_st_by_ok` for a `FipFn` function.
+    pub open spec fn compact_map_st_fip_ok<S, A, F: FipFn<(S, A), Output = (S, A, bool)>>(old: Seq<A>, f: F, s0: S) -> bool {
+        ||| forall|s: S, i: int| 0 <= i < old.len() ==> #[trigger] f.pre((s, old[i]))
+        ||| exists|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old, f, s0, inv)
+    }
+
+    /// `compact_map_st_by_witnesses` for a `FipFn` function.
+    pub open spec fn compact_map_st_fip_witnesses<S, A, F: FipFn<(S, A), Output = (S, A, bool)>>(
+        old: Seq<A>,
+        new: Seq<A>,
+        w: int,
+        f: F,
+        s0: S,
+        s: S,
+    ) -> (Seq<S>, Seq<A>, Seq<bool>, Seq<int>, Seq<int>) {
+        choose|ss: Seq<S>, ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
+            #[trigger] compact_map_st_fip_post(old, new, w, f, s0, s, ss, ys, ks, idx, pos)
+            && forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old, f, s0, inv) ==> st_trace_inv(ss, inv)
+    }
+
+    /// Pre-verification of the invariant specs on `count_up` restricted to states below
+    /// 13, over three elements from state 10:
+    /// - `c == 10 + k` is an invariant (the count before call `k` is at most 12);
+    /// - `c < 13` is not (call 2 may return 13), nor is `c == 10 + k` from state 11;
+    /// - three elements from 10 meet the precondition, four do not (call 3 would see 13).
+    pub proof fn lemma_map_st_inv_spec<F: Fn(u8, u8) -> (u8, u8)>(f: F)
+        requires
+            forall|a: u8, x: u8| #[trigger] f.requires((a, x)) == (a < 13),
+            forall|a: u8, x: u8, b: u8, y: u8| #[trigger] f.ensures((a, x), (b, y)) == count_up(a, x, b, y),
+        ensures
+            map_st_by_inv(seq![0u8, 0u8, 0u8], f, 10u8, |k: int, c: u8| c == 10 + k),
+            !map_st_by_inv(seq![0u8, 0u8, 0u8], f, 10u8, |k: int, c: u8| c < 13),
+            !map_st_by_inv(seq![0u8, 0u8, 0u8], f, 11u8, |k: int, c: u8| c == 10 + k),
+            map_st_by_ok(seq![0u8, 0u8, 0u8], f, 10u8),
+            !map_st_by_ok(seq![0u8, 0u8, 0u8, 0u8], f, 10u8),
+    {
+        let old = seq![0u8, 0u8, 0u8];
+        let old4 = seq![0u8, 0u8, 0u8, 0u8];
+        assert(old[0] == 0 && old[1] == 0 && old[2] == 0);
+        assert(old4[0] == 0 && old4[1] == 0 && old4[2] == 0 && old4[3] == 0);
+        assert(map_st_by_inv(old, f, 10u8, |k: int, c: u8| c == 10 + k));
+        if map_st_by_inv(old, f, 10u8, |k: int, c: u8| c < 13) {
+            assert(count_up(12u8, old[2], 13u8, 13u8));
+            assert(f.ensures((12u8, old[2]), (13u8, 13u8)));
+        }
+        assert(!f.requires((13u8, old4[3])));
+        assert forall|inv: spec_fn(int, u8) -> bool| !map_st_by_inv(old4, f, 10u8, inv) by {
+            if map_st_by_inv(old4, f, 10u8, inv) {
+                assert(count_up(10u8, old4[0], 11u8, 11u8) && count_up(11u8, old4[1], 12u8, 12u8));
+                assert(count_up(12u8, old4[2], 13u8, 13u8));
+                assert(f.ensures((10u8, old4[0]), (11u8, 11u8)));
+                assert(f.ensures((11u8, old4[1]), (12u8, 12u8)));
+                assert(f.ensures((12u8, old4[2]), (13u8, 13u8)));
+                assert(inv(3, 13u8));
+            }
+        };
+    }
+
+    /// Same for `compact_map_st_by_inv` with `count_up_keep_odd` below 13, over `[1, 2, 3]`.
+    pub proof fn lemma_compact_map_st_inv_spec<F: Fn(u8, u8) -> (u8, u8, bool)>(f: F)
+        requires
+            forall|a: u8, x: u8| #[trigger] f.requires((a, x)) == (a < 13),
+            forall|a: u8, x: u8, b: u8, y: u8, k: bool| #[trigger] f.ensures((a, x), (b, y, k)) == count_up_keep_odd(a, x, b, y, k),
+        ensures
+            compact_map_st_by_inv(seq![1u8, 2u8, 3u8], f, 10u8, |k: int, c: u8| c == 10 + k),
+            !compact_map_st_by_inv(seq![1u8, 2u8, 3u8], f, 10u8, |k: int, c: u8| c < 13),
+            compact_map_st_by_ok(seq![1u8, 2u8, 3u8], f, 10u8),
+            !compact_map_st_by_ok(seq![1u8, 2u8, 3u8, 4u8], f, 10u8),
+    {
+        let old = seq![1u8, 2u8, 3u8];
+        let old4 = seq![1u8, 2u8, 3u8, 4u8];
+        assert(old[0] == 1 && old[1] == 2 && old[2] == 3);
+        assert(old4[0] == 1 && old4[1] == 2 && old4[2] == 3 && old4[3] == 4);
+        assert(compact_map_st_by_inv(old, f, 10u8, |k: int, c: u8| c == 10 + k));
+        if compact_map_st_by_inv(old, f, 10u8, |k: int, c: u8| c < 13) {
+            assert(count_up_keep_odd(12u8, old[2], 13u8, 16u8, true));
+            assert(f.ensures((12u8, old[2]), (13u8, 16u8, true)));
+        }
+        assert(!f.requires((13u8, old4[3])));
+        assert forall|inv: spec_fn(int, u8) -> bool| !compact_map_st_by_inv(old4, f, 10u8, inv) by {
+            if compact_map_st_by_inv(old4, f, 10u8, inv) {
+                assert(count_up_keep_odd(10u8, old4[0], 11u8, 12u8, true));
+                assert(count_up_keep_odd(11u8, old4[1], 12u8, 14u8, false));
+                assert(count_up_keep_odd(12u8, old4[2], 13u8, 16u8, true));
+                assert(f.ensures((10u8, old4[0]), (11u8, 12u8, true)));
+                assert(f.ensures((11u8, old4[1]), (12u8, 14u8, false)));
+                assert(f.ensures((12u8, old4[2]), (13u8, 16u8, true)));
+                assert(inv(3, 13u8));
+            }
+        };
+    }
+
+    /// The `FipFn` forms accept and reject as the `Fn` forms do, with `pre` / `post` in
+    /// place of `requires` / `ensures`.
+    pub proof fn lemma_st_inv_fip_specs<
+        M: FipFn<(u8, u8), Output = (u8, u8)>,
+        C: FipFn<(u8, u8), Output = (u8, u8, bool)>,
+    >(m: M, c: C)
+        requires
+            forall|a: u8, x: u8| #[trigger] m.pre((a, x)) == (a < 13),
+            forall|a: u8, x: u8, b: u8, y: u8| #[trigger] m.post((a, x), (b, y)) == count_up(a, x, b, y),
+            forall|a: u8, x: u8| #[trigger] c.pre((a, x)) == (a < 13),
+            forall|a: u8, x: u8, b: u8, y: u8, k: bool| #[trigger] c.post((a, x), (b, y, k)) == count_up_keep_odd(a, x, b, y, k),
+        ensures
+            map_st_fip_inv(seq![0u8, 0u8, 0u8], m, 10u8, |k: int, c: u8| c == 10 + k),
+            !map_st_fip_inv(seq![0u8, 0u8, 0u8], m, 10u8, |k: int, c: u8| c < 13),
+            map_st_fip_ok(seq![0u8, 0u8, 0u8], m, 10u8),
+            !map_st_fip_ok(seq![0u8, 0u8, 0u8, 0u8], m, 10u8),
+            compact_map_st_fip_inv(seq![1u8, 2u8, 3u8], c, 10u8, |k: int, c: u8| c == 10 + k),
+            !compact_map_st_fip_inv(seq![1u8, 2u8, 3u8], c, 10u8, |k: int, c: u8| c < 13),
+            compact_map_st_fip_ok(seq![1u8, 2u8, 3u8], c, 10u8),
+            !compact_map_st_fip_ok(seq![1u8, 2u8, 3u8, 4u8], c, 10u8),
+    {
+        let zs = seq![0u8, 0u8, 0u8];
+        let zs4 = seq![0u8, 0u8, 0u8, 0u8];
+        let os = seq![1u8, 2u8, 3u8];
+        let os4 = seq![1u8, 2u8, 3u8, 4u8];
+        assert(zs[0] == 0 && zs[1] == 0 && zs[2] == 0);
+        assert(zs4[0] == 0 && zs4[1] == 0 && zs4[2] == 0 && zs4[3] == 0);
+        assert(os[0] == 1 && os[1] == 2 && os[2] == 3);
+        assert(os4[0] == 1 && os4[1] == 2 && os4[2] == 3 && os4[3] == 4);
+        assert(map_st_fip_inv(zs, m, 10u8, |k: int, c: u8| c == 10 + k));
+        if map_st_fip_inv(zs, m, 10u8, |k: int, c: u8| c < 13) {
+            assert(count_up(12u8, zs[2], 13u8, 13u8));
+            assert(m.post((12u8, zs[2]), (13u8, 13u8)));
+        }
+        assert(!m.pre((13u8, zs4[3])));
+        assert forall|inv: spec_fn(int, u8) -> bool| !map_st_fip_inv(zs4, m, 10u8, inv) by {
+            if map_st_fip_inv(zs4, m, 10u8, inv) {
+                assert(count_up(10u8, zs4[0], 11u8, 11u8) && count_up(11u8, zs4[1], 12u8, 12u8));
+                assert(count_up(12u8, zs4[2], 13u8, 13u8));
+                assert(m.post((10u8, zs4[0]), (11u8, 11u8)));
+                assert(m.post((11u8, zs4[1]), (12u8, 12u8)));
+                assert(m.post((12u8, zs4[2]), (13u8, 13u8)));
+                assert(inv(3, 13u8));
+            }
+        };
+        assert(compact_map_st_fip_inv(os, c, 10u8, |k: int, c: u8| c == 10 + k));
+        if compact_map_st_fip_inv(os, c, 10u8, |k: int, c: u8| c < 13) {
+            assert(count_up_keep_odd(12u8, os[2], 13u8, 16u8, true));
+            assert(c.post((12u8, os[2]), (13u8, 16u8, true)));
+        }
+        assert(!c.pre((13u8, os4[3])));
+        assert forall|inv: spec_fn(int, u8) -> bool| !compact_map_st_fip_inv(os4, c, 10u8, inv) by {
+            if compact_map_st_fip_inv(os4, c, 10u8, inv) {
+                assert(count_up_keep_odd(10u8, os4[0], 11u8, 12u8, true));
+                assert(count_up_keep_odd(11u8, os4[1], 12u8, 14u8, false));
+                assert(count_up_keep_odd(12u8, os4[2], 13u8, 16u8, true));
+                assert(c.post((10u8, os4[0]), (11u8, 12u8, true)));
+                assert(c.post((11u8, os4[1]), (12u8, 14u8, false)));
+                assert(c.post((12u8, os4[2]), (13u8, 16u8, true)));
+                assert(inv(3, 13u8));
+            }
+        };
+    }
+
     } // verus!
 } // mod state
