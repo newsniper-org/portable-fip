@@ -117,7 +117,10 @@ fn implicit() {
 /// Values returned by calls (return summaries): `usize::from(u8)`, a wrapper's
 /// `len`/`get`/`is_empty` over a `Vec` field, `len() - 1` after `is_empty()`,
 /// `count_ones` (intrinsic table) pass; `usize::from(u16)`, a `Cell`-backed `len`, a
-/// replaced reference, a `&mut` wrapper changed in between are reported.
+/// replaced reference, a `&mut` wrapper changed in between are reported. Iterator
+/// contracts: `(0..len).rev()`, `0..=len - 1` after `is_empty`, `enumerate` indexing
+/// a longer slice, a counter of `zip`'s items pass; off-by-one controls of each are
+/// reported.
 #[test]
 fn guards() {
     check("guards");

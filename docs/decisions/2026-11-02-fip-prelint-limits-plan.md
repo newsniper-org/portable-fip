@@ -346,6 +346,21 @@ longer slice, `zip`; each also has a reported off-by-one control.
 
 **Effort.** M (2–3 days). Depends on L2 (the contract table and test harness).
 
+**Implemented** (item 6 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: iterator contracts"). M3's `rev`, inclusive, `enumerate` and
+`zip` cases pass (fixture `guards`, each with a reported control; `limits` 12 → 7
+errors); self-check unchanged. The `zip` panic was located with the dump: the
+`size_of::<T>()` assert of `offset_from_unsigned` inside `slice::Iter::size_hint`, a
+generic constant the analysis did not evaluate; constants are now evaluated with the
+instance's arguments (so it is not a reachable panic for sized `T`). Deviations, from
+measurement: the differential test showed that `RangeInclusive`'s `start` wraps
+after the last item (`255..=255` ends with `start == 0`), so the contract assumes
+only `start <= end` for a yielded `start` and forgets `start` (no `exhausted` flag is
+tracked); `Enumerate` and `Zip` are modelled over slice iterators only, with the
+position as their state rather than `rem`; the `Enumerate` contract also discharges
+the inherited overflow check of `count += 1` in `Enumerate::next`; `Zip`'s `None`
+edge carries no fact (a disjunction).
+
 ### L4. Function pointers and `dyn` calls are `⊤`
 
 **Current.**

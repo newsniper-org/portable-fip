@@ -506,3 +506,118 @@ pub fn count_ones_index(xs: &[u8; 33], x: u32) -> u8 {
 pub fn count_ones_off(xs: &[u8; 32], x: u32) -> u8 {
     xs[x.count_ones() as usize]
 }
+
+// Iterator contracts (limits plan L3).
+
+/// `for i in (0..xs.len()).rev() { xs[i] }`: `Rev<Range>` yields `end - 1` while
+/// `start < end`: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn rev_index(xs: &[u8]) -> u8 {
+    let mut s = 0u8;
+    for i in (0..xs.len()).rev() {
+        s ^= xs[i];
+    }
+    s
+}
+
+/// Control: `(1..xs.len() + 1).rev()` starts one past the end: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn rev_off_by_one(xs: &[u8]) -> u8 {
+    let mut s = 0u8;
+    if xs.len() < usize::MAX {
+        for i in (1..xs.len() + 1).rev() {
+            s ^= xs[i];
+        }
+    }
+    s
+}
+
+/// `for i in 0..=xs.len() - 1` after `is_empty()`: `RangeInclusive` yields values
+/// up to `end`: passes (overflow and bounds).
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn inclusive_last(xs: &[u8]) -> u8 {
+    let mut s = 0u8;
+    if xs.is_empty() {
+        return 0;
+    }
+    for i in 0..=xs.len() - 1 {
+        s ^= xs[i];
+    }
+    s
+}
+
+/// `for (i, x) in xs.iter().enumerate() { ys[i] }` with `ys.len() >= xs.len()`:
+/// `Enumerate` yields indices below `xs.len()`: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn enumerate_index(xs: &[u8], ys: &[u8]) -> u8 {
+    let mut s = 0u8;
+    if ys.len() < xs.len() {
+        return 0;
+    }
+    for (i, x) in xs.iter().enumerate() {
+        s ^= *x ^ ys[i];
+    }
+    s
+}
+
+/// Control: `ys` may be shorter (`ys.len() + 1 >= xs.len()`): reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn enumerate_short(xs: &[u8], ys: &[u8]) -> u8 {
+    let mut s = 0u8;
+    if ys.len() < usize::MAX && ys.len() + 1 < xs.len() {
+        return 0;
+    }
+    for (i, x) in xs.iter().enumerate() {
+        s ^= *x ^ ys[i];
+    }
+    s
+}
+
+/// `zip` stops at the shorter slice: a counter of its items indexes `out` (as long
+/// as `xs`): passes (and `Iterator::zip`'s `size_of::<T>()` assert is decided for
+/// `T = u8`).
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn zip_count(xs: &[u8], ys: &[u8], out: &mut [u8]) {
+    if out.len() < xs.len() {
+        return;
+    }
+    let mut i = 0;
+    for (x, y) in xs.iter().zip(ys) {
+        out[i] = *x ^ *y;
+        i += 1;
+    }
+}
+
+/// Control: `out` may be one shorter than both: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn zip_count_short(xs: &[u8], ys: &[u8], out: &mut [u8]) {
+    if out.len() < usize::MAX && out.len() + 1 < xs.len() {
+        return;
+    }
+    let mut i = 0;
+    for (x, y) in xs.iter().zip(ys) {
+        out[i] = *x ^ *y;
+        i += 1;
+    }
+}

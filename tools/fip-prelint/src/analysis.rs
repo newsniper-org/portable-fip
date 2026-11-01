@@ -1377,7 +1377,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     let cannot_fire = self
                         .eval_in_block(data, cond)
                         .is_some_and(|v| (v != 0) == *expected)
-                        || proved.assert_cannot_fire(b);
+                        || proved.assert_cannot_fire(b)
+                        || (matches!(**msg, AssertKind::Overflow(mir::BinOp::Add, ..))
+                            && crate::value::enumerate_count_cannot_overflow(tcx, inst));
                     if !cannot_fire && !is_ub_check_assert(msg) {
                         blocks[b].push(Site {
                             item: Item::Ev(Ev::Panic(describe_assert(msg))),

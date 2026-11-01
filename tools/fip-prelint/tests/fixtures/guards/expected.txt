@@ -22,4 +22,7 @@ guarded/src/lib.rs:458:38: error: fip-prelint: `cell_len` is #[fip(strict = true
 guarded/src/lib.rs:469:9: error: fip-prelint: `wrapper_replaced` is #[fip(strict = true)]: reachable panic path: `wrapper_replaced`: index out of bounds (bounds check) (guarded/src/lib.rs:469) (`panic_macros = false`)
 guarded/src/lib.rs:484:9: error: fip-prelint: `wrapper_mut` is #[fip(strict = true)]: reachable panic path: `wrapper_mut`: index out of bounds (bounds check) (guarded/src/lib.rs:484) (`panic_macros = false`)
 guarded/src/lib.rs:507:5: error: fip-prelint: `count_ones_off` is #[fip(strict = true)]: reachable panic path: `count_ones_off`: index out of bounds (bounds check) (guarded/src/lib.rs:507) (`panic_macros = false`)
-note: fip-prelint: crate `guarded`: 40 roots, 19 passed, 22 errors, 0 warnings, 0 notes
+guarded/src/lib.rs:535:18: error: fip-prelint: `rev_off_by_one` is #[fip(strict = true)]: reachable panic path: `rev_off_by_one`: index out of bounds (bounds check) (guarded/src/lib.rs:535) (`panic_macros = false`)
+guarded/src/lib.rs:586:19: error: fip-prelint: `enumerate_short` is #[fip(strict = true)]: reachable panic path: `enumerate_short`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:586) (`panic_macros = false`)
+guarded/src/lib.rs:620:9: error: fip-prelint: `zip_count_short` is #[fip(strict = true)]: reachable panic path: `zip_count_short`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:620) (`panic_macros = false`)
+note: fip-prelint: crate `guarded`: 47 roots, 23 passed, 25 errors, 0 warnings, 0 notes

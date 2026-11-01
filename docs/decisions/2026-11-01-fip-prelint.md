@@ -318,6 +318,20 @@ Verus, and a source gate for `fip-core`). Self-check: 46 → 23 notes (the 23
 `swap_lt` notes). Fixture `preconditions`. Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-02: caller contexts and declared preconditions".
 
+## Amendment 2026-11-02: iterator contracts (limits plan L3)
+
+The value analysis models more `for` loops: `RangeInclusive<int>`, `Rev<Range<int>>`,
+`slice::Iter{,Mut}`, `Enumerate` of a slice iterator and `Zip` of two, each by a
+contract of `next` (trusted models of `core`, matched by lang item or defining path,
+each with a differential test against the real iterator). Constants are evaluated
+with the analysed instance's arguments, which removes the `size_of::<T>()` assert
+behind `Iterator::zip` for a sized `T` (the cause of M3's `zip` report). The
+`Enumerate` contract covers `Enumerate::next`'s inherited overflow check. Measured:
+fixture `guards` (4 passes, 3 controls), M3 probe 12 → 7 errors, self-check
+unchanged. The differential test showed that `RangeInclusive`'s `start` wraps after
+the last item on rustc 1.99.1; the contract does not use it. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-02: iterator contracts".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

@@ -744,3 +744,55 @@ crates the driver does not analyse are not checked (as in Verus); a context is l
 beyond 3 nested contexts or when the caller's body exceeds the analysis limits (then
 the precondition is reported as not established); `core::hint::assert_unchecked` as
 a fact (accepted in the plan as a small extension) is not implemented.
+
+## Resolved 2026-11-02: iterator contracts (limits plan L3)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L3 (item 6 of its order).
+Only `Range<integer>` was modelled; M3's `rev()`, `0..=n`, `enumerate` and `zip`
+loops were reported.
+
+**`zip`'s panic, located first** (the plan's open question, with
+`FIP_PRELINT_DUMP=1` and the new `FIP_PRELINT_DUMP_MIR=size_hint`): it is
+`assert!(0 < pointee_size && pointee_size <= isize::MAX as usize)` in
+`offset_from_unsigned`, inlined into `<slice::Iter<T> as Iterator>::size_hint`, which
+`Iterator::zip` calls through `TrustedRandomAccess::size`. `pointee_size` is the
+generic constant `<T as SizedTypeProperties>::SIZE`, which the value analysis did not
+evaluate. Fix: constants are evaluated with the analysed instance's arguments
+(`T = u8`: `0 < 1 <= isize::MAX`, the panic branch is infeasible). It is not a
+reachable `std` panic for a sized `T`; for a generic `T` it stays reported.
+
+**Contracts** (`value::Contract`; matched by lang item or by the iterator type's
+defining path in `core`): `RangeInclusive<int>` (yields `start <= end`; `start`
+forgotten after `next`), `Rev<Range<int>>` (`end -= 1`, yields the new `end` while
+`start < end`), `slice::Iter{,Mut}` (position and length), `Enumerate` of a slice
+iterator (yields the index, below the length) and `Zip` of two slice iterators (below
+both lengths); constructors `RangeInclusive::new`, `Iterator::rev`, `<[T]>::iter{,_mut}`,
+`IntoIterator` of a slice reference, `Iterator::enumerate`, `Iterator::zip`. The
+`Enumerate` contract also covers `self.count += 1` in `Enumerate::next` (an overflow
+check inherited from the caller, `#[rustc_inherit_overflow_checks]`): `count` is the
+index of the item just produced, so it cannot overflow. A differential test runs
+each real iterator on boundary inputs (`u8` up to 255, empty and short slices) and
+checks every fact the contract assumes. It **found** that on rustc 1.99.1
+`RangeInclusive`'s `start` wraps after the last item (`255..=255` ends with
+`start == 0`), so the contract forgets `start` instead of the plan's "start grows";
+the test pins the measured behaviour.
+
+**Measured** (fixture `guards`; before = driver of `44dec16`):
+
+| case | before | after |
+|---|---|---|
+| `rev_index`: `for i in (0..xs.len()).rev() { xs[i] }` (M3) | bounds check | passes |
+| `inclusive_last`: `for i in 0..=xs.len() - 1` after `is_empty()` (M3) | bounds check | passes |
+| `enumerate_index`: `ys[i]` over `xs.iter().enumerate()`, `ys.len() >= xs.len()` (M3) | bounds check, overflow in `Enumerate::next` | passes |
+| `zip_count`: a counter of `xs.iter().zip(ys)` indexes `out`, `out.len() >= xs.len()` (M3's `zip`) | `panic` in `Iterator::zip`, bounds check | passes |
+| controls: `(1..len + 1).rev()`, `enumerate` with `ys` one shorter, `zip` counter with `out` one shorter; `for_inclusive` (`0..=len`, existing) | reported | reported |
+
+`guarded`: 47 roots, 19 passed, 33 errors → 23 passed, 25 errors. M3 probe `limits`:
+13 roots, 3 passed, 12 errors → 7 passed, 7 errors (`rev_index`, `inclusive_ok`,
+`enumerate_index`, `zip_ok` pass; the rest are L4/L5/L6/L8 rows). Other fixtures and
+the self-check unchanged (23 notes).
+
+**Open:** user iterators, data-dependent adapters (`filter`, `take_while`), `StepBy`,
+`Take`, `Skip` (no fixture needs them), `Enumerate`/`Zip` over ranges or nested
+adapters, and slice iterators whose position is unknown when adapted (their
+remaining length is then not tracked); `zip`'s `size_of` assert for a generic `T`.

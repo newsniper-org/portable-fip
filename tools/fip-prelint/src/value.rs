@@ -31,10 +31,12 @@
 //! mathematical result; a `SwitchInt` on a recorded comparison adds the comparison
 //! (or its negation) on each edge, and an infeasible edge is dropped; the success
 //! edge of an `Assert` adds the checked condition (and, for a checked operation,
-//! `t.0 = a op b`). A `for` loop over `a..b` is modelled from the contract of
-//! `Range<integer>`: `into_iter` is the identity, `next(&mut r)` returns
-//! `Some(r.start)` and increments `start` if `start < end`, else `None`, and never
-//! changes `end`. A call whose callee has a return summary gets the summary's facts
+//! `t.0 = a op b`). Constants are evaluated with the analysed instance's arguments.
+//! A `for` loop over `a..b`, `a..=b`, `(a..b).rev()`, a slice iterator, its
+//! `enumerate` or the `zip` of two is modelled from the iterator's contract
+//! ([`Contract`]): `into_iter` is the identity, and for `Range<integer>`
+//! `next(&mut r)` returns `Some(r.start)` and increments `start` if `start < end`,
+//! else `None`, and never changes `end`. A call whose callee has a return summary gets the summary's facts
 //! over its argument values; any other call's destination, any other assignment,
 //! `StorageLive`/`StorageDead` and partial writes forget the local (a comparison
 //! that mentions a forgotten value is rewritten through a value equal to it, if
@@ -81,6 +83,7 @@ use rustc_middle::mir::{
     TerminatorKind, UnOp,
 };
 use rustc_middle::ty::adjustment::PointerCoercion;
+use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
 use crate::analysis::{Crates, is_std_crate};
@@ -151,9 +154,15 @@ enum Var {
     RangeEnd(Local),
     /// `(o as Some).0` of an `Option<integer>` local.
     SomeVal(Local),
-    /// For an `Option<integer>` local `o = <Range as Iterator>::next(&mut r)`: the
-    /// value of `r.start` when `next` was called.
+    /// For an `Option` local `o = <I as Iterator>::next(&mut r)` of a modelled
+    /// iterator ([`Contract`]): the value of `r.start` (of `r.end` for `Rev`) when
+    /// `next` was called.
     NextOld(Local),
+    /// The second end of a `Zip` of two slice iterators (`RangeEnd` is the first).
+    RangeEnd2(Local),
+    /// The integer in field `k` of the tuple in an `Option<(..)>` local (read only
+    /// where it is `Some`): the index yielded by `Enumerate`.
+    SomeFieldInt(Local, u32),
     /// The integer at `(*p).f1.f2…` for a local `p: &T` with `T: Freeze`: nothing
     /// can change it while `p` holds the same reference.
     Path(Local, Fields),
@@ -577,13 +586,12 @@ impl Dbm {
     }
 }
 
-/// What `o = <Range<_> as Iterator>::next(&mut r)` implies once `o`'s variant is
-/// known (`Range::next`: `Some(start)` and `start += 1` if `start < end`, else
-/// `None` and nothing changes).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What `o = <I as Iterator>::next(&mut r)` implies once `o`'s variant is known
+/// (the contract of the iterator `I`, see [`Contract`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct OptFacts {
-    some: [Cmp; 3],
-    none: [Cmp; 2],
+    some: Vec<Cmp>,
+    none: Vec<Cmp>,
 }
 
 impl OptFacts {
@@ -639,19 +647,22 @@ impl State {
     }
 }
 
-fn intersect<K: Ord + Copy, V: PartialEq + Copy>(
+fn intersect<K: Ord + Copy, V: PartialEq + Clone>(
     a: &BTreeMap<K, V>,
     b: &BTreeMap<K, V>,
 ) -> BTreeMap<K, V> {
     a.iter()
         .filter(|(k, v)| b.get(k) == Some(v))
-        .map(|(k, v)| (*k, *v))
+        .map(|(k, v)| (*k, v.clone()))
         .collect()
 }
 
 struct Ctx<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
+    /// The instance whose body is analysed: constants are evaluated with its
+    /// arguments (`size_of::<T>()` of a `T` known at the call).
+    inst: Instance<'tcx>,
     body: &'a Body<'tcx>,
     /// Tracked value → index (1-based; 0 is the constant zero).
     index: HashMap<Var, usize>,
@@ -693,15 +704,6 @@ fn is_slice_ptr(ty: Ty<'_>) -> bool {
         .is_some_and(|t| matches!(t.kind(), ty::Slice(_) | ty::Str))
 }
 
-/// The integer type `T` of `core::ops::Range<T>`.
-fn range_int<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
-    let ty::Adt(def, args) = ty.kind() else {
-        return None;
-    };
-    let t = args.types().next()?;
-    (tcx.is_lang_item(def.did(), LangItem::Range) && t.is_integral()).then_some(t)
-}
-
 /// The fields of the tuple `(..)` of `Option<(..)>` if one of them is a slice pointer.
 fn option_tuple<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<&'tcx ty::List<Ty<'tcx>>> {
     let ty::Adt(def, args) = ty.kind() else {
@@ -716,6 +718,11 @@ fn option_tuple<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<&'tcx ty::List<
     fields.iter().any(is_slice_ptr).then_some(*fields)
 }
 
+/// `true` for `Option<_>`.
+fn is_option<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    matches!(ty.kind(), ty::Adt(def, _) if tcx.is_lang_item(def.did(), LangItem::Option))
+}
+
 /// The integer type `T` of `Option<T>`.
 fn option_int<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
     let ty::Adt(def, args) = ty.kind() else {
@@ -725,26 +732,164 @@ fn option_int<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
     (tcx.is_lang_item(def.did(), LangItem::Option) && t.is_integral()).then_some(t)
 }
 
-/// `func` is `<Range<integer> as Iterator>::next` (`lang`: `IteratorNext`) or
-/// `<Range<integer> as IntoIterator>::into_iter` (`IntoIterIntoIter`, the identity
-/// for an iterator).
-fn is_range_call<'tcx>(
+/// An iterator of `core` whose `next` the analysis models (limits plan L3). Each is
+/// tracked as a position `start` and an end (two ends for `Zip`); the contracts of
+/// `next(&mut r)`, matched by lang item or by the iterator type's defining path in
+/// `core`, never by a name alone:
+///
+/// | iterator | `Some` | `None` |
+/// |---|---|---|
+/// | `Range<int>` | yields `start` and `start < end`; `start += 1` | `end <= start` |
+/// | `RangeInclusive<int>` | yields `start` and `start <= end`; `start` is forgotten (measured on rustc 1.99.1: after yielding `end` it wraps to 0 at the type's maximum, `255..=255` ends with `start == 0`) | — |
+/// | `Rev<Range<int>>` | `start < end`; `end -= 1`, yields the new `end` | `end <= start` |
+/// | `slice::Iter{,Mut}` (`start` = consumed, `end` = length) | `start < end`; `start += 1` | `end <= start` |
+/// | `Enumerate<slice::Iter{,Mut}>` | yields the index `start`, `start < end`; `start += 1` | `end <= start` |
+/// | `Zip<slice::Iter{,Mut}, slice::Iter{,Mut}>` | `start < end`, `start < end2`; `start += 1` | — |
+///
+/// Constructors: `RangeInclusive::new(a, b)`, `Iterator::rev` of a `Range`,
+/// `<[T]>::iter`/`iter_mut` and `IntoIterator` of a slice reference (`0..len`),
+/// `Iterator::enumerate` and `Iterator::zip` of slice iterators (from the remaining
+/// lengths, known when the position is), and `IntoIterator::into_iter` (the
+/// identity). Each contract has a differential test against the real iterator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Contract {
+    Range,
+    Inclusive,
+    Rev,
+    Slice,
+    Enumerate,
+    Zip,
+}
+
+/// The defining path of an item of `core`, or `None` for other crates.
+fn core_path(tcx: TyCtxt<'_>, did: DefId) -> Option<String> {
+    (tcx.crate_name(did.krate).as_str() == "core")
+        .then(|| with_no_visible_paths!(with_no_trimmed_paths!(tcx.def_path_str(did))))
+}
+
+/// The contract of an iterator type and the type of its tracked values.
+fn contract_of<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<(Contract, Ty<'tcx>)> {
+    let ty::Adt(def, args) = ty.kind() else {
+        return None;
+    };
+    let first = args.types().next();
+    if tcx.is_lang_item(def.did(), LangItem::Range) {
+        return first
+            .filter(|t| t.is_integral())
+            .map(|t| (Contract::Range, t));
+    }
+    if tcx.is_lang_item(def.did(), LangItem::RangeInclusiveStruct) {
+        return first
+            .filter(|t| t.is_integral())
+            .map(|t| (Contract::Inclusive, t));
+    }
+    let path = core_path(tcx, def.did())?;
+    let slice = |t: Ty<'tcx>| matches!(contract_of(tcx, t), Some((Contract::Slice, _)));
+    match path.as_str() {
+        "core::slice::iter::Iter" | "core::slice::iter::IterMut" => {
+            Some((Contract::Slice, tcx.types.usize))
+        }
+        "core::iter::adapters::rev::Rev" => match contract_of(tcx, first?) {
+            Some((Contract::Range, t)) => Some((Contract::Rev, t)),
+            _ => None,
+        },
+        "core::iter::adapters::enumerate::Enumerate" if slice(first?) => {
+            Some((Contract::Enumerate, tcx.types.usize))
+        }
+        "core::iter::adapters::zip::Zip" if args.types().all(slice) => {
+            Some((Contract::Zip, tcx.types.usize))
+        }
+        _ => None,
+    }
+}
+
+/// `true` if `inst` is `<Enumerate<slice::Iter{,Mut}<_>> as Iterator>::next`: its
+/// `self.count += 1` (an overflow check inherited from the caller,
+/// `#[rustc_inherit_overflow_checks]`) cannot overflow, because `count` is the index
+/// of the item just produced, below the number of items, at most `usize::MAX` (the
+/// `Enumerate` contract of [`Contract`]).
+pub fn enumerate_count_cannot_overflow<'tcx>(tcx: TyCtxt<'tcx>, inst: Instance<'tcx>) -> bool {
+    let InstanceKind::Item(def_id) = inst.def else {
+        return false;
+    };
+    // The resolved instance is the impl's method (the lang item is the trait's); its
+    // arguments are the impl's, so the iterator is the impl's self type.
+    let Some(imp) = tcx.trait_impl_of_assoc(def_id) else {
+        return false;
+    };
+    let self_ty = tcx
+        .type_of(imp)
+        .instantiate(tcx, inst.args)
+        .skip_normalization();
+    tcx.trait_item_of(def_id)
+        .is_some_and(|t| tcx.is_lang_item(t, LangItem::IteratorNext))
+        && matches!(contract_of(tcx, self_ty), Some((Contract::Enumerate, _)))
+}
+
+/// The contract of the iterator `func` is called on (its `Self` type) if `func` is
+/// the lang item `lang` (`IteratorNext`, or `IntoIterIntoIter`: the identity for an
+/// iterator).
+fn contract_call<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     func: &Operand<'tcx>,
     lang: LangItem,
-) -> bool {
+) -> Option<Contract> {
     let ty::FnDef(def_id, args) = *func.ty(&body.local_decls, tcx).kind() else {
-        return false;
+        return None;
     };
-    let Some(args) = args.no_bound_vars() else {
-        return false;
+    let args = args.no_bound_vars()?;
+    if !tcx.is_lang_item(def_id, lang) {
+        return None;
+    }
+    contract_of(tcx, args.types().next()?).map(|(c, _)| c)
+}
+
+/// How a call builds a modelled iterator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ctor {
+    /// `RangeInclusive::new(a, b)`.
+    Inclusive,
+    /// `<Range<_> as Iterator>::rev(r)`.
+    Rev,
+    /// `<[T]>::iter(xs)`, `iter_mut`, `<&[T] as IntoIterator>::into_iter(xs)`.
+    Slice,
+    /// `<slice::Iter<_> as Iterator>::enumerate(it)`.
+    Enumerate,
+    /// `<slice::Iter<_> as Iterator>::zip(it, other)`.
+    Zip,
+}
+
+/// The constructor `func` is, if any.
+fn ctor_of<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, func: &Operand<'tcx>) -> Option<Ctor> {
+    let ty::FnDef(def_id, args) = *func.ty(&body.local_decls, tcx).kind() else {
+        return None;
     };
-    tcx.is_lang_item(def_id, lang)
-        && args
-            .types()
-            .next()
-            .is_some_and(|t| range_int(tcx, t).is_some())
+    let args = args.no_bound_vars()?;
+    if tcx.is_lang_item(def_id, LangItem::RangeInclusiveNew) {
+        return Some(Ctor::Inclusive);
+    }
+    let self_ty = args.types().next();
+    if tcx.is_lang_item(def_id, LangItem::IntoIterIntoIter) {
+        return self_ty
+            .filter(|t| t.is_ref() && is_slice_ptr(*t))
+            .map(|_| Ctor::Slice);
+    }
+    if let Some(tr) = tcx.trait_of_assoc(def_id)
+        && tcx.is_lang_item(tr, LangItem::Iterator)
+    {
+        let kind = contract_of(tcx, self_ty?).map(|(c, _)| c);
+        return match (tcx.item_name(def_id).as_str(), kind) {
+            ("rev", Some(Contract::Range)) => Some(Ctor::Rev),
+            ("enumerate", Some(Contract::Slice)) => Some(Ctor::Enumerate),
+            ("zip", Some(Contract::Slice)) => Some(Ctor::Zip),
+            _ => None,
+        };
+    }
+    match core_path(tcx, def_id)?.as_str() {
+        "core::slice::<impl [T]>::iter" | "core::slice::<impl [T]>::iter_mut" => Some(Ctor::Slice),
+        _ => None,
+    }
 }
 
 /// Counts the uses of each local that read or write it other than by a plain
@@ -766,9 +911,9 @@ impl<'tcx> Visitor<'tcx> for Uses {
     }
 }
 
-/// `Range` locals whose only borrows are `b = &mut r` with `b` used once, as the
-/// argument of `<Range<_> as Iterator>::next` (a `for` loop): `next` changes only
-/// `start`, which the transfer models.
+/// Modelled iterator locals ([`Contract`]) whose only borrows are `b = &mut r` with
+/// `b` used once, as the argument of their `next` (a `for` loop): `next` changes only
+/// what its contract models.
 fn ranges_borrowed_only_by_next<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> HashSet<Local> {
     let mut uses = Uses {
         reads: HashMap::new(),
@@ -781,7 +926,7 @@ fn ranges_borrowed_only_by_next<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> H
             && let [arg] = &**args
             && let Operand::Copy(p) | Operand::Move(p) = &arg.node
             && let Some(b) = p.as_local()
-            && is_range_call(tcx, body, func, LangItem::IteratorNext)
+            && contract_call(tcx, body, func, LangItem::IteratorNext).is_some()
         {
             next_args.insert(b);
         }
@@ -802,7 +947,7 @@ fn ranges_borrowed_only_by_next<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> H
             }
             let only_next = matches!(rv, Rvalue::Ref(_, mir::BorrowKind::Mut { .. }, _))
                 && p.projection.is_empty()
-                && range_int(tcx, body.local_decls[p.local].ty).is_some()
+                && contract_of(tcx, body.local_decls[p.local].ty).is_some()
                 && dest.as_local().is_some_and(|b| {
                     next_args.contains(&b)
                         && uses.reads.get(&b).copied() == Some(1)
@@ -1360,7 +1505,9 @@ fn analyse_with<'a, 'tcx>(
             | Var::PathLen(l, _)
             | Var::FieldLen(l, _)
             | Var::FieldInt(l, _)
-            | Var::SomeFieldLen(l, _) => l,
+            | Var::SomeFieldLen(l, _)
+            | Var::RangeEnd2(l)
+            | Var::SomeFieldInt(l, _) => l,
         };
         of_local.entry(l).or_default().push(bounds.len());
         index.insert(v, bounds.len());
@@ -1403,12 +1550,32 @@ fn analyse_with<'a, 'tcx>(
                     push(Var::SomeFieldLen(local, k), (0, usize_max));
                 }
             }
-        } else if let Some(r) = range_int(tcx, decl.ty).and_then(|t| int_range(tcx, t)) {
+        } else if let Some((c, t)) = contract_of(tcx, decl.ty)
+            && let Some(r) = int_range(tcx, t)
+        {
             push(Var::RangeStart(local), r);
             push(Var::RangeEnd(local), r);
+            if c == Contract::Zip {
+                push(Var::RangeEnd2(local), r);
+            }
         } else if let Some(r) = option_int(tcx, decl.ty).and_then(|t| int_range(tcx, t)) {
             push(Var::SomeVal(local), r);
             push(Var::NextOld(local), r);
+        } else if is_option(tcx, decl.ty) {
+            // The item of a slice iterator (`Option<&T>`, `Option<(usize, &T)>`, ..):
+            // the position before `next`, and the index of `Enumerate`.
+            push(Var::NextOld(local), (0, usize_max));
+            if let ty::Adt(_, args) = decl.ty.kind()
+                && let Some(ty::Tuple(fields)) = args.types().next().map(|t| t.kind())
+            {
+                for (k, f) in fields.iter().enumerate() {
+                    if let Ok(k) = u32::try_from(k)
+                        && let Some(r) = int_range(tcx, f)
+                    {
+                        push(Var::SomeFieldInt(local, k), r);
+                    }
+                }
+            }
         }
     }
     for v in path_candidates(tcx, body, &shared, calls) {
@@ -1434,6 +1601,7 @@ fn analyse_with<'a, 'tcx>(
     let cx = Ctx {
         tcx,
         env,
+        inst,
         body,
         index,
         of_local,
@@ -1542,8 +1710,9 @@ fn relevant_locals<'tcx>(
                 args,
                 destination,
                 ..
-            } if is_range_call(tcx, body, func, LangItem::IteratorNext)
-                || is_range_call(tcx, body, func, LangItem::IntoIterIntoIter)
+            } if contract_call(tcx, body, func, LangItem::IteratorNext).is_some()
+                || contract_call(tcx, body, func, LangItem::IntoIterIntoIter).is_some()
+                || ctor_of(tcx, body, func).is_some()
                 || calls.get(&bb).is_some_and(|c| !c.sums.is_empty()) =>
             {
                 for a in args.iter() {
@@ -1757,9 +1926,17 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
 
     /// Value of a constant integer operand.
     fn const_value(&self, c: &mir::ConstOperand<'tcx>) -> Option<i128> {
-        let ty = c.const_.ty();
+        let k = self
+            .inst
+            .try_instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                self.env,
+                EarlyBinder::bind(self.tcx, c.const_),
+            )
+            .unwrap_or(c.const_);
+        let ty = k.ty();
         let (lo, _) = int_range(self.tcx, ty)?;
-        let bits = c.const_.try_eval_bits(self.tcx, self.env)?;
+        let bits = k.try_eval_bits(self.tcx, self.env)?;
         let v = if lo < 0 {
             let size = self.tcx.layout_of(self.env.as_query_input(ty)).ok()?.size;
             size.sign_extend(bits)
@@ -1795,6 +1972,14 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             [ProjectionElem::Downcast(..), ProjectionElem::Field(f, _)] if f.as_usize() == 0 => {
                 self.var(Var::SomeVal(p.local)).map(|v| Lin { v, c: 0 })
             }
+            // `(o as Some).0.k`: a field of the tuple in an `Option`.
+            [
+                ProjectionElem::Downcast(..),
+                ProjectionElem::Field(z, _),
+                ProjectionElem::Field(f, _),
+            ] if z.as_usize() == 0 => self
+                .var(Var::SomeFieldInt(p.local, f.as_u32()))
+                .map(|v| Lin { v, c: 0 }),
             _ => None,
         }
     }
@@ -2445,7 +2630,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             Rvalue::Discriminant(p) => {
                 let o = p
                     .as_local()
-                    .filter(|o| *o != l && self.var(Var::SomeVal(*o)).is_some());
+                    .filter(|o| *o != l && self.var(Var::NextOld(*o)).is_some());
                 self.kill(st, l);
                 if let Some(o) = o {
                     st.disc.insert(l, o);
@@ -2662,7 +2847,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             return None;
         };
         let o = *st.disc.get(&p.as_local()?)?;
-        let facts = *st.opt.get(&o)?;
+        let facts = st.opt.get(&o)?.clone();
         let (some, none) = self.some_none?;
         let apply = |cmps: &[Cmp]| {
             let mut s = st.clone();
@@ -2716,58 +2901,44 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             _ => None,
         };
         let dest = destination.as_local();
-        // `d = <Range<_> as IntoIterator>::into_iter(r)`: `d = r`.
+        // `d = <I as IntoIterator>::into_iter(r)` of a modelled iterator: `d = r`.
         if let (Some(src), Some(d)) = (arg, dest)
             && src != d
-            && is_range_call(tcx, self.body, func, LangItem::IntoIterIntoIter)
-            && let Some((s, e)) = self.range_vars(src)
-            && self.range_vars(d).is_some()
+            && let Some(kind) = contract_call(tcx, self.body, func, LangItem::IntoIterIntoIter)
+            && let Some(from) = self.iter_vars(src)
+            && self.iter_vars(d).is_some()
         {
             self.kill(st, d);
-            if let Some((s2, e2)) = self.range_vars(d) {
-                self.equate(st, s2, Lin { v: s, c: 0 });
-                self.equate(st, e2, Lin { v: e, c: 0 });
+            if let Some(to) = self.iter_vars(d) {
+                self.equate(st, to.0, Lin { v: from.0, c: 0 });
+                self.equate(st, to.1, Lin { v: from.1, c: 0 });
+                if kind == Contract::Zip
+                    && let (Some(a), Some(b)) = (from.2, to.2)
+                {
+                    self.equate(st, b, Lin { v: a, c: 0 });
+                }
             }
             return true;
         }
-        // `d = <Range<_> as Iterator>::next(&mut r)`: `Some(start)` and `start += 1`
-        // if `start < end`, else `None`; `end` is unchanged.
+        // A constructor of a modelled iterator.
+        if let Some(d) = dest
+            && let Some(ctor) = ctor_of(tcx, self.body, func)
+            && self.iter_vars(d).is_some()
+        {
+            self.construct(st, ctor, args, d);
+            return true;
+        }
+        // `d = <I as Iterator>::next(&mut r)` of a modelled iterator: its contract.
         if let (Some(b), Some(d)) = (arg, dest)
-            && is_range_call(tcx, self.body, func, LangItem::IteratorNext)
+            && let Some(kind) = contract_call(tcx, self.body, func, LangItem::IteratorNext)
             && let Some(&r) = st.borrow.get(&b)
             && r != d
-            && let Some((s, e)) = self.range_vars(r)
-            && let (Some(val), Some(old)) = (self.var(Var::SomeVal(d)), self.var(Var::NextOld(d)))
+            && let Some(vars) = self.iter_vars(r)
+            && let Some(old) = self.var(Var::NextOld(d))
         {
             self.kill(st, d);
             st.borrow.remove(&b);
-            self.equate(st, old, Lin { v: s, c: 0 });
-            // `start` grows by 0 or 1: its upper bounds grow by 1, lower ones stay.
-            self.invalidate(st, s);
-            let n = st.d.n;
-            for j in 0..n {
-                if j != s {
-                    st.d.m[s * n + j] = add(st.d.m[s * n + j], 1);
-                }
-            }
-            st.d.constrain(s, 0, self.bounds[s].1);
-            let lin = |v: usize, c: i128| Lin { v, c };
-            let cmp = |op: CmpOp, a: Lin, b: Lin| Cmp { op, a, b };
-            st.opt.insert(
-                d,
-                OptFacts {
-                    some: [
-                        cmp(CmpOp::Eq, lin(val, 0), lin(old, 0)),
-                        cmp(CmpOp::Lt, lin(val, 0), lin(e, 0)),
-                        cmp(CmpOp::Eq, lin(s, 0), lin(old, 1)),
-                    ],
-                    none: [
-                        cmp(CmpOp::Le, lin(e, 0), lin(old, 0)),
-                        cmp(CmpOp::Eq, lin(s, 0), lin(old, 0)),
-                    ],
-                },
-            );
-            return true;
+            return self.next(st, kind, vars, d, old);
         }
         if let Some(ci) = self.calls.get(&bb)
             && let Some((_, s)) = ci
@@ -2781,6 +2952,175 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         if !destination.is_indirect_first_projection() {
             self.kill(st, destination.local);
         }
+        true
+    }
+
+    /// `(start, end, end2)` of a tracked iterator local.
+    fn iter_vars(&self, r: Local) -> Option<(usize, usize, Option<usize>)> {
+        let (s, e) = self.range_vars(r)?;
+        Some((s, e, self.var(Var::RangeEnd2(r))))
+    }
+
+    /// The number of items left in the slice iterator `op` (`end - start`), if its
+    /// position is known; or the length of a slice reference `op` (`zip(ys)`).
+    fn remaining(&self, st: &State, op: &Operand<'tcx>) -> Option<Lin> {
+        if let Operand::Copy(p) | Operand::Move(p) = op
+            && let Some(l) = p.as_local()
+            && let Some((s, e, None)) = self.iter_vars(l)
+        {
+            let at = Lin { v: s, c: 0 };
+            let (lo, hi) = (self.lower(st, at), self.upper(st, at));
+            return (lo == hi && lo > -INF).then_some(Lin { v: e, c: -lo });
+        }
+        if is_slice_ptr(op.ty(&self.body.local_decls, self.tcx)) {
+            return self.len_of(st, op).map(|v| Lin { v, c: 0 });
+        }
+        None
+    }
+
+    /// `d = ctor(args)`: the new iterator's position and ends.
+    fn construct(
+        &self,
+        st: &mut State,
+        ctor: Ctor,
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+        d: Local,
+    ) {
+        let op = |i: usize| args.get(i).map(|a| &a.node);
+        let zero = Lin { v: 0, c: 0 };
+        let (start, end, end2) = match ctor {
+            Ctor::Inclusive => (
+                op(0).and_then(|o| self.lin(st, o)),
+                op(1).and_then(|o| self.lin(st, o)),
+                None,
+            ),
+            Ctor::Rev => {
+                let r = op(0)
+                    .and_then(Operand::place)
+                    .and_then(|p| p.as_local())
+                    .and_then(|r| self.range_vars(r));
+                (
+                    r.map(|(s, _)| Lin { v: s, c: 0 }),
+                    r.map(|(_, e)| Lin { v: e, c: 0 }),
+                    None,
+                )
+            }
+            Ctor::Slice => (
+                Some(zero),
+                op(0)
+                    .and_then(|o| self.len_of(st, o))
+                    .map(|v| Lin { v, c: 0 }),
+                None,
+            ),
+            Ctor::Enumerate => (Some(zero), op(0).and_then(|o| self.remaining(st, o)), None),
+            Ctor::Zip => (
+                Some(zero),
+                op(0).and_then(|o| self.remaining(st, o)),
+                op(1).and_then(|o| self.remaining(st, o)),
+            ),
+        };
+        let fresh = |x: Option<Lin>| x.filter(|x| !self.mentions_local(*x, d));
+        let (start, end, end2) = (fresh(start), fresh(end), fresh(end2));
+        self.kill(st, d);
+        if let Some((s, e, e2)) = self.iter_vars(d) {
+            for (v, x) in [(Some(s), start), (Some(e), end), (e2, end2)] {
+                if let (Some(v), Some(x)) = (v, x) {
+                    self.equate(st, v, x);
+                }
+            }
+        }
+    }
+
+    /// The return edge of `d = next(&mut r)` for an iterator `r` with contract
+    /// `kind` and values `(s, e, e2)`; `old` is `d`'s record of the value `next`
+    /// changes. Always `true` (both variants stay possible; the switch on `d`'s
+    /// discriminant applies the facts of each).
+    fn next(
+        &self,
+        st: &mut State,
+        kind: Contract,
+        (s, e, e2): (usize, usize, Option<usize>),
+        d: Local,
+        old: usize,
+    ) -> bool {
+        let lin = |v: usize, c: i128| Lin { v, c };
+        let cmp = |op: CmpOp, a: Lin, b: Lin| Cmp { op, a, b };
+        let n = st.d.n;
+        if kind == Contract::Rev {
+            // `end` shrinks by 0 or 1: its lower bounds drop by 1, upper ones stay.
+            self.equate(st, old, lin(e, 0));
+            self.invalidate(st, e);
+            for j in 0..n {
+                if j != e {
+                    st.d.m[j * n + e] = add(st.d.m[j * n + e], 1);
+                }
+            }
+            let lo = self.bounds[e].0;
+            if lo > -INF {
+                st.d.constrain(0, e, -lo);
+            }
+            let mut some = vec![
+                cmp(CmpOp::Eq, lin(e, 0), lin(old, -1)),
+                cmp(CmpOp::Lt, lin(s, 0), lin(old, 0)),
+            ];
+            if let Some(val) = self.var(Var::SomeVal(d)) {
+                some.push(cmp(CmpOp::Eq, lin(val, 0), lin(old, -1)));
+            }
+            let none = vec![
+                cmp(CmpOp::Le, lin(old, 0), lin(s, 0)),
+                cmp(CmpOp::Eq, lin(e, 0), lin(old, 0)),
+            ];
+            st.opt.insert(d, OptFacts { some, none });
+            return true;
+        }
+        self.equate(st, old, lin(s, 0));
+        if kind == Contract::Inclusive {
+            // `start` after `next` is not a number the contract fixes (it wraps at
+            // the type's maximum): forgotten.
+            self.forget_var(st, s);
+        } else {
+            // `start` grows by 0 or 1: its upper bounds grow by 1, lower ones stay.
+            self.invalidate(st, s);
+            for j in 0..n {
+                if j != s {
+                    st.d.m[s * n + j] = add(st.d.m[s * n + j], 1);
+                }
+            }
+            st.d.constrain(s, 0, self.bounds[s].1);
+        }
+        let val = self.var(Var::SomeVal(d));
+        let index = self.var(Var::SomeFieldInt(d, 0));
+        let mut some = Vec::new();
+        let mut none = Vec::new();
+        match kind {
+            Contract::Inclusive => {
+                some.push(cmp(CmpOp::Le, lin(old, 0), lin(e, 0)));
+                if let Some(v) = val {
+                    some.push(cmp(CmpOp::Eq, lin(v, 0), lin(old, 0)));
+                }
+            }
+            Contract::Range | Contract::Slice | Contract::Enumerate | Contract::Zip => {
+                some.push(cmp(CmpOp::Lt, lin(old, 0), lin(e, 0)));
+                some.push(cmp(CmpOp::Eq, lin(s, 0), lin(old, 1)));
+                if let (Contract::Zip, Some(e2)) = (kind, e2) {
+                    some.push(cmp(CmpOp::Lt, lin(old, 0), lin(e2, 0)));
+                }
+                match (kind, val, index) {
+                    (Contract::Range, Some(v), _) | (Contract::Enumerate, _, Some(v)) => {
+                        some.push(cmp(CmpOp::Eq, lin(v, 0), lin(old, 0)));
+                    }
+                    _ => {}
+                }
+                if kind == Contract::Zip {
+                    none.push(cmp(CmpOp::Eq, lin(s, 0), lin(old, 0)));
+                } else {
+                    none.push(cmp(CmpOp::Le, lin(e, 0), lin(old, 0)));
+                    none.push(cmp(CmpOp::Eq, lin(s, 0), lin(old, 0)));
+                }
+            }
+            Contract::Rev => {}
+        }
+        st.opt.insert(d, OptFacts { some, none });
         true
     }
 
@@ -3263,6 +3603,115 @@ mod tests {
         let mut b = ctx;
         b.sort();
         assert_eq!(a, b);
+    }
+
+    /// Differential tests of the iterator contracts ([`Contract`]): each contract,
+    /// written as a model step, against the real `core` iterator on boundary inputs;
+    /// the facts the analysis assumes are checked on every step.
+    #[test]
+    fn iterator_contracts_match_core() {
+        let bounds: [(u8, u8); 6] = [(0, 0), (0, 3), (3, 1), (250, 255), (254, 255), (255, 255)];
+        // Range: `Some(start)` with `start < end`, `start += 1`; `None`: `end <= start`.
+        for (a, b) in bounds {
+            let mut r = a..b;
+            loop {
+                let (old, end) = (r.start, r.end);
+                match r.next() {
+                    Some(v) => {
+                        assert!(
+                            v == old
+                                && v < end
+                                && u16::from(r.start) == u16::from(old) + 1
+                                && r.end == end
+                        );
+                    }
+                    None => {
+                        assert!(end <= old && r.start == old);
+                        break;
+                    }
+                }
+            }
+        }
+        // RangeInclusive: `Some(start)` with `start <= end`, `end` unchanged; nothing
+        // is assumed about `start` afterwards (it wraps: `255..=255` ends at 0).
+        for (a, b) in bounds {
+            let mut r = a..=b;
+            let mut items = 0;
+            for _ in 0..300 {
+                let (old, end) = (*r.start(), *r.end());
+                let v = r.next();
+                assert_eq!(*r.end(), end);
+                match v {
+                    Some(v) => {
+                        assert!(v == old && v <= end);
+                        items += 1;
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(items, if a <= b { usize::from(b - a) + 1 } else { 0 });
+        }
+        let mut wraps = 255u8..=255;
+        assert_eq!(wraps.next(), Some(255));
+        assert_eq!(
+            *wraps.start(),
+            0,
+            "measured on rustc 1.99.1; the contract forgets `start`"
+        );
+        // Rev<Range>: `Some` iff `start < end`, `end -= 1`, yields the new `end`.
+        for (a, b) in bounds {
+            let (mut s, mut e) = (a, b);
+            let model: Vec<u8> = std::iter::from_fn(|| {
+                if s < e {
+                    e -= 1;
+                    Some(e)
+                } else {
+                    let _ = &mut s;
+                    None
+                }
+            })
+            .collect();
+            let real: Vec<u8> = (a..b).rev().collect();
+            assert_eq!(model, real);
+            assert!(real.iter().all(|v| a <= *v && *v < b));
+        }
+        let slices: [&[u8]; 4] = [&[], &[7], &[1, 2, 3], &[0; 9]];
+        // slice::Iter: `Some` iff `start < len`, `start += 1` (`start` = consumed).
+        for xs in slices {
+            let mut it = xs.iter();
+            let mut start = 0;
+            loop {
+                assert_eq!(it.len(), xs.len() - start);
+                let got = it.next();
+                if start < xs.len() {
+                    assert!(got.is_some());
+                    start += 1;
+                } else {
+                    assert!(got.is_none());
+                    break;
+                }
+            }
+        }
+        // Enumerate<slice::Iter>: yields the index `start < len`.
+        for xs in slices {
+            let mut start = 0;
+            for (i, _) in xs.iter().enumerate() {
+                assert!(i == start && i < xs.len());
+                start += 1;
+            }
+            assert_eq!(start, xs.len());
+        }
+        // Zip of two slice iterators: `Some` iff `start < len_a` and `start < len_b`.
+        for xs in slices {
+            for ys in slices {
+                let mut start = 0;
+                for _ in xs.iter().zip(ys) {
+                    assert!(start < xs.len() && start < ys.len());
+                    start += 1;
+                }
+                assert_eq!(start, xs.len().min(ys.len()));
+            }
+        }
     }
 
     #[test]
