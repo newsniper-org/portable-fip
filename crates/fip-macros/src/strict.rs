@@ -101,6 +101,9 @@ pub(crate) struct StrictScan {
     pub(crate) self_ty: Option<String>,
     /// `panic_macros = false`: reject the panicking macros of [`ALLOWED_MACROS`].
     pub(crate) no_panic_macros: bool,
+    /// Path of the `fip_strict` crate in generated code (`crate = ..`); `None` is
+    /// `::fip_strict`.
+    pub(crate) krate: Option<TokenStream>,
 }
 
 fn param_index(params: &[Param], name: &str) -> Option<usize> {
@@ -584,19 +587,54 @@ fn brace(inner: TokenStream) -> TokenTree {
     TokenTree::Group(Group::new(Delimiter::Brace, inner))
 }
 
-/// `prefix::__fip_strict_name.allocs_for("name")`, with the call's span so a missing
-/// certificate is reported at the call site.
-fn term(c: &Call) -> TokenStream {
-    let mut out: TokenStream = c.cert_prefix.iter().cloned().collect();
-    out.extend([TokenTree::Ident(Ident::new(
+/// `<krate>::Cert::allocs_for(prefix::__fip_strict_name, "name")`, with the call's
+/// span so a missing certificate is reported at the call site. Called through the
+/// `Cert` type, not as a method, so a constant of another type with an `allocs_for`
+/// method is not accepted as a certificate.
+fn term(c: &Call, krate: &TokenStream) -> TokenStream {
+    let mut arg: TokenStream = c.cert_prefix.iter().cloned().collect();
+    arg.extend([TokenTree::Ident(Ident::new(
         &format!("__fip_strict_{}", c.cert_name),
         c.span,
     ))]);
-    out.extend(ts(&format!(".allocs_for({:?})", c.cert_name)));
+    arg.extend(ts(&format!(", {:?}", c.cert_name)));
+    let mut out = krate_item(krate, "Cert::allocs_for");
+    out.extend([paren(arg)]);
+    out
+}
+
+/// The default path of the `fip_strict` crate.
+pub(crate) fn default_krate() -> TokenStream {
+    ts("::fip_strict")
+}
+
+/// `<krate>::<item>`. The appended segments take the span of the path's last token,
+/// so an item missing under a `crate = ..` path is reported at that argument.
+pub(crate) fn krate_item(krate: &TokenStream, item: &str) -> TokenStream {
+    let span = krate
+        .clone()
+        .into_iter()
+        .last()
+        .map_or_else(Span::call_site, |t| t.span());
+    let mut out = krate.clone();
+    out.extend(ts(&format!("::{item}")).into_iter().map(|mut t| {
+        t.set_span(span);
+        t
+    }));
     out
 }
 
 impl StrictScan {
+    /// Path of the `fip_strict` crate in generated code.
+    pub(crate) fn krate(&self) -> TokenStream {
+        self.krate.clone().unwrap_or_else(default_krate)
+    }
+
+    /// `<krate>::<item>`, see [`krate_item`].
+    pub(crate) fn krate_item(&self, item: &str) -> TokenStream {
+        krate_item(&self.krate(), item)
+    }
+
     /// Errors that need the declared parameter bounds.
     pub(crate) fn check_params(&mut self) {
         let mut errs = Vec::new();
@@ -623,10 +661,11 @@ impl StrictScan {
 
     /// `local + Σ cert(callee) + Σ declared(param)` over calls outside loops.
     fn sum_expr(&self, local: u64) -> TokenStream {
+        let krate = self.krate();
         let mut out = ts(&format!("{local}u64"));
         for c in self.calls.iter().filter(|c| !c.in_loop) {
             out.extend(ts("+"));
-            out.extend(term(c));
+            out.extend(term(c, &krate));
         }
         for pc in self.param_calls.iter().filter(|c| !c.in_loop) {
             let k = self.params[pc.param].bound.unwrap_or(0);
@@ -650,7 +689,7 @@ impl StrictScan {
             body.extend(ts(";"));
         }
         for c in self.calls.iter().filter(|c| c.in_loop) {
-            let mut a = term(c);
+            let mut a = term(c, &self.krate());
             a.extend(ts(&format!(
                 " == 0u64, {:?}",
                 format!("{tag}: `{}` is called in a loop and may allocate", c.shown)
@@ -670,8 +709,10 @@ impl StrictScan {
                     let mut a =
                         TokenStream::from(TokenTree::Punct(Punct::new('<', Spacing::Alone)));
                     a.extend([TokenTree::Ident(ty.clone())]);
+                    a.extend(ts(" as "));
+                    a.extend(self.krate_item("FipBound"));
                     a.extend(ts(&format!(
-                        " as ::fip_strict::FipBound>::ALLOCS <= {k}u64, {:?}",
+                        ">::ALLOCS <= {k}u64, {:?}",
                         format!("{tag}: the argument passed as `{}` may allocate more than its declared bound {k}", p.name)
                     )));
                     body.extend(ts("::core::assert!"));
@@ -697,10 +738,10 @@ impl StrictScan {
         let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)]";
         let mut items = ts(attrs);
         items.extend(vis.iter().cloned());
-        items.extend(ts(&format!(
-            "const __fip_strict_{cert_name}: ::fip_strict::Cert = unsafe"
-        )));
-        let mut ctor = ts("::fip_strict::Cert::assume");
+        items.extend(ts(&format!("const __fip_strict_{cert_name}: ")));
+        items.extend(self.krate_item("Cert"));
+        items.extend(ts("= unsafe"));
+        let mut ctor = self.krate_item("Cert::assume");
         let mut args = ts(&format!("{cert_name:?},"));
         args.extend(self.sum_expr(local));
         ctor.extend([paren(args)]);

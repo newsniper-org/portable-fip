@@ -146,10 +146,43 @@
 //! bodies) and are checked against `K` when the instantiation is built (not by
 //! `cargo check`). `panic_macros = false` rejects the panicking macros
 //! (`assert!`, `panic!`, `unreachable!`, ...); panics from indexing, arithmetic
-//! overflow or callees remain. Generated code references `::fip_strict`, so the
-//! crate must depend on `fip-strict`. Not seen: implicit calls (`Drop`, overloaded
+//! overflow or callees remain. Not seen: implicit calls (`Drop`, overloaded
 //! operators, `Deref`, `Index`); `fip_testkit::assert_fip!` counts what they free or
 //! allocate. Details and limits: `docs/decisions/2026-11-01-strict-core-table.md`.
+//!
+//! ### The `fip_strict` path: `crate = ..`
+//!
+//! Generated code names three items of `fip-strict`: `Cert` (certificates and the
+//! bound of every callee, read as `Cert::allocs_for(cert, "name")`), `FipBound`
+//! (bounds of `param(..)` arguments) and `Certified` (`fip_fn!`). By default it
+//! names them under `::fip_strict`, so the crate must have `fip_strict` in its extern
+//! prelude. A crate that gets the macros through a facade crate sets the path:
+//!
+//! | macro | argument |
+//! |---|---|
+//! | `#[fip(..)]` | `#[fip(strict = true, crate = my_facade::fip_strict)]` (after `strict = true`) |
+//! | `#[fip_impl]` | `#[fip_impl(crate = my_facade::fip_strict)]`, inherited by its strict methods that set none |
+//! | `fip_fn!` | `fip_fn!(crate = my_facade::fip_strict, \|x: u8\| ..)` |
+//!
+//! The value is a path (`a::b`, `::a::b`, `crate::a`, `$crate::a` from a
+//! `macro_rules!`) or the same path as a string literal (`crate = "a::b"`); it must
+//! name `Cert`, `FipBound` and `Certified` of `fip-strict`, e.g. a re-export of the
+//! whole crate. Without writing the argument at every use:
+//!
+//! - the facade re-exports `fip_fn!` as a hidden `__fip_fn` and defines
+//!   `macro_rules! fip_fn { ($($t:tt)*) => { $crate::__fip_fn!(crate = $crate::fip_strict, $($t)*) } }`;
+//! - attribute macros cannot be wrapped by `macro_rules!` on stable Rust (rustc
+//!   1.99.1: "`macro_rules!` attributes are unstable"), so instead the facade
+//!   re-exports `Cert`, `Certified` and `FipBound` at its root and the consumer writes
+//!   `extern crate my_facade as fip_strict;` once in its crate root: `::fip_strict`
+//!   then names the facade. (A crate-root `use my_facade::fip_strict;` does not
+//!   work: `::name` resolves only through the extern prelude.)
+//!
+//! `crates/fip-macros/tests/facade.rs` builds both setups with a consumer that
+//! depends on the facade only. The path decides which `Cert` type a strict function
+//! trusts: a constant of another type fails to compile where it is read, so a
+//! certificate made under another path (or a look-alike type without `unsafe`) is not
+//! accepted by callers using the real one.
 //!
 //! Rejected in strict mode (each example fails for exactly the stated reason;
 //! `verify/compile_fail_reasons.py` checks that):
@@ -274,6 +307,47 @@
 //! const __fip_strict_g: fip_strict::Cert = unsafe { fip_strict::Cert::assume("g", 0) };
 //! # fn main() {}
 //! ```
+//! look-alike certificate type (no `unsafe` needed to write it):
+//! ```compile_fail
+//! # // expect: mismatched types
+//! #![forbid(unsafe_code)]
+//! pub struct Fake;
+//! impl Fake { pub const fn allocs_for(self, _: &str) -> u64 { 0 } }
+//! #[allow(non_upper_case_globals)]
+//! const __fip_strict_two: Fake = Fake;
+//! fn two() -> (Box<u8>, Box<u8>) { (Box::new(1), Box::new(2)) }
+//! #[fip_macros::fip(strict = true)]
+//! fn f() -> (Box<u8>, Box<u8>) { two() }
+//! # fn main() {}
+//! ```
+//! a `crate = ..` path that does not resolve:
+//! ```compile_fail
+//! # // expect: cannot find module or crate `nowhere`
+//! #[fip_macros::fip(strict = true, crate = nowhere::fip_strict)]
+//! fn f() {}
+//! # fn main() {}
+//! ```
+//! a `crate = ..` path without the `fip-strict` items:
+//! ```compile_fail
+//! # // expect: `Cert` in
+//! #[fip_macros::fip(strict = true, crate = core)]
+//! fn f() {}
+//! # fn main() {}
+//! ```
+//! `crate = ..` that is not a path:
+//! ```compile_fail
+//! # // expect: `crate = ..` takes the path of the `fip_strict` crate
+//! #[fip_macros::fip(strict = true, crate = 1)]
+//! fn f() {}
+//! # fn main() {}
+//! ```
+//! `crate = ..` without `strict = true`:
+//! ```compile_fail
+//! # // expect: `crate = ..` requires `strict = true` before it
+//! #[fip_macros::fip(crate = fip_strict)]
+//! fn f() {}
+//! # fn main() {}
+//! ```
 //! hand-written `FipBound` in a `forbid(unsafe_code)` crate:
 //! ```compile_fail
 //! # // expect: implementation of an `unsafe` trait
@@ -341,6 +415,14 @@
 //!
 //! Methods (`#[fip_impl]`, see [`macro@fip_impl`]):
 //!
+//! an argument other than `crate = ..`:
+//! ```compile_fail
+//! # // expect: the only argument is `crate = path::to::fip_strict`
+//! struct S;
+//! #[fip_macros::fip_impl(strict = true)]
+//! impl S {}
+//! # fn main() {}
+//! ```
 //! strict method without `#[fip_impl]` on its `impl` block:
 //! ```compile_fail
 //! # // expect: a method needs `#[fip_macros::fip_impl]` on its `impl` block
@@ -493,9 +575,68 @@ struct FipArgs {
     params: Vec<(String, u64, Span)>,
     /// `panic_macros = false`: strict bodies may not use the panicking macros.
     panic_macros: bool,
+    /// `crate = path`: path of the `fip_strict` crate in generated code.
+    krate: Option<TokenStream>,
 }
 
-const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)` and `panic_macros = false` after `strict = true`";
+const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)`, `panic_macros = false` and `crate = path::to::fip_strict` after `strict = true`";
+
+const KRATE_HELP: &str = "`crate = ..` takes the path of the `fip_strict` crate as the caller sees it, e.g. `crate = my_facade::fip_strict` or `crate = \"my_facade::fip_strict\"`";
+
+/// The path after `crate =`: `a::b`, `::a::b`, `$crate::b` (as tokens, possibly in an
+/// invisible group from a `macro_rules!` fragment), or the same as a string literal.
+/// Tokens keep their spans, so a path that does not resolve is reported at it.
+fn parse_krate(key: Span, rest: &[TokenTree]) -> Result<TokenStream, (Span, String)> {
+    let toks: Vec<TokenTree> = match rest {
+        [TokenTree::Group(g)] if g.delimiter() == Delimiter::None => {
+            g.stream().into_iter().collect()
+        }
+        [TokenTree::Literal(l)] => {
+            let s = l.to_string();
+            let inner = s
+                .strip_prefix('"')
+                .and_then(|x| x.strip_suffix('"'))
+                .ok_or((l.span(), KRATE_HELP.to_string()))?;
+            let parsed: TokenStream = inner
+                .parse()
+                .map_err(|_| (l.span(), KRATE_HELP.to_string()))?;
+            parsed
+                .into_iter()
+                .map(|mut t| {
+                    t.set_span(l.span());
+                    t
+                })
+                .collect()
+        }
+        _ => rest.to_vec(),
+    };
+    let sp = toks.first().map_or(key, TokenTree::span);
+    let mut i = 0;
+    let mut segments = 0;
+    loop {
+        let sep = toks.get(i).is_some_and(|t| is_punct(t, ':'))
+            && toks.get(i + 1).is_some_and(|t| is_punct(t, ':'));
+        if sep {
+            i += 2;
+        } else if segments > 0 {
+            break;
+        }
+        match toks.get(i) {
+            Some(TokenTree::Ident(_)) => {
+                segments += 1;
+                i += 1;
+            }
+            _ => return Err((sp, KRATE_HELP.to_string())),
+        }
+        if i == toks.len() {
+            break;
+        }
+    }
+    if i != toks.len() {
+        return Err((sp, KRATE_HELP.to_string()));
+    }
+    Ok(toks.into_iter().collect())
+}
 
 fn split_commas(ts: TokenStream) -> Vec<Vec<TokenTree>> {
     let mut parts = vec![Vec::new()];
@@ -525,6 +666,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
         strict: false,
         params: Vec::new(),
         panic_macros: true,
+        krate: None,
     };
     let mut seen_strict = false;
     for (k, part) in split_commas(attr).into_iter().enumerate() {
@@ -562,6 +704,17 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
                         ));
                     }
                 };
+            }
+            [TokenTree::Ident(key), eq, rest @ ..]
+                if key.to_string() == "crate" && is_punct(eq, '=') && args.krate.is_none() =>
+            {
+                if !args.strict {
+                    return Err((
+                        key.span(),
+                        "`crate = ..` requires `strict = true` before it".to_string(),
+                    ));
+                }
+                args.krate = Some(parse_krate(key.span(), rest)?);
             }
             [TokenTree::Ident(key), TokenTree::Group(g)]
                 if key.to_string() == "param" && g.delimiter() == Delimiter::Parenthesis =>
@@ -1137,6 +1290,7 @@ fn run_strict_scan(
     let mut ss = strict::StrictScan {
         self_ty: ctx.map(|c| c.self_ty.clone()),
         no_panic_macros: !args.panic_macros,
+        krate: args.krate.clone(),
         ..strict::StrictScan::default()
     };
     let types = param_types(shape.params.as_ref());
@@ -1199,6 +1353,11 @@ fn run_strict_scan(
 /// A trait method is reached only through `<Type as Trait>::m`: `Type::m` would pick
 /// an inherent method of the same name first.
 ///
+/// `#[fip_impl(crate = path::to::fip_strict)]` sets the path of the `fip_strict` crate
+/// (see `crate = ..` in the crate documentation) for every strict method of the block
+/// that does not set its own. Strict methods are recognised by any attribute path
+/// ending in `fip` (`#[fip(..)]`, `#[fip_macros::fip(..)]`, `#[my_facade::fip(..)]`).
+///
 /// ```
 /// use fip_macros::{fip, fip_impl};
 /// pub struct Cell<T> { v: T }
@@ -1213,12 +1372,33 @@ fn run_strict_scan(
 /// ```
 #[proc_macro_attribute]
 pub fn fip_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if let Some(first) = attr.into_iter().next() {
-        let mut out = compile_error(first.span(), "`#[fip_impl]` takes no arguments");
-        out.extend(item);
-        return out;
-    }
-    match fip_impl_inner(&item) {
+    let krate = match split_commas(attr).as_slice() {
+        [] => Ok(None),
+        [part] => match part.as_slice() {
+            [TokenTree::Ident(key), eq, rest @ ..]
+                if key.to_string() == "crate" && is_punct(eq, '=') =>
+            {
+                parse_krate(key.span(), rest).map(Some)
+            }
+            _ => Err((
+                part.first().map_or_else(Span::call_site, TokenTree::span),
+                FIP_IMPL_ARGS.to_string(),
+            )),
+        },
+        [_, second, ..] => Err((
+            second.first().map_or_else(Span::call_site, TokenTree::span),
+            FIP_IMPL_ARGS.to_string(),
+        )),
+    };
+    let krate = match krate {
+        Ok(k) => k,
+        Err((span, msg)) => {
+            let mut out = compile_error(span, &format!("#[fip_impl]: {msg}"));
+            out.extend(strip_fip_attrs(item));
+            return out;
+        }
+    };
+    match fip_impl_inner(&item, krate.as_ref()) {
         Ok(out) => out,
         Err((span, msg)) => {
             let mut out = compile_error(span, &format!("#[fip_impl]: {msg}"));
@@ -1227,6 +1407,8 @@ pub fn fip_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 }
+
+const FIP_IMPL_ARGS: &str = "the only argument is `crate = path::to::fip_strict`";
 
 /// The item with the `#[fip(..)]` attributes of its body removed, so a rejected
 /// `#[fip_impl]` reports one error rather than one per method.
@@ -1358,8 +1540,9 @@ fn impl_self_ty(ty: &[TokenTree], params: &[String]) -> Result<String, (Span, St
     Ok(strict::bare(&name.to_string()).to_string())
 }
 
-/// `true` if the attribute group `[..]` is `fip(..)` / `fip_macros::fip(..)`; returns
-/// its argument tokens.
+/// `true` if the attribute group `[..]` is `fip(..)` under any path ending in `fip`
+/// (`fip`, `fip_macros::fip`, `my_facade::fip`, `::a::b::fip`); returns its
+/// argument tokens.
 fn fip_attr_args(g: &Group) -> Option<TokenStream> {
     let toks: Vec<TokenTree> = g.stream().into_iter().collect();
     let (args, path) = match toks.split_last() {
@@ -1368,20 +1551,17 @@ fn fip_attr_args(g: &Group) -> Option<TokenStream> {
         }
         _ => (TokenStream::new(), toks.as_slice()),
     };
-    let is_fip = match path {
-        [f] => is_ident(f, "fip"),
-        [m, c1, c2, f] => {
-            is_ident(m, "fip_macros")
-                && is_punct(c1, ':')
-                && is_punct(c2, ':')
-                && is_ident(f, "fip")
-        }
-        _ => false,
-    };
+    let plain_path = path
+        .iter()
+        .all(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':'));
+    let is_fip = plain_path && path.last().is_some_and(|f| is_ident(f, "fip"));
     is_fip.then_some(args)
 }
 
-fn fip_impl_inner(item: &TokenStream) -> Result<TokenStream, (Span, String)> {
+fn fip_impl_inner(
+    item: &TokenStream,
+    krate: Option<&TokenStream>,
+) -> Result<TokenStream, (Span, String)> {
     let toks: Vec<TokenTree> = item.clone().into_iter().collect();
     let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
     let not_impl = || (first, "expected an `impl` block".to_string());
@@ -1412,7 +1592,7 @@ fn fip_impl_inner(item: &TokenStream) -> Result<TokenStream, (Span, String)> {
         return Err(not_impl());
     }
     let ctx = impl_ctx(&toks[pos..toks.len() - 1], &params, first)?;
-    let (module_items, new_body) = rewrite_impl_body(body, &ctx)?;
+    let (module_items, new_body) = rewrite_impl_body(body, &ctx, krate)?;
     let mut g = Group::new(Delimiter::Brace, new_body);
     g.set_span(body.span());
     let mut out = module_items;
@@ -1472,9 +1652,11 @@ fn impl_ctx(
 }
 
 /// Expands the strict methods of an impl body: `(module-level items, new body)`.
+/// `krate` (from `#[fip_impl(crate = ..)]`) applies to methods without their own.
 fn rewrite_impl_body(
     body: &Group,
     ctx: &ImplCtx,
+    krate: Option<&TokenStream>,
 ) -> Result<(TokenStream, TokenStream), (Span, String)> {
     let mut module_items = TokenStream::new();
     let mut new_body = TokenStream::new();
@@ -1508,7 +1690,10 @@ fn rewrite_impl_body(
             if let TokenTree::Group(g) = &item_toks[at + 1]
                 && let Some(args) = fip_attr_args(g)
             {
-                let parsed = parse_fip_args(args)?;
+                let mut parsed = parse_fip_args(args)?;
+                if parsed.krate.is_none() {
+                    parsed.krate = krate.cloned();
+                }
                 if parsed.strict {
                     strict_attr = Some((at, parsed));
                     break;
@@ -1579,9 +1764,26 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// let gt1 = fip_macros::fip_fn!(|v: &u8| *v > 1);
 /// assert!(gt1.call((&2,)));
 /// ```
+///
+/// `fip_fn!(crate = path::to::fip_strict, |..| ..)` sets the path of the `fip_strict`
+/// crate in the generated code (see `crate = ..` in the crate documentation).
 #[proc_macro]
 pub fn fip_fn(input: TokenStream) -> TokenStream {
-    let toks: Vec<TokenTree> = input.clone().into_iter().collect();
+    let all: Vec<TokenTree> = input.into_iter().collect();
+    let (krate, toks) = match all.as_slice() {
+        [TokenTree::Ident(key), eq, rest @ ..]
+            if key.to_string() == "crate" && is_punct(eq, '=') =>
+        {
+            let Some(comma) = rest.iter().position(|t| is_punct(t, ',')) else {
+                return compile_error(key.span(), "fip_fn!: expected `crate = path, |args| body`");
+            };
+            match parse_krate(key.span(), &rest[..comma]) {
+                Ok(k) => (Some(k), rest[comma + 1..].to_vec()),
+                Err((sp, msg)) => return compile_error(sp, &format!("fip_fn!: {msg}")),
+            }
+        }
+        _ => (None, all),
+    };
     let (arity, body_start) = match closure_shape(&toks) {
         Ok(v) => v,
         Err(sp) => return compile_error(sp, "fip_fn!: expected a closure `|args| body`"),
@@ -1593,7 +1795,10 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         recursion: Vec::new(),
     };
     scan.stream(body.clone(), false);
-    let mut strict_scan = strict::StrictScan::default();
+    let mut strict_scan = strict::StrictScan {
+        krate,
+        ..strict::StrictScan::default()
+    };
     strict_scan.stream(body, false);
     let mut errors = TokenStream::new();
     for s in scan.sites.iter().filter(|s| s.in_loop) {
@@ -1617,7 +1822,12 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         );
     }
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
-    fip_fn_wrapper(strict_scan.emit_fip_fn_bound(local), input)
+    let closure: TokenStream = toks.into_iter().collect();
+    fip_fn_wrapper(
+        &strict_scan.krate(),
+        strict_scan.emit_fip_fn_bound(local),
+        closure,
+    )
 }
 
 /// Must equal `fip_strict::MAX_ARITY` (the number of `FipFn` impls for
@@ -1669,13 +1879,14 @@ fn closure_shape(toks: &[TokenTree]) -> Result<(usize, usize), Span> {
     Ok((arity, j + 1))
 }
 
-/// `unsafe { ::fip_strict::Certified::<{ checks; bound }, _>::assume(closure) }`.
+/// `unsafe { <krate>::Certified::<{ checks; bound }, _>::assume(closure) }`.
 ///
 /// No item is declared, so the expression is also accepted inside functions verified
 /// by Verus (which does not support item statements in function bodies).
-fn fip_fn_wrapper(bound: TokenStream, closure: TokenStream) -> TokenStream {
+fn fip_fn_wrapper(krate: &TokenStream, bound: TokenStream, closure: TokenStream) -> TokenStream {
     let parse = |src: &str| src.parse::<TokenStream>().unwrap_or_default();
-    let mut inner = parse("::fip_strict::Certified::<");
+    let mut inner = strict::krate_item(krate, "Certified");
+    inner.extend(parse("::<"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, bound))]);
     inner.extend(parse(", _>::assume"));
     inner.extend([TokenTree::Group(Group::new(

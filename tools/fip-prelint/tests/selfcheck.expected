@@ -7,5 +7,6 @@ note: fip-prelint: crate `accept`: 8 roots, 8 passed, 0 errors, 0 warnings, 0 no
 note: fip-prelint: crate `fip_core`: 8 roots, 8 passed, 0 errors, 0 warnings, 11 notes
 note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warnings, 12 notes
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 11 notes
+note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_impl`: 11 roots, 10 passed, 0 errors, 1 warnings, 7 notes

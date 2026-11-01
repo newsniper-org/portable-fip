@@ -310,6 +310,19 @@ fn find_top(t: &[Tok], from: usize, to: usize, f: impl Fn(usize) -> bool) -> Opt
     None
 }
 
+/// Start of the closure inside `fip_fn!(..)` whose `(` is `t[open]` and whose group
+/// ends before `ge`: skips a leading `crate = path,` and `move`.
+fn fip_fn_closure(t: &[Tok], open: usize, ge: usize) -> usize {
+    let mut k = open + 1;
+    if is_id(t, k, "crate")
+        && is_p(t, k + 1, '=')
+        && let Some(comma) = find_top(t, k + 2, ge - 1, |q| is_p(t, q, ','))
+    {
+        k = comma + 1;
+    }
+    if is_id(t, k, "move") { k + 1 } else { k }
+}
+
 /// An `=` that is an assignment, not part of `==`, `<=`, `=>`, `+=`, ...
 fn is_assign(t: &[Tok], q: usize) -> bool {
     is_p(t, q, '=')
@@ -857,11 +870,7 @@ impl<'a> Builder<'a> {
         }
         if is_id(t, q, "fip_fn") && is_p(t, q + 1, '!') && is_open(t, q + 2) {
             let ge = group_end(t, q + 2);
-            let inner = if is_id(t, q + 3, "move") {
-                q + 4
-            } else {
-                q + 3
-            };
+            let inner = fip_fn_closure(t, q + 2, ge);
             if is_p(t, inner, '|') {
                 let (cid, _) = self.closure(t, inner, ge - 1, cx);
                 return Some((cid, ge));
@@ -1167,11 +1176,7 @@ impl<'a> Builder<'a> {
             return ge;
         }
         if name == "fip_fn" {
-            let inner = if is_id(t, g + 1, "move") {
-                g + 2
-            } else {
-                g + 1
-            };
+            let inner = fip_fn_closure(t, g, ge);
             if is_p(t, inner, '|') {
                 let (cid, _) = self.closure(t, inner, ge - 1, cx);
                 self.push(cx, Ev::Escape(cid), &t[i], lp);

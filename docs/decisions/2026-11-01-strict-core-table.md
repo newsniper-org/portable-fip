@@ -5,7 +5,8 @@
 
 **Status:** ACCEPTED, 2026-11-01. Amended 2026-10-31 (named certificates,
 `#[fip_impl]`, `Certified`, Verus specs for `FipFn`, `panic_macros = false`,
-audit at rustc 1.97.1). Open items: `TODOs/strict-open-items.md`.
+audit at rustc 1.97.1). Amended 2026-11-01 (`crate = ..` path, certificates read
+through the `Cert` type). Open items: `TODOs/strict-open-items.md`.
 
 ## Decision
 
@@ -31,13 +32,66 @@ through strict functions becomes a cycle in constant evaluation, which rustc rej
 
 `Cert::assume(name, allocs)`; generated certificates carry the part of their
 identifier after `__fip_strict_` (`"f"`, `"Type__m"`, `"Type__Tr__m"`). A strict
-caller reads a bound only through `Cert::allocs_for("<name>")`, which panics in
+caller reads a bound only through `Cert::allocs_for(cert, "<name>")`, which panics in
 constant evaluation if the names differ. `use a::__fip_strict_g as __fip_strict_f;`
 therefore fails where `f` is called (`compile_fail` example in `fip-macros`).
 Still possible without `unsafe`: importing a **same-named** function's certificate
 from another module (`use a::__fip_strict_f;` next to a local `fn f`). The token-level
 caller cannot tell which `f` it calls; `fip_testkit::certs::hand_written` reports the
 `__fip_strict_` identifier in source.
+
+The read goes through the type (`Cert::allocs_for(cert, ..)`), not method syntax
+(`cert.allocs_for(..)`, before 2026-11-01). Measured with method syntax: in a
+`#![forbid(unsafe_code)]` crate, `const __fip_strict_two: Fake = Fake;` with
+`impl Fake { const fn allocs_for(self, _: &str) -> u64 { 0 } }` was accepted as the
+certificate of a function allocating twice, and its strict caller got a certificate
+of bound 0 — no `unsafe` needed. With the typed read it is a type error
+(`compile_fail` example "look-alike certificate type").
+
+### The `fip_strict` path: `crate = ..`
+
+Generated code names `Cert`, `FipBound` and `Certified`. Under the fixed path
+`::fip_strict`, a crate using the macros through a facade crate (one that
+re-exports `fip_macros::{fip, fbip, fip_fn, fip_impl}` and `pub use fip_strict;`)
+still had to depend on `fip-strict` itself. Measured 2026-11-01 (rustc 1.99.1, a
+facade and a consumer depending on the facade only, under `/tmp`): 5 errors
+"cannot find `fip_strict` in the list of imported crates", one per strict function,
+`#[fip_impl]` method and `fip_fn!`. A crate-root `use facade::fip_strict;` does not
+help (same 5 errors): `::name` resolves only through the extern prelude.
+
+Decision: an argument `crate = <path>` on `#[fip(.., strict = true, ..)]`,
+`#[fip_impl(..)]` (inherited by the block's strict methods that set none) and
+`fip_fn!(crate = <path>, |..| ..)`; a path, or the same path as a string literal
+(serde's form). Default stays `::fip_strict`. Every emission uses it: the
+certificate constant and its `Cert::assume`, the typed `Cert::allocs_for` reads of
+callees, the `FipBound` assertions of `param(..)`, and `Certified` in `fip_fn!`.
+The appended segments carry the span of the path's last token, so a wrong path is
+reported at the argument (`compile_fail` examples: unresolved path, path without
+the items, non-path, `crate` without `strict = true`). The `fip::mark(..)` of
+`fip-prelint` names no path and is unchanged; the driver finds `Certified` calls on
+MIR, not by path. `#[fip_impl]` now recognises strict methods under any attribute
+path ending in `fip` (`#[my_facade::fip(..)]`), not only `fip` / `fip_macros::fip`.
+
+Defaults without an argument at every use, evaluated:
+
+| option | result |
+|---|---|
+| facade wraps `fip_fn!` in `macro_rules!` filling in `crate = $crate::fip_strict` | works (`$crate` resolves to the facade); adopted for `fip_fn!` |
+| facade wraps the attributes in `macro_rules!` | not on stable: rustc 1.99.1 "`macro_rules!` attributes are unstable" (measured) |
+| consumer writes `extern crate my_facade as fip_strict;` once; the facade re-exports `Cert`, `Certified`, `FipBound` at its root | works for all three macros with no argument: an `extern crate` item at the crate root enters the extern prelude, so `::fip_strict` names the facade; adopted |
+| relative default path `fip_strict` (resolved through the caller's `use`) | rejected: changes the default, and any local item named `fip_strict` would capture it |
+| env var / consumer build script / reading the consumer's `Cargo.toml` | rejected: a proc macro cannot see the dependency graph; these are per-consumer configuration anyway, need a TOML parser (no deps), and do not apply under the `verus` driver or plain `rustc` |
+
+`crates/fip-macros/tests/facade.rs` builds a facade and consumers that depend on the
+facade only (nested `cargo`, offline): with explicit `crate = ..` everywhere (plus
+the `fip_fn!` wrapper), with the `extern crate` alias and no argument, and a
+control with neither, which must fail with "could not find `fip_strict`".
+`tests/strict_crate_path.rs` covers the argument forms in-crate.
+
+Trust: the path selects which `Cert` type a strict function's own certificate has
+and which type it accepts from callees. A crate can point it at a module of its
+own with look-alike items, but the certificates made that way have that type, and a
+caller under the real `fip_strict` path rejects them (type error).
 
 ### Methods: `#[fip_impl]`
 
