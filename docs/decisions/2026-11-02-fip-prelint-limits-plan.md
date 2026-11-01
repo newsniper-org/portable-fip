@@ -788,6 +788,26 @@ interrupt context, panic machinery. All are reported as `⊤`, or excluded by st
 
 **Effort.** L (4–5 days). Depends on L4, and on L6 for `std` frames.
 
+**Implemented** (item 10 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: stack bounds for one build"). `cargo fip-prelint --stack`;
+fixture `stack` with expected bounds for two stated builds (dev, opt-level 0:
+`chain_top` 504 bytes; release, opt-level 3: 256 bytes; x86_64-unknown-linux-gnu,
+rustc 1.99.1), each at least the `llvm-readobj` frame sum of its chain (472, 232).
+Deviations, from measurement: the graph is the build's machine call graph (direct
+calls from relocations), each function on it mapped to its MIR instance (a mono item
+the driver recorded, required to contain no indirect call), instead of the MIR
+instance graph with uncodegened instances counted 0 — opt-level-0 code calls
+`precondition_check` functions the MIR analysis does not explore, and `memcpy`; no
+table of runtime functions (`memcpy`, `memset`, `labs` are not built with stack
+sizes and cannot be measured the same way): calls of them are `⊤`; L6's `std` build is
+not reused (it is a `cargo check` without objects), so precompiled `std` functions are
+`⊤`; `-Zshare-generics=no` so generic instances are codegened (and measured) in the
+crate that uses them; libraries only (objects are read from rlibs); recursion means a
+cycle in the build (at opt-level 3 LLVM turned a self-recursive root into a loop:
+bounded, 8 bytes); a frame's return address (8 bytes, x86_64) is added; only x86_64
+ELF objects are read. On this workspace every root is generic (`fip_core`): 8 roots,
+0 bounded (no symbol of their own), as stated.
+
 ### L10. Toolchain, platform and process limits
 
 The current state of each:

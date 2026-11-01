@@ -20,9 +20,19 @@
 //! into `FIP_PRELINT_TARGET_DIR` (default: a directory under the system temporary
 //! directory, never the repository's `target/`), writing
 //! `std-summaries/<release>-<target>.txt` (or `--out`).
+//!
+//! `cargo fip-prelint --stack [cargo build args..]` (limits plan L9) runs `cargo build
+//! --workspace --lib` with the driver in stack mode (`FIP_PRELINT_STACK=1`) into
+//! `<workspace>/target/fip-prelint-stack` (or `FIP_PRELINT_TARGET_DIR`), with the
+//! profile cargo selects (`--release`, `--profile ..`), and reports per root a byte
+//! bound for that build, read from the objects' `.stack_sizes`, or `⊤` with the reason
+//! (`src/stackbound.rs`). The exit status is 1 if the build fails or a root is `⊤`.
 
-use std::path::PathBuf;
-use std::process::{Command, ExitCode};
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
+
+#[path = "../stackbound.rs"]
+mod stackbound;
 
 const DEFAULT_TOOLCHAIN: &str = "1.99.1";
 
@@ -186,6 +196,167 @@ fn std_summaries(mut args: Vec<String>, toolchain: &str, sysroot: &str, ld: &str
     }
 }
 
+/// The `"filenames":[..]` of cargo's `compiler-artifact` JSON messages.
+fn artifact_files(json: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for line in json.lines() {
+        if !line.contains("\"reason\":\"compiler-artifact\"") {
+            continue;
+        }
+        let Some(i) = line.find("\"filenames\":[") else {
+            continue;
+        };
+        let mut chars = line[i + "\"filenames\":[".len()..].chars();
+        let mut cur: Option<String> = None;
+        while let Some(c) = chars.next() {
+            match cur.as_mut() {
+                None if c == ']' => break,
+                None if c == '"' => cur = Some(String::new()),
+                None => {}
+                Some(s) if c == '"' => {
+                    out.push(PathBuf::from(std::mem::take(s)));
+                    cur = None;
+                }
+                Some(s) if c == '\\' => match chars.next() {
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some(o) => s.push(o),
+                    None => {}
+                },
+                Some(s) => s.push(c),
+            }
+        }
+    }
+    out
+}
+
+/// `--stack`: builds and reports stack bounds (see the module documentation).
+fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: &Path) -> ExitCode {
+    let driver = driver_path();
+    let selects_packages = args
+        .iter()
+        .any(|a| a == "-p" || a.starts_with("--package") || a == "--workspace");
+    let mut cmd = Command::new("cargo");
+    cmd.env("RUSTUP_TOOLCHAIN", toolchain)
+        .env("FIP_PRELINT_DRIVER_ID", driver_id(&driver))
+        .env("RUSTC_WRAPPER", &driver)
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("LD_LIBRARY_PATH", ld)
+        .env("FIP_PRELINT_SYSROOT", sysroot)
+        .env("FIP_PRELINT_STACK", "1")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTC")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("FIP_PRELINT_WARN_ONLY")
+        .arg("build");
+    if !selects_packages {
+        cmd.arg("--workspace");
+    }
+    cmd.args([
+        "--lib",
+        "--keep-going",
+        "--message-format",
+        "json-render-diagnostics",
+        "--target-dir",
+    ])
+    .arg(target_dir)
+    .args(args)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit());
+    let out = match cmd.output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("cargo-fip-prelint: cannot run cargo: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let built = out.status.success();
+    let json = String::from_utf8_lossy(&out.stdout);
+    // The rlib in `deps/` (next to its `.rmeta`; cargo also lists an uplifted copy
+    // of a member's rlib, without the side file).
+    let mut rlibs: Vec<PathBuf> = artifact_files(&json)
+        .into_iter()
+        .filter_map(|p| match p.extension().and_then(|e| e.to_str()) {
+            Some("rmeta") => Some(p.with_extension("rlib")),
+            Some("rlib") => Some(p),
+            _ => None,
+        })
+        .filter(|p| {
+            let mut side = p.clone().into_os_string();
+            side.push(".fip-stack");
+            Path::new(&side).is_file()
+        })
+        .collect();
+    rlibs.sort();
+    rlibs.dedup();
+    let mut build = stackbound::Build::default();
+    let mut records = Vec::new();
+    for rlib in &rlibs {
+        let mut side = rlib.clone().into_os_string();
+        side.push(".fip-stack");
+        // Only crates the driver compiled have one: the functions of a dependency
+        // passed through to the real rustc are not in the graph, so calls into them
+        // are `⊤`.
+        let Ok(text) = std::fs::read_to_string(&side) else {
+            continue;
+        };
+        match stackbound::parse_record(&text) {
+            Ok(r) => {
+                build.add_rlib(rlib);
+                build.add_record(&r);
+                records.push(r);
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: fip-prelint: stack: {}: {e}",
+                    Path::new(&side).display()
+                );
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let mut tops = 0usize;
+    for r in &records {
+        let mut bounded = 0usize;
+        for (label, sym) in &r.roots {
+            match sym.clone().and_then(|s| build.bound(&s)) {
+                Ok((b, path)) => {
+                    bounded += 1;
+                    let chain: Vec<String> =
+                        path.iter().map(|(l, f)| format!("`{l}` {f}")).collect();
+                    eprintln!(
+                        "note: fip-prelint: stack: `{label}` uses at most {b} bytes in this build (target {}, opt-level {}; frames from `.stack_sizes` plus {} bytes of return address each, longest path: {}; panic paths, unwinding, signal and interrupt contexts excluded)",
+                        r.target,
+                        r.opt_level,
+                        stackbound::RETURN_ADDRESS,
+                        chain.join(" -> ")
+                    );
+                }
+                Err(why) => {
+                    tops += 1;
+                    eprintln!("error: fip-prelint: stack: `{label}` has no bound (⊤): {why}");
+                }
+            }
+        }
+        if !r.roots.is_empty() {
+            eprintln!(
+                "note: fip-prelint: stack: crate `{}`: {} roots, {bounded} bounded, {} ⊤",
+                r.krate,
+                r.roots.len(),
+                r.roots.len() - bounded
+            );
+        }
+    }
+    if !built {
+        eprintln!("cargo-fip-prelint: the build failed");
+        return ExitCode::from(1);
+    }
+    if tops > 0 {
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `cargo fip-prelint ..` passes the subcommand name first.
@@ -196,6 +367,15 @@ fn main() -> ExitCode {
     args.retain(|a| {
         if a == "--std-summaries" {
             generate = true;
+            false
+        } else {
+            true
+        }
+    });
+    let mut stack_mode = false;
+    args.retain(|a| {
+        if a == "--stack" {
+            stack_mode = true;
             false
         } else {
             true
@@ -238,6 +418,7 @@ fn main() -> ExitCode {
     let target_dir = match std::env::var_os("FIP_PRELINT_TARGET_DIR") {
         Some(d) => PathBuf::from(d),
         None => match workspace_root(&toolchain, manifest.as_deref()) {
+            Ok(root) if stack_mode => root.join("target").join("fip-prelint-stack"),
             Ok(root) => root.join("target").join("fip-prelint"),
             Err(e) => {
                 eprintln!("cargo-fip-prelint: {e}");
@@ -250,6 +431,9 @@ fn main() -> ExitCode {
         Ok(old) if !old.is_empty() => format!("{lib}:{old}"),
         _ => lib,
     };
+    if stack_mode {
+        return stack(&args, &toolchain, &sysroot, &ld, &target_dir);
+    }
 
     let selects_packages = args
         .iter()

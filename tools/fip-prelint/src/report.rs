@@ -529,6 +529,30 @@ fn local_bodies(tcx: TyCtxt<'_>) -> Vec<DefId> {
 
 /// Entry point after analysis: validate attributes, analyse every root, check the
 /// declared parameter bounds at every call site, report.
+/// Stack mode (`cargo fip-prelint --stack`): records the crate's roots and codegened
+/// functions for the stack bound ([`crate::stack`]); no FIP verdicts (`cargo
+/// fip-prelint` without `--stack` gives them).
+pub fn stack_record(tcx: TyCtxt<'_>) {
+    let mut out = Out {
+        tcx,
+        warn_only: true,
+        errors: 0,
+        warnings: 0,
+        notes: 0,
+    };
+    let marked = roots(tcx, &mut out);
+    let roots: Vec<(DefId, Mark)> = marked
+        .into_iter()
+        .filter(|(d, _)| tcx.trait_of_assoc(*d).is_none())
+        .collect();
+    crate::stack::record(tcx, &roots);
+}
+
+/// Stack mode for an exported dependency: its codegened functions, no roots.
+pub fn stack_record_dependency(tcx: TyCtxt<'_>) {
+    crate::stack::record(tcx, &[]);
+}
+
 pub fn check_crate(tcx: TyCtxt<'_>) {
     let mut out = Out {
         tcx,

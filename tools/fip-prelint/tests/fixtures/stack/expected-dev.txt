@@ -1,0 +1,14 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+error: fip-prelint: stack: `boxed` has no bound (⊤): `alloc::alloc::__rust_alloc` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
+error: fip-prelint: stack: `copy_big` has no bound (⊤): `memcpy` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
+error: fip-prelint: stack: `ffi` has no bound (⊤): `labs` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
+error: fip-prelint: stack: `generic` has no bound (⊤): generic: no symbol of its own in a build (bounded per instantiation only through its callers)
+error: fip-prelint: stack: `precompiled` has no bound (⊤): `std::process::id` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
+error: fip-prelint: stack: `recursive` has no bound (⊤): recursion: `recursive` -> `recursive`
+error: fip-prelint: stack: `via_dyn` has no bound (⊤): `via_dyn` contains a dynamic call to `Shape::area` (trait object)
+error: fip-prelint: stack: `via_fn_ptr` has no bound (⊤): `via_fn_ptr` contains a call through a function pointer
+note: fip-prelint: stack: `chain_top` uses at most 504 bytes in this build (target x86_64-unknown-linux-gnu, opt-level 0; frames from `.stack_sizes` plus 8 bytes of return address each, longest path: `chain_top` 24 -> `mid` 136 -> `leaf` 312 -> `std::hint::black_box::<&mut [u64; 32]>` 0; panic paths, unwinding, signal and interrupt contexts excluded)
+note: fip-prelint: stack: `indexed` uses at most 64 bytes in this build (target x86_64-unknown-linux-gnu, opt-level 0; frames from `.stack_sizes` plus 8 bytes of return address each, longest path: `indexed` 56; panic paths, unwinding, signal and interrupt contexts excluded)
+note: fip-prelint: stack: `summed` uses at most 288 bytes in this build (target x86_64-unknown-linux-gnu, opt-level 0; frames from `.stack_sizes` plus 8 bytes of return address each, longest path: `summed` 24 -> `<std::slice::Iter<'_, u64> as std::iter::Iterator>::fold::<u64, {closure@chain/src/lib.rs:91:23: 91:29}>` 200 -> `std::ptr::const_ptr::<impl *const T>::offset_from_unsigned::precondition_check` 40; panic paths, unwinding, signal and interrupt contexts excluded)
+note: fip-prelint: stack: crate `chain`: 11 roots, 3 bounded, 8 ⊤

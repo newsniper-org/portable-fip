@@ -27,7 +27,11 @@
 //!   --std-summaries`): generation mode. Crates of a `-Zbuild-std` build are compiled
 //!   by the driver with `-Zalways-encode-mir` and the release settings of the shipped
 //!   `std`; the workspace member (the seed crate) is not checked, its roots seed the
-//!   summaries written to `<file>` ([`stdsum`]).
+//!   summaries written to `<file>` ([`stdsum`]);
+//! - `FIP_PRELINT_STACK=1` (set by `cargo fip-prelint --stack`, a `cargo build`):
+//!   stack mode. Crates the driver compiles get `-Zemit-stack-sizes
+//!   -Zshare-generics=no` and keep the profile's opt-level; instead of verdicts, each
+//!   records its roots and codegened functions next to its rlib ([`stack`]).
 
 #![feature(rustc_private)]
 
@@ -48,6 +52,7 @@ mod analysis;
 mod export;
 mod marks;
 mod report;
+mod stack;
 mod stdsum;
 mod value;
 
@@ -94,7 +99,11 @@ const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_STD_SUMMARIES",
     "FIP_PRELINT_STD_SUMMARIES_OUT",
     "FIP_MACROS_MARK_ONLY",
+    "FIP_PRELINT_STACK",
 ];
+
+/// Added in stack mode (`cargo fip-prelint --stack`, [`stack`]).
+const STACK_FLAGS: &[&str] = &["-Zemit-stack-sizes", "-Zshare-generics=no"];
 
 /// Generation mode of the std summaries (see the module documentation).
 pub const GENERATE_ENV: &str = "FIP_PRELINT_STD_SUMMARIES_OUT";
@@ -133,6 +142,8 @@ impl Callbacks for Prelint {
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let check = match self.role {
+            Role::Primary if stack::enabled() => report::stack_record,
+            Role::ExportedDependency if stack::enabled() => report::stack_record_dependency,
             Role::Primary if std::env::var_os(GENERATE_ENV).is_some() => report::generate,
             Role::Primary => report::check_crate,
             // An exported dependency's implementations of trait methods with a
@@ -292,6 +303,16 @@ fn main() -> std::process::ExitCode {
     if role == Role::StdBuild {
         args.extend(STD_RELEASE_FLAGS.iter().map(|f| (*f).to_string()));
     }
+    let stack = stack::enabled();
+    if stack && matches!(role, Role::Primary | Role::ExportedDependency) {
+        // Frame sizes of the build as profiled (no `-Copt-level=0` below), every
+        // generic instance codegened in the crate that uses it.
+        for f in STACK_FLAGS {
+            if !args.iter().any(|a| a == f) {
+                args.push((*f).to_string());
+            }
+        }
+    }
     let compiles = matches!(role, Role::Primary | Role::ExportedDependency);
     if compiles {
         // Skip flags already present (e.g. from RUSTFLAGS): a repeated
@@ -299,6 +320,10 @@ fn main() -> std::process::ExitCode {
         let mut i = 0;
         while i < CRATE_FLAGS.len() {
             let f = CRATE_FLAGS[i];
+            if stack && f == "-Copt-level=0" {
+                i += 1;
+                continue;
+            }
             let pair = matches!(f, "--cfg" | "--check-cfg");
             let present = if pair {
                 args.windows(2)

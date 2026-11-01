@@ -389,6 +389,24 @@ of its documentation run through the driver (`tests/compile_fail.rs`): all rejec
 14 for the documented reason, `HashMap::new` as `⊤`. Details: `TODOs/fip-prelint.md`,
 "Resolved 2026-11-02: repin, targets, export detection, `compile_fail` examples".
 
+## Amendment 2026-11-02: stack bounds for one build (limits plan L9)
+
+`cargo fip-prelint --stack` is a separate build mode: `cargo build --workspace --lib`
+with the driver adding `-Zemit-stack-sizes -Zshare-generics=no` and keeping the
+profile's opt-level, and giving no FIP verdicts. The driver writes, next to each rlib
+it compiles, the roots' symbols and every codegened function (mono item) with the
+reason it cannot be bounded (call through a function pointer, dynamic call, unresolved
+call, inline assembly, unsized local) and the diverging standard-library functions it
+calls (panic paths, excluded). `cargo-fip-prelint` reads the rlibs' ELF objects
+without dependencies and reports per root the longest path over the build's direct
+calls (relocations) of `.stack_sizes` frames plus 8 bytes of return address each, or
+`⊤` with the reason. The graph is the machine code's, every function on it mapped to
+its MIR instance, not the MIR call graph: measured, opt-level-0 code calls
+`precondition_check` functions the MIR analysis does not explore, and `memcpy`.
+Fixture `stack` (dev and release builds, expected bounds, cross-checked with
+`llvm-readobj` where present). Summing MIR local sizes stays rejected. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-02: stack bounds for one build".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

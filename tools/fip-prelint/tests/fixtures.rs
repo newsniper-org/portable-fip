@@ -20,12 +20,22 @@ fn fixtures_dir() -> PathBuf {
 }
 
 fn run(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) -> Vec<String> {
+    run_args(name, variant, envs, &["--message-format", "short"])
+}
+
+fn run_args(
+    name: &str,
+    variant: &str,
+    envs: &[(&str, std::ffi::OsString)],
+    args: &[&str],
+) -> Vec<String> {
     let dir = fixtures_dir().join(name);
     let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("fixtures")
         .join(format!("{name}{variant}"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"));
-    cmd.args(["fip-prelint", "--message-format", "short"])
+    cmd.arg("fip-prelint")
+        .args(args)
         .current_dir(&dir)
         .env("FIP_PRELINT_TARGET_DIR", &target)
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
@@ -34,6 +44,8 @@ fn run(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) -> Vec<St
         .env_remove("FIP_PRELINT_DUMP_MIR")
         .env_remove("FIP_PRELINT_STD_SUMMARIES")
         .env_remove("FIP_PRELINT_STD_SUMMARIES_OUT")
+        .env_remove("FIP_PRELINT_STACK")
+        .env_remove("FIP_MACROS_MARK_ONLY")
         .env_remove("CARGO_TARGET_DIR");
     for (k, v) in envs {
         cmd.env(k, v);
@@ -66,7 +78,12 @@ fn check(name: &str) {
 
 /// `check` with extra environment variables, compared with `expected{variant}.txt`.
 fn check_with(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) {
-    let got = run(name, variant, envs);
+    compare(name, variant, &run(name, variant, envs));
+}
+
+/// Compares (or blesses) `got` with `expected{variant}.txt`.
+fn compare(name: &str, variant: &str, got: &[String]) {
+    let got = got.to_vec();
     let path = fixtures_dir()
         .join(name)
         .join(format!("expected{variant}.txt"));
@@ -271,6 +288,80 @@ fn std_summaries_stale() {
         "-stale",
         &[("FIP_PRELINT_STD_SUMMARIES", stale.into_os_string())],
     );
+}
+
+/// Stack bounds (limits plan L9): `cargo fip-prelint --stack` in the dev profile
+/// (opt-level 0) and with `--release` (opt-level 3), target x86_64-unknown-linux-gnu,
+/// rustc 1.99.1; the expected bounds hold for these builds only. A three-level chain
+/// with arrays, an index (its panic path excluded) and a slice iterator (through the
+/// `precondition_check` functions codegen calls) are bounded; recursion, a dynamic
+/// call, a function pointer, a foreign function, a precompiled std function, `memcpy`,
+/// an allocation and a generic root are `⊤` with the reason, where the build has them
+/// (at opt-level 3 the recursion became a loop and `labs` an instruction). If the
+/// system `llvm-readobj` exists, each bound of `chain_top` is checked to be at least
+/// the sum of its chain's frame sizes as `llvm-readobj --stack-sizes` reads them.
+#[test]
+fn stack() {
+    if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        eprintln!("stack fixture: x86_64 Linux only (the expected bounds are for that build)");
+        return;
+    }
+    for (variant, extra) in [("-dev", &[][..]), ("-release", &["--release"][..])] {
+        let mut args = vec!["--stack"];
+        args.extend_from_slice(extra);
+        let got = run_args("stack", variant, &[], &args);
+        compare("stack", variant, &got);
+        let bound: u64 = got
+            .iter()
+            .find_map(|l| {
+                l.split("`chain_top` uses at most ")
+                    .nth(1)?
+                    .split(' ')
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .expect("a bound for chain_top");
+        let profile = if extra.is_empty() { "debug" } else { "release" };
+        let rlib = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("fixtures")
+            .join(format!("stack{variant}"))
+            .join(profile)
+            .join("libchain.rlib");
+        match Command::new("llvm-readobj")
+            .args(["--stack-sizes"])
+            .arg(&rlib)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let mut sum = 0u64;
+                let mut current: Option<String> = None;
+                for line in text.lines() {
+                    let line = line.trim();
+                    if let Some(f) = line.strip_prefix("Functions: [") {
+                        current = Some(f.trim_end_matches(']').to_string());
+                    } else if let Some(size) = line.strip_prefix("Size: 0x")
+                        && let Some(f) = current.take()
+                        && ["5chain9chain_top", "5chain3mid", "5chain4leaf"]
+                            .iter()
+                            .any(|n| f.ends_with(n))
+                    {
+                        sum += u64::from_str_radix(size, 16).expect("a hex size");
+                    }
+                }
+                assert!(sum > 0, "llvm-readobj found no frame of the chain");
+                assert!(
+                    bound >= sum,
+                    "bound {bound} of chain_top{variant} below the llvm-readobj frame sum {sum}"
+                );
+                eprintln!("stack fixture{variant}: bound {bound} >= llvm-readobj frame sum {sum}");
+            }
+            _ => {
+                eprintln!("stack fixture{variant}: llvm-readobj not available, cross-check skipped")
+            }
+        }
+    }
 }
 
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.

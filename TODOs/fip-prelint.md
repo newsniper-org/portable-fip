@@ -1086,3 +1086,71 @@ behaviour); the generated workspace is built by the test, not a committed fixtur
 repin recipe also checks the sidecar's reproducibility and builds the driver ignoring
 the workspace MSRV; per-target std summaries are not generated (only the host's), which
 is harmless for the workspace today and stated.
+
+## Resolved 2026-11-02: stack bounds for one build (limits plan L9)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L9 (item 10 of its
+order). Before: no byte bound; recursion was reported (`fip`) and acyclicity was the
+only stack claim. Summing MIR local sizes stays rejected (LLVM adds spill slots,
+argument areas, alignment; it removes what it inlines).
+
+**Mode.** `cargo fip-prelint --stack [cargo build args]` runs `cargo build --workspace
+--lib --keep-going --message-format json-render-diagnostics` into
+`target/fip-prelint-stack` (or `FIP_PRELINT_TARGET_DIR`) with the driver in stack mode
+(`FIP_PRELINT_STACK=1`): crates it compiles get `-Zemit-stack-sizes
+-Zshare-generics=no`, keep the profile's opt-level (no `-Copt-level=0`), and get no FIP
+verdicts. Each writes `<rlib>.fip-stack` (`src/stack.rs`): its roots with their symbols
+(a generic root has none), every mono item it codegens (symbol, instance, and the reason
+it cannot be bounded: a call through a function pointer, a dynamic call or a drop of a
+`dyn` value, an unresolved call, inline assembly, a local of unsized type), the
+diverging `core`/`alloc`/`std` functions it calls and the diverging standard-library
+lang items (panic paths), and labels of other callees. `cargo-fip-prelint`
+(`src/stackbound.rs`, no dependencies, unit tests) finds the rlibs from cargo's
+artifact messages, reads their `ar` members and the ELF64 x86_64 objects: frame sizes
+from `.stack_sizes` (through its relocations; a symbol in several objects counts its
+maximum), direct calls from the relocations of each function's section (undefined
+symbols, functions, sections of functions; a label inside the caller's own body is
+not a call). Per root: `Σ (frame + 8)` over the longest path from its symbol, calls of
+excluded panic functions skipped; `⊤` with the reason for a cycle, a callee not defined
+in the build's objects, a function without a frame size or without a recorded MIR
+instance, a recorded reason, a root without a symbol, an unreadable object. Exit
+status 1 if a root is `⊤` or the build fails.
+
+**Measured** (fixture `stack`, x86_64-unknown-linux-gnu, rustc 1.99.1):
+
+| root | dev (opt-level 0) | release (opt-level 3) |
+|---|---|---|
+| `chain_top` → `mid` → `leaf` (arrays of 64 and 256 bytes) | 504 bytes: 24 + 136 + 312 + 0 (`black_box`) frames, 4 × 8 return addresses; `llvm-readobj` frame sum of the three: 472 | 256 bytes: 8 + 88 + 136, 3 × 8; `llvm-readobj` sum: 232 |
+| `indexed` (`xs[i]`, its bounds check's panic call excluded) | 64 | ⊤: no symbol (kept only for cross-crate inlining) |
+| `summed` (`xs.iter().fold(..)`) | 288, through `Iter::fold` and `offset_from_unsigned::precondition_check` | 8 |
+| `recursive` | ⊤: recursion `recursive` -> `recursive` | 8: LLVM turned the self-call into a loop |
+| `via_dyn`, `via_fn_ptr` | ⊤: dynamic call / call through a function pointer | the same |
+| `ffi` (`labs`) | ⊤: `labs` not defined in the build | 8: `labs` computed inline |
+| `precompiled` (`std::process::id`) | ⊤: precompiled | the same |
+| `copy_big` (512-byte copy) | ⊤: `memcpy` | ⊤: no symbol |
+| `boxed` | ⊤: `alloc::alloc::__rust_alloc` | the same |
+| `generic<T>` | ⊤: no symbol of its own | the same |
+| totals | 11 roots, 3 bounded, 8 ⊤ | 11 roots, 4 bounded, 7 ⊤ |
+
+The two builds differ by a factor of 2 for the same chain (as M5 predicted), so a bound
+is stated with its target and opt-level and never reused. On this workspace
+(`--stack`, dev and release, 3.7 s and 6.6 s with a cold target directory): `fip_core` 8 roots, 0 bounded —
+all are generic, so they have no symbol of their own; a monomorphic caller is bounded
+through their instances.
+
+**Deviations from the plan:** the graph is the build's machine call graph with every
+function mapped to its MIR instance (the plan: the MIR instance graph, instances
+without a symbol counting 0): measured, opt-level-0 code calls `precondition_check`
+functions that the MIR analysis does not explore and `memcpy`, which a MIR graph would
+miss; machine code shows no indirect call, hence the per-function MIR facts. No table
+of runtime functions: `memcpy`, `memset` and libc are not built with stack sizes, so
+they cannot be measured the same way, and are `⊤`. Precompiled `std` functions are
+`⊤` (L6's `std` build is a `cargo check`, without objects). `-Zshare-generics=no`;
+libraries only; recursion is a cycle in the build's graph (so a recursion LLVM
+removed is bounded); 8 bytes of return address per frame added; x86_64 ELF only (other
+objects: `⊤`, unreadable).
+
+**Open:** other architectures and object formats (Mach-O, COFF, wasm); runtime
+functions (`memcpy`, `memset`) with frames measured by other means; precompiled `std`
+frames (a `-Zbuild-std` build with stack sizes); roots in binaries and tests; generic
+roots (bounded only through monomorphic callers).
