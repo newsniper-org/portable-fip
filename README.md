@@ -206,7 +206,7 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 |---|---|
 | `fmt-check`, `lint` | rustfmt; clippy with `all = deny`, `pedantic = warn`, `-D warnings` |
 | `test` | unit, integration, doc tests (allocation tests run in parallel) |
-| `msrv` | the same on rustc 1.97.1 |
+| `msrv` | the same on rustc 1.99.1 (the workspace `rust-version`) |
 | `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch`, `fip-strict` (only `core`/`alloc` exist there) |
 | `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks |
 | `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected |

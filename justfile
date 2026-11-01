@@ -5,7 +5,7 @@
 verus := env_var_or_default("VERUS", "verus")
 singular := env_var_or_default("SINGULAR", "/usr/bin/Singular")
 # Lowest supported toolchain (workspace `rust-version`).
-msrv := "1.97.1"
+msrv := "1.99.1"
 # Toolchain of `fip-prelint` (the installed Verus toolchain; decision 2026-11-01-fip-prelint).
 prelint_tc := "1.99.1"
 
