@@ -6,7 +6,7 @@
 **Status:** ACCEPTED, 2026-11-01. Amended 2026-10-31 (named certificates,
 `#[fip_impl]`, `Certified`, Verus specs for `FipFn`, `panic_macros = false`,
 audit at rustc 1.97.1). Amended 2026-11-01 (`crate = ..` path, certificates read
-through the `Cert` type). Open items: `TODOs/strict-open-items.md`.
+through the `Cert` type; non-allocating constructors of std heap types). Open items: `TODOs/strict-open-items.md`.
 
 ## Decision
 
@@ -177,6 +177,78 @@ audited versions (`1.97.1`, `1.99.1`), and `fip-macros/tests/strict_toolchain.rs
 fails on any other compiling rustc (`fip-macros/build.rs` records it; measured to
 fail on 1.96.0). When the toolchain changes, re-read the implementations above,
 update the line references, and add the version.
+
+## Non-allocating constructors of std heap types
+
+**Added 2026-11-01.** The token rule "`Type::ctor` with `Type` in `HEAP_TYPES` and
+`ctor` in `HEAP_CONSTRUCTORS` is an allocation site" rejected constructors that never
+allocate: `#[fip] fn f(v: &mut Vec<u8>) -> Vec<u8> { core::mem::replace(v, Vec::new()) }`
+did not compile (measured before the change: the 18 functions of
+`fip-macros/tests/non_allocating_ctors.rs` gave 19 "allocation site" errors).
+`fip_lint_rules::NON_ALLOCATING_CONSTRUCTORS` lists the `(type, constructor)` pairs
+that are not allocation sites; `#[fip]` (base scan), strict mode and
+`fip_testkit::summaries` read it through `is_heap_constructor` /
+`is_non_allocating_constructor`.
+
+Strict mode accepts the listed constructors **without a certificate, with bound 0**.
+They meet the `core` table's rules: no allocation (below), no deallocation (each
+builds a value from nothing and drops none), no call into user code (no method of the
+element type or of a caller-chosen trait is invoked; `BinaryHeap::new` is in
+`impl<T> BinaryHeap<T>`), no recursion. Unlike the `core` table they are recognised
+by the type's **last path segment** (`Vec::new`, `std::vec::Vec::new`,
+`alloc::vec::Vec::new`), as every `HEAP_TYPES` constructor already was: a user type
+named `Vec` with an allocating `new` would be taken for the std one by the macro
+(`fip-prelint` resolves the call on MIR and is not fooled).
+
+Audit, per entry: every constructor is a `const fn` building an empty value;
+`RawVec::new` (`raw_vec/mod.rs:103-105` → `new_in` `:199-203` →
+`RawVecInner::new_in`) stores a dangling, well-aligned pointer with capacity 0.
+Paths are under `library/alloc/src` of the `rust-src` component.
+
+| entry | rustc 1.99.1 | rustc 1.97.1 |
+|---|---|---|
+| `Vec::new` | `vec/mod.rs:461-463`: `Vec { buf: RawVec::new(), len: 0 }` | `vec/mod.rs:463-465`, identical |
+| `Vec::default` | `vec/mod.rs:4366-4372`: `Vec::new()` (`const impl`) | `vec/mod.rs:4293-4299` (`impl const`), same body |
+| `String::new` | `string.rs:446-448`: `String { vec: Vec::new() }` | same lines, identical |
+| `String::default` | `string.rs:2737-2742`: `String::new()` | `string.rs:2713-2718`, same body |
+| `VecDeque::new` | `collections/vec_deque/mod.rs:826-829`: `{ head: WrappedIndex::zero(), len: 0, buf: RawVec::new() }` | `:828-831`, identical |
+| `VecDeque::default` | `collections/vec_deque/mod.rs:162-167`: `VecDeque::new()` | same lines, identical |
+| `BTreeMap::new` | `collections/btree/map.rs:651-653`: `{ root: None, length: 0, alloc: ManuallyDrop::new(Global), .. }` | same lines, identical |
+| `BTreeMap::default` | `collections/btree/map.rs:2598-2603`: `BTreeMap::new()` | `:2597-2601`, same body |
+| `BTreeSet::new` | `collections/btree/set.rs:344-346`: `BTreeSet { map: BTreeMap::new() }` | same lines, identical |
+| `BTreeSet::default` | `collections/btree/set.rs:1640-1645`: `BTreeSet::new()` | same lines, identical |
+| `LinkedList::new` | `collections/linked_list.rs:448-450`: `{ head: None, tail: None, len: 0, .. }` | `:447-449`, identical |
+| `LinkedList::default` | `collections/linked_list.rs:426-432`: `Self::new()` | `:425-431`, identical |
+| `BinaryHeap::new` | `collections/binary_heap/mod.rs:514-516`: `BinaryHeap { data: vec![] }`; `vec![]` is `$crate::vec::Vec::new()` (`macros.rs:43-46`) | same lines (`macros.rs:42-45`), identical |
+| `BinaryHeap::default` | `collections/binary_heap/mod.rs:469-475`: `BinaryHeap::new()` | same lines, identical |
+
+Measured: `fip-macros/tests/non_allocating_ctors.rs` runs each entry under the
+counting allocator (0 allocations, 0 reallocations, 0 frees, also when the empty
+values are dropped), on rustc 1.99.1 and 1.97.1; a test pins that it measures
+exactly the table. `fip-prelint` agrees: its self-check reports the 18 roots of that
+test crate (15 `#[fip]`, 3 strict) as passed with 0 errors; its dump shows it read
+each constructor's MIR body and found no allocation entry point.
+
+Not listed, on purpose:
+
+- `HashMap::new` / `HashSet::new` (`std/src/collections/hash/map.rs:269-271`,
+  `hash/set.rs:149-151`: `Default::default()` → `HashMap::with_hasher(Default::default())`,
+  `map.rs:1488-1496`): `RandomState::new` (`std/src/hash/random.rs:55-76`) reads a
+  lazily initialised `thread_local!` filled by `hashmap_random_keys()` (OS code). On
+  targets without native thread-locals `std` uses the `os` implementation
+  (`std/src/sys/thread_local/mod.rs:36-57`), which stores each thread's value in a
+  `System.alloc` allocation (`sys/thread_local/os.rs:99-110`), invisible to a counting
+  global allocator. Not allocation-free on every target, so not listed.
+- `HashMap::default` / `HashSet::default`: call the hasher's `Default` (user code).
+- `with_capacity` (also `with_capacity(0)`), `from`, `from_iter`: argument-dependent.
+- every `Box` / `Rc` / `Arc` constructor, incl. `Box::default`
+  (`alloc/src/boxed.rs:2008-2016`: `Box::new_uninit()`), `Rc::default`
+  (`rc.rs:2540`), `Arc::default` (`sync.rs:3780`).
+
+The audit is tied to a toolchain like the `core` table:
+`fip_lint_rules::NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT` (`1.97.1`, `1.99.1`), and
+`fip-macros/tests/strict_toolchain.rs` fails on any other compiling rustc (measured
+on 1.96.0: both toolchain tests fail).
 
 ## Hand-written certificates
 

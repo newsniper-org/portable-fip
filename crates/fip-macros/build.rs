@@ -3,7 +3,9 @@
 
 //! Records the version of the compiling rustc as `FIP_RUSTC_VERSION`, so
 //! `tests/strict_toolchain.rs` can check it against the toolchains the `core` table
-//! was audited at (`fip_lint_rules::CORE_TABLE_AUDITED_AT`).
+//! and the non-allocating constructors were audited at
+//! (`fip_lint_rules::CORE_TABLE_AUDITED_AT`,
+//! `fip_lint_rules::NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT`).
 
 use std::process::Command;
 

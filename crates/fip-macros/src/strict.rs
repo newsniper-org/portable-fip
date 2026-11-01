@@ -35,7 +35,7 @@
 
 use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 
-use crate::{GHOST_MACROS, HEAP_CONSTRUCTORS, HEAP_TYPES, is_group, is_ident, is_punct};
+use crate::{GHOST_MACROS, is_group, is_ident, is_punct};
 use fip_lint_rules::CORE_TABLE;
 
 /// Macros a strict body may invoke: the panicking macros of the shared rule set
@@ -335,10 +335,13 @@ impl StrictScan {
                 _ => None,
             })
             .collect();
-        let heap_ctor = segs
-            .last()
-            .is_some_and(|l| HEAP_TYPES.contains(&l.as_str()))
-            && HEAP_CONSTRUCTORS.contains(&s.as_str());
+        // A std heap constructor needs no certificate: an allocating one is an
+        // allocation site of this body (counted by the base scan), a
+        // `NON_ALLOCATING_CONSTRUCTORS` pair counts 0 (audited like the `core` table).
+        let heap_ctor = segs.last().is_some_and(|l| {
+            fip_lint_rules::is_heap_constructor(l, &s)
+                || fip_lint_rules::is_non_allocating_constructor(l, &s)
+        });
         if heap_ctor || in_core_table(&segs, &s) {
             return;
         }

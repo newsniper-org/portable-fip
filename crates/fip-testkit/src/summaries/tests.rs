@@ -265,6 +265,20 @@ fn fip_fn_with_a_crate_path_is_a_closure() {
 }
 
 #[test]
+fn non_allocating_constructors_are_not_sites() {
+    let r = report(
+        "#[fip]\nfn a(v: &mut Vec<u8>) -> Vec<u8> { core::mem::replace(v, Vec::new()) }\n#[fip]\nfn b() -> (String, std::collections::BTreeMap<u8, u8>) { (String::default(), std::collections::BTreeMap::new()) }\n",
+    );
+    assert_eq!(r.violations, Vec::new());
+    assert_eq!(summary_of(&r, "a"), "0");
+    assert_eq!(summary_of(&r, "b"), "0");
+    let r = report(
+        "#[fip]\nfn a() -> Vec<u8> { Vec::with_capacity(0) }\n#[fip]\nfn b() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }\n",
+    );
+    assert_eq!(r.violations.len(), 2, "{r:?}");
+}
+
+#[test]
 fn method_calls_resolve_by_name() {
     let r = report(
         "struct S;\nimpl S {\n    fn grow(&self) -> Box<u8> { Box::new(1) }\n}\n#[fip]\nfn a(s: &S) { let _b = s.grow(); }\n",

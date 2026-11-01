@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fip_lint_rules::{
-    ALLOC_FREE_MACROS, ALLOC_MACROS, ALLOC_METHODS, FN_TRAITS, GHOST_MACROS, HEAP_CONSTRUCTORS,
-    HEAP_TYPES, PANIC_MACROS,
+    ALLOC_FREE_MACROS, ALLOC_MACROS, ALLOC_METHODS, FN_TRAITS, GHOST_MACROS, PANIC_MACROS,
+    is_heap_constructor, is_non_allocating_constructor,
 };
 
 use super::lex::{
@@ -1073,14 +1073,16 @@ impl<'a> Builder<'a> {
         if is_p(t, j, '!') && !is_p(t, j + 1, '=') && is_open(t, j + 1) {
             return self.macro_call(t, i, &name, j + 1, lp, cx);
         }
-        if segs
-            .last()
-            .is_some_and(|s| HEAP_TYPES.contains(&s.as_str()))
-            && HEAP_CONSTRUCTORS.contains(&name.as_str())
-        {
-            let ty = segs.last().cloned().unwrap_or_default();
-            self.push(cx, Ev::Site(format!("`{ty}::{name}`")), &t[i], lp);
-            return j;
+        if let Some(ty) = segs.last() {
+            if is_heap_constructor(ty, &name) {
+                let ty = ty.clone();
+                self.push(cx, Ev::Site(format!("`{ty}::{name}`")), &t[i], lp);
+                return j;
+            }
+            // Audited not to allocate, free or call user code.
+            if is_non_allocating_constructor(ty, &name) {
+                return j;
+            }
         }
         if is_p(t, j, '(') {
             return self.call(t, i, (segs, name), j, lp, cx);

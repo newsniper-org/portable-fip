@@ -21,6 +21,15 @@
 //! `.to_owned()`, `.to_string()`, `.collect()` and the growth methods (`.push`,
 //! `.insert`, `.extend`, `.reserve`, `.resize`, …), which may allocate.
 //!
+//! Not allocation sites: the constructors of empty collections that never allocate,
+//! `fip_lint_rules::NON_ALLOCATING_CONSTRUCTORS` (`new` and `default` of `Vec`,
+//! `String`, `VecDeque`, `BTreeMap`, `BTreeSet`, `LinkedList`, `BinaryHeap`), audited
+//! in the `alloc` sources of the toolchains in
+//! `fip_lint_rules::NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT` and measured with a
+//! counting allocator. `HashMap`/`HashSet` constructors, `with_capacity` (also with
+//! `0`), `from` and every `Box`/`Rc`/`Arc` constructor stay allocation sites. Strict
+//! mode accepts the listed constructors without a certificate, with bound 0.
+//!
 //! Not seen: allocation inside called functions, trait methods with other names,
 //! user macros, recursion through other functions. For those, use `fip-testkit`:
 //! its allocation-count assertions check what the code does, and
@@ -62,6 +71,12 @@
 //! pub fn count_down(n: u32) -> u32 {
 //!     if n == 0 { 0 } else { count_down(n - 1) }
 //! }
+//!
+//! /// Takes the vector out, leaving an empty one (`Vec::new` does not allocate).
+//! #[fip]
+//! pub fn take(v: &mut Vec<u8>) -> Vec<u8> {
+//!     core::mem::replace(v, Vec::new())
+//! }
 //! # fn main() { let mut v = 3; double(&mut v); assert_eq!(v, 6); }
 //! ```
 //!
@@ -70,6 +85,24 @@
 //! ```compile_fail
 //! #[fip_macros::fip]
 //! fn f(x: i32) -> Box<i32> { Box::new(x) }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: #[fip]: allocation site `Vec::with_capacity` in the body
+//! #[fip_macros::fip]
+//! fn f() -> Vec<u8> { Vec::with_capacity(0) }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: #[fip]: allocation site `HashMap::new` in the body
+//! #[fip_macros::fip]
+//! fn f() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: #[fip]: allocation site `Box::default` in the body
+//! #[fip_macros::fip]
+//! fn f() -> Box<u8> { Box::default() }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
@@ -522,7 +555,7 @@ use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenSt
 
 mod strict;
 
-use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, HEAP_CONSTRUCTORS, HEAP_TYPES};
+use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, is_heap_constructor};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -965,11 +998,10 @@ impl Scan<'_> {
                 if bang_next && ALLOC_MACROS.contains(&s.as_str()) {
                     self.site(id.span(), format!("`{s}!`"), in_loop);
                 }
-                if HEAP_TYPES.contains(&s.as_str())
-                    && toks.get(i + 1).is_some_and(|n| is_punct(n, ':'))
+                if toks.get(i + 1).is_some_and(|n| is_punct(n, ':'))
                     && toks.get(i + 2).is_some_and(|n| is_punct(n, ':'))
                     && let Some(TokenTree::Ident(f)) = toks.get(i + 3)
-                    && HEAP_CONSTRUCTORS.contains(&f.to_string().as_str())
+                    && is_heap_constructor(&s, &f.to_string())
                 {
                     self.site(id.span(), format!("`{s}::{f}`"), in_loop);
                 }

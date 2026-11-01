@@ -13,8 +13,13 @@ use fip_testkit::summaries::{Report, fip_violations, fip_violations_in};
 
 /// Copies of the `compile_fail` examples in `src/lib.rs` whose rejection is about
 /// behaviour (allocation sites, recursion), without the hidden `# fn main() {}` line.
+/// A hidden `# // expect: ..` line is kept for the comparison and dropped before
+/// the checker reads the snippet.
 const REJECTED: &[&str] = &[
     "#[fip_macros::fip]\nfn f(x: i32) -> Box<i32> { Box::new(x) }",
+    "# // expect: #[fip]: allocation site `Vec::with_capacity` in the body\n#[fip_macros::fip]\nfn f() -> Vec<u8> { Vec::with_capacity(0) }",
+    "# // expect: #[fip]: allocation site `HashMap::new` in the body\n#[fip_macros::fip]\nfn f() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }",
+    "# // expect: #[fip]: allocation site `Box::default` in the body\n#[fip_macros::fip]\nfn f() -> Box<u8> { Box::default() }",
     "#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let v = vec![0u8; 4]; v.len() + x.len() }",
     "#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let y = x.to_vec(); y.len() }",
     "#[fip_macros::fip]\nfn f(n: u32) -> u32 { if n == 0 { 0 } else { f(n - 1) } }",
@@ -52,7 +57,12 @@ fn snippets_are_the_ones_in_the_crate_docs() {
 #[test]
 fn rejected_examples_are_violations() {
     for s in REJECTED {
-        let r = check("snippet.rs", s);
+        let code = s
+            .lines()
+            .filter(|l| !l.starts_with("# //"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let r = check("snippet.rs", &code);
         assert!(!r.violations.is_empty(), "checker accepts:\n{s}\n{r:?}");
     }
 }

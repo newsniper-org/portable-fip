@@ -13,7 +13,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-/// Standard heap-owning types; `Type::ctor(..)` with a ctor below is an allocation site.
+/// Standard heap-owning types; `Type::ctor(..)` with a ctor below is an allocation site
+/// unless the pair is in [`NON_ALLOCATING_CONSTRUCTORS`] (see [`is_heap_constructor`]).
 pub const HEAP_TYPES: &[&str] = &[
     "Box",
     "Vec",
@@ -28,7 +29,7 @@ pub const HEAP_TYPES: &[&str] = &[
     "BinaryHeap",
     "LinkedList",
 ];
-/// Constructors of [`HEAP_TYPES`] that allocate.
+/// Constructors of [`HEAP_TYPES`] that may allocate.
 pub const HEAP_CONSTRUCTORS: &[&str] = &[
     "new",
     "pin",
@@ -40,6 +41,62 @@ pub const HEAP_CONSTRUCTORS: &[&str] = &[
     "new_cyclic",
     "default",
 ];
+
+/// `(type, constructor)` pairs of [`HEAP_TYPES`] × [`HEAP_CONSTRUCTORS`] that never
+/// allocate, whatever their arguments (they take none): each builds an empty value
+/// (a dangling, capacity-0 buffer or `None` links) in a `const fn`, frees nothing
+/// (it drops no value) and calls no user code (no trait method of the element type).
+/// **Audited, not machine-proved**, in the `alloc` sources of the toolchains in
+/// [`NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT`]; measured with a counting allocator
+/// (`fip-macros/tests/non_allocating_ctors.rs`) and agreed by `fip-prelint` (MIR).
+/// Recognised, like [`HEAP_TYPES`], by the type's last path segment.
+/// Per-entry reasons: `docs/decisions/2026-11-01-strict-core-table.md`.
+///
+/// Not listed on purpose: `HashMap`/`HashSet` `new`/`default` (`RandomState::new`
+/// reads a lazily initialised thread-local, which targets without native TLS store in
+/// a heap allocation, and `default` calls the hasher's `Default`, user code);
+/// `with_capacity` and `from`/`from_iter` (argument-dependent); every constructor of
+/// `Box`, `Rc`, `Arc`.
+pub const NON_ALLOCATING_CONSTRUCTORS: &[(&str, &str)] = &[
+    ("Vec", "new"),
+    ("Vec", "default"),
+    ("String", "new"),
+    ("String", "default"),
+    ("VecDeque", "new"),
+    ("VecDeque", "default"),
+    ("BTreeMap", "new"),
+    ("BTreeMap", "default"),
+    ("BTreeSet", "new"),
+    ("BTreeSet", "default"),
+    ("LinkedList", "new"),
+    ("LinkedList", "default"),
+    ("BinaryHeap", "new"),
+    ("BinaryHeap", "default"),
+];
+
+/// rustc versions whose `alloc` sources were read for [`NON_ALLOCATING_CONSTRUCTORS`].
+/// A build with any other version is not covered by the audit (`fip-macros` tests
+/// fail on it).
+pub const NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1"];
+
+/// `true` if `ty::ctor(..)` (by the last segment of the type path) is an allocation
+/// site: a [`HEAP_TYPES`] type, a [`HEAP_CONSTRUCTORS`] constructor, and not a
+/// [`NON_ALLOCATING_CONSTRUCTORS`] pair.
+#[must_use]
+pub fn is_heap_constructor(ty: &str, ctor: &str) -> bool {
+    HEAP_TYPES.contains(&ty)
+        && HEAP_CONSTRUCTORS.contains(&ctor)
+        && !is_non_allocating_constructor(ty, ctor)
+}
+
+/// `true` if `ty::ctor(..)` is a [`NON_ALLOCATING_CONSTRUCTORS`] pair.
+#[must_use]
+pub fn is_non_allocating_constructor(ty: &str, ctor: &str) -> bool {
+    NON_ALLOCATING_CONSTRUCTORS
+        .iter()
+        .any(|&(t, c)| t == ty && c == ctor)
+}
+
 /// Macros that allocate.
 pub const ALLOC_MACROS: &[&str] = &["vec", "format"];
 /// Method names that may allocate (by name; the receiver type is not known).
@@ -453,6 +510,22 @@ mod tests {
                 .iter()
                 .all(|(n, why)| !n.is_empty() && !why.is_empty())
         );
+    }
+
+    #[test]
+    fn non_allocating_constructors() {
+        for &(t, c) in NON_ALLOCATING_CONSTRUCTORS {
+            assert!(HEAP_TYPES.contains(&t) && HEAP_CONSTRUCTORS.contains(&c));
+            assert!(!is_heap_constructor(t, c));
+            assert!(c == "new" || c == "default", "{t}::{c} takes arguments");
+            assert!(!matches!(t, "Box" | "Rc" | "Arc" | "HashMap" | "HashSet"));
+        }
+        assert!(is_non_allocating_constructor("Vec", "new"));
+        assert!(is_heap_constructor("Vec", "with_capacity"));
+        assert!(is_heap_constructor("Box", "new"));
+        assert!(is_heap_constructor("Box", "default"));
+        assert!(is_heap_constructor("HashMap", "new"));
+        assert!(!is_heap_constructor("Foo", "new"));
     }
 
     #[test]
