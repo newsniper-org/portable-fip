@@ -63,7 +63,7 @@ use rustc_middle::mir::{self, AssertKind, Body, Operand, TerminatorKind};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{
     self, EarlyBinder, GenericArgs, GenericArgsRef, Instance, InstanceKind, ShimKind, Ty, TyCtxt,
-    TypeFoldable, TypingEnv,
+    TypeFoldable, TypeVisitableExt, TypingEnv,
 };
 use rustc_span::{DUMMY_SP, Span};
 
@@ -957,12 +957,39 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 "unsupported shim `{}`",
                 self.nodes[i].label
             ))]),
+            // rustc builds a polymorphic drop shim in the typing environment of
+            // `drop_in_place`, which lacks the root's bounds and the types of its
+            // const parameters; it may fail with an internal compiler error there
+            // (measured: a field `[Vec<T>; N]`). Such a drop is `⊤`, never an abort.
+            InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty))) if ty.has_param() => {
+                match self.polymorphic_shim(inst) {
+                    Some(body) => NodeKind::Body(self.scan_body(inst, body)),
+                    None => NodeKind::Leaf(vec![Ev::Unknown(format!(
+                        "drop glue of `{ty}`: rustc cannot build its drop shim for the generic type (internal compiler error caught)"
+                    ))]),
+                }
+            }
             InstanceKind::Shim(_) => {
                 let body = tcx.instance_mir(inst.def);
                 NodeKind::Body(self.scan_body(inst, body))
             }
         };
         self.nodes[i].kind = kind;
+    }
+
+    /// The MIR of a drop shim whose type mentions a generic parameter, or `None` if
+    /// rustc panics while building it (an internal compiler error). The panic is
+    /// caught with rustc's panic hook (backtrace, ICE file) suspended; a failed query
+    /// stays poisoned, and asking for it again panics again, which is caught the same
+    /// way.
+    fn polymorphic_shim(&self, inst: Instance<'tcx>) -> Option<&'tcx Body<'tcx>> {
+        let tcx = self.tcx;
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let body =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tcx.instance_mir(inst.def)));
+        std::panic::set_hook(hook);
+        body.ok()
     }
 
     fn classify_intrinsic(&mut self, inst: Instance<'tcx>, def_id: DefId) -> NodeKind {

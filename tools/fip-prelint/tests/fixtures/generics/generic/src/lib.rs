@@ -167,3 +167,23 @@ pub fn drop_bare<T>(t: T) {
 pub fn drop_option_u32(o: Option<u32>) {
     drop_option(o);
 }
+
+/// A field `[Vec<T>; N]`: rustc's polymorphic drop shim builder (run in the typing
+/// environment of `drop_in_place`, which does not know the type of `N`) fails with an
+/// internal compiler error. The driver catches it: the drop is `⊤` (error), and the
+/// driver does not abort. rustc still prints the caught internal error once per crate.
+pub struct Rows<T, const N: usize> {
+    pub rows: [Vec<T>; N],
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_rows<T, const N: usize>(r: Rows<T, N>) {
+    drop(r);
+}
+
+/// The same shim requested again from another root (the failed query is poisoned and
+/// fails again): `⊤` again, no abort.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_rows_again<T, const N: usize>(r: Rows<T, N>) {
+    let _ = r;
+}

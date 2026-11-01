@@ -421,9 +421,11 @@ glue is resolved through the `drop_glue` lang item of rustc 1.99.1 (what
 resolve, and is the term `drop(T)` (it was `⊤`). `[T]` is not special-cased: its
 glue is analysed and loops over `drop(T)`, so `drop(Vec<T>)` is "may free" plus
 `∞·drop(T)` (the plan wrote `drop(T)`). `put_twice` stays a warning, as predicted.
-Not covered: a polymorphic shim that rustc cannot build would abort the driver
-instead of becoming `⊤` (none seen in the fixtures or the self-check; unmeasured
-beyond them).
+Not covered at first: a polymorphic shim that rustc cannot build aborted the driver.
+Hardened afterwards (own commit): measured with a field `[Vec<T>; N]` of a
+const-generic struct (an internal compiler error in rustc's shim builder); the shim is
+now built under `catch_unwind` and such a drop is `⊤` (fixture `generics`,
+`drop_rows`).
 
 ### L6. `format!` and other `std` functions without MIR are `⊤`
 

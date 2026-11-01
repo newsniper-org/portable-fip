@@ -558,3 +558,36 @@ texts now run through the glue to `<Global as Allocator>::deallocate`.
 **Open:** a polymorphic drop shim that rustc cannot build would abort the driver
 (an internal compiler error) instead of becoming `⊤`; none occurred in the fixtures,
 the self-check or the M3 probe (unmeasured beyond them).
+
+## Resolved 2026-11-02: drop shims rustc cannot build are `⊤` (hardening of L5)
+
+Open point of "drops through their glue": a polymorphic drop shim that rustc cannot
+build would abort the driver. Reproduced: rustc builds a polymorphic drop shim in the
+typing environment of `drop_in_place` (bounds `T: Destruct` only), so a field whose
+type needs the type of the root's const parameter, `struct Rows<T, const N: usize> {
+rows: [Vec<T>; N] }`, ends in an internal compiler error ("cannot find `N/#1` in
+param-env", in `needs_drop` → `is_copy` of the field during `build_drop_shim`).
+Not every const-generic type fails: `Vec<[u8; N]>`, `[Vec<T>; N]`, `Box<[T; N]>` and a
+struct with fields `Vec<u8>` and `[u8; N]` build and are analysed (measured).
+
+**Change.** The MIR of a drop shim whose type mentions a generic parameter is
+requested under `catch_unwind`, with the panic hook suspended (no backtrace, no ICE
+file). A panic makes the drop `⊤`: "drop glue of `Rows<T, N>`: rustc cannot build its
+drop shim for the generic type (internal compiler error caught)". A second request of
+the same shim (the failed query is poisoned) panics again and is caught the same way.
+rustc still prints the caught internal error once per crate and counts it as an
+error, so such a crate fails also under `--warn-only` (visible, never a pass).
+
+**Measured** (fixture `generics`, roots `drop_rows` and `drop_rows_again`):
+
+| | before (driver of `061de14`) | after |
+|---|---|---|
+| `generic` crate | driver aborted (internal compiler error, no summary, later roots not checked) | 20 roots, 7 passed, 9 errors, 6 warnings |
+| `drop_rows`, `drop_rows_again` | — (abort) | `⊤` each (error) |
+
+The other 18 roots and every other fixture and the self-check are unchanged.
+
+**Open:** a caught internal error still leaves rustc's diagnostic (and an error count)
+behind; other panics of the shim builder are caught the same way but are not in a
+fixture. Non-generic drop shims are built as before (rustc builds them for codegen
+too).

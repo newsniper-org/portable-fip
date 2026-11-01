@@ -272,6 +272,18 @@ fixture `generics` (`drop(Vec<T>)`, `drop(Box<T>)` errors; `drop(Option<T>)`,
 `drop(T)` warnings); self-check: same verdicts and counts, two witness texts changed.
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: drops through their glue".
 
+## Amendment 2026-11-02: drop shims rustc cannot build (hardening of L5)
+
+A polymorphic drop shim is built by rustc in the typing environment of
+`drop_in_place`, which lacks the root's bounds and the types of its const parameters.
+For a field `[Vec<T>; N]` of a const-generic struct this ends in an internal compiler
+error, which aborted the driver. The driver now requests the MIR of a drop shim whose
+type mentions a generic parameter under `catch_unwind` (panic hook suspended); a panic
+makes that drop `⊤`, reported with the type. rustc still prints the caught internal
+error and counts it as an error (the crate fails, also under `--warn-only`). Fixture
+`generics` (`drop_rows`, `drop_rows_again`); details: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: drop shims rustc cannot build are `⊤`".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

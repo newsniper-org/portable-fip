@@ -120,7 +120,8 @@ fn guards() {
 
 /// Generic instantiation, closure arguments, higher-order roots, `fip(N)` bounds and
 /// the loop rule, recursion through two functions; drops of generic values through
-/// their glue (`Vec<T>`, `Box<T>` may free; `Option<T>`, `T` are the term `drop(T)`).
+/// their glue (`Vec<T>`, `Box<T>` may free; `Option<T>`, `T` are the term `drop(T)`;
+/// a glue rustc cannot build for the generic type is `⊤`, without aborting).
 #[test]
 fn generics() {
     check("generics");
