@@ -479,3 +479,34 @@ misplaced `fip::` attribute on a unit struct was counted twice in the error tota
 the `Allocator` rule on a user implementation is not in a fixture, because
 `allocator_api` is unstable and the fixtures build without feature gates (it is
 exercised through `Global` by `vec_push`).
+
+## Resolved 2026-11-02: sites on infeasible paths (limits plan L11)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L11 (item 2 of its order).
+The value analysis computed block entry states but used them only for `Assert`
+terminators, and ran only on bodies with an `Assert`. A panic call, an allocation, a
+drop or a `⊤` on a branch it proves infeasible was still counted.
+
+**Change.** `value::analyse` returns per block "cannot fire" (asserts) and "dead" (no
+feasible edge reaches it, or its statements contradict the state). It runs on bodies
+with an `Assert` or a `SwitchInt` on a local assigned from a comparison; those
+comparison locals are tracked as well, with a fallback to the assert locals alone if
+the larger set exceeds the size limits. `scan_body` skips dead blocks entirely:
+their sites and their outgoing edges.
+
+**Measured** (fixture `guards`, four new roots; before = the driver built from
+`f977844`, whose value analysis and body scan the sources change of `a599b0b` did not
+touch):
+
+| root | before | after |
+|---|---|---|
+| `infeasible_panic`: `if i < n && i >= n { panic!() }`, strict, `panic_macros = false` | error: panic path `panic_fmt` | passes |
+| `infeasible_box`: `Box::new` and its drop under `i < n` then `i >= n`, `#[fip]` | errors: 1 allocation, may free | passes |
+| `feasible_panic`: the same under `i < n && i > 0` (control) | error | error |
+| `feasible_box`: the same under `i < n` then `i >= 1` (control) | errors: 1 allocation, may free | the same |
+
+`guarded`: 28 roots, 12 passed, 18 errors → 14 passed, 15 errors (the 24 earlier roots
+unchanged). Every other fixture is unchanged. Self-check: unchanged
+(`selfcheck.expected` and the note counts), as the plan predicted: `split_at_mut`'s
+`panic_fmt` branch needs the caller's `j < len` (L1) to become infeasible. How many
+blocks of `std` bodies the self-check now drops is unmeasured; no verdict changed.

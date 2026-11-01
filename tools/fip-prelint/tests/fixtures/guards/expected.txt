@@ -12,4 +12,7 @@ guarded/src/lib.rs:251:38: error: fip-prelint: `for_other_bound` is #[fip(strict
 guarded/src/lib.rs:265:38: error: fip-prelint: `for_next_index` is #[fip(strict = true)]: reachable panic path: `for_next_index`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:265) (`panic_macros = false`)
 guarded/src/lib.rs:281:38: error: fip-prelint: `step_two` is #[fip(strict = true)]: reachable panic path: `step_two`: index out of bounds (bounds check) (in loop) (guarded/src/lib.rs:281) (`panic_macros = false`)
 guarded/src/lib.rs:307:16: error: fip-prelint: `signed_dec` is #[fip(strict = true)]: reachable panic path: `signed_dec`: arithmetic overflow check (Sub) (guarded/src/lib.rs:307) (`panic_macros = false`)
-note: fip-prelint: crate `guarded`: 24 roots, 12 passed, 12 errors, 0 warnings, 0 notes
+guarded/src/lib.rs:343:9: error: fip-prelint: `feasible_panic` is #[fip(strict = true)]: reachable panic path: `feasible_panic` -> `core::panicking::panic_fmt` (guarded/src/lib.rs:343): `core::panicking::panic_fmt` (`panic_macros = false`)
+guarded/src/lib.rs:354:21: error: fip-prelint: `feasible_box` is #[fip] but may allocate 1 time(s), at most 0 allowed: `feasible_box` -> `alloc::boxed::Box::<usize>::new` (guarded/src/lib.rs:354) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+guarded/src/lib.rs:356:9: error: fip-prelint: `feasible_box` is #[fip] but may free: `feasible_box`: drop of `std::boxed::Box<usize>` (guarded/src/lib.rs:356)
+note: fip-prelint: crate `guarded`: 28 roots, 14 passed, 15 errors, 0 warnings, 0 notes

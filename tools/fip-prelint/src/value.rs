@@ -3,14 +3,15 @@
 
 //! Intraprocedural value analysis of one MIR body, used to drop `Assert`
 //! terminators that cannot fire (bounds, overflow, division and negation checks
-//! behind guards).
+//! behind guards) and every site in a block that no feasible path reaches.
 //!
 //! **Domain.** Difference bounds (`x - y ≤ c`, a zone) over mathematical integers
 //! between tracked values: integer locals, the length `len(p)` of the slice behind a
 //! slice pointer local `p` (its metadata), the result `t.0` of a checked operation
 //! `t = AddWithOverflow(a, b)`, `start`/`end` of a `Range<integer>` local, the
 //! payload of an `Option<integer>` local, and the constant 0. Only locals connected
-//! to some `Assert` condition through assignments are tracked. Every tracked value
+//! to some `Assert` condition, or to the discriminant of a `SwitchInt` on a
+//! comparison, through assignments are tracked. Every tracked value
 //! carries the bounds of its type (`len(p)` lies in `0..=usize::MAX`). Besides the
 //! matrix, the state records which boolean locals hold which comparison
 //! (`c = Lt(a, b)`), which tuple locals hold which checked operation together with
@@ -36,8 +37,11 @@
 //! (widening), so the fixpoint terminates.
 //!
 //! **Use.** An `Assert` whose condition is decided equal to `expected` in the state
-//! reaching it, or whose block no feasible path reaches, cannot fire. Anything not
-//! modelled keeps the assert: unknown rvalues, other calls, signed division overflow
+//! reaching it, or whose block no feasible path reaches, cannot fire. A block that no
+//! feasible path reaches (no feasible edge into it, or its statements contradict the
+//! state) is dead: its terminator never runs, so its call, drop, panic or allocation
+//! is not counted. Anything not modelled keeps the assert and the block: unknown
+//! rvalues, other calls, signed division overflow
 //! (`BitAnd` of two comparisons), 128-bit arithmetic, bodies with more than
 //! [`MAX_VARS`] tracked values or [`MAX_CELLS`] matrix entries, coroutines; inline
 //! assembly resets the state.
@@ -513,29 +517,89 @@ fn address_taken<'tcx>(
     out
 }
 
-/// For each basic block, `true` if its terminator is an `Assert` that cannot fire.
-/// Empty (nothing proved) if the body is not analysed.
-pub fn asserts_that_cannot_fire<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    env: TypingEnv<'tcx>,
-    body: &Body<'tcx>,
-) -> Vec<bool> {
-    let n_blocks = body.basic_blocks.len();
+/// What the value analysis proves about one body, per basic block. Both vectors are
+/// empty (nothing proved) if the body is not analysed.
+#[derive(Clone, Debug, Default)]
+pub struct Proved {
+    /// The block's terminator is an `Assert` that cannot fire.
+    pub asserts: Vec<bool>,
+    /// No feasible path reaches the block's terminator.
+    pub dead: Vec<bool>,
+}
+
+impl Proved {
+    pub fn assert_cannot_fire(&self, b: usize) -> bool {
+        self.asserts.get(b).copied().unwrap_or(false)
+    }
+    pub fn dead(&self, b: usize) -> bool {
+        self.dead.get(b).copied().unwrap_or(false)
+    }
+}
+
+/// `true` if `body` branches (`SwitchInt`) on a local assigned from a comparison:
+/// the analysis may then prove a branch infeasible.
+fn switches_on_comparison(body: &Body<'_>) -> bool {
+    let cmp: HashSet<Local> = body
+        .basic_blocks
+        .iter()
+        .flat_map(|d| d.statements.iter())
+        .filter_map(|st| {
+            let StatementKind::Assign(assign) = &st.kind else {
+                return None;
+            };
+            let (place, rv) = &**assign;
+            match rv {
+                Rvalue::BinaryOp(op, _) if Ctx::cmp_op(*op).is_some() => place.as_local(),
+                _ => None,
+            }
+        })
+        .collect();
+    body.basic_blocks.iter().any(|d| {
+        !d.is_cleanup
+            && matches!(&d.terminator().kind, TerminatorKind::SwitchInt { discr, .. }
+                if discr.place().and_then(|p| p.as_local()).is_some_and(|l| cmp.contains(&l)))
+    })
+}
+
+/// Runs the value analysis on `body` if it has an `Assert` or a `SwitchInt` on a
+/// comparison. If tracking the locals of both exceeds the size limits, the analysis
+/// is retried with the locals of the asserts only (what was tracked before
+/// feasibility was used).
+pub fn analyse<'tcx>(tcx: TyCtxt<'tcx>, env: TypingEnv<'tcx>, body: &Body<'tcx>) -> Proved {
     let has_assert = body
         .basic_blocks
         .iter()
         .any(|d| !d.is_cleanup && matches!(d.terminator().kind, TerminatorKind::Assert { .. }));
-    if !has_assert
+    let switches = switches_on_comparison(body);
+    if !(has_assert || switches)
         || body.coroutine.is_some()
         || body
             .basic_blocks
             .iter()
             .any(|d| matches!(d.terminator().kind, TerminatorKind::Yield { .. }))
     {
-        return Vec::new();
+        return Proved::default();
     }
+    if let Some(p) = analyse_with(tcx, env, body, switches) {
+        return p;
+    }
+    if switches && has_assert {
+        return analyse_with(tcx, env, body, false).unwrap_or_default();
+    }
+    Proved::default()
+}
+
+/// The analysis tracking the locals connected to asserts, and to comparisons
+/// switched on if `switches`; `None` if that exceeds the size limits.
+fn analyse_with<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    body: &Body<'tcx>,
+    switches: bool,
+) -> Option<Proved> {
+    let n_blocks = body.basic_blocks.len();
     let taken = address_taken(tcx, env, body);
-    let relevant = relevant_locals(tcx, body);
+    let relevant = relevant_locals(tcx, body, switches);
     let mut index = HashMap::new();
     let mut bounds = vec![(0, 0)];
     let usize_max = int_range(tcx, tcx.types.usize).map_or(INF, |r| r.1);
@@ -567,7 +631,7 @@ pub fn asserts_that_cannot_fire<'tcx>(
     }
     let n = bounds.len();
     if n > MAX_VARS || n_blocks.saturating_mul(n * n) > MAX_CELLS {
-        return Vec::new();
+        return None;
     }
     let cx = Ctx {
         tcx,
@@ -577,14 +641,15 @@ pub fn asserts_that_cannot_fire<'tcx>(
         bounds,
         some_none: option_discriminants(tcx),
     };
-    cx.run(n_blocks)
+    Some(cx.run(n_blocks))
 }
 
-/// Locals connected to an `Assert` condition through assignments (copies, casts,
-/// operations, comparisons, borrows, discriminants, the two `Range` calls of a
-/// `for` loop): only these are tracked. The others cannot constrain a checked
-/// value, so leaving them untracked loses nothing the analysis could use.
-fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> HashSet<Local> {
+/// Locals connected to an `Assert` condition, or with `switches` to the discriminant
+/// of a `SwitchInt`, through assignments (copies, casts, operations, comparisons,
+/// borrows, discriminants, the two `Range` calls of a `for` loop): only these are
+/// tracked. The others cannot constrain a checked value or a branch, so leaving them
+/// untracked loses nothing the analysis could use.
+fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switches: bool) -> HashSet<Local> {
     let n = body.local_decls.len();
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -633,6 +698,9 @@ fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> HashSet<Local>
         }
         match &data.terminator().kind {
             TerminatorKind::Assert { cond, .. } => seeds.extend(op_local(cond)),
+            TerminatorKind::SwitchInt { discr, .. } if switches && !data.is_cleanup => {
+                seeds.extend(op_local(discr));
+            }
             TerminatorKind::Call {
                 func,
                 args,
@@ -1544,7 +1612,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         Some(st)
     }
 
-    fn run(&self, n_blocks: usize) -> Vec<bool> {
+    fn run(&self, n_blocks: usize) -> Proved {
         let body = self.body;
         let rpo: Vec<BasicBlock> = body
             .basic_blocks
@@ -1572,7 +1640,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let mut closed = vec![true; n_blocks];
         let mut visits = vec![0u32; n_blocks];
         let Some(&start) = rpo.first() else {
-            return Vec::new();
+            return Proved::default();
         };
         entry[start.as_usize()] = Some(self.entry());
         let mut work: BTreeSet<usize> = BTreeSet::from([0]);
@@ -1580,7 +1648,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let mut budget = 200 * rpo.len() + 1000;
         while let Some(k) = work.pop_first() {
             if budget == 0 {
-                return Vec::new();
+                return Proved::default();
             }
             budget -= 1;
             let bb = rpo[k];
@@ -1620,29 +1688,36 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 }
             }
         }
-        let mut result = vec![false; n_blocks];
+        let mut asserts = vec![false; n_blocks];
+        let mut dead = vec![false; n_blocks];
         for bb in &rpo {
-            let data = &body.basic_blocks[*bb];
-            let TerminatorKind::Assert { cond, expected, .. } = &data.terminator().kind else {
-                continue;
-            };
-            let Some(mut in_state) = entry[bb.as_usize()].clone() else {
-                // No feasible path reaches the block.
-                result[bb.as_usize()] = true;
-                continue;
-            };
-            if !closed[bb.as_usize()] && !in_state.d.close() {
-                result[bb.as_usize()] = true;
-                continue;
-            }
-            match self.through(&in_state, *bb) {
-                None => result[bb.as_usize()] = true,
-                Some(st) => {
-                    result[bb.as_usize()] = self.decide_operand(&st, cond) == Some(*expected);
+            let b = bb.as_usize();
+            // The state at the terminator; `None` if no feasible path reaches it.
+            let at_terminator = match entry[b].clone() {
+                None => None,
+                Some(mut in_state) => {
+                    if !closed[b] && !in_state.d.close() {
+                        None
+                    } else {
+                        self.through(&in_state, *bb)
+                    }
                 }
+            };
+            let Some(st) = at_terminator else {
+                dead[b] = true;
+                asserts[b] = matches!(
+                    body.basic_blocks[*bb].terminator().kind,
+                    TerminatorKind::Assert { .. }
+                );
+                continue;
+            };
+            if let TerminatorKind::Assert { cond, expected, .. } =
+                &body.basic_blocks[*bb].terminator().kind
+            {
+                asserts[b] = self.decide_operand(&st, cond) == Some(*expected);
             }
         }
-        result
+        Proved { asserts, dead }
     }
 }
 

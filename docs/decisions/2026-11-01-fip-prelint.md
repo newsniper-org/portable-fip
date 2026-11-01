@@ -233,6 +233,20 @@ into errors; the self-check is unchanged (`selfcheck.expected` byte-identical, s
 note counts). Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: allocation and
 free sources".
 
+## Amendment 2026-11-02: sites on infeasible paths (limits plan L11)
+
+The value analysis (amendment "value analysis for `Assert` terminators") now returns,
+per block, whether any feasible path reaches its terminator, and it also runs on
+bodies without an `Assert` that branch (`SwitchInt`) on a comparison; the locals of
+those comparisons are tracked too (if that exceeds the size limits, the analysis is
+retried with the assert locals only, as before). Every site in a block that no
+feasible path reaches is dropped: calls (with their allocations, frees, panics and
+`⊤`), drops, asserts, inline assembly, and the block's outgoing edges. Before, only
+`Assert` terminators were dropped. Soundness: the same proof as for asserts (no
+execution reaches the block). Fixture `guards`: a `panic!` and a `Box::new` under
+`i < n && i >= n` pass, feasible controls are reported; the self-check is unchanged.
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: sites on infeasible paths".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

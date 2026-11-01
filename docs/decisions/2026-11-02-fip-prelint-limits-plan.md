@@ -783,6 +783,15 @@ same with `Box::new` under `fip` passes. A feasible control is reported.
 
 **Effort.** S (0.5 day). The first prerequisite of L1 and L2.
 
+**Implemented** (item 2 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: sites on infeasible paths"). As proposed. Details decided in
+the change: a "tracked comparison" is a `SwitchInt` whose discriminant is a local
+assigned from a comparison `BinaryOp`; its locals join the tracked set, and if the
+larger set exceeds `MAX_VARS`/`MAX_CELLS` the analysis falls back to the assert
+locals (so no previously proved assert is lost); a dead block also loses its
+outgoing edges (no loop or path cost through it). Self-check unchanged, as
+predicted.
+
 ### L12. (Found) Every drop of a type with drop glue is a "possible free"
 
 **Current.** `analysis.rs:1019-1027` pushes `Ev::Free` for every drop of a

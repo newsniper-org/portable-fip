@@ -306,3 +306,54 @@ pub fn countdown(xs: &[u8]) -> u32 {
 pub fn signed_dec(i: i32) -> i32 {
     if i < 0 { i - 1 } else { 0 }
 }
+
+/// `panic!` under `i < n` and `i >= n`: no feasible path reaches it, so it is not a
+/// panic path (limits plan L11): passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn infeasible_panic(i: usize, n: usize) -> usize {
+    if i < n && i >= n {
+        panic!("unreachable");
+    }
+    i
+}
+
+/// `Box::new` (and its drop) on the same infeasible branch, under `#[fip]`: no
+/// allocation and no free are counted: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn infeasible_box(i: usize, n: usize) -> usize {
+    if i < n {
+        if i >= n {
+            let b = Box::new(i);
+            return *b;
+        }
+    }
+    0
+}
+
+/// Control: `panic!` under `i < n` and `i > 0` is feasible: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn feasible_panic(i: usize, n: usize) -> usize {
+    if i < n && i > 0 {
+        panic!("reachable");
+    }
+    i
+}
+
+/// Control: `Box::new` under `i < n` and `i >= 1` is feasible: one allocation and a
+/// free, reported.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn feasible_box(i: usize, n: usize) -> usize {
+    if i < n {
+        if i >= 1 {
+            let b = Box::new(i);
+            return *b;
+        }
+    }
+    0
+}

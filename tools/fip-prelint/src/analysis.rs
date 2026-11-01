@@ -1103,13 +1103,20 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let n = body.basic_blocks.len();
         let mut blocks: Vec<Vec<Site>> = (0..n).map(|_| Vec::new()).collect();
         let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
-        // Asserts proved unable to fire by the value analysis, computed on demand.
-        let mut proved: Option<Vec<bool>> = None;
+        // Asserts proved unable to fire and blocks no feasible path reaches, by the
+        // value analysis (run only on bodies with an `Assert` or a `SwitchInt` on a
+        // comparison).
+        let proved = crate::value::analyse(tcx, env, body);
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup {
                 continue;
             }
             let b = bb.as_usize();
+            // No execution reaches the terminator of a dead block, nor its successors
+            // through it: its sites are not counted and its edges are not followed.
+            if proved.dead(b) {
+                continue;
+            }
             let term = data.terminator();
             succ[b] = term
                 .successors()
@@ -1174,15 +1181,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     msg,
                     ..
                 } => {
-                    let mut cannot_fire = self
+                    let cannot_fire = self
                         .eval_in_block(data, cond)
-                        .is_some_and(|v| (v != 0) == *expected);
-                    if !cannot_fire && !is_ub_check_assert(msg) {
-                        let p = proved.get_or_insert_with(|| {
-                            crate::value::asserts_that_cannot_fire(tcx, env, body)
-                        });
-                        cannot_fire = p.get(b).copied().unwrap_or(false);
-                    }
+                        .is_some_and(|v| (v != 0) == *expected)
+                        || proved.assert_cannot_fire(b);
                     if !cannot_fire && !is_ub_check_assert(msg) {
                         blocks[b].push(Site {
                             item: Item::Ev(Ev::Panic(describe_assert(msg))),
