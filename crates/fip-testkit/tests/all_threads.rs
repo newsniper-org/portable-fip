@@ -23,9 +23,22 @@ fn spawn_and_join(allocations: u64) {
 
 #[test]
 fn all_threads_counts_child_work_and_per_thread_does_not() {
-    // Baselines: spawning a thread allocates by itself.
-    let ((), base_all) = measure_all_threads(|| spawn_and_join(0));
-    let ((), base_one) = measure(|| spawn_and_join(0));
+    // Baselines: spawning a thread allocates by itself. The first spawns of a process
+    // can also do one-time setup that later spawns skip, so a single early baseline can
+    // exceed the cost of a later spawn and make `with - base` undercount the child's
+    // work (observed once: base 10, with 106 < 110). Warm up first, then take the
+    // minimum of several spawns.
+    for _ in 0..3 {
+        spawn_and_join(0);
+    }
+    let base_all = (0..5)
+        .map(|_| measure_all_threads(|| spawn_and_join(0)).1)
+        .min_by_key(|c| c.allocs)
+        .expect("five baseline runs");
+    let base_one = (0..5)
+        .map(|_| measure(|| spawn_and_join(0)).1)
+        .min_by_key(|c| c.allocs)
+        .expect("five baseline runs");
 
     let ((), with_all) = measure_all_threads(|| spawn_and_join(N));
     let ((), with_one) = measure(|| spawn_and_join(N));
