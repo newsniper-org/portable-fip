@@ -1,0 +1,4 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+cell/src/lib.rs:40:5: error: fip-prelint: `rc_drop` is #[fip] but may free: `rc_drop` -> `core::mem::drop::<alloc::rc::Rc<u32>>` (cell/src/lib.rs:40) -> … -> `<&alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<&A as core::alloc::Allocator>::deallocate`
+note: fip-prelint: crate `cell`: 4 roots, 3 passed, 1 errors, 0 warnings, 0 notes

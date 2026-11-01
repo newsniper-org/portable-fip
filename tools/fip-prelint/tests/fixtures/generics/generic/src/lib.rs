@@ -135,3 +135,35 @@ pub fn odd(n: u32) -> bool {
 pub fn even_fbip(n: u32) -> bool {
     even(n)
 }
+
+/// Dropping a `Vec<T>`: its glue reaches the deallocation for every `T`: may free
+/// (error); the elements' drops stay the term `drop(T)` (warning).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_vec<T>(v: Vec<T>) {
+    drop(v);
+}
+
+/// Dropping an `Option<T>` frees only if dropping a `T` does: the term `drop(T)`
+/// (warning).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_option<T>(o: Option<T>) {
+    drop(o);
+}
+
+/// Dropping a `Box<T>`: may free (error), plus the term `drop(T)` (warning).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_box<T>(b: Box<T>) {
+    drop(b);
+}
+
+/// Dropping a bare `T`: the term `drop(T)` (warning), as before.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_bare<T>(t: T) {
+    drop(t);
+}
+
+/// `drop_option` instantiated with an allocation-free `T`: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_option_u32(o: Option<u32>) {
+    drop_option(o);
+}

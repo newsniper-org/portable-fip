@@ -21,12 +21,15 @@
 //! (`F: Fn*`/`FipFn`) is the symbolic term `alloc(g)`, a trait method on another
 //! generic parameter the term `alloc(<T as Trait>::m)`.
 //!
-//! **Events.** Allocation and deallocation entry points, `Drop` terminators on types
-//! with drop glue (possible frees), `Assert` terminators and panic entry points
+//! **Events.** Allocation and deallocation entry points, `Assert` terminators and panic entry points
 //! (panic paths), and everything that cannot be resolved or has no usable MIR
 //! (`⊤`, with the reason). Tables: `fip_lint_rules::mir`. An `Assert` that the
 //! value analysis of its body ([`crate::value`]) proves unable to fire on every path
-//! reaching it is not a panic path.
+//! reaching it is not a panic path. A `Drop` terminator is a call of the type's drop
+//! glue, analysed like any callee: a drop frees exactly when its glue reaches a
+//! deallocation, a free source or `⊤` (a `RefMut` or a guard without heap does not).
+//! Glue of a type mentioning a generic parameter is analysed field by field; only
+//! the drop of a bare type parameter is the term `drop(T)`.
 //!
 //! **Sources** ([`Crates::source_of`]): functions declared `fip::alloc_source`/
 //! `fip::free_source` (on themselves or on the trait method they implement), the
@@ -53,13 +56,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use fip_lint_rules::mir as rules;
+use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
 use rustc_middle::mir::{self, AssertKind, Body, Operand, TerminatorKind};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{
     self, EarlyBinder, GenericArgs, GenericArgsRef, Instance, InstanceKind, ShimKind, Ty, TyCtxt,
-    TypeFoldable, TypeVisitableExt, TypingEnv,
+    TypeFoldable, TypingEnv,
 };
 use rustc_span::{DUMMY_SP, Span};
 
@@ -869,7 +873,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         match inst.def {
             InstanceKind::Item(def_id) => def_path_args(self.tcx, def_id, inst.args),
             InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty))) => {
-                with_no_visible_paths!(with_no_trimmed_paths!(format!("drop glue of `{ty}`")))
+                with_no_visible_paths!(with_no_trimmed_paths!(format!("drop glue of {ty}")))
             }
             InstanceKind::Intrinsic(def_id) | InstanceKind::LlvmIntrinsic(def_id) => {
                 format!("{} (intrinsic)", def_path_args(self.tcx, def_id, inst.args))
@@ -936,9 +940,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 ))]),
             },
             InstanceKind::Shim(ShimKind::DropGlue(_, None)) => NodeKind::Leaf(Vec::new()),
-            InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty))) if ty.has_param() => {
+            InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty)))
+                if matches!(ty.kind(), ty::Param(_)) =>
+            {
                 NodeKind::Leaf(vec![Ev::Unknown(format!(
-                    "drop glue of generic `{ty}` (called directly)"
+                    "drop glue of the type parameter `{ty}`"
                 ))])
             }
             InstanceKind::Shim(
@@ -1142,29 +1148,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     let ty = place.ty(&body.local_decls, tcx).ty;
                     match self.subst(inst, ty) {
                         Some(ty) if ty.needs_drop(tcx, self.env) => {
-                            // Dropping a value whose type mentions a generic
-                            // parameter frees only for some instantiations: a term,
-                            // like a call (`drop(T)`, `drop(Option<T>)`).
-                            if ty.has_param() {
-                                let name = match ty.kind() {
-                                    ty::Param(p) => format!("drop({})", p.name),
-                                    _ => format!("drop({ty})"),
-                                };
-                                blocks[b].push(Site {
-                                    item: Item::Term(name),
-                                    span,
-                                });
-                                continue;
-                            }
-                            blocks[b].push(Site {
-                                item: Item::Ev(Ev::Free(format!("drop of `{ty}`"))),
-                                span,
-                            });
-                            let glue = Instance::resolve_drop_glue(tcx, ty);
-                            blocks[b].push(Site {
-                                item: Item::Call(self.node_for(glue)),
-                                span,
-                            });
+                            // A drop runs its drop glue, analysed like a callee: it
+                            // frees exactly when the glue reaches a deallocation, a
+                            // free source or `⊤`. Glue of a type that mentions a
+                            // generic parameter is analysed field by field in the
+                            // root's typing environment; only the drop of a bare
+                            // parameter frees for some instantiations only: the
+                            // term `drop(T)`.
+                            let item = self.drop_item(ty);
+                            blocks[b].push(Site { item, span });
                         }
                         Some(_) => {}
                         None => blocks[b].push(Site {
@@ -1360,8 +1352,27 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             || tcx.item_name(trait_id).as_str() == "FipFn"
     }
 
+    /// The drop of a value of type `ty` (which needs dropping): its drop glue, or the
+    /// term `drop(T)` for a bare type parameter `T`.
+    fn drop_item(&mut self, ty: Ty<'tcx>) -> Item {
+        if let ty::Param(p) = ty.kind() {
+            return Item::Term(format!("drop({})", p.name));
+        }
+        let tcx = self.tcx;
+        let glue = tcx.require_lang_item(LangItem::DropGlue, DUMMY_SP);
+        self.resolve(glue, tcx.mk_args(&[ty.into()]))
+    }
+
     fn unresolved(&mut self, def_id: DefId, args: GenericArgsRef<'tcx>) -> Item {
         let tcx = self.tcx;
+        // `drop_in_place::<T>` reaches the drop glue of a bare type parameter, which
+        // is not resolvable: the term `drop(T)`, like a `Drop` of a `T`.
+        if tcx.is_lang_item(def_id, LangItem::DropGlue)
+            && let Some(ty) = args.types().next()
+            && let ty::Param(p) = ty.kind()
+        {
+            return Item::Term(format!("drop({})", p.name));
+        }
         // A source's trait method is that source for every implementation: the call
         // is the declared event, not a term.
         if self.crates.source_of(tcx, def_id).is_some() {

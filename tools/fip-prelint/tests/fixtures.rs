@@ -119,7 +119,8 @@ fn guards() {
 }
 
 /// Generic instantiation, closure arguments, higher-order roots, `fip(N)` bounds and
-/// the loop rule, recursion through two functions.
+/// the loop rule, recursion through two functions; drops of generic values through
+/// their glue (`Vec<T>`, `Box<T>` may free; `Option<T>`, `T` are the term `drop(T)`).
 #[test]
 fn generics() {
     check("generics");
@@ -170,6 +171,13 @@ fn param_bounds() {
 #[test]
 fn alloc_sources() {
     check("alloc_sources");
+}
+
+/// Drops are frees only when their drop glue deallocates (limits plan L12): `Cell`,
+/// a `RefMut` store and a user guard pass; dropping an `Rc` may free.
+#[test]
+fn cells() {
+    check("cells");
 }
 
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.

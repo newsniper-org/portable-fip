@@ -10,7 +10,7 @@
 //! | `⊤`: unresolved call, no usable MIR ("cannot check") | error, one per distinct leaf |
 //! | panic path, `strict = true` with `panic_macros = false` | error |
 //! | panic path, `strict = true` otherwise | note |
-//! | terms left: callable parameters without `param(..)`, trait methods on generic parameters, drops of generic values | warning |
+//! | terms left: callable parameters without `param(..)`, trait methods on generic parameters, drops of a bare type parameter (`drop(T)`, also inside the glue of `Option<T>`, `Vec<T>`, ..) | warning |
 //! | a call site passing, for a callee's `param(g = K)`, an argument that may allocate more than `K` times per call, or `⊤` (in any analysed body: roots, what they reach in analysed crates, every local function and closure) | error, at the call site |
 //! | unknown name under `fip::`, misplaced or malformed attribute | error |
 //! | a FIP mark (`fip::mark`) on an allocation/free source, including `GlobalAlloc`/`Allocator` methods | error |

@@ -247,6 +247,31 @@ execution reaches the block). Fixture `guards`: a `panic!` and a `Box::new` unde
 `i < n && i >= n` pass, feasible controls are reported; the self-check is unchanged.
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: sites on infeasible paths".
 
+## Amendment 2026-11-02: drops through their glue (limits plan L12 + L5)
+
+Item 6 ("`Drop` terminators ... count as possible frees") changes. Before, every drop
+of a type with drop glue pushed a free at the drop site and also descended into the
+glue, and a drop of a type mentioning a generic parameter was a term
+(`drop(Option<T>)`, `drop(Vec<T>)`), with no analysis of its glue.
+
+- A `Drop` terminator is a call of the drop glue (`drop_glue::<T>` resolved in the
+  root's typing environment), analysed like any callee. A drop frees exactly when
+  its glue reaches a deallocation entry point, a free source (L7, including
+  `Allocator::deallocate`) or `⊤`. `RefMut`, `MutexGuard`-like guards and user
+  guards without heap are no longer frees; `Box`, `Vec`, `Rc`, `String` still are.
+- Glue of a type that mentions a generic parameter is built for the polymorphic
+  type and analysed field by field. Only the drop of a bare type parameter
+  (`Drop` of a `T`, `drop_glue::<T>` reached from `drop_in_place::<T>`) is the term
+  `drop(T)`; `param(g = K)` still instantiates `drop(F)` with 0. So `drop(Vec<T>)`
+  is "may free" plus `∞·drop(T)`, `drop(Option<T>)` is `drop(T)` only.
+- Witness chains of frees run through the glue (`drop glue of Box<u8>`) to the
+  deallocation instead of ending at "drop of `T`".
+
+Measured: fixture `cells` (new: `RefMut` store and a user guard pass, `Rc` may free),
+fixture `generics` (`drop(Vec<T>)`, `drop(Box<T>)` errors; `drop(Option<T>)`,
+`drop(T)` warnings); self-check: same verdicts and counts, two witness texts changed.
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: drops through their glue".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

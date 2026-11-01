@@ -272,8 +272,10 @@ compact_map_st}` add 2 roots to `fip_core` (8) and 6 checked call sites (22 in t
    call site of a callee with `param(g = K)` is checked, in roots, in what they reach
    and in local bodies that are not roots (section "Resolved: declared parameter
    bounds at call sites" below; fixture `param_bounds`).
-4. **Drops of generic values** are terms (`drop(T)`, `drop(Option<T>)`), also when the
-   type frees for every instantiation (`Vec<T>`); reported as warnings, never passed.
+4. ~~**Drops of generic values** are terms (`drop(T)`, `drop(Option<T>)`), also when the
+   type frees for every instantiation (`Vec<T>`); reported as warnings, never passed.~~
+   **Resolved** 2026-11-02 (section "Resolved 2026-11-02: drops through their glue"):
+   glue is analysed field by field; only a bare `drop(T)` stays a term.
 5. **`format!`**: `alloc::fmt::format::format_inner` has no MIR, so `format!` is `⊤` in
    addition to its allocation violation; a summary table for such `std` functions
    (or `-Zbuild-std`) would remove it.
@@ -510,3 +512,49 @@ unchanged). Every other fixture is unchanged. Self-check: unchanged
 (`selfcheck.expected` and the note counts), as the plan predicted: `split_at_mut`'s
 `panic_fmt` branch needs the caller's `j < len` (L1) to become infeasible. How many
 blocks of `std` bodies the self-check now drops is unmeasured; no verdict changed.
+
+## Resolved 2026-11-02: drops through their glue (limits plan L12 + L5)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L12 and L5 (item 3 of
+its order). Every drop of a type with drop glue was a "possible free" at the drop
+site (M3: `*c.borrow_mut() = 1` reported "may free: drop of `RefMut<'_, u32>`"), and a
+drop of a type mentioning a generic parameter was a term (`drop(Vec<T>)`), so a
+generic root dropping a `Vec<T>` was only a warning although it frees for every `T`.
+
+**Change.** A `Drop` terminator is a call of `drop_glue::<T>` (the lang item behind
+`drop_in_place` on rustc 1.99.1), resolved in the root's typing environment and
+analysed like any callee. A drop frees exactly when its glue reaches a deallocation,
+a free source or `⊤`. Glue of a generic type is built for the polymorphic type; the
+drop of a bare type parameter (a `Drop` of a `T`, or `drop_glue::<T>` reached from
+`drop_in_place::<T>`, which was `⊤`) is the term `drop(T)`.
+
+**Measured** (before = driver of `fefc0dd`):
+
+| case | before | after |
+|---|---|---|
+| `cells::refmut_store` (`*c.borrow_mut() = 1`) | may free: drop of `RefMut<'_, u32>` | passes |
+| `cells::guard_scope` (user `Drop` writing a `Cell<bool>`) | may free: drop of `Guard<'_>` | passes |
+| `cells::cell_inc` | passes | passes |
+| `cells::rc_drop` | may free: drop of `Rc<u32>` | may free, chain to `<&Global as Allocator>::deallocate` |
+| `generics::drop_vec::<T>` | warning: `alloc(drop(Vec<T>))` | error: may free (glue → `<Global as Allocator>::deallocate`), warning: `∞·alloc(drop(T))` |
+| `generics::drop_box::<T>` | warning: `alloc(drop(Box<T>))` | error: may free, warning: `alloc(drop(T))` |
+| `generics::drop_option::<T>` | warning: `alloc(drop(Option<T>))` | warning: `alloc(drop(T))` |
+| `generics::drop_bare::<T>` | warning: `alloc(drop(T))` | the same |
+| `generics::drop_option_u32` (instantiated) | passes | passes |
+| `implicit::consume(Box<u8>)` | may free: drop of `Box<u8>` | may free, chain through `drop glue of Box<u8>` |
+
+`cell`: 4 roots, 1 passed, 3 errors → 3 passed, 1 error. `generic`: 18 roots, 7
+passed, 5 errors, 6 warnings → 7 passed, 7 errors, 6 warnings. M3 probe `limits`:
+15 errors before and after (the `RefMut` free gone, `drop_vec` now an error).
+Fixtures `guards`, `implicit`, `param_bounds`: same verdicts, the "may free" witness
+texts now run through the glue to `<Global as Allocator>::deallocate`.
+
+**Self-check:** same verdicts and per-crate summaries (67 roots, 3 errors, 1 warning,
+46 notes); two lines of `selfcheck.expected` changed text only:
+`strict_gaps::consume` and `strict_gaps::sum` "may free" now name the glue
+(`drop glue of alloc::boxed::Box<u8>`, `drop glue of Big`) and end at
+`<Global as Allocator>::deallocate`. `put_twice` stays a warning (`drop(T)`).
+
+**Open:** a polymorphic drop shim that rustc cannot build would abort the driver
+(an internal compiler error) instead of becoming `⊤`; none occurred in the fixtures,
+the self-check or the M3 probe (unmeasured beyond them).

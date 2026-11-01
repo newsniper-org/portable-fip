@@ -414,6 +414,17 @@ instantiation (as now).
 
 **Effort.** M (1.5–2 days), together with L12. Depends on L7.
 
+**Implemented** with L12 (item 3 of the order). Deviations from measurement: the
+glue is resolved through the `drop_glue` lang item of rustc 1.99.1 (what
+`drop_in_place` calls), in the root's typing environment; a direct
+`drop_in_place::<T>` of a bare parameter reaches `drop_glue::<T>`, which does not
+resolve, and is the term `drop(T)` (it was `⊤`). `[T]` is not special-cased: its
+glue is analysed and loops over `drop(T)`, so `drop(Vec<T>)` is "may free" plus
+`∞·drop(T)` (the plan wrote `drop(T)`). `put_twice` stays a warning, as predicted.
+Not covered: a polymorphic shim that rustc cannot build would abort the driver
+instead of becoming `⊤` (none seen in the fixtures or the self-check; unmeasured
+beyond them).
+
 ### L6. `format!` and other `std` functions without MIR are `⊤`
 
 **Current.** A `std` function that is neither generic nor `#[inline]` has no MIR, and
@@ -816,6 +827,15 @@ still frees. `selfcheck.expected`: the three `strict_gaps` errors are predicted
 unchanged (`Box`-backed), and this is verified in the change.
 
 **Effort.** Part of L5's M.
+
+**Implemented** together with L5 (item 3 of the order; measurements in
+`TODOs/fip-prelint.md`, "Resolved 2026-11-02: drops through their glue"). As
+proposed: no `Ev::Free` at the drop site; a drop is a call of its glue. M3's spurious
+`RefMut` free is gone (`limits`: still 15 errors, because `drop(Vec<T>)` became one).
+The three `strict_gaps` errors are unchanged as verdicts; two of their witness texts
+now end at `<Global as Allocator>::deallocate` (through L7's trait rule) instead of
+"drop of `T`". The fixture for `RefMut` is a new `cells` fixture with that case, a
+`Cell`, a user guard and an `Rc` (item 11 extends it).
 
 ### Other limits found and kept
 
