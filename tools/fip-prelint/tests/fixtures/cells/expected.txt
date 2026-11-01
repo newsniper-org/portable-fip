@@ -1,4 +1,8 @@
 # Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
 exit: failure
-cell/src/lib.rs:40:5: error: fip-prelint: `rc_drop` is #[fip] but may free: `rc_drop` -> `core::mem::drop::<alloc::rc::Rc<u32>>` (cell/src/lib.rs:40) -> … -> `<&alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<&A as core::alloc::Allocator>::deallocate`
-note: fip-prelint: crate `cell`: 4 roots, 3 passed, 1 errors, 0 warnings, 0 notes
+cell/src/lib.rs:111:5: error: fip-prelint: `rc_new` is #[fip] but may allocate 1 time(s), at most 0 allowed: `rc_new` -> `alloc::rc::Rc::<u32>::new` (cell/src/lib.rs:111) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+cell/src/lib.rs:42:5: error: fip-prelint: `rc_drop` is #[fip] but may free: `rc_drop` -> `core::mem::drop::<alloc::rc::Rc<u32>>` (cell/src/lib.rs:42) -> … -> `<&alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<&A as core::alloc::Allocator>::deallocate`
+cell/src/lib.rs:65:5: error: fip-prelint: `cell_take_box` is #[fip] but may free: `cell_take_box` -> `core::mem::drop::<core::option::Option<alloc::boxed::Box<u8>>>` (cell/src/lib.rs:65) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
+cell/src/lib.rs:78:6: error: fip-prelint: `refcell_read_strict` is #[fip(strict = true)]: reachable panic path: `refcell_read_strict` -> `core::cell::RefCell::<u32>::borrow` (cell/src/lib.rs:78) -> `core::cell::panic_already_mutably_borrowed`: `core::cell::panic_already_mutably_borrowed` (diverges) (`panic_macros = false`)
+cell/src/lib.rs:84:6: error: fip-prelint: `refmut_store_strict` is #[fip(strict = true)]: reachable panic path: `refmut_store_strict` -> `core::cell::RefCell::<u32>::borrow_mut` (cell/src/lib.rs:84) -> `core::cell::panic_already_borrowed`: `core::cell::panic_already_borrowed` (diverges) (`panic_macros = false`)
+note: fip-prelint: crate `cell`: 15 roots, 10 passed, 5 errors, 0 warnings, 0 notes

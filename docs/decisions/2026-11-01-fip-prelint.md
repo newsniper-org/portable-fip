@@ -407,6 +407,27 @@ Fixture `stack` (dev and release builds, expected bounds, cross-checked with
 `llvm-readobj` where present). Summing MIR local sizes stays rejected. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-02: stack bounds for one build".
 
+## Amendment 2026-11-02: uniqueness and interior mutability are out of scope (limits plan L8)
+
+`fip-prelint` checks no uniqueness, aliasing or interior-mutability property, and
+will not. Reasons: (1) uniqueness of owned values and of `&mut` is what Rust's
+ownership and borrow checking already give, statically; the reuse primitive
+`fip_alloc::refill` takes its `Box` by value. (2) Where uniqueness is dynamic (`Rc`,
+`Arc`, `RefCell`), its FIP-relevant effects are already observed by the analysis as it
+is: creating an `Rc` allocates, dropping the last one may free (its glue reaches the
+deallocation), a failed dynamic borrow is a panic path (`panic_already_borrowed`,
+`panic_already_mutably_borrowed`), and `Rc::get_mut`/`try_borrow_mut` neither allocate
+nor panic. (3) Whether an `UnsafeCell` or raw pointer aliases is a question of
+undefined behaviour, which belongs to Verus, Miri and the `unsafe` audit
+(`fip_strict::certs`); no MIR heuristic decides it. Interior mutability matters to the
+driver only for the soundness of its value analysis: places behind an `UnsafeCell` are
+never tracked through shared references (`Freeze` access paths only). Fixture `cells`
+pins the behaviour: 15 roots, 10 passed, 5 errors (`Rc::new`, a last `Rc` dropped, a
+`Box` taken out of a `Cell` and dropped, `borrow`/`borrow_mut` under `strict = true,
+panic_macros = false`); `Cell`, aliasing `&Cell`s, an `UnsafeCell` write,
+`try_borrow_mut`, `Rc::get_mut`, `Rc::clone` and a `RefMut` store pass. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-02: uniqueness and interior mutability".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

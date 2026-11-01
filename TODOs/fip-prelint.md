@@ -1154,3 +1154,35 @@ objects: `⊤`, unreadable).
 functions (`memcpy`, `memset`) with frames measured by other means; precompiled `std`
 frames (a `-Zbuild-std` build with stack sizes); roots in binaries and tests; generic
 roots (bounded only through monomorphic callers).
+
+## Resolved 2026-11-02: uniqueness and interior mutability (limits plan L8)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L8 (item 11 of its
+order). Decision, recorded in `docs/decisions/2026-11-01-fip-prelint.md` (amendment
+"uniqueness and interior mutability are out of scope") and in the README guarantee
+row: `fip-prelint` checks no uniqueness, aliasing or interior-mutability property.
+Static uniqueness is Rust's (ownership, `&mut`); the FIP effects of dynamic uniqueness
+(`Rc`, `RefCell`) are allocations, frees and panic paths, which the analysis already
+sees; `UnsafeCell` aliasing is undefined behaviour, for Verus, Miri and the `unsafe`
+audit. ("F4" does not occur in the repository; read as FP²'s uniqueness condition.)
+
+Fixture `cells` (no driver change; before = after for every case that existed) pins
+today's behaviour, before → after the extension: 4 roots, 3 passed, 1 error → 15
+roots, 10 passed, 5 errors:
+
+| root | result |
+|---|---|
+| `cell_inc` (`Cell::set`), `cell_replace`, `cell_aliased` (two `&Cell` to one cell) | pass |
+| `refmut_store` (`*c.borrow_mut() = 1`, its `RefMut` glue frees nothing), `guard_scope` (a user guard) | pass |
+| `refcell_read` (`*c.borrow()`, not strict) | pass: a non-strict root allows panic paths |
+| `refcell_read_strict`, `refmut_store_strict` (`strict = true, panic_macros = false`) | error: panic path `panic_already_mutably_borrowed` / `panic_already_borrowed` |
+| `refcell_try_store` (`try_borrow_mut`, strict) | pass: no panic path |
+| `unsafecell_write` (`*c.get() = 3`) | pass: aliasing is not checked |
+| `cell_take_box` (`drop(c.take())` of `Cell<Option<Box<u8>>>`) | error: may free |
+| `rc_new` | error: 1 allocation |
+| `rc_drop` | error: may free (the last reference) |
+| `rc_unique_store` (`Rc::get_mut`) | pass |
+| `rc_clone` (`Rc::clone` twice, one forgotten) | pass: no allocation; the count's overflow is `abort`, a panic path allowed outside strict mode |
+
+Deviation from the plan's measurement M3: there `RefCell::borrow_mut` showed a panic
+path because the probe's root was strict; non-strict roots report none.

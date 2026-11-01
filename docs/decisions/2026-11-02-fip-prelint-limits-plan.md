@@ -736,6 +736,17 @@ pinned. The `RefMut` case flips to "passed" when L12 lands.
 
 **Effort.** S (0.5 day, fixture and README sentence).
 
+**Implemented** (item 11 of the order; `TODOs/fip-prelint.md`, "Resolved 2026-11-02:
+uniqueness and interior mutability"). The decision is recorded in the decision record
+(amendment "uniqueness and interior mutability are out of scope") and the README
+guarantee row. Fixture `cells` extended from 4 to 15 roots (10 passed, 5 errors), as
+measured: `Cell::replace`, two aliasing `&Cell`, an `UnsafeCell` write,
+`try_borrow_mut`, `Rc::get_mut`, `Rc::clone` pass; a `Box` taken out of a `Cell` and
+dropped frees; `Rc::new` allocates; `RefCell::borrow`/`borrow_mut` are errors under
+`strict = true, panic_macros = false`. Deviation, from measurement: a non-strict root
+reports no panic path at all (non-strict marks allow them), so `RefCell::borrow`
+passes there; M3's "panic path `panic_already_borrowed`" was a strict root.
+
 ### L9. Stack: no byte bound, only acyclicity
 
 **Current.**

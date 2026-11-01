@@ -239,7 +239,12 @@ fn preconditions() {
 }
 
 /// Drops are frees only when their drop glue deallocates (limits plan L12): `Cell`,
-/// a `RefMut` store and a user guard pass; dropping an `Rc` may free.
+/// a `RefMut` store and a user guard pass; dropping an `Rc` may free. Interior
+/// mutability and dynamic uniqueness are out of scope (limits plan L8); pinned:
+/// `Cell::replace`, two aliasing `&Cell`, an `UnsafeCell` write, `try_borrow_mut`,
+/// `Rc::get_mut` and `Rc::clone` pass; a `Box` taken out of a `Cell` and dropped
+/// frees; `Rc::new` allocates; `RefCell::borrow`/`borrow_mut` are panic paths (errors
+/// under `strict = true, panic_macros = false`, allowed otherwise).
 #[test]
 fn cells() {
     check("cells");
