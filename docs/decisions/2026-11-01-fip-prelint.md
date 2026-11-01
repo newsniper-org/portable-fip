@@ -300,6 +300,24 @@ an unknown callee keeps the old behaviour. Fixture `guards` (5 passes, 7 control
 self-check unchanged. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: values
 returned by calls".
 
+## Amendment 2026-11-02: caller contexts and declared preconditions (limits plan L1)
+
+The analysis is no longer intraprocedural for facts. A callee whose body can use the
+caller's state (an `Assert`, a branch on a comparison, a declared precondition) is
+analysed in the context of each call site (the caller's state projected onto its
+parameters), up to 3 nested contexts; return summaries are computed per context too.
+A new contract attribute, `#[cfg_attr(fip_prelint, fip::requires(..))]` (written by
+`fip-macros` from `#[fip(.., requires(..))]`, grammar `fip_lint_rules::requires`): a
+root is analysed under it; every analysed call site must establish it (else a panic
+path at the call, and the callee is analysed without it there); a function with a
+precondition used as a function value is a panic path. `fip-macros` cannot read the
+Verus `requires` (measured: an attribute macro does not see a following
+`cfg_attr(verus_keep_ghost, ..)` when the cfg is off), so the precondition is written
+by hand and checked against the Verus one where both are visible (the macro under
+Verus, and a source gate for `fip-core`). Self-check: 46 → 23 notes (the 23
+`swap_lt` notes). Fixture `preconditions`. Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-02: caller contexts and declared preconditions".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

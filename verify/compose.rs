@@ -25,3 +25,15 @@ pub fn count(n: u32) -> u32 {
     }
     i
 }
+
+/// `requires(..)` (the precondition `fip-prelint` checks at call sites) must be a
+/// conjunct of the `verus_spec` requires: `#[fip]` sees it here (above `verus_spec`)
+/// and rejects any drift (negative control in `just verify-compose`).
+#[fip(requires(i < xs.len()))]
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires i < xs@.len(),
+    ensures r == xs@[i as int],
+))]
+pub fn at(xs: &[u8], i: usize) -> u8 {
+    xs[i]
+}

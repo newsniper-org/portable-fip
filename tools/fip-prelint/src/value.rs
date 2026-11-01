@@ -161,6 +161,11 @@ enum Var {
     PathLen(Local, Fields),
     /// The metadata of the slice pointer in field `k` of a tuple local.
     FieldLen(Local, u32),
+    /// The integer in field `k` of a tuple local.
+    FieldInt(Local, u32),
+    /// The metadata of the slice pointer in field `k` of the tuple in an
+    /// `Option<(..)>` local (read only where it is `Some`).
+    SomeFieldLen(Local, u32),
 }
 
 /// A value of a callee's interface, as seen from outside its body: its return value
@@ -207,20 +212,29 @@ pub struct RetSummary {
 /// source (whose body is out of scope), and lies in `core`/`alloc`/`std` or a crate
 /// the driver analyses; recursion and nesting deeper than [`MAX_SUMMARY_DEPTH`] give
 /// no summary (the destination is forgotten).
+/// Summaries memoized per callee and context.
+type SummaryMap<'tcx> = HashMap<(Instance<'tcx>, Vec<Fact>), Option<Rc<RetSummary>>>;
+
 pub struct Summaries<'a, 'tcx> {
-    map: RefCell<HashMap<Instance<'tcx>, Option<Rc<RetSummary>>>>,
+    map: RefCell<SummaryMap<'tcx>>,
     stack: RefCell<Vec<Instance<'tcx>>>,
+    /// Callees worth a context at their call sites (see [`Summaries::wants_context`]).
+    wanted: RefCell<HashMap<Instance<'tcx>, bool>>,
     crates: &'a Crates,
 }
 
 /// Nested summary computations before a callee is left unknown.
 const MAX_SUMMARY_DEPTH: usize = 8;
+/// Nested summary computations below which a call gets a summary for its context
+/// (the projection of the caller's state onto the callee's parameters).
+const MAX_CONTEXT_SUMMARY_DEPTH: usize = 3;
 
 impl<'a, 'tcx> Summaries<'a, 'tcx> {
     pub fn new(crates: &'a Crates) -> Summaries<'a, 'tcx> {
         Summaries {
             map: RefCell::new(HashMap::new()),
             stack: RefCell::new(Vec::new()),
+            wanted: RefCell::new(HashMap::new()),
             crates,
         }
     }
@@ -232,14 +246,50 @@ impl<'a, 'tcx> Summaries<'a, 'tcx> {
             && self.crates.source_of(tcx, def_id).is_none()
     }
 
-    /// The summary of `callee`, computed on first use.
+    /// `true` if a call of `callee` should be given the caller's state on its
+    /// parameters (a context): the callee declares `fip::requires(..)` (checked at
+    /// the call), or its body (usable MIR) has an `Assert` or branches on a
+    /// comparison, which the context may decide.
+    pub fn wants_context(&self, tcx: TyCtxt<'tcx>, callee: Instance<'tcx>) -> bool {
+        if let Some(w) = self.wanted.borrow().get(&callee) {
+            return *w;
+        }
+        let w = match callee.def {
+            InstanceKind::Item(def_id) => {
+                self.crates.requires_of(def_id).is_some()
+                    || (!tcx.is_foreign_item(def_id)
+                        && tcx.is_mir_available(def_id)
+                        && self.usable(tcx, def_id)
+                        && {
+                            let body = tcx.instance_mir(callee.def);
+                            !is_coroutine(body)
+                                && (switches_on_comparison(body)
+                                    || body.basic_blocks.iter().any(|d| {
+                                        !d.is_cleanup
+                                            && matches!(
+                                                d.terminator().kind,
+                                                TerminatorKind::Assert { .. }
+                                            )
+                                    }))
+                        })
+            }
+            _ => false,
+        };
+        self.wanted.borrow_mut().insert(callee, w);
+        w
+    }
+
+    /// The summary of `callee` when called in a state that entails `ctx` (facts over
+    /// its parameters; empty: any call), computed on first use.
     fn get(
         &self,
         tcx: TyCtxt<'tcx>,
         env: TypingEnv<'tcx>,
         callee: Instance<'tcx>,
+        ctx: &[Fact],
     ) -> Option<Rc<RetSummary>> {
-        if let Some(s) = self.map.borrow().get(&callee) {
+        let key = (callee, ctx.to_vec());
+        if let Some(s) = self.map.borrow().get(&key) {
             return s.clone();
         }
         {
@@ -250,7 +300,7 @@ impl<'a, 'tcx> Summaries<'a, 'tcx> {
         }
         if let InstanceKind::Intrinsic(def_id) = callee.def {
             let s = intrinsic_summary(tcx, def_id, callee).map(Rc::new);
-            self.map.borrow_mut().insert(callee, s.clone());
+            self.map.borrow_mut().insert(key, s.clone());
             return s;
         }
         let InstanceKind::Item(def_id) = callee.def else {
@@ -258,20 +308,58 @@ impl<'a, 'tcx> Summaries<'a, 'tcx> {
         };
         if tcx.is_foreign_item(def_id) || !tcx.is_mir_available(def_id) || !self.usable(tcx, def_id)
         {
-            self.map.borrow_mut().insert(callee, None);
+            self.map.borrow_mut().insert(key, None);
             return None;
         }
         let body = tcx.instance_mir(callee.def);
         if !summarisable(tcx, body.local_decls[mir::RETURN_PLACE].ty) {
-            self.map.borrow_mut().insert(callee, None);
+            self.map.borrow_mut().insert(key, None);
             return None;
         }
         self.stack.borrow_mut().push(callee);
-        let s = summarise(tcx, env, callee, body, self).map(Rc::new);
+        let s = summarise(tcx, env, callee, body, self, ctx).map(Rc::new);
         self.stack.borrow_mut().pop();
-        self.map.borrow_mut().insert(callee, s.clone());
+        self.map.borrow_mut().insert(key, s.clone());
         s
     }
+
+    /// `true` if summaries computed now may be specific to a context.
+    fn contexts_allowed(&self) -> bool {
+        self.stack.borrow().len() < MAX_CONTEXT_SUMMARY_DEPTH
+    }
+}
+
+/// `true` if `facts` (over interface values) can hold together.
+pub fn satisfiable(facts: &[Fact]) -> bool {
+    let mut vars: Vec<SVar> = vec![SVar::Zero];
+    for f in facts {
+        for v in [f.a, f.b] {
+            if !vars.contains(&v) {
+                vars.push(v);
+            }
+        }
+    }
+    let idx = |v: SVar| vars.iter().position(|x| *x == v).unwrap_or(0);
+    let mut d = Dbm::top(vars.len());
+    facts.iter().all(|f| {
+        let (a, b) = (idx(f.a), idx(f.b));
+        if a == b {
+            f.c >= 0
+        } else {
+            d.constrain(a, b, f.c)
+        }
+    })
+}
+
+/// `true` if every fact of `req` follows from `ctx` (a projection of a closed state,
+/// so every implied bound between two of its values is listed).
+pub fn entails(ctx: &[Fact], req: &[Fact]) -> bool {
+    req.iter().all(|r| {
+        if r.a == r.b {
+            return r.c >= 0;
+        }
+        ctx.iter().any(|f| f.a == r.a && f.b == r.b && f.c <= r.c)
+    })
 }
 
 /// The summary of an intrinsic from `fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS`:
@@ -573,8 +661,10 @@ struct Ctx<'a, 'tcx> {
     bounds: Vec<(i128, i128)>,
     /// Discriminant values of `Option::Some` and `Option::None`.
     some_none: Option<(u128, u128)>,
-    /// Return summaries of the callees of call terminators, per block.
-    calls: HashMap<BasicBlock, Rc<RetSummary>>,
+    /// The resolved calls, per block, with the return summaries to try.
+    calls: Calls<'tcx>,
+    /// Facts over the parameters that hold on entry.
+    entry_facts: Vec<Fact>,
     /// Shared reference locals to a `Freeze` type.
     shared: HashSet<Local>,
 }
@@ -610,6 +700,20 @@ fn range_int<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
     };
     let t = args.types().next()?;
     (tcx.is_lang_item(def.did(), LangItem::Range) && t.is_integral()).then_some(t)
+}
+
+/// The fields of the tuple `(..)` of `Option<(..)>` if one of them is a slice pointer.
+fn option_tuple<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<&'tcx ty::List<Ty<'tcx>>> {
+    let ty::Adt(def, args) = ty.kind() else {
+        return None;
+    };
+    if !tcx.is_lang_item(def.did(), LangItem::Option) {
+        return None;
+    }
+    let ty::Tuple(fields) = args.types().next()?.kind() else {
+        return None;
+    };
+    fields.iter().any(is_slice_ptr).then_some(*fields)
 }
 
 /// The integer type `T` of `Option<T>`.
@@ -771,6 +875,10 @@ pub struct Proved {
     pub asserts: Vec<bool>,
     /// No feasible path reaches the block's terminator.
     pub dead: Vec<bool>,
+    /// For a block ending in a call (reached by a feasible path): the state there
+    /// projected onto the callee's parameters (its context), a closed set of
+    /// difference bounds between the arguments, their slice lengths and 0.
+    pub contexts: HashMap<usize, Vec<Fact>>,
 }
 
 impl Proved {
@@ -839,65 +947,128 @@ fn dump_mir<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) {
     }
 }
 
-/// Runs the value analysis on the body of `inst` if it has an `Assert` or a
-/// `SwitchInt` on a comparison. If tracking the locals of both exceeds the size
-/// limits, the analysis is retried with the locals of the asserts only (what was
-/// tracked before feasibility was used). Calls with a return summary (`sums`) relate
-/// their result to their arguments.
+/// Runs the value analysis on the body of `inst` if it has an `Assert`, a
+/// `SwitchInt` on a comparison, or a call whose callee wants a context. If tracking
+/// the locals of all of them exceeds the size limits, the analysis is retried with
+/// the locals of the asserts (and context calls) only. `entry`: facts over the
+/// parameters that hold on entry (a context, or a root's `fip::requires`). Calls
+/// with a return summary (`sums`) relate their result to their arguments.
 pub fn analyse<'tcx>(
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
     inst: Instance<'tcx>,
     body: &Body<'tcx>,
     sums: &Summaries<'_, 'tcx>,
+    entry: &[Fact],
 ) -> Proved {
+    if is_coroutine(body) {
+        return Proved::default();
+    }
     let has_assert = body
         .basic_blocks
         .iter()
         .any(|d| !d.is_cleanup && matches!(d.terminator().kind, TerminatorKind::Assert { .. }));
     let switches = switches_on_comparison(body);
-    if !(has_assert || switches) || is_coroutine(body) {
+    let calls = call_infos(tcx, env, inst, body, sums);
+    let wants = calls.values().any(|c| c.wants);
+    if !(has_assert || switches || wants) {
         return Proved::default();
     }
     dump_mir(tcx, body);
-    let calls = call_summaries(tcx, env, inst, body, sums);
-    let mode = |switches| Mode {
+    let mut modes = vec![Mode {
         switches,
         ret: false,
-    };
-    if let Some((_, o)) = analyse_with(tcx, env, inst, body, mode(switches), &calls) {
-        return o.proved;
+    }];
+    if switches && (has_assert || wants) {
+        modes.push(Mode {
+            switches: false,
+            ret: false,
+        });
     }
-    if switches && has_assert {
-        return analyse_with(tcx, env, inst, body, mode(false), &calls)
-            .map(|(_, o)| o.proved)
-            .unwrap_or_default();
-    }
-    Proved::default()
+    with_contexts(tcx, env, inst, body, sums, entry, &modes, calls)
+        .map(|(_, o)| o.proved)
+        .unwrap_or_default()
 }
 
-/// The return summary of `inst` (whose body is `body`): the analysis tracking the
-/// return place, the parameters connected to it and the comparisons switched on,
-/// projected at the reachable `return`s onto the return value and the parameters
-/// that the body never changes.
+/// The analysis in the first mode that fits the size limits; then, if calls with a
+/// summarisable result have a context (and contexts are allowed at this nesting),
+/// once more with the summaries of those callees for their contexts (each applied
+/// only where the state at the call entails its context).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one analysis: body, its instance, environment, summaries, entry, modes, calls"
+)]
+fn with_contexts<'a, 'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
+    body: &'a Body<'tcx>,
+    sums: &Summaries<'_, 'tcx>,
+    entry: &[Fact],
+    modes: &[Mode],
+    calls: Calls<'tcx>,
+) -> Option<(Ctx<'a, 'tcx>, Outcome)> {
+    for mode in modes {
+        let Some((cx, out)) = analyse_with(tcx, env, inst, body, *mode, &calls, entry) else {
+            continue;
+        };
+        if !sums.contexts_allowed() {
+            return Some((cx, out));
+        }
+        let mut more = calls.clone();
+        let mut added = false;
+        for (b, ctx) in &out.proved.contexts {
+            let bb = BasicBlock::from_usize(*b);
+            if ctx.is_empty() {
+                continue;
+            }
+            let Some(ci) = more.get_mut(&bb) else {
+                continue;
+            };
+            if !ci.summarisable || ci.sums.iter().any(|(c, _)| c == ctx) {
+                continue;
+            }
+            if let Some(s) = sums.get(tcx, env, ci.callee, ctx) {
+                ci.sums.insert(0, (ctx.clone(), s));
+                added = true;
+            }
+        }
+        if added && let Some(r) = analyse_with(tcx, env, inst, body, *mode, &more, entry) {
+            return Some(r);
+        }
+        return Some((cx, out));
+    }
+    None
+}
+
+/// The return summary of `inst` (whose body is `body`) when entered in a state that
+/// entails `entry`: the analysis tracking the return place, the parameters connected
+/// to it and the comparisons switched on, projected at the reachable `return`s onto
+/// the return value and the parameters that the body never changes.
 fn summarise<'tcx>(
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
     inst: Instance<'tcx>,
     body: &Body<'tcx>,
     sums: &Summaries<'_, 'tcx>,
+    entry: &[Fact],
 ) -> Option<RetSummary> {
     if is_coroutine(body) {
         return None;
     }
     dump_mir(tcx, body);
-    let calls = call_summaries(tcx, env, inst, body, sums);
-    let mode = |switches| Mode {
-        switches,
-        ret: true,
-    };
-    let (cx, out) = analyse_with(tcx, env, inst, body, mode(true), &calls)
-        .or_else(|| analyse_with(tcx, env, inst, body, mode(false), &calls))?;
+    let calls = call_infos(tcx, env, inst, body, sums);
+    let modes = [
+        Mode {
+            switches: true,
+            ret: true,
+        },
+        Mode {
+            switches: false,
+            ret: true,
+        },
+    ];
+    let (cx, out) = with_contexts(tcx, env, inst, body, sums, entry, &modes, calls)?;
     cx.summary(out.returns?)
 }
 
@@ -924,15 +1095,29 @@ fn callee_at<'tcx>(
         .flatten()
 }
 
-/// Return summaries of the callees of the call terminators of `body` whose
-/// destination has a summarisable type.
-fn call_summaries<'tcx>(
+/// A call terminator with a resolved callee: the return summaries to try, most
+/// specific first (each with the context its caller state must entail), whether
+/// its result type is summarisable, and whether the callee wants a context (its
+/// arguments are then tracked).
+#[derive(Clone)]
+struct CallInfo<'tcx> {
+    callee: Instance<'tcx>,
+    sums: Vec<(Vec<Fact>, Rc<RetSummary>)>,
+    summarisable: bool,
+    wants: bool,
+}
+
+type Calls<'tcx> = HashMap<BasicBlock, CallInfo<'tcx>>;
+
+/// The calls of `body` with a resolved callee, with the callee's context-free
+/// summary if its result type is summarisable.
+fn call_infos<'tcx>(
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
     inst: Instance<'tcx>,
     body: &Body<'tcx>,
     sums: &Summaries<'_, 'tcx>,
-) -> HashMap<BasicBlock, Rc<RetSummary>> {
+) -> Calls<'tcx> {
     let mut out = HashMap::new();
     for (bb, data) in body.basic_blocks.iter_enumerated() {
         if data.is_cleanup {
@@ -947,14 +1132,24 @@ fn call_summaries<'tcx>(
         else {
             continue;
         };
-        if !summarisable(tcx, destination.ty(&body.local_decls, tcx).ty) {
+        let Some(callee) = callee_at(tcx, env, inst, body, func) else {
             continue;
-        }
-        if let Some(callee) = callee_at(tcx, env, inst, body, func)
-            && let Some(s) = sums.get(tcx, env, callee)
-        {
-            out.insert(bb, s);
-        }
+        };
+        let summarisable = summarisable(tcx, destination.ty(&body.local_decls, tcx).ty);
+        let base = if summarisable {
+            sums.get(tcx, env, callee, &[])
+        } else {
+            None
+        };
+        out.insert(
+            bb,
+            CallInfo {
+                callee,
+                sums: base.map(|s| (Vec::new(), s)).into_iter().collect(),
+                summarisable,
+                wants: sums.wants_context(tcx, callee),
+            },
+        );
     }
     out
 }
@@ -1057,7 +1252,7 @@ fn path_candidates<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     shared: &HashSet<Local>,
-    calls: &HashMap<BasicBlock, Rc<RetSummary>>,
+    calls: &Calls<'_>,
 ) -> BTreeSet<Var> {
     struct Reads<'b, 'tcx> {
         tcx: TyCtxt<'tcx>,
@@ -1087,11 +1282,11 @@ fn path_candidates<'tcx>(
     };
     reads.visit_body(body);
     let mut found = reads.found;
-    for (bb, s) in calls {
+    for (bb, ci) in calls {
         let TerminatorKind::Call { args, .. } = &body.basic_blocks[*bb].terminator().kind else {
             continue;
         };
-        for sv in s.svars() {
+        for sv in ci.sums.iter().flat_map(|(_, s)| s.svars()) {
             let (i, fs, len) = match sv {
                 SVar::ArgPath(i, fs) => (i, fs, false),
                 SVar::ArgPathLen(i, fs) => (i, fs, true),
@@ -1132,7 +1327,8 @@ fn analyse_with<'a, 'tcx>(
     inst: Instance<'tcx>,
     body: &'a Body<'tcx>,
     mode: Mode,
-    calls: &HashMap<BasicBlock, Rc<RetSummary>>,
+    calls: &Calls<'tcx>,
+    entry: &[Fact],
 ) -> Option<(Ctx<'a, 'tcx>, Outcome)> {
     let n_blocks = body.basic_blocks.len();
     let taken = address_taken(tcx, env, body);
@@ -1162,7 +1358,9 @@ fn analyse_with<'a, 'tcx>(
             | Var::NextOld(l)
             | Var::Path(l, _)
             | Var::PathLen(l, _)
-            | Var::FieldLen(l, _) => l,
+            | Var::FieldLen(l, _)
+            | Var::FieldInt(l, _)
+            | Var::SomeFieldLen(l, _) => l,
         };
         of_local.entry(l).or_default().push(bounds.len());
         index.insert(v, bounds.len());
@@ -1183,13 +1381,26 @@ fn analyse_with<'a, 'tcx>(
         {
             push(Var::Field0(local), r);
         } else if let ty::Tuple(fields) = decl.ty.kind()
-            && fields.iter().any(is_slice_ptr)
+            && fields
+                .iter()
+                .any(|f| is_slice_ptr(f) || int_range(tcx, f).is_some())
         {
+            for (k, f) in fields.iter().enumerate() {
+                let Ok(k) = u32::try_from(k) else {
+                    continue;
+                };
+                if is_slice_ptr(f) {
+                    push(Var::FieldLen(local, k), (0, usize_max));
+                } else if let Some(r) = int_range(tcx, f) {
+                    push(Var::FieldInt(local, k), r);
+                }
+            }
+        } else if let Some(fields) = option_tuple(tcx, decl.ty) {
             for (k, f) in fields.iter().enumerate() {
                 if is_slice_ptr(f)
                     && let Ok(k) = u32::try_from(k)
                 {
-                    push(Var::FieldLen(local, k), (0, usize_max));
+                    push(Var::SomeFieldLen(local, k), (0, usize_max));
                 }
             }
         } else if let Some(r) = range_int(tcx, decl.ty).and_then(|t| int_range(tcx, t)) {
@@ -1229,6 +1440,7 @@ fn analyse_with<'a, 'tcx>(
         bounds,
         some_none: option_discriminants(tcx),
         calls: calls.clone(),
+        entry_facts: entry.to_vec(),
         shared,
     };
     let out = cx.run(n_blocks);
@@ -1266,7 +1478,7 @@ fn relevant_locals<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     mode: Mode,
-    calls: &HashMap<BasicBlock, Rc<RetSummary>>,
+    calls: &Calls<'_>,
 ) -> HashSet<Local> {
     let n = body.local_decls.len();
     let mut parent: Vec<usize> = (0..n).collect();
@@ -1332,13 +1544,20 @@ fn relevant_locals<'tcx>(
                 ..
             } if is_range_call(tcx, body, func, LangItem::IteratorNext)
                 || is_range_call(tcx, body, func, LangItem::IntoIterIntoIter)
-                || calls.contains_key(&bb) =>
+                || calls.get(&bb).is_some_and(|c| !c.sums.is_empty()) =>
             {
                 for a in args.iter() {
                     if let Some(u) = op_local(&a.node) {
                         union(&mut parent, destination.local, u);
                     }
                 }
+                if calls.get(&bb).is_some_and(|c| c.wants) {
+                    seeds.extend(args.iter().filter_map(|a| op_local(&a.node)));
+                }
+            }
+            TerminatorKind::Call { args, .. } if calls.get(&bb).is_some_and(|c| c.wants) => {
+                // The arguments of a call whose callee wants a context are tracked.
+                seeds.extend(args.iter().filter_map(|a| op_local(&a.node)));
             }
             _ => {}
         }
@@ -1388,6 +1607,90 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             disc: BTreeMap::new(),
             refs: BTreeMap::new(),
         }
+    }
+
+    /// The state at function entry: type bounds and the entry facts; `None` if the
+    /// entry facts contradict each other (no call can enter in that state).
+    fn initial(&self) -> Option<State> {
+        let mut st = self.entry();
+        for f in &self.entry_facts {
+            let param =
+                |i: u32| Local::from_usize(usize::try_from(i).unwrap_or(usize::MAX - 1) + 1);
+            let var = |sv: SVar| match sv {
+                SVar::Zero => Some(0),
+                SVar::Arg(i) => self.var(Var::Local(param(i))),
+                SVar::ArgLen(i) => self.var(Var::Len(param(i))),
+                SVar::ArgPath(i, fs) => self.var(Var::Path(param(i), fs)),
+                SVar::ArgPathLen(i, fs) => self.var(Var::PathLen(param(i), fs)),
+                SVar::Ret | SVar::RetLen | SVar::RetFieldLen(_) => None,
+            };
+            if let (Some(a), Some(b)) = (var(f.a), var(f.b)) {
+                let ok = if a == b {
+                    f.c >= 0
+                } else {
+                    st.d.constrain(a, b, f.c)
+                };
+                if !ok {
+                    return None;
+                }
+            }
+        }
+        Some(st)
+    }
+
+    /// `true` if every fact of `ctx` (over the callee's parameters) holds for the
+    /// arguments `args` in `st`.
+    fn entails_at(
+        &self,
+        st: &State,
+        ctx: &[Fact],
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+    ) -> bool {
+        ctx.iter().all(
+            |f| match (self.arg_value(st, f.a, args), self.arg_value(st, f.b, args)) {
+                (Some(a), Some(b)) => self.entails(st, a, b, f.c),
+                _ => false,
+            },
+        )
+    }
+
+    /// The context of a call: the difference bounds in `st` between its argument
+    /// values, their slice lengths and 0 (`st` is closed, so this lists every bound
+    /// implied between them).
+    fn project(&self, st: &State, args: &[rustc_span::Spanned<Operand<'tcx>>]) -> Vec<Fact> {
+        let mut iface: Vec<(SVar, Lin)> = vec![(SVar::Zero, Lin { v: 0, c: 0 })];
+        for (i, a) in args.iter().enumerate() {
+            let Ok(i) = u32::try_from(i) else {
+                continue;
+            };
+            if let Some(x) = self.lin(st, &a.node) {
+                iface.push((SVar::Arg(i), x));
+            }
+            if let Some(v) = self.len_of(st, &a.node) {
+                iface.push((SVar::ArgLen(i), Lin { v, c: 0 }));
+            }
+        }
+        if iface.len() < 2 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (sa, x) in &iface {
+            for (sb, y) in &iface {
+                if sa == sb {
+                    continue;
+                }
+                let c = if x.v == y.v {
+                    x.c - y.c
+                } else {
+                    add(st.d.get(x.v, y.v), x.c - y.c)
+                };
+                if c < INF {
+                    out.push(Fact { a: *sa, b: *sb, c });
+                }
+            }
+        }
+        out.sort();
+        out
     }
 
     fn var(&self, v: Var) -> Option<usize> {
@@ -1483,9 +1786,11 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             return self.path_var(st, b, fs, false).map(|v| Lin { v, c: 0 });
         }
         match p.projection.as_slice() {
-            [ProjectionElem::Field(f, _)] if f.as_usize() == 0 => {
-                self.var(Var::Field0(p.local)).map(|v| Lin { v, c: 0 })
-            }
+            [ProjectionElem::Field(f, _)] => self
+                .var(Var::Field0(p.local))
+                .filter(|_| f.as_usize() == 0)
+                .or_else(|| self.var(Var::FieldInt(p.local, f.as_u32())))
+                .map(|v| Lin { v, c: 0 }),
             // `(o as Some).0`: only read where `o` is `Some`.
             [ProjectionElem::Downcast(..), ProjectionElem::Field(f, _)] if f.as_usize() == 0 => {
                 self.var(Var::SomeVal(p.local)).map(|v| Lin { v, c: 0 })
@@ -1529,10 +1834,36 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         if let Some((b, fs)) = path_of(p) {
             return self.path_var(st, b, fs, true);
         }
-        if let [ProjectionElem::Field(f, _)] = p.projection.as_slice() {
-            return self.var(Var::FieldLen(p.local, f.as_u32()));
+        match p.projection.as_slice() {
+            [ProjectionElem::Field(f, _)] => self.var(Var::FieldLen(p.local, f.as_u32())),
+            [
+                ProjectionElem::Downcast(..),
+                ProjectionElem::Field(z, _),
+                ProjectionElem::Field(f, _),
+            ] if z.as_usize() == 0 => self.var(Var::SomeFieldLen(p.local, f.as_u32())),
+            _ => None,
         }
-        None
+    }
+
+    /// The tracked value of field `k` of the tuple at `p` (a tuple local, or the
+    /// payload `(t as Some).0` of an `Option` local): its metadata if `len`, else
+    /// the integer.
+    fn component(&self, p: &Place<'tcx>, k: u32, len: bool) -> Option<usize> {
+        if let Some(t) = p.as_local() {
+            return self.var(if len {
+                Var::FieldLen(t, k)
+            } else {
+                Var::FieldInt(t, k)
+            });
+        }
+        match p.projection.as_slice() {
+            [ProjectionElem::Downcast(..), ProjectionElem::Field(z, _)]
+                if z.as_usize() == 0 && len =>
+            {
+                self.var(Var::SomeFieldLen(p.local, k))
+            }
+            _ => None,
+        }
     }
 
     /// The slice local whose length `op` (a slice pointer) has.
@@ -1805,7 +2136,32 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 .or_else(|| self.shared.contains(&c).then_some((c, Fields::EMPTY)))
         });
         let own_len = len.is_some_and(|v| self.of_local.get(&l).is_some_and(|vs| vs.contains(&v)));
+        // A tuple copied whole: its fields' values and metadata.
+        let mut parts: Vec<(usize, usize)> = Vec::new();
+        if let Operand::Copy(p) | Operand::Move(p) = op
+            && p.local != l
+            && let ty::Tuple(fields) = self.body.local_decls[l].ty.kind()
+        {
+            for k in 0..fields.len() {
+                let Ok(k) = u32::try_from(k) else {
+                    continue;
+                };
+                for len in [true, false] {
+                    let me = self.var(if len {
+                        Var::FieldLen(l, k)
+                    } else {
+                        Var::FieldInt(l, k)
+                    });
+                    if let (Some(me), Some(src)) = (me, self.component(p, k, len)) {
+                        parts.push((me, src));
+                    }
+                }
+            }
+        }
         self.kill(st, l);
+        for (me, src) in parts {
+            self.equate(st, me, Lin { v: src, c: 0 });
+        }
         if let Some(c) = cond {
             st.cond.insert(l, c);
         }
@@ -2028,18 +2384,43 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     }
                     _ => None,
                 };
-                // `t = (a, b, ..)`: the slice pointer fields keep their metadata.
-                let tuple: Vec<(u32, Lin)> = match &**kind {
-                    mir::AggregateKind::Tuple => ops
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(k, op)| {
-                            let v = self.len_of(st, op)?;
-                            Some((u32::try_from(k).ok()?, Lin { v, c: 0 }))
+                // `t = (a, b, ..)`: the fields keep their values and metadata.
+                let mut tuple: Vec<(Var, Lin)> = Vec::new();
+                if let mir::AggregateKind::Tuple = &**kind {
+                    for (k, op) in ops.iter().enumerate() {
+                        let Ok(k) = u32::try_from(k) else {
+                            continue;
+                        };
+                        if let Some(v) = self.len_of(st, op) {
+                            tuple.push((Var::FieldLen(l, k), Lin { v, c: 0 }));
+                        }
+                        if let Some(x) = self.lin(st, op) {
+                            tuple.push((Var::FieldInt(l, k), x));
+                        }
+                    }
+                }
+                // `o = Some(t)` of a tuple local `t`: the payload's metadata.
+                if let mir::AggregateKind::Adt(def_id, variant, ..) = &**kind
+                    && self.tcx.is_lang_item(*def_id, LangItem::Option)
+                    && self
+                        .tcx
+                        .lang_items()
+                        .option_some_variant()
+                        .is_some_and(|v| {
+                            self.tcx.adt_def(*def_id).variant_index_with_id(v) == *variant
                         })
-                        .collect(),
-                    _ => Vec::new(),
-                };
+                    && let Some(Operand::Copy(t) | Operand::Move(t)) = ops.iter().next()
+                    && let Some(t) = t.as_local()
+                    && let ty::Tuple(fields) = self.body.local_decls[t].ty.kind()
+                {
+                    for k in 0..fields.len() {
+                        if let Ok(k) = u32::try_from(k)
+                            && let Some(v) = self.var(Var::FieldLen(t, k))
+                        {
+                            tuple.push((Var::SomeFieldLen(l, k), Lin { v, c: 0 }));
+                        }
+                    }
+                }
                 self.kill(st, l);
                 if let (Some((a, b)), Some((s, e))) = (fields, self.range_vars(l))
                     && !self.mentions_local(a, l)
@@ -2053,8 +2434,8 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 {
                     self.equate(st, me, m);
                 }
-                for (k, x) in tuple {
-                    if let Some(me) = self.var(Var::FieldLen(l, k))
+                for (var, x) in tuple {
+                    if let Some(me) = self.var(var)
                         && !self.mentions_local(x, l)
                     {
                         self.equate(st, me, x);
@@ -2388,8 +2769,14 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             );
             return true;
         }
-        if let Some(s) = self.calls.get(&bb) {
-            return self.apply_summary(st, s, args, destination);
+        if let Some(ci) = self.calls.get(&bb)
+            && let Some((_, s)) = ci
+                .sums
+                .iter()
+                .find(|(ctx, _)| self.entails_at(st, ctx, args))
+        {
+            let s = Rc::clone(s);
+            return self.apply_summary(st, &s, args, destination);
         }
         if !destination.is_indirect_first_projection() {
             self.kill(st, destination.local);
@@ -2555,7 +2942,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 returns: None,
             };
         };
-        entry[start.as_usize()] = Some(self.entry());
+        entry[start.as_usize()] = self.initial();
         let mut work: BTreeSet<usize> = BTreeSet::from([0]);
         // Safety net against non-termination: give up (prove nothing).
         let mut budget = 200 * rpo.len() + 1000;
@@ -2607,6 +2994,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let mut asserts = vec![false; n_blocks];
         let mut dead = vec![false; n_blocks];
         let mut returns = Vec::new();
+        let mut contexts = HashMap::new();
         for bb in &rpo {
             let b = bb.as_usize();
             // The state at the terminator; `None` if no feasible path reaches it.
@@ -2633,11 +3021,21 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     asserts[b] = self.decide_operand(&st, cond) == Some(*expected);
                 }
                 TerminatorKind::Return => returns.push(st),
+                TerminatorKind::Call { args, .. } => {
+                    let ctx = self.project(&st, args);
+                    if !ctx.is_empty() {
+                        contexts.insert(b, ctx);
+                    }
+                }
                 _ => {}
             }
         }
         Outcome {
-            proved: Proved { asserts, dead },
+            proved: Proved {
+                asserts,
+                dead,
+                contexts,
+            },
             returns: Some(returns),
         }
     }
@@ -2829,6 +3227,42 @@ mod tests {
         assert_eq!(r.a, Lin { v: 3, c: -2 });
         assert_eq!(r.b, Lin { v: 2, c: 3 });
         assert!(!r.mentions(1));
+    }
+
+    #[test]
+    fn contexts_and_preconditions() {
+        let f = |a, b, c| Fact { a, b, c };
+        // i < j, j < len(xs): satisfiable; with j < i too it is not.
+        let req = vec![
+            f(SVar::Arg(1), SVar::Arg(2), -1),
+            f(SVar::Arg(2), SVar::ArgLen(0), -1),
+        ];
+        assert!(satisfiable(&req));
+        let mut bad = req.clone();
+        bad.push(f(SVar::Arg(2), SVar::Arg(1), -1));
+        assert!(!satisfiable(&bad));
+        assert!(!satisfiable(&[f(SVar::Zero, SVar::Zero, -1)]));
+        // A context lists every implied bound: a tighter bound entails, a looser
+        // one does not, a missing pair does not.
+        let ctx = vec![
+            f(SVar::Arg(1), SVar::Arg(2), -2),
+            f(SVar::Arg(2), SVar::ArgLen(0), -1),
+        ];
+        assert!(entails(&ctx, &req));
+        let loose = vec![
+            f(SVar::Arg(1), SVar::Arg(2), 0),
+            f(SVar::Arg(2), SVar::ArgLen(0), -1),
+        ];
+        assert!(!entails(&loose, &req));
+        assert!(!entails(&ctx[..1], &req));
+        assert!(entails(&[], &[f(SVar::Arg(0), SVar::Arg(0), 0)]));
+        // Contexts are compared as sorted lists (memoization keys).
+        let mut a = ctx.clone();
+        a.reverse();
+        a.sort();
+        let mut b = ctx;
+        b.sort();
+        assert_eq!(a, b);
     }
 
     #[test]

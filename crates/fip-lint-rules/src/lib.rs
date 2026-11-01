@@ -8,10 +8,15 @@
 //! `fip_testkit::callgraph` (crate-wide checker) both read these tables, so the two
 //! tools cannot disagree about the rules.
 //!
-//! `#![no_std]`, no dependencies, data only.
+//! `#![no_std]`, no dependencies, data only, except the `requires` grammar
+//! ([`requires`], which uses `alloc`).
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
+
+pub mod requires;
 
 /// Standard heap-owning types; `Type::ctor(..)` with a ctor below is an allocation site
 /// unless the pair is in [`NON_ALLOCATING_CONSTRUCTORS`] (see [`is_heap_constructor`]).
@@ -560,6 +565,47 @@ pub mod mir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requires_grammar() {
+        use requires::{Rel, Side, Term, display_all, from_verus, not_in, parse};
+        let cs = parse("i < j < xs.len(), 0 <= i, n >= k + 1, 3usize == m - 2").unwrap();
+        assert_eq!(
+            display_all(&cs),
+            "i < j, j < xs.len(), 0 <= i, k + 1 <= n, 3 == m - 2"
+        );
+        assert_eq!(cs[0].rel, Rel::Lt);
+        assert_eq!(
+            cs[3].a,
+            Side {
+                term: Term::Param("k".into()),
+                offset: 1
+            }
+        );
+        // Outside the grammar: errors, never dropped.
+        for bad in [
+            "",
+            "i",
+            "i != j",
+            "i < j * 2",
+            "f(i) < j",
+            "i < j + k",
+            "xs[0] < 1",
+            "i < j,, k < l",
+            "i < 3q",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        // The Verus subset: `old(xs)@.len()`, chains; the rest is left out.
+        let spec = "r => requires i < j < old(xs)@.len(), forall|k: int| 0 <= k < 3 ==> #[trigger] f(k), n != 0, ensures r == 1";
+        let v = from_verus(spec);
+        assert_eq!(display_all(&v), "i < j, j < xs.len()");
+        let fip = parse("i < j, j < xs.len()").unwrap();
+        assert_eq!(not_in(&fip, &v).len(), 0);
+        let drift = parse("i <= j").unwrap();
+        assert_eq!(not_in(&drift, &v).len(), 1);
+        assert_eq!(from_verus("ensures r == 1").len(), 0);
+    }
 
     /// Differential test of `mir::INTRINSIC_RESULT_BOUNDS`: the real stable wrappers of
     /// each intrinsic, on boundary inputs of every unsigned and signed width, stay

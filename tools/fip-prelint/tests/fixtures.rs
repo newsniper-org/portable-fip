@@ -179,6 +179,17 @@ fn alloc_sources() {
     check("alloc_sources");
 }
 
+/// Declared preconditions and callee contexts (limits plan L1): `fip::requires`
+/// established by guards or constants passes, a root is checked under its own; a
+/// call site that does not establish it, a function with a precondition used as a
+/// value, `split_at_mut` without `j < len`, and a callee whose context is too weak
+/// are reported; an allocation hidden behind a broken precondition is counted;
+/// malformed and unsatisfiable preconditions are errors.
+#[test]
+fn preconditions() {
+    check("preconditions");
+}
+
 /// Drops are frees only when their drop glue deallocates (limits plan L12): `Cell`,
 /// a `RefMut` store and a user guard pass; dropping an `Rc` may free.
 #[test]

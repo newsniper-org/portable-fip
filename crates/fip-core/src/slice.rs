@@ -20,7 +20,10 @@ use vstd::prelude::*;
 /// Swaps `xs[i]` and `xs[j]` for `i < j`, built only from `vstd`-specified primitives
 /// (`split_at_mut`, `core::mem::swap`); `<[T]>::swap` has no `vstd` specification.
 /// Strict (certificate `__fip_strict_swap_lt`), so `crate::strict` can call it.
-#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true))]
+#[cfg_attr(
+    not(verus_keep_ghost),
+    fip_macros::fip(strict = true, requires(i < j, j < xs.len()))
+)]
 #[cfg_attr(verus_keep_ghost, verus_spec(
     requires
         i < j < old(xs)@.len(),

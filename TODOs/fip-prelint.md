@@ -225,8 +225,8 @@ analysis, see "Resolved: path-insensitive panics" below). Every one investigated
 | `strict_gaps::sum` may free (`drop of Big` inside `add`) | real | `add` drops `self` and `o`; the test measures 2 frees |
 | `strict_impl::Slot::<T>::put_twice` only relative to `drop(T)` (warning) | real, new | `Self::put(self, a);` discards the returned old value, which is dropped: a free for every `T` with drop glue (`T = u16` in the test). The token-level checker cannot see it |
 | 14 notes: overflow checks | real | unguarded arithmetic: `x + 1` in `two_boxes`, `s += ..` in `sum_rotations`, `old + 1` in `Counter::bump` (and twice through `bump_twice`), `*self.0 + *o.0` in `strict_gaps::Big::add`, `old + 1` / `self.n += 10` in the two `Ticker::step` (5 notes with their callers), `v + 1`, `v * 2`, `v + 10` in the closures of `strict_behaviour::pipeline` |
-| 10 notes: bounds checks | real path, unreachable under the documented precondition `i < j < len` | `a[i]` and `b[0]` after `split_at_mut(xs, j)` in `fip_core::slice::swap_lt`, directly and through its callers; the precondition is a caller's guard, which an intraprocedural analysis does not see |
-| 9 notes: `core::panicking::panic_fmt` from `<[T]>::split_at_mut` in `fip_core::slice::swap_lt` | real path, unreachable under the same precondition | `split_at_mut`'s assert |
+| 10 notes: bounds checks | real path, unreachable under the documented precondition `i < j < len` | `a[i]` and `b[0]` after `split_at_mut(xs, j)` in `fip_core::slice::swap_lt`, directly and through its callers; the precondition is a caller's guard, which an intraprocedural analysis does not see. **Gone** since L1 (2026-11-02, "Resolved: caller contexts and declared preconditions"; then 12) |
+| 9 notes: `core::panicking::panic_fmt` from `<[T]>::split_at_mut` in `fip_core::slice::swap_lt` | real path, unreachable under the same precondition | `split_at_mut`'s assert. **Gone** since L1 (then 11) |
 | 1 note: `panic_fmt` in `strict_gaps::checked_dec` | real | `assert!(x > 0)` |
 | 6 notes: `alloc::alloc::handle_alloc_error` (diverges) | real | allocation failure in the allocating strict roots (`boxed`, `two_boxes` twice, `Slot::boxed`, `box_it`, `sum`) |
 
@@ -646,3 +646,101 @@ self-check: 4.1 s before, 4.3 s after (one run each, unmeasured variance).
 arithmetic, access paths through more than one dereference or into enums, and
 callees without MIR outside the table stay unknown; integer fields of returned
 tuples and structs are not tracked (only slice metadata of tuple fields).
+
+## Resolved 2026-11-02: caller contexts and declared preconditions (limits plan L1)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L1 (item 5 of its order).
+The 23 `swap_lt` notes of the self-check (M1: 12 bounds checks `a[i]`, `b[0]`, 11
+`panic_fmt` in `split_at_mut`) are safe only under `i < j < xs.len()`, a Verus
+`requires` the driver never saw, and the analysis was intraprocedural.
+
+**Probe first** (the plan's open question): does `#[fip]` see the following
+`#[cfg_attr(verus_keep_ghost, verus_spec(..))]` when the cfg is off? Measured with a
+printing attribute macro (`/tmp/pd-w2-macroprobe`) on rustc 1.99.1 and 1.97.1: **no**,
+the item arrives without the attribute. So, as the plan's fallback says, the mark is
+written by hand: `#[fip(.., requires(i < j, j < xs.len()))]` (or
+`#[cfg_attr(fip_prelint, fip::requires(..))]` without `#[fip]`), and the drift guard
+compares it with the Verus `requires` where both are visible: in `fip-macros` when it
+sees a `#[verus_spec(..)]` (Verus builds with `#[fip]` above `verus_spec`; negative
+control in `just verify-compose`), and by a source gate for `fip-core`, whose
+`#[fip]` is compiled out under Verus (`crates/fip-macros/tests/requires_drift.rs`,
+with a drifted copy as negative control).
+
+**Change.**
+
+- Contexts: the value analysis projects its state at every call onto the callee's
+  parameters (closed difference bounds between arguments, their slice lengths and
+  0). A callee whose body can use it (an `Assert`, a branch on a comparison, or a
+  `fip::requires`) becomes the node `(instance, context)`, analysed with the context
+  as entry state; nesting stops at 3 non-empty contexts (then the empty context, as
+  before), and a callee already on the path from the root (recursion) gets the empty
+  context, so recursive components are the same nodes as before. The arguments of
+  such calls are tracked, and bodies with such calls are analysed.
+- Return summaries per context: after a first pass, a call with a summarisable result
+  and a context gets the callee's summary for that context (computed with the
+  context as entry, at most 3 summaries deep); it is applied only where the state at
+  the call entails the context. Tuple fields (integers and slice metadata) and the
+  slice metadata of an `Option` of a tuple are tracked (`split_at_mut` returns
+  `Some(pair).0`; `swap`'s `let (lo, hi) = ..`).
+- `fip::requires(..)` (grammar in `fip_lint_rules::requires`: chained comparisons of
+  integer parameters, `p.len()` of slice parameters and literals, each `± literal`;
+  anything else is an error): a root is analysed under its precondition (verdicts
+  say "under `fip::requires(..)`"); at every analysed call site the context must
+  entail it, else the call is a panic path "precondition `..` of `f` not established
+  at this call" (note, error under `panic_macros = false`); a function with a
+  precondition used as a function value (reified, passed as a callable) is a panic
+  path there. Malformed, misplaced and unsatisfiable preconditions are errors.
+- `fip-macros`: `requires(..)` in `#[fip(..)]`, checked against the grammar and the
+  parameter names, emitted as `fip::requires(..)` for the driver.
+  `fip_core::slice::swap_lt` declares `requires(i < j, j < xs.len())`.
+
+**Measured** (self-check, `--warn-only`, notes; before = driver of `8af43f1`):
+
+| notes | before | after |
+|---|---|---|
+| `swap_lt` bounds checks | 12 | 0 |
+| `split_at_mut`'s `panic_fmt` under `swap_lt` | 11 | 0 |
+| "precondition not established" | — | 0 |
+| overflow (real) | 14 | 14 |
+| `handle_alloc_error` (real) | 8 | 8 |
+| `assert!` in `checked_dec` (real) | 1 | 1 |
+| total | 46 | 23 |
+
+Per crate: `fip_core` 11 → 0, `strict_accept` 12 → 8 (`rotate3` and `sum_rotations`
+through `fip_core::swap` on `[u8; 2]`: the constant length comes from the unsizing
+coercion, `lo < hi` from the tuple), `strict_behaviour` 11 → 3. Every caller of
+`swap_lt` in the workspace establishes its precondition (the loops' `w < r` and
+`r < n` with `n = xs.len()`, through the `<[T]>::len` summary). Verdicts, warnings
+and errors unchanged; `selfcheck.expected`: the three summary lines above.
+
+New fixture `preconditions` (15 roots, 7 passed, 12 errors, 3 notes; crate
+`bad_pre` 6 errors): a private callee with a guarded caller (passes) and a caller
+with `j <= xs.len()` (precondition and the callee's bounds check reported); a root
+under its own precondition (passes) and one whose precondition does not cover
+`xs[i + 1]` (reported, "under `fip::requires(i < xs.len())`"); constant callers on an
+array of 4 (index 3 passes, 4 reported); a reified function and one passed as a
+callable (reported); `boxes_if_broken`, which allocates only when its precondition
+is broken: the guarded caller passes, the unguarded one is charged the allocation
+and the free; `split_at_mut` under `j < xs.len()` (passes), under `j <= xs.len()`
+(the second half's `b[0]` reported) and without a guard (its `panic_fmt` reported);
+a callee without a precondition in a sufficient and an insufficient context;
+`!=`, a product, an unknown name, `len()` of an integer, a contradiction and a mark
+on a struct are errors. `bad_attr`: the list of known `fip::` names gained
+`fip::requires` (two lines). Other fixtures unchanged. M3 probe `limits`: 12 errors
+before and after. Self-check time: 3.4 s (one run; before 4.3 s, unmeasured
+variance).
+
+**Deviation (soundness first).** The plan assumes a function's precondition in its
+body everywhere. Here it is assumed only for a root; a callee is analysed in the
+context of its call site, which contains the precondition exactly where the call
+establishes it. Where it is not established, the call is reported and the callee is
+analysed without it, so a broken contract never hides an allocation, free or `⊤`
+from a root that is not strict (strict roots also see the panic path). Measured:
+`alloc_unguarded` is charged `boxes_if_broken`'s allocation.
+
+**Open:** preconditions over fields, sequences, non-linear terms or quantifiers stay
+outside the grammar (left out when translated from Verus: assumes less); callers in
+crates the driver does not analyse are not checked (as in Verus); a context is lost
+beyond 3 nested contexts or when the caller's body exceeds the analysis limits (then
+the precondition is reported as not established); `core::hint::assert_unchecked` as
+a fact (accepted in the plan as a small extension) is not implemented.

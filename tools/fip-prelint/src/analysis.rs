@@ -38,6 +38,16 @@
 //! MIR, it is a leaf with exactly its declared events, and its body is never
 //! analysed (allocation inside an allocator is outside FIP).
 //!
+//! **Contexts and preconditions.** A callee whose body can use the caller's state
+//! (an `Assert`, a branch on a comparison, or `fip::requires(..)`) is the node
+//! `(instance, context)`: the caller's value-analysis state at the call projected
+//! onto its parameters ([`crate::value`]), used as the callee's entry state; at most
+//! [`MAX_CONTEXT_DEPTH`] nested contexts, and a callee already on the path from the
+//! root gets none. A root is analysed under its own `fip::requires(..)`; at every
+//! call the context must entail the callee's, else the call is a panic path (and the
+//! callee is analysed without it there); a function with a precondition used as a
+//! value is a panic path.
+//!
 //! **Declared parameter bounds at call sites.** A call whose resolved callee carries
 //! `fip::mark(.., param(g = K))` passes, for `g`, a value of the callee's generic type
 //! parameter `F` (`g: F`, `g: &F`, `g: &mut F`). The argument's bound is the bound of
@@ -68,6 +78,7 @@ use rustc_middle::ty::{
 use rustc_span::{DUMMY_SP, Span};
 
 use crate::marks::{self, Mark, Source};
+use crate::value::{Fact, SVar};
 
 /// Explored instances per root before the rest is `⊤` ("analysis limit").
 const MAX_NODES: usize = 20_000;
@@ -379,8 +390,90 @@ enum NodeKind {
 
 struct Node<'tcx> {
     inst: Instance<'tcx>,
+    /// Facts over the parameters that hold on entry: the context of the call sites
+    /// that reach this node (the projection of their state), or a root's
+    /// `fip::requires`. Empty: any call.
+    ctx: Vec<Fact>,
+    /// Non-empty contexts on the way from the root (at most [`MAX_CONTEXT_DEPTH`]).
+    depth: u8,
+    /// The node whose body first called this one (`None` for the root).
+    parent: Option<usize>,
     label: String,
     kind: NodeKind,
+}
+
+/// Nested contexts (a callee analysed in the state of its call site, itself analysed
+/// in a context, ..) before a callee is analysed for any call (empty context).
+const MAX_CONTEXT_DEPTH: u8 = 3;
+
+/// A declared precondition (`fip::requires(..)`): as written, and as facts over the
+/// parameters.
+#[derive(Clone, Debug)]
+pub struct Requires {
+    pub text: String,
+    pub facts: Vec<Fact>,
+}
+
+/// The facts of the conjuncts of `fip::requires(..)` on `def_id`: `i` is an integer
+/// parameter, `xs.len()` the length of a slice parameter.
+pub fn requires_facts(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+    cs: &[fip_lint_rules::requires::Conjunct],
+) -> Result<Vec<Fact>, String> {
+    use fip_lint_rules::requires::{Rel, Side, Term};
+    if !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
+        return Err("`fip::requires` applies to functions".to_string());
+    }
+    let idents = tcx.fn_arg_idents(def_id);
+    let inputs = tcx.fn_sig(def_id).skip_binder().skip_binder().inputs();
+    let find = |name: &str| {
+        idents
+            .iter()
+            .position(|i| i.is_some_and(|i| i.name.as_str() == name))
+            .ok_or_else(|| format!("`{name}` is not a parameter"))
+    };
+    let side = |s: &Side| -> Result<(SVar, i128), String> {
+        let at = |k: usize| u32::try_from(k).map_err(|_| "too many parameters".to_string());
+        match &s.term {
+            Term::Zero => Ok((SVar::Zero, s.offset)),
+            Term::Param(p) => {
+                let k = find(p)?;
+                if !inputs[k].is_integral() {
+                    return Err(format!("`{p}` is not an integer parameter"));
+                }
+                Ok((SVar::Arg(at(k)?), s.offset))
+            }
+            Term::Len(p) => {
+                let k = find(p)?;
+                let slice = inputs[k]
+                    .builtin_deref(true)
+                    .is_some_and(|t| matches!(t.kind(), ty::Slice(_) | ty::Str));
+                if !slice {
+                    return Err(format!("`{p}.len()`: `{p}` is not a slice reference"));
+                }
+                Ok((SVar::ArgLen(at(k)?), s.offset))
+            }
+        }
+    };
+    let mut facts = Vec::new();
+    for c in cs {
+        let ((a, ka), (b, kb)) = (side(&c.a)?, side(&c.b)?);
+        // a + ka REL b + kb, i.e. a - b ≤ kb - ka (- 1 for `<`).
+        let le = |a: SVar, b: SVar, c: i128| Fact { a, b, c };
+        match c.rel {
+            Rel::Lt => facts.push(le(a, b, kb - ka - 1)),
+            Rel::Le => facts.push(le(a, b, kb - ka)),
+            Rel::Eq => {
+                facts.push(le(a, b, kb - ka));
+                facts.push(le(b, a, ka - kb));
+            }
+        }
+    }
+    if !crate::value::satisfiable(&facts) {
+        return Err("the precondition can never hold".to_string());
+    }
+    Ok(facts)
 }
 
 /// Crates whose MIR may be used: the local crate, `core`/`alloc`/`std`, and crates
@@ -396,6 +489,8 @@ pub struct Crates {
     /// `fip::alloc_source`/`fip::free_source` of functions, trait method declarations
     /// and foreign functions in the local crate and in exported crates.
     sources: HashMap<DefId, Source>,
+    /// `fip::requires(..)` of functions in the local crate and in exported crates.
+    requires: HashMap<DefId, Requires>,
 }
 
 /// Why a function is an allocation or free source.
@@ -443,6 +538,7 @@ impl Crates {
         let mut unencoded = HashMap::new();
         let mut marks = HashMap::new();
         let mut sources = HashMap::new();
+        let mut requires = HashMap::new();
         for krate in rustc_public::external_crates() {
             let Some(&cnum) = tcx
                 .crates(())
@@ -469,6 +565,17 @@ impl Crates {
                 if let Ok(Some(s)) = marks::source_of_printed(attrs.iter().map(String::as_str)) {
                     sources.insert(def_id, s);
                 }
+                if let Ok(Some(cs)) = marks::requires_of_printed(attrs.iter().map(String::as_str))
+                    && let Ok(facts) = requires_facts(tcx, def_id, &cs)
+                {
+                    requires.insert(
+                        def_id,
+                        Requires {
+                            text: fip_lint_rules::requires::display_all(&cs),
+                            facts,
+                        },
+                    );
+                }
                 if !has_source_body(tcx, def_id) {
                     continue;
                 }
@@ -489,6 +596,7 @@ impl Crates {
             unencoded,
             marks,
             sources,
+            requires,
         }
     }
     /// Adds the marks of the local crate (the roots).
@@ -496,6 +604,16 @@ impl Crates {
         for (d, m) in roots {
             self.marks.insert(*d, m.clone());
         }
+    }
+    /// Adds the declared preconditions of the local crate.
+    pub fn add_local_requires(&mut self, requires: &[(DefId, Requires)]) {
+        for (d, r) in requires {
+            self.requires.insert(*d, r.clone());
+        }
+    }
+    /// The declared precondition of `def_id`.
+    pub fn requires_of(&self, def_id: DefId) -> Option<&Requires> {
+        self.requires.get(&def_id)
     }
     /// Adds the declared sources of the local crate.
     pub fn add_local_sources(&mut self, sources: &[(DefId, Source)]) {
@@ -657,7 +775,9 @@ pub struct Analysis<'a, 'tcx> {
     env: TypingEnv<'tcx>,
     crates: &'a Crates,
     nodes: Vec<Node<'tcx>>,
-    index: HashMap<Instance<'tcx>, usize>,
+    index: HashMap<(Instance<'tcx>, Vec<Fact>), usize>,
+    /// The node being classified.
+    current: usize,
     queue: Vec<usize>,
     param_names: HashMap<u32, String>,
     param_types: Vec<(String, String)>,
@@ -772,6 +892,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             crates,
             nodes: Vec::new(),
             index: HashMap::new(),
+            current: 0,
             queue: Vec::new(),
             param_names: HashMap::new(),
             param_types: Vec::new(),
@@ -793,7 +914,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let mut a = Analysis::new(tcx, crates, root);
         a.owner_params = mark.params.clone();
         let inst = a.identity(root);
-        let r = a.node_for(inst);
+        // A root is analysed under its own precondition (checked at its callers).
+        let ctx = crates
+            .requires_of(root)
+            .map(|r| r.facts.clone())
+            .unwrap_or_default();
+        let r = a.node_in(inst, ctx, 0);
         while let Some(i) = a.queue.pop() {
             a.classify(i);
         }
@@ -892,17 +1018,27 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     }
 
     fn node_for(&mut self, inst: Instance<'tcx>) -> usize {
-        if let Some(&i) = self.index.get(&inst) {
+        self.node_in(inst, Vec::new(), 0)
+    }
+
+    /// The node of `inst` entered in context `ctx` (facts over its parameters).
+    fn node_in(&mut self, inst: Instance<'tcx>, ctx: Vec<Fact>, depth: u8) -> usize {
+        let key = (inst, ctx);
+        if let Some(&i) = self.index.get(&key) {
             return i;
         }
         let i = self.nodes.len();
         let label = self.label(inst);
+        let parent = (i > 0).then_some(self.current);
         self.nodes.push(Node {
             inst,
+            ctx: key.1.clone(),
+            depth,
+            parent,
             label,
             kind: NodeKind::Pending,
         });
-        self.index.insert(inst, i);
+        self.index.insert(key, i);
         self.queue.push(i);
         i
     }
@@ -925,6 +1061,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             return;
         }
         let inst = self.nodes[i].inst;
+        self.current = i;
         let tcx = self.tcx;
         let kind = match inst.def {
             InstanceKind::Item(def_id) => self.classify_item(inst, def_id),
@@ -1142,7 +1279,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         // Asserts proved unable to fire and blocks no feasible path reaches, by the
         // value analysis (run only on bodies with an `Assert` or a `SwitchInt` on a
         // comparison).
-        let proved = crate::value::analyse(tcx, env, inst, body, &self.vsums);
+        let (ctx, depth) = {
+            let node = &self.nodes[self.current];
+            (node.ctx.clone(), node.depth)
+        };
+        let proved = crate::value::analyse(tcx, env, inst, body, &self.vsums, &ctx);
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup {
                 continue;
@@ -1159,18 +1300,48 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 .filter(|s| !body.basic_blocks[*s].is_cleanup)
                 .map(|s| s.as_usize())
                 .collect();
+            // A function with `fip::requires(..)` taken as a value: the calls through
+            // it cannot be checked.
+            for st in &data.statements {
+                if let mir::StatementKind::Assign(assign) = &st.kind {
+                    for op in rvalue_operands(&assign.1) {
+                        self.reified(inst, body, op, st.source_info.span, &mut blocks[b]);
+                    }
+                }
+            }
             let span = term.source_info.span;
             match &term.kind {
-                TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. } => {
-                    let item = self.call_item(inst, body, func);
-                    // Call sites in analysed crates (local, `fip::export`) are checked
-                    // against the callee's declared parameter bounds.
-                    if let Item::Call(j) = item
-                        && matches!(inst.def, InstanceKind::Item(_))
-                        && self.crates.exported(inst.def_id().krate)
-                    {
+                TerminatorKind::Call { func, args, .. }
+                | TerminatorKind::TailCall { func, args, .. } => {
+                    let here = proved.contexts.get(&b);
+                    let item = self.call_item(inst, body, func, here, depth);
+                    if let Item::Call(j) = item {
+                        // Call sites in analysed crates (local, `fip::export`) are
+                        // checked against the callee's declared parameter bounds.
                         let callee = self.nodes[j].inst;
-                        self.note_arg_site(inst, span, callee);
+                        if matches!(inst.def, InstanceKind::Item(_))
+                            && self.crates.exported(inst.def_id().krate)
+                        {
+                            self.note_arg_site(inst, span, callee);
+                        }
+                        // And against its declared precondition: the state here must
+                        // entail it, else the call is a panic path (a broken contract).
+                        if let InstanceKind::Item(d) = callee.def
+                            && let Some(req) = self.crates.requires_of(d)
+                            && !here.is_some_and(|c| crate::value::entails(c, &req.facts))
+                        {
+                            blocks[b].push(Site {
+                                item: Item::Ev(Ev::Panic(format!(
+                                    "precondition `{}` of `{}` not established at this call",
+                                    req.text,
+                                    def_path(tcx, d)
+                                ))),
+                                span,
+                            });
+                        }
+                    }
+                    for a in args.iter() {
+                        self.reified(inst, body, &a.node, span, &mut blocks[b]);
                     }
                     blocks[b].push(Site { item, span });
                 }
@@ -1332,11 +1503,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         eval_op(&known, op)
     }
 
+    /// The callee of a call in `inst`'s body. A callee whose body may use it
+    /// (`Summaries::wants_context`) is entered in the context `here` (the caller's
+    /// state projected onto the arguments), unless contexts are nested
+    /// [`MAX_CONTEXT_DEPTH`] deep or the call is direct recursion.
     fn call_item(
         &mut self,
         inst: Instance<'tcx>,
         body: &'tcx Body<'tcx>,
         func: &Operand<'tcx>,
+        here: Option<&Vec<Fact>>,
+        depth: u8,
     ) -> Item {
         let fty = func.ty(&body.local_decls, self.tcx);
         let Some(fty) = self.subst(inst, fty) else {
@@ -1346,13 +1523,67 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         };
         match *fty.kind() {
             ty::FnDef(def_id, args) => match args.no_bound_vars() {
-                Some(args) => self.resolve(def_id, args),
+                Some(args) => match Instance::try_resolve(self.tcx, self.env, def_id, args) {
+                    Ok(Some(callee))
+                        if depth < MAX_CONTEXT_DEPTH
+                            && !self.on_path(callee)
+                            && matches!(callee.def, InstanceKind::Item(_))
+                            && here.is_some()
+                            && self.vsums.wants_context(self.tcx, callee) =>
+                    {
+                        let ctx = here.cloned().unwrap_or_default();
+                        Item::Call(self.node_in(callee, ctx, depth + 1))
+                    }
+                    _ => self.resolve(def_id, args),
+                },
                 None => Item::Ev(Ev::Unknown(format!("callee `{fty}` with bound variables"))),
             },
             ty::FnPtr(..) => Item::Ev(Ev::Unknown(format!(
                 "call through a function pointer `{fty}`"
             ))),
             _ => Item::Ev(Ev::Unknown(format!("call of `{fty}`"))),
+        }
+    }
+
+    /// `true` if `inst` is the node being classified or one of the nodes through
+    /// which it was first reached: a call of it is recursion, which gets the empty
+    /// context (so a recursive component is the same nodes as without contexts).
+    fn on_path(&self, inst: Instance<'tcx>) -> bool {
+        let mut at = Some(self.current);
+        while let Some(i) = at {
+            if self.nodes[i].inst == inst {
+                return true;
+            }
+            at = self.nodes[i].parent;
+        }
+        false
+    }
+
+    /// Reports a function with `fip::requires(..)` used as a value (`op`, outside the
+    /// callee position of a call): reified to a function pointer or passed as a
+    /// callable, its precondition cannot be checked where it is called.
+    fn reified(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+        span: Span,
+        sites: &mut Vec<Site>,
+    ) {
+        let Some(ty) = self.subst(inst, op.ty(&body.local_decls, self.tcx)) else {
+            return;
+        };
+        if let ty::FnDef(d, _) = *ty.kind()
+            && let Some(req) = self.crates.requires_of(d)
+        {
+            sites.push(Site {
+                item: Item::Ev(Ev::Panic(format!(
+                    "`{}` declares `fip::requires({})` but is used as a function value: its precondition is not checked where it is called",
+                    def_path(self.tcx, d),
+                    req.text
+                ))),
+                span,
+            });
         }
     }
 
@@ -1892,6 +2123,20 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 site.caller, site.callee, site.param, site.param, site.declared, site.arg
             );
         }
+    }
+}
+
+/// The operands an rvalue reads.
+fn rvalue_operands<'b, 'tcx>(rv: &'b mir::Rvalue<'tcx>) -> Vec<&'b Operand<'tcx>> {
+    match rv {
+        mir::Rvalue::Use(op, ..)
+        | mir::Rvalue::Repeat(op, _)
+        | mir::Rvalue::Cast(_, op, _)
+        | mir::Rvalue::UnaryOp(_, op)
+        | mir::Rvalue::WrapUnsafeBinder(op, _) => vec![op],
+        mir::Rvalue::BinaryOp(_, ops) => vec![&ops.0, &ops.1],
+        mir::Rvalue::Aggregate(_, ops) => ops.iter().collect(),
+        _ => Vec::new(),
     }
 }
 

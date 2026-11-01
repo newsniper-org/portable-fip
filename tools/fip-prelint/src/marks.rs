@@ -18,11 +18,32 @@
 //!   internals are outside FIP). On a trait method declaration the mark applies to
 //!   every implementation.
 //!
+//! - `#[cfg_attr(fip_prelint, fip::requires(i < j, j < xs.len()))]` (functions): a
+//!   declared precondition (grammar: `fip_lint_rules::requires`), assumed in the
+//!   function when it is a root and checked at every analysed call site; a function
+//!   with a precondition used as a function value is reported there.
+//!
 //! Any other name under `fip::` is rejected: rustc accepts unknown names under a
 //! registered tool silently.
 
 /// Names allowed under `fip::`.
-pub const KNOWN: &[&str] = &["export", "mark", "alloc_source", "free_source"];
+pub const KNOWN: &[&str] = &["export", "mark", "alloc_source", "free_source", "requires"];
+
+/// The conjuncts of the printed `fip::requires(..)` attributes of one function
+/// (several attributes are one conjunction); `Ok(None)` if it has none.
+pub fn requires_of_printed<'a>(
+    attrs: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<Vec<fip_lint_rules::requires::Conjunct>>, String> {
+    let mut found: Option<Vec<fip_lint_rules::requires::Conjunct>> = None;
+    for attr in attrs {
+        let Some(("requires", args)) = tool_attr_of_printed(attr) else {
+            continue;
+        };
+        let cs = fip_lint_rules::requires::parse(args.unwrap_or(""))?;
+        found.get_or_insert_with(Vec::new).extend(cs);
+    }
+    Ok(found)
+}
 
 /// What one call of an allocation or free source does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

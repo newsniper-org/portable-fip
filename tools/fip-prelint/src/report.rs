@@ -14,6 +14,8 @@
 //! | a call site passing, for a callee's `param(g = K)`, an argument that may allocate more than `K` times per call, or `⊤` (in any analysed body: roots, what they reach in analysed crates, every local function and closure) | error, at the call site |
 //! | unknown name under `fip::`, misplaced or malformed attribute | error |
 //! | a FIP mark (`fip::mark`) on an allocation/free source, including `GlobalAlloc`/`Allocator` methods | error |
+//! | a call site that does not establish the callee's `fip::requires(..)`, a function with `fip::requires(..)` used as a function value | panic path (above) |
+//! | a malformed or unsatisfiable `fip::requires(..)` | error |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
 //! The per-crate summary note ends with the number of declared sources when the crate
@@ -28,7 +30,9 @@ use rustc_middle::ty::TyCtxt;
 use rustc_public::CrateDef;
 use rustc_span::Span;
 
-use crate::analysis::{Analysis, ArgViolation, Crates, RootResult, Witness};
+use crate::analysis::{
+    Analysis, ArgViolation, Crates, Requires, RootResult, Witness, requires_facts,
+};
 use crate::marks::{self, Kind, Mark, Source};
 
 struct Out<'tcx> {
@@ -200,6 +204,8 @@ fn validate_tool_attrs(out: &mut Out<'_>) {
                     "mark" if on_fn => None,
                     "mark" => Some("`fip::mark` applies to functions with a body".to_string()),
                     "alloc_source" | "free_source" if on_fn => None,
+                    "requires" if on_fn => None,
+                    "requires" => Some("`fip::requires` applies to functions".to_string()),
                     "alloc_source" | "free_source" => Some(format!(
                         "`fip::{name}` applies to functions, methods, trait method declarations and foreign functions"
                     )),
@@ -272,13 +278,57 @@ fn local_sources(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Source)> {
     sources
 }
 
-/// Verdicts of one root.
-fn verdict(out: &mut Out<'_>, def_id: DefId, mark: &Mark, r: &RootResult) {
+/// Local functions carrying `fip::requires(..)`, through `rustc_public`; a malformed
+/// one is an error (and is not used).
+fn local_requires(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Requires)> {
+    let mut found = Vec::new();
+    for f in rustc_public::local_crate().fn_defs() {
+        let attrs: Vec<String> = f
+            .all_tool_attrs()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
+        let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
+        let parsed =
+            marks::requires_of_printed(attrs.iter().map(String::as_str)).and_then(|cs| match cs {
+                None => Ok(None),
+                Some(cs) => requires_facts(tcx, def_id, &cs).map(|facts| {
+                    Some(Requires {
+                        text: fip_lint_rules::requires::display_all(&cs),
+                        facts,
+                    })
+                }),
+            });
+        match parsed {
+            Ok(Some(r)) => found.push((def_id, r)),
+            Ok(None) => {}
+            Err(e) => out.error(
+                tcx.def_span(def_id),
+                &format!("malformed `fip::requires`: {e}"),
+            ),
+        }
+    }
+    found.sort_by_key(|(d, _)| tcx.def_span(*d));
+    found
+}
+
+/// Verdicts of one root (`requires`: its declared precondition, under which it is
+/// analysed).
+fn verdict(
+    out: &mut Out<'_>,
+    def_id: DefId,
+    mark: &Mark,
+    requires: Option<&Requires>,
+    r: &RootResult,
+) {
     let label = r.label.as_str();
     let s = &r.summary;
     let tcx = out.tcx;
     let fspan = tcx.def_span(def_id);
-    let tag = mark.tag();
+    let tag = match requires {
+        Some(req) => format!("{} under `fip::requires({})`", mark.tag(), req.text),
+        None => mark.tag(),
+    };
     let bound = s.alloc.instantiate(&mark.params, &r.param_types);
     let allowed = match mark.kind {
         Kind::Fip => mark.n,
@@ -476,6 +526,8 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     crates.add_local_marks(&roots);
     let sources = local_sources(tcx, &mut out);
     crates.add_local_sources(&sources);
+    let requires = local_requires(tcx, &mut out);
+    crates.add_local_requires(&requires);
     // A violation reached from several roots (or also found in the body scan below) is
     // reported once, for the first root in source order.
     let mut seen: HashSet<String> = HashSet::new();
@@ -503,7 +555,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         }
         let before = (out.errors, out.warnings);
         let r = Analysis::run(tcx, &crates, *def_id, mark);
-        verdict(&mut out, *def_id, mark, &r);
+        verdict(&mut out, *def_id, mark, crates.requires_of(*def_id), &r);
         for v in &r.args {
             if seen.insert(v.key()) {
                 report_argument(&mut out, tcx.def_span(*def_id), v);

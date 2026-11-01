@@ -240,6 +240,24 @@ guards the zone domain cannot express. Those panic paths stay reported.
 
 **Effort.** L (4–5 days). Depends on L11 and L2.
 
+**Implemented** (item 5 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: caller contexts and declared preconditions"). The 23 `swap_lt`
+notes are gone (self-check 46 → 23 notes; M1's table after: 0 bounds, 0 `panic_fmt`
+in `swap_lt`, 14 overflow, 8 `handle_alloc_error`, 1 `assert!`). Probe result: `#[fip]`
+does **not** see the following `cfg_attr(verus_keep_ghost, ..)` (rustc 1.99.1 and
+1.97.1), so the fallback applies: hand-written `requires(..)` in `#[fip(..)]` (or the
+bare mark), and a drift guard: in `fip-macros` when it sees `verus_spec` (Verus
+builds; negative control in `just verify-compose`) and a source gate for `fip-core`,
+whose `#[fip]` is compiled out under Verus. Deviations, from measurement or
+soundness: the precondition is assumed only in a root; in a callee it holds through
+the call site's context, and where a call does not establish it the callee is
+analysed without it (besides the reported panic path), so a broken contract cannot
+hide an allocation from a non-strict root; return summaries are context-sensitive
+too (needed: `split_at_mut`'s second half has length `len - j ≥ 1` only under
+`j < len`); tuple fields and `Option<(..)>` payload lengths are tracked (needed for
+`split_at_mut` and `swap`); recursion is detected by the first-call path of a node,
+not by SCC; `assert_unchecked` is not implemented.
+
 ### L2. Values returned by calls are unknown
 
 **Current.** A call forgets its destination (`value.rs:1512-1514`). Only

@@ -51,6 +51,17 @@
 //! `panic_macros` and `param(..)` bounds; the driver checks those functions over MIR
 //! (callees, implicit calls, panics). Plain builds get no such attribute.
 //!
+//! `#[fip(.., requires(i < j, j < xs.len()))]` declares a precondition (a conjunction
+//! of comparisons between integer parameters, `p.len()` of slice parameters and
+//! integer literals; grammar `fip_lint_rules::requires`). It is emitted for the
+//! driver as `#[cfg_attr(fip_prelint, fip::requires(..))]`: the driver checks the
+//! function under it and checks it at every analysed call site. A Verus `requires`
+//! is not read from `verus_spec` (an attribute macro does not see a following
+//! `cfg_attr(verus_keep_ghost, ..)` when that cfg is off; measured on rustc
+//! 1.97.1 and 1.99.1), so it is written by hand; when the macro does see a
+//! `verus_spec` (a Verus build, `#[fip]` above it), every conjunct must appear in
+//! its `requires`, else the macro reports the drift.
+//!
 //! ## Examples
 //!
 //! ```
@@ -158,6 +169,18 @@
 //! ```compile_fail
 //! #[fip_macros::fip]
 //! async fn f() {}
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: `requires(..)`: unexpected `!=` in a comparison
+//! #[fip_macros::fip(requires(i != j))]
+//! fn f(i: usize, j: usize) -> usize { i ^ j }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: `requires(..)`: `k` is not a parameter of `f`
+//! #[fip_macros::fip(requires(i < k))]
+//! fn f(i: usize) -> usize { i }
 //! # fn main() {}
 //! ```
 
@@ -610,9 +633,12 @@ struct FipArgs {
     panic_macros: bool,
     /// `crate = path`: path of the `fip_strict` crate in generated code.
     krate: Option<TokenStream>,
+    /// `requires(..)`: the declared precondition, emitted for `fip-prelint` as
+    /// `fip::requires(..)`.
+    requires: Option<(Vec<fip_lint_rules::requires::Conjunct>, Span)>,
 }
 
-const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)`, `panic_macros = false` and `crate = path::to::fip_strict` after `strict = true`";
+const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)`, `panic_macros = false` and `crate = path::to::fip_strict` after `strict = true`, and `requires(i < j, j < xs.len())`";
 
 const KRATE_HELP: &str = "`crate = ..` takes the path of the `fip_strict` crate as the caller sees it, e.g. `crate = my_facade::fip_strict` or `crate = \"my_facade::fip_strict\"`";
 
@@ -700,6 +726,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
         params: Vec::new(),
         panic_macros: true,
         krate: None,
+        requires: None,
     };
     let mut seen_strict = false;
     for (k, part) in split_commas(attr).into_iter().enumerate() {
@@ -748,6 +775,15 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
                     ));
                 }
                 args.krate = Some(parse_krate(key.span(), rest)?);
+            }
+            [TokenTree::Ident(key), TokenTree::Group(g)]
+                if key.to_string() == "requires"
+                    && g.delimiter() == Delimiter::Parenthesis
+                    && args.requires.is_none() =>
+            {
+                let cs = fip_lint_rules::requires::parse(&g.stream().to_string())
+                    .map_err(|e| (g.span(), format!("`requires(..)`: {e}")))?;
+                args.requires = Some((cs, g.span()));
             }
             [TokenTree::Ident(key), TokenTree::Group(g)]
                 if key.to_string() == "param" && g.delimiter() == Delimiter::Parenthesis =>
@@ -1145,6 +1181,9 @@ fn expand_parts(
         ));
     }
     let strict_scan = strict_args.map(|a| run_strict_scan(a, &shape, &tag, ctx, &mut errors));
+    if let Some((cs, sp)) = args.and_then(|a| a.requires.as_ref()) {
+        errors.extend(check_requires(cs, *sp, &shape, &toks[..shape.after_attrs]));
+    }
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -1181,6 +1220,77 @@ fn expand_parts(
     f.extend(mark);
     f.extend(toks[shape.after_attrs..].iter().cloned());
     Ok((items, f))
+}
+
+/// Names of the parameters in `( .. )`: the last identifier before the first `:` of
+/// each parameter (`mut x: T` → `x`, `self`).
+fn param_names(params: Option<&Group>) -> Vec<String> {
+    let Some(g) = params else {
+        return Vec::new();
+    };
+    split_commas(g.stream())
+        .iter()
+        .filter_map(|part| {
+            let head = part.iter().take_while(|t| !is_punct(t, ':'));
+            head.filter_map(|t| match t {
+                TokenTree::Ident(i) => Some(i.to_string()),
+                _ => None,
+            })
+            .filter(|n| n != "mut")
+            .last()
+        })
+        .collect()
+}
+
+/// `requires(..)`: every name it uses is a parameter, and, when the item carries a
+/// `#[verus_spec(..)]` (a Verus build, where `cfg_attr(verus_keep_ghost, ..)` is
+/// expanded), every conjunct appears in its `requires` clause, so the precondition
+/// `fip-prelint` uses cannot drift from the verified one.
+fn check_requires(
+    cs: &[fip_lint_rules::requires::Conjunct],
+    span: Span,
+    shape: &FnShape,
+    attrs: &[TokenTree],
+) -> TokenStream {
+    use fip_lint_rules::requires::{Term, display, from_verus, not_in};
+    let mut errors = TokenStream::new();
+    let names = param_names(shape.params.as_ref());
+    for c in cs {
+        for side in [&c.a, &c.b] {
+            if let Term::Param(n) | Term::Len(n) = &side.term
+                && !names.contains(n)
+            {
+                errors.extend(compile_error(
+                    span,
+                    &format!(
+                        "`requires(..)`: `{n}` is not a parameter of `{}`",
+                        shape.name
+                    ),
+                ));
+            }
+        }
+    }
+    for pair in attrs.chunks(2) {
+        let [_, TokenTree::Group(g)] = pair else {
+            continue;
+        };
+        let inner: Vec<TokenTree> = g.stream().into_iter().collect();
+        if let [TokenTree::Ident(i), TokenTree::Group(spec)] = inner.as_slice()
+            && i.to_string() == "verus_spec"
+        {
+            let verus = from_verus(&spec.stream().to_string());
+            for c in not_in(cs, &verus) {
+                errors.extend(compile_error(
+                    span,
+                    &format!(
+                        "`requires(..)`: `{}` is not in the `requires` of `verus_spec`; the precondition `fip-prelint` assumes must be the verified one",
+                        display(c)
+                    ),
+                ));
+            }
+        }
+    }
+    errors
 }
 
 /// Errors of the non-strict checks: allocation sites and direct self-recursion.
@@ -1246,6 +1356,8 @@ const PRELINT_ENV: &str = "FIP_PRELINT_DRIVER";
 ///
 /// `n` is the declared allocation bound (`#[fip]` and `#[fbip]`: 0, `#[fip(N)]`: N);
 /// `param(..)` repeats the declared `FipFn` parameter bounds of strict functions.
+/// With `requires(..)` a second attribute follows:
+/// `#[cfg_attr(fip_prelint, fip::requires(..))]` (normalised conjuncts).
 fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
     if std::env::var_os(PRELINT_ENV).is_none() {
         return TokenStream::new();
@@ -1273,9 +1385,13 @@ fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
             .collect();
         parts.push(format!("param({})", decls.join(", ")));
     }
-    format!("#[cfg_attr(fip_prelint, fip::mark({}))]", parts.join(", "))
-        .parse()
-        .unwrap_or_default()
+    let mut out = format!("#[cfg_attr(fip_prelint, fip::mark({}))]", parts.join(", "));
+    if let Some((cs, _)) = args.and_then(|a| a.requires.as_ref()) {
+        out += "#[cfg_attr(fip_prelint, fip::requires(";
+        out += &fip_lint_rules::requires::display_all(cs);
+        out += "))]";
+    }
+    out.parse().unwrap_or_default()
 }
 
 /// The `# FIP` doc section stating what was checked.

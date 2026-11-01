@@ -89,6 +89,11 @@ verify-compose: verify-strict verify-core
       | awk '{print} /feature\(proc_macro_hygiene\)/ {print "extern crate alloc;"} /^        i \+= 1;$/ {print "        let _b = alloc::boxed::Box::new(i);"}' > "$out/alloc.rs"
     if run "$out/alloc.rs" 2> "$out/alloc.err"; then echo "FAIL: allocation inside #[fip] was accepted"; exit 1; fi
     grep -q "allocation site \`Box::new\`" "$out/alloc.err"
+    # `requires(..)` of `#[fip]` that is not in the `verus_spec` requires: rejected.
+    sed 's/^#\[fip(requires(i < xs.len()))\]$/#[fip(requires(i <= xs.len()))]/' verify/compose.rs > "$out/drift.rs"
+    if cmp -s verify/compose.rs "$out/drift.rs"; then echo "FAIL: mutation drift did not apply"; exit 1; fi
+    if run "$out/drift.rs" 2> "$out/drift.err"; then echo "FAIL: requires(..) drifting from verus_spec was accepted"; exit 1; fi
+    grep -q "is not in the \`requires\` of \`verus_spec\`" "$out/drift.err"
     # strict + Verus: an uncertified callee is still rejected under `verus`.
     sed 's/^    swap2(a, b);$/    plain(a, b);/' verify/compose_strict.rs > "$out/strict_bad.rs"
     printf 'pub fn plain(a: &mut u32, b: &mut u32) { core::mem::swap(a, b) }\n' >> "$out/strict_bad.rs"

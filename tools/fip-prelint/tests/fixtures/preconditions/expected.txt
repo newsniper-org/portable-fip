@@ -1,0 +1,24 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+bad_pre/src/lib.rs:14:1: error: fip-prelint: malformed `fip::requires`: unexpected `*` in a comparison
+bad_pre/src/lib.rs:20:1: error: fip-prelint: malformed `fip::requires`: `k` is not a parameter
+bad_pre/src/lib.rs:26:1: error: fip-prelint: malformed `fip::requires`: `xs.len()`: `xs` is not a slice reference
+bad_pre/src/lib.rs:32:1: error: fip-prelint: malformed `fip::requires`: the precondition can never hold
+bad_pre/src/lib.rs:37:25: error: fip-prelint: `fip::requires` applies to functions
+bad_pre/src/lib.rs:8:1: error: fip-prelint: malformed `fip::requires`: unexpected `!=` in a comparison
+note: fip-prelint: crate `pre`: 15 roots, 7 passed, 12 errors, 0 warnings, 3 notes
+pre/src/lib.rs:106:5: error: fip-prelint: `alloc_unguarded` is #[fip] but may allocate 1 time(s), at most 0 allowed: `alloc_unguarded` -> `boxes_if_broken` (pre/src/lib.rs:106) -> `alloc::boxed::Box::<usize>::new` (pre/src/lib.rs:90) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+pre/src/lib.rs:106:5: error: fip-prelint: `alloc_unguarded` is #[fip] but may free: `alloc_unguarded` -> `boxes_if_broken` (pre/src/lib.rs:106) -> `core::mem::drop::<alloc::boxed::Box<usize>>` (pre/src/lib.rs:90) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
+pre/src/lib.rs:134:9: error: fip-prelint: `split_unguarded` is #[fip(strict = true)]: reachable panic path: `split_unguarded`: index out of bounds (bounds check) (pre/src/lib.rs:134) (`panic_macros = false`)
+pre/src/lib.rs:146:18: error: fip-prelint: `split_no_guard` is #[fip(strict = true)]: reachable panic path: `split_no_guard` -> `core::slice::<impl [u8]>::split_at_mut` (pre/src/lib.rs:146) -> `core::panicking::panic_fmt`: `core::panicking::panic_fmt` (`panic_macros = false`)
+pre/src/lib.rs:170:23: error: fip-prelint: `context_short` is #[fip(strict = true)]: reachable panic path: `context_short` -> `third` (pre/src/lib.rs:170): arithmetic overflow check (Add) (pre/src/lib.rs:152) (`panic_macros = false`)
+pre/src/lib.rs:170:23: error: fip-prelint: `context_short` is #[fip(strict = true)]: reachable panic path: `context_short` -> `third` (pre/src/lib.rs:170): index out of bounds (bounds check) (pre/src/lib.rs:152) (`panic_macros = false`)
+pre/src/lib.rs:181:5: error: fip-prelint: `get_next` is #[fip(strict = true)] under `fip::requires(i < xs.len())`: reachable panic path: `get_next`: index out of bounds (bounds check) (pre/src/lib.rs:181) (`panic_macros = false`)
+pre/src/lib.rs:30:33: error: fip-prelint: `unguarded_caller` is #[fip(strict = true)]: reachable panic path: `unguarded_caller` -> `pick` (pre/src/lib.rs:30): index out of bounds (bounds check) (pre/src/lib.rs:10) (`panic_macros = false`)
+pre/src/lib.rs:30:33: error: fip-prelint: `unguarded_caller` is #[fip(strict = true)]: reachable panic path: `unguarded_caller`: precondition `i < j, j < xs.len()` of `pick` not established at this call (pre/src/lib.rs:30) (`panic_macros = false`)
+pre/src/lib.rs:60:5: error: fip-prelint: `constant_caller_off` is #[fip(strict = true)]: reachable panic path: `constant_caller_off` -> `get_at` (pre/src/lib.rs:60): index out of bounds (bounds check) (pre/src/lib.rs:41) (`panic_macros = false`)
+pre/src/lib.rs:60:5: error: fip-prelint: `constant_caller_off` is #[fip(strict = true)]: reachable panic path: `constant_caller_off`: precondition `i < xs.len()` of `get_at` not established at this call (pre/src/lib.rs:60) (`panic_macros = false`)
+pre/src/lib.rs:71:5: error: fip-prelint: `reified` is #[fip(strict = true)]: reachable panic path: `reified`: `get_at` declares `fip::requires(i < xs.len())` but is used as a function value: its precondition is not checked where it is called (pre/src/lib.rs:71) (`panic_macros = false`)
+pre/src/lib.rs:79:5: note: fip-prelint: `as_value` is #[fip(strict = true)]: reachable panic path: `as_value` -> `apply::<for<'a> fn(&'a [u8], usize) -> u8 {get_at}>` (pre/src/lib.rs:79) -> `<for<'a> fn(&'a [u8], usize) -> u8 {get_at} as core::ops::function::Fn<(&[u8], usize)>>::call (shim)` (pre/src/lib.rs:83) -> `get_at`: index out of bounds (bounds check) (pre/src/lib.rs:41)
+pre/src/lib.rs:79:5: note: fip-prelint: `as_value` is #[fip(strict = true)]: reachable panic path: `as_value` -> `apply::<for<'a> fn(&'a [u8], usize) -> u8 {get_at}>` (pre/src/lib.rs:79) -> `<for<'a> fn(&'a [u8], usize) -> u8 {get_at} as core::ops::function::Fn<(&[u8], usize)>>::call (shim)` (pre/src/lib.rs:83): precondition `i < xs.len()` of `get_at` not established at this call
+pre/src/lib.rs:79:5: note: fip-prelint: `as_value` is #[fip(strict = true)]: reachable panic path: `as_value`: `get_at` declares `fip::requires(i < xs.len())` but is used as a function value: its precondition is not checked where it is called (pre/src/lib.rs:79)
