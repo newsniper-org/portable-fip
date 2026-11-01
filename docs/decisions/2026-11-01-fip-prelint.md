@@ -366,6 +366,29 @@ Measured: `write!` into a buffer passes, `format!` is a violation without `⊤`
 unchanged. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: generated std
 summaries".
 
+## Amendment 2026-11-02: repin, targets, export detection, `compile_fail` examples (limits plan L10a–d)
+
+The pin to 1.99.1 stays. A repin is scripted (`just prelint-repin <version>`,
+`tools/fip-prelint/repin.sh`): toolchain, driver build, the probes of "Measured"
+(now runnable, sysroot from `PROBE_SYSROOT`), the allocator entry-point dump, the std
+summaries (regenerated; byte-identical for the pinned version), every driver test,
+then the pin sites and the trusted tables to re-audit by hand. Measured: identity
+repin passes in 80 s; 1.97.1 fails to build the driver (41 `rustc_private` errors).
+`just prelint` now checks the workspace for every target installed in the driver's
+toolchain (11 here; the 10 `std` targets equal the host self-check,
+`x86_64-unknown-none` checks the `no_std` libraries). Item 4's **exported dependency**
+role is decided from the crate root's inner attributes as `rustc_parse` parses them
+(`#![fip::export]`, or inside `cfg_attr`, nested, with the predicate evaluated
+three-valued, unknown counting as declared), no longer from the file's text; the text
+test is only the fallback for an unparsable file (fixture `export_detection`: three
+`cfg_attr` forms the text test missed are analysed, the attribute's text in comments
+and a raw string no longer gives the driver's flags). `fip-macros` has a mark-only
+mode (`FIP_MACROS_MARK_ONLY=1`, honoured only inside the driver) in which `#[fip]` and
+`#[fbip]` skip their token-level behaviour checks; the 15 rejected behaviour examples
+of its documentation run through the driver (`tests/compile_fail.rs`): all rejected,
+14 for the documented reason, `HashMap::new` as `⊤`. Details: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: repin, targets, export detection, `compile_fail` examples".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

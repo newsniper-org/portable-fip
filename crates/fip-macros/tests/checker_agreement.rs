@@ -13,19 +13,19 @@ use fip_testkit::summaries::{Report, fip_violations, fip_violations_in};
 
 /// Copies of the `compile_fail` examples in `src/lib.rs` whose rejection is about
 /// behaviour (allocation sites, recursion), without the hidden `# fn main() {}` line.
-/// A hidden `# // expect: ..` line is kept for the comparison and dropped before
-/// the checker reads the snippet.
+/// Hidden `# // prelint: ..` and `# // expect: ..` lines are kept for the comparison
+/// and dropped before the checker reads the snippet.
 const REJECTED: &[&str] = &[
-    "#[fip_macros::fip]\nfn f(x: i32) -> Box<i32> { Box::new(x) }",
-    "# // expect: #[fip]: allocation site `Vec::with_capacity` in the body\n#[fip_macros::fip]\nfn f() -> Vec<u8> { Vec::with_capacity(0) }",
-    "# // expect: #[fip]: allocation site `HashMap::new` in the body\n#[fip_macros::fip]\nfn f() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }",
-    "# // expect: #[fip]: allocation site `Box::default` in the body\n#[fip_macros::fip]\nfn f() -> Box<u8> { Box::default() }",
-    "#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let v = vec![0u8; 4]; v.len() + x.len() }",
-    "#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let y = x.to_vec(); y.len() }",
-    "#[fip_macros::fip]\nfn f(n: u32) -> u32 { if n == 0 { 0 } else { f(n - 1) } }",
-    "#[fip_macros::fip(1)]\nfn f(n: u32) -> u32 { let mut s = 0; for i in 0..n { let b = Box::new(i); s += *b; } s }",
-    "#[fip_macros::fip(1)]\nfn f(a: u8, b: u8) -> (Box<u8>, Box<u8>) { (Box::new(a), Box::new(b)) }",
-    "#[fip_macros::fbip]\nfn f(x: u8) -> String { format!(\"{x}\") }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n#[fip_macros::fip]\nfn f(x: i32) -> Box<i32> { Box::new(x) }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Vec::with_capacity` in the body\n#[fip_macros::fip]\nfn f() -> Vec<u8> { Vec::with_capacity(0) }",
+    "# // prelint: cannot check `f` (#[fip]): unresolved\n# // expect: #[fip]: allocation site `HashMap::new` in the body\n#[fip_macros::fip]\nfn f() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Box::default` in the body\n#[fip_macros::fip]\nfn f() -> Box<u8> { Box::default() }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let v = vec![0u8; 4]; v.len() + x.len() }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let y = x.to_vec(); y.len() }",
+    "# // prelint: `f` is #[fip] but recurses\n#[fip_macros::fip]\nfn f(n: u32) -> u32 { if n == 0 { 0 } else { f(n - 1) } }",
+    "# // prelint: may allocate ∞ time(s), at most 1 allowed\n#[fip_macros::fip(1)]\nfn f(n: u32) -> u32 { let mut s = 0; for i in 0..n { let b = Box::new(i); s += *b; } s }",
+    "# // prelint: may allocate 2 time(s), at most 1 allowed\n#[fip_macros::fip(1)]\nfn f(a: u8, b: u8) -> (Box<u8>, Box<u8>) { (Box::new(a), Box::new(b)) }",
+    "# // prelint: `f` is #[fbip] but may allocate ∞ time(s), at most 0 allowed\n#[fip_macros::fbip]\nfn f(x: u8) -> String { format!(\"{x}\") }",
 ];
 
 fn manifest() -> PathBuf {

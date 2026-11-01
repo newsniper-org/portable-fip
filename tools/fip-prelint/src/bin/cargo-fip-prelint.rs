@@ -10,7 +10,8 @@
 //! `LD_LIBRARY_PATH` pointing at the toolchain's `lib` directory.
 //!
 //! `--warn-only` reports violations as warnings, so every crate is checked even if a
-//! dependency has violations. The exit status is cargo's.
+//! dependency has violations. A target selection (`--lib`, `--tests`, ..) replaces
+//! `--all-targets`. The exit status is cargo's.
 //!
 //! `cargo fip-prelint --std-summaries [--target <triple>] [--out <file>]` (maintainers)
 //! regenerates the std summaries (limits plan L6, sidecar of L10e): `cargo check
@@ -272,7 +273,27 @@ fn main() -> ExitCode {
     if !selects_packages {
         cmd.arg("--workspace");
     }
-    cmd.args(["--all-targets", "--keep-going", "--target-dir"])
+    // Target selection of the caller (e.g. `--lib` for a target without `std`)
+    // replaces `--all-targets`.
+    let selects_targets = args.iter().any(|a| {
+        matches!(
+            a.split('=').next().unwrap_or(""),
+            "--lib"
+                | "--bins"
+                | "--bin"
+                | "--tests"
+                | "--test"
+                | "--examples"
+                | "--example"
+                | "--benches"
+                | "--bench"
+                | "--all-targets"
+        )
+    });
+    if !selects_targets {
+        cmd.arg("--all-targets");
+    }
+    cmd.args(["--keep-going", "--target-dir"])
         .arg(&target_dir)
         .args(&args);
     if warn_only {

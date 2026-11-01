@@ -281,10 +281,14 @@ compact_map_st}` add 2 roots to `fip_core` (8) and 6 checked call sites (22 in t
    (or `-Zbuild-std`) would remove it.
 6. **Cross-toolchain summary sidecars** (decision record item 7): deferred.
 7. Measured on `x86_64` Linux only. `cargo-fip-prelint` sets `LD_LIBRARY_PATH`; the
-   binaries also carry an rpath to the sysroot `lib`.
-8. The 7 behaviour `compile_fail` examples of `fip-macros` and the reproducers in
+   binaries also carry an rpath to the sysroot `lib`. **Partly resolved** 2026-11-02:
+   every installed target is checked from this host (section "Resolved 2026-11-02:
+   repin, targets, export detection, `compile_fail` examples"); other hosts remain
+   unmeasured.
+8. ~~The 7 behaviour `compile_fail` examples of `fip-macros` and the reproducers in
    `TODOs/` are not run through the driver one by one (the macro rejects them first);
-   a mode of `fip-macros` that only emits the mark would allow it.
+   a mode of `fip-macros` that only emits the mark would allow it.~~ **Resolved**
+   2026-11-02 for the `compile_fail` examples (mark-only mode, same section).
 
 ## Update 2026-11-01 (after implementation)
 
@@ -974,3 +978,111 @@ summaries cover what the seed crate reaches, not every public function.
 `Formatter`s made by `wrap_buf`, functions the seed does not reach, other targets
 (one file per target; only x86_64 Linux generated), `std::io` and `println!` (stdout
 handles, locks, foreign calls).
+
+## Resolved 2026-11-02: repin, targets, export detection, `compile_fail` examples (limits plan L10a–d)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L10a–d (item 9 of its
+order). Pinning stays (decision); what changes is how a repin is done, what is
+checked per target, how an exported dependency is recognised, and that the rejected
+behaviour examples of `fip-macros` reach the driver.
+
+**a. Repin recipe** (`just prelint-repin <version>`, script
+`tools/fip-prelint/repin.sh`, logs under `/tmp/fip-prelint-repin-<version>`): (1)
+toolchain with `rustc-dev`, `rust-src`, `llvm-tools` (`INSTALL=1` installs it); (2)
+driver build, ignoring the workspace MSRV; (3) the decision record's probes, now
+scripted (`tools/fip-prelint/probes`, sysroot from `PROBE_SYSROOT`): `dep::big`'s
+MIR readable downstream only with `-Zalways-encode-mir`, crate-root `fip::export` and
+function `fip::mark` of a dependency readable, `E0514` when the pinned rustc reads the
+new metadata; (4) the allocator entry-point dump (`FIP_PRELINT_DUMP=1`) of `Box::new`,
+`vec!`, `Vec::with_capacity`, `String::from`, `format!`, `Vec::push` and a `Box`
+drop, each required to reach an allocation or free leaf, leaves printed; (5) the std
+summaries sidecar for the host (for the pinned version regenerated under `/tmp` and
+compared byte for byte with the committed file; for a new version written next to
+it); (6) every driver test with the new toolchain (diffs reviewed before blessing);
+(7) the pin sites (`APPLY=1` rewrites `rust-toolchain.toml`, `DEFAULT_TOOLCHAIN`,
+`tests/targets.rs`, `justfile` `prelint_tc`) and the checklist of trusted tables to
+re-audit by hand (`fip_lint_rules::mir` tables, `NON_ALLOCATING_CONSTRUCTORS` and
+`CORE_TABLE` with their `*_AUDITED_AT`, the iterator contracts, the `drop_glue` lang
+item, `Formatter::buf`, the Verus toolchain and MSRV).
+
+Measured: `repin.sh 1.99.1` (identity) passes all seven steps in 80 s: `dep::big`
+241 blocks with the flag and unavailable without (as in the decision record), both
+attributes read, the regenerated sidecar identical to the committed one, all driver
+tests pass. `repin.sh 1.97.1` stops at step 2: first at the workspace MSRV (hence
+`--ignore-rust-version`), then with 41 compile errors in the driver
+(`InstanceKind::Shim`/`LlvmIntrinsic`, `GenericArgs::no_bound_vars`,
+`rustc_hir::attrs::lang_items`, `WithTokens::node`, ..): the `rustc_private` API
+differs between the two releases, so the pin is not a formality.
+
+**b. Every installed target** (`tests/targets.rs`, part of `just prelint`;
+`tests/targets.expected`): `cargo fip-prelint --warn-only --target <triple>` on the
+workspace for each target whose standard library is installed in the driver's
+toolchain, four at a time. Targets with `std` check all targets of every member;
+targets with only `core`/`alloc` check the `no_std` libraries of `just nostd` with
+`--lib` (`cargo-fip-prelint` now leaves out `--all-targets` when the caller selects
+targets). An installed target without a recorded section fails; a recorded one not
+installed is skipped. Measured on this host (11 targets of 1.99.1): the 10 `std`
+targets (`aarch64-apple-darwin`, `aarch64-pc-windows-gnullvm`,
+`aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`,
+`i686-unknown-linux-gnu`, `wasm32-unknown-unknown`, `wasm32-wasip1`, `wasm32-wasip2`,
+`x86_64-pc-windows-gnullvm`, `x86_64-unknown-linux-gnu`) give lines identical to
+`selfcheck.expected` (3 errors in `strict_gaps`, 1 warning, the same 8 crate
+summaries); `x86_64-unknown-none`: `fip_core` 8 roots, 8 passed (the other `no_std`
+crates have no roots). Cost: 3.2–5.3 s per target sequentially and cold, 9–14 s for
+the whole test with four in parallel. Without per-target std summaries (only
+`x86_64-unknown-linux-gnu` has a file), a target's functions without MIR would be `⊤`;
+none is reached by the workspace. Other hosts (aarch64 Linux, macOS, where
+`DYLD_FALLBACK_LIBRARY_PATH` would replace `LD_LIBRARY_PATH`) remain unmeasured.
+
+**c. Export detection by parsing** (`src/export.rs`): the crate root is parsed with
+`rustc_parse` (`parse_inner_attributes`, silent diagnostics, the crate's edition, on
+its own thread for the session globals) before compilation; `#![fip::export]` or a
+`cfg_attr` containing it (several attributes, nested `cfg_attr`) declares the export
+unless its predicate is known false. Predicates are three-valued: `fip_prelint` true,
+`--cfg` options and `feature = ".."` known (cargo passes every enabled feature),
+`not`/`all`/`any` combined, other options unknown and counted as declared (sound: a
+crate taken for exported whose attribute is inactive is still `⊤` downstream).
+Comments, doc comments, string and raw-string contents, and inner attributes after the
+first item are not attributes. The old text test remains only as the fallback for a
+file that does not parse. Unit tests cover each form. New fixture `export_detection`
+(before = driver of `3baf35e`):
+
+| case | before | after |
+|---|---|---|
+| `#![cfg_attr(fip_prelint, allow(dead_code), fip::export)]` | not detected: `⊤` for `make` and `twice` | analysed: `make` 1 allocation, `twice` passes |
+| `#![cfg_attr(fip_prelint, /* opt in */ fip::export)]` | `⊤` (2 roots) | analysed (1 error, 1 pass) |
+| nested `cfg_attr(all(fip_prelint, not(feature = "never")), cfg_attr(fip_prelint, fip::export))` | `⊤` (2 roots) | analysed (1 error, 1 pass) |
+| the attribute only in comments and a raw string | taken for exported: compiled with the driver's flags (its `#[cfg(fip_prelint)] compile_error!` fired, `app_text` not built) | passed through to the real rustc; the call is `⊤` |
+| totals | `app` 6 roots, 0 passed, 6 errors (all `⊤`); `app_text` not compiled | `app` 6 roots, 3 passed, 3 errors (no `⊤`); `app_text` 1 root, 1 error (`⊤`) |
+
+Not detectable before expansion: a crate attribute produced by a macro or `include!`
+(passed through, `⊤` downstream).
+
+**d. `compile_fail` examples through the driver.** `fip-macros` honours
+`FIP_MACROS_MARK_ONLY=1` only together with `FIP_PRELINT_DRIVER` (set by the driver):
+`#[fip]`/`#[fbip]` on free functions then skip the token-level behaviour checks
+(allocation sites, recursion, the strict rules and certificates), keep the argument
+and `requires(..)` validation, and emit the mark (and a `# FIP` doc section saying the
+macro checked nothing). `#[fip_impl]` methods and `fip_fn!` are unchanged. The
+variable is tracked in the dep-info. Each behaviour example in the documentation
+carries a hidden `# // prelint: <reason>` line; `tests/compile_fail.rs` extracts them
+into a generated workspace (one crate per example) and requires, per example, a
+driver error containing the reason and no other compile error; the number of examples
+(15) is pinned. Measured:
+
+| | before (macro checks on) | after (`FIP_MACROS_MARK_ONLY=1`) |
+|---|---|---|
+| 10 non-strict examples (`Box::new`, `Vec::with_capacity`, `HashMap::new`, `Box::default`, `vec!`, `to_vec`, self-recursion, `Box::new` in a loop under `fip(1)`, two boxes under `fip(1)`, `format!` under `fbip`) | all stop at the macro's `compile_error!`; the driver never analyses them | all rejected by the driver; 9 for the documented reason (allocation 1/2/∞ over the bound, recursion); `HashMap::new` is `⊤` (`RandomState::new` reads a thread-local through a function pointer), not an allocation |
+| 5 strict examples (bound exceeded through callees, allocating callee in a loop, recursion through another strict function, `assert!` under `panic_macros = false`, an allocating `fip_fn!` for `param(g = 0)`) | 4 stop at the macro (`compile_error!`, or `E0080`/`E0391` in certificate constants); the `param` case reaches the driver (the macro checks it only when the instantiation is built) | all 5 rejected by the driver for the documented reason (2 > 1, ∞ > 1, recursion, panic path under `panic_macros = false`, argument over `param(g = 0)`) |
+
+So 15 of 15 are rejected by the driver, 14 for the documented reason. `HashMap::new`
+does not allocate (an empty table); the macro rejects it by its syntactic rule and the
+driver because it cannot check `RandomState::new` (⊤), never as a pass.
+
+**Deviations from the plan:** 15 examples instead of 7 (the 7 were the non-strict
+behaviour examples when the item was written; 3 non-strict and 5 strict behaviour
+examples exist now, the strict ones included because the driver checks the same
+behaviour); the generated workspace is built by the test, not a committed fixture; the
+repin recipe also checks the sidecar's reproducibility and builds the driver ignoring
+the workspace MSRV; per-target std summaries are not generated (only the host's), which
+is harmless for the workspace today and stated.

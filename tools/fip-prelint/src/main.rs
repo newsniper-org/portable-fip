@@ -39,10 +39,13 @@ extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_parse;
 extern crate rustc_public;
+extern crate rustc_session;
 extern crate rustc_span;
 
 mod analysis;
+mod export;
 mod marks;
 mod report;
 mod stdsum;
@@ -90,6 +93,7 @@ const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_DRIVER_ID",
     "FIP_PRELINT_STD_SUMMARIES",
     "FIP_PRELINT_STD_SUMMARIES_OUT",
+    "FIP_MACROS_MARK_ONLY",
 ];
 
 /// Generation mode of the std summaries (see the module documentation).
@@ -237,17 +241,6 @@ fn crate_root(args: &[String]) -> Option<&str> {
     found
 }
 
-/// `true` if the crate root's inner attributes contain `fip::export`, either as
-/// `#![cfg_attr(fip_prelint, fip::export)]` or as `#![fip::export]` (whitespace
-/// ignored). Only the source text is available before compilation.
-fn declares_export_in_source(root: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(root) else {
-        return false;
-    };
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    compact.contains("#![cfg_attr(fip_prelint,fip::export)]") || compact.contains("#![fip::export]")
-}
-
 fn role(args: &[String]) -> Role {
     if !args.iter().any(|a| a == "--crate-name") {
         return Role::PassThrough;
@@ -263,7 +256,7 @@ fn role(args: &[String]) -> Role {
         return Role::Primary;
     }
     match crate_root(args) {
-        Some(root) if declares_export_in_source(Path::new(root)) => Role::ExportedDependency,
+        Some(root) if export::declares_export(Path::new(root), args) => Role::ExportedDependency,
         _ => Role::PassThrough,
     }
 }

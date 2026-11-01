@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: how the driver decides that a
+# dependency declares `fip::export` (limits plan L10c): from the crate root's inner
+# attributes as rustc parses them, not from its text.
+[workspace]
+resolver = "3"
+members = ["app", "app_text"]
+exclude = ["dep_multi", "dep_comment_in", "dep_nested", "dep_text_only"]

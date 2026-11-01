@@ -47,7 +47,11 @@ fn analyze(tcx: TyCtxt<'_>) -> ControlFlow<(), ()> {
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
     args.push("--sysroot".into());
-    args.push(std::fs::read_to_string("/tmp/mirprobe/sysroot.txt").unwrap().trim().into());
+    // `PROBE_SYSROOT` (set by `repin.sh`), else the file of the first probe runs.
+    let sysroot = std::env::var("PROBE_SYSROOT").unwrap_or_else(|_| {
+        std::fs::read_to_string("/tmp/mirprobe/sysroot.txt").unwrap().trim().to_string()
+    });
+    args.push(sysroot);
     let r = run_driver!(&args, analyze, with_tcx);
     if let Err(e) = r { eprintln!("driver result: {e:?}"); }
 }

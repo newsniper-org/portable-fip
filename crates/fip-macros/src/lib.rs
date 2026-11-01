@@ -49,7 +49,11 @@
 //! Compiled by the MIR-level checker `fip-prelint` (`tools/fip-prelint`), they also
 //! emit `#[cfg_attr(fip_prelint, fip::mark(..))]` with the mode, bound, `strict`,
 //! `panic_macros` and `param(..)` bounds; the driver checks those functions over MIR
-//! (callees, implicit calls, panics). Plain builds get no such attribute.
+//! (callees, implicit calls, panics). Plain builds get no such attribute. With
+//! `FIP_MACROS_MARK_ONLY=1` as well (honoured only inside the driver), `#[fip]` and
+//! `#[fbip]` on free functions skip their token-level behaviour checks and emit only
+//! the mark, so the driver alone decides (used to run the rejected examples below
+//! through it; each carries a hidden `# // prelint: ..` line with the driver's reason).
 //!
 //! `#[fip(.., requires(i < j, j < xs.len()))]` declares a precondition (a conjunction
 //! of comparisons between integer parameters, `p.len()` of slice parameters and
@@ -94,54 +98,64 @@
 //! Rejected:
 //!
 //! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
 //! #[fip_macros::fip]
 //! fn f(x: i32) -> Box<i32> { Box::new(x) }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
 //! # // expect: #[fip]: allocation site `Vec::with_capacity` in the body
 //! #[fip_macros::fip]
 //! fn f() -> Vec<u8> { Vec::with_capacity(0) }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: cannot check `f` (#[fip]): unresolved
 //! # // expect: #[fip]: allocation site `HashMap::new` in the body
 //! #[fip_macros::fip]
 //! fn f() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
 //! # // expect: #[fip]: allocation site `Box::default` in the body
 //! #[fip_macros::fip]
 //! fn f() -> Box<u8> { Box::default() }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
 //! #[fip_macros::fip]
 //! fn f(x: &[u8]) -> usize { let v = vec![0u8; 4]; v.len() + x.len() }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
 //! #[fip_macros::fip]
 //! fn f(x: &[u8]) -> usize { let y = x.to_vec(); y.len() }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: `f` is #[fip] but recurses
 //! #[fip_macros::fip]
 //! fn f(n: u32) -> u32 { if n == 0 { 0 } else { f(n - 1) } }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: may allocate ∞ time(s), at most 1 allowed
 //! #[fip_macros::fip(1)]
 //! fn f(n: u32) -> u32 { let mut s = 0; for i in 0..n { let b = Box::new(i); s += *b; } s }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: may allocate 2 time(s), at most 1 allowed
 //! #[fip_macros::fip(1)]
 //! fn f(a: u8, b: u8) -> (Box<u8>, Box<u8>) { (Box::new(a), Box::new(b)) }
 //! # fn main() {}
 //! ```
 //! ```compile_fail
+//! # // prelint: `f` is #[fbip] but may allocate ∞ time(s), at most 0 allowed
 //! #[fip_macros::fbip]
 //! fn f(x: u8) -> String { format!("{x}") }
 //! # fn main() {}
@@ -277,6 +291,7 @@
 //! ```
 //! total bound exceeded through callees:
 //! ```compile_fail
+//! # // prelint: `two` is #[fip(1, strict = true)] but may allocate 2 time(s), at most 1 allowed
 //! # // expect: the callees may allocate more than 1 times in total
 //! #[fip_macros::fip(1, strict = true)]
 //! fn one(x: u8) -> Box<u8> { Box::new(x) }
@@ -286,6 +301,7 @@
 //! ```
 //! allocating callee inside a loop:
 //! ```compile_fail
+//! # // prelint: `many` is #[fip(1, strict = true)] but may allocate ∞ time(s), at most 1 allowed
 //! # // expect: `one` is called in a loop and may allocate
 //! #[fip_macros::fip(1, strict = true)]
 //! fn one(x: u8) -> Box<u8> { Box::new(x) }
@@ -295,6 +311,7 @@
 //! ```
 //! recursion through another strict function:
 //! ```compile_fail
+//! # // prelint: `a` is #[fip(strict = true)] but recurses
 //! # // expect: cycle detected
 //! #[fip_macros::fip(strict = true)]
 //! fn a(n: u8) -> u8 { if n == 0 { 0 } else { b(n - 1) } }
@@ -341,6 +358,7 @@
 //! ```
 //! argument exceeding the declared parameter bound:
 //! ```compile_fail
+//! # // prelint: but `f` declares `param(g = 0)`
 //! # // expect: may allocate more than its declared bound 0
 //! use fip_strict::FipFn;
 //! #[fip_macros::fip(strict = true, param(g = 0))]
@@ -450,6 +468,7 @@
 //! ```
 //! `panic_macros = false` and a panicking macro:
 //! ```compile_fail
+//! # // prelint: reachable panic path: `f` -> `core::panicking::panic`
 //! # // expect: `assert!` may panic
 //! #[fip_macros::fip(strict = true, panic_macros = false)]
 //! fn f(x: u8) -> u8 { assert!(x > 0); x - 1 }
@@ -1169,8 +1188,15 @@ fn expand_parts(
     scan.stream(shape.body.stream(), false);
 
     let tag = mode.name();
-    let mut errors = base_errors(mode, &tag, &scan, &shape.name);
-    let strict_args = args.filter(|a| a.strict);
+    // Mark-only mode (`fip-prelint`'s behaviour check of rejected examples): no
+    // token-level behaviour checks and no strict rewriting for free functions.
+    let mark_only = ctx.is_none() && mark_only();
+    let mut errors = if mark_only {
+        TokenStream::new()
+    } else {
+        base_errors(mode, &tag, &scan, &shape.name)
+    };
+    let strict_args = args.filter(|a| a.strict && !mark_only);
     if strict_args.is_some() && ctx.is_none() && has_receiver(shape.params.as_ref()) {
         errors.extend(compile_error(
             shape.body.span(),
@@ -1187,7 +1213,11 @@ fn expand_parts(
     if !errors.is_empty() {
         return Err(errors);
     }
-    let doc = fip_doc(mode, strict_scan.is_some());
+    let doc = if mark_only {
+        mark_only_doc()
+    } else {
+        fip_doc(mode, strict_scan.is_some())
+    };
     let mark = prelint_mark(mode, args);
     let mut items = TokenStream::new();
     let mut toks = toks;
@@ -1339,6 +1369,29 @@ fn base_errors(mode: Mode, tag: &str, scan: &Scan<'_>, fn_name: &str) -> TokenSt
 /// Environment variable the `fip-prelint` driver sets in its own process before it
 /// expands any crate. Proc macros run inside the compiler process, so they see it.
 const PRELINT_ENV: &str = "FIP_PRELINT_DRIVER";
+
+/// Mark-only mode: set together with [`PRELINT_ENV`] (never honoured alone, so a
+/// plain build always runs every check).
+const MARK_ONLY_ENV: &str = "FIP_MACROS_MARK_ONLY";
+
+/// `true` when `#[fip]`/`#[fbip]` on a free function emit only the mark (and the
+/// argument and `requires(..)` validation): `FIP_MACROS_MARK_ONLY=1` inside the
+/// `fip-prelint` driver. The token-level behaviour checks (allocation sites,
+/// recursion, the strict rules and certificates) are skipped, so the driver decides
+/// alone; `tools/fip-prelint/tests/compile_fail.rs` runs the rejected behaviour
+/// examples of this crate's documentation that way. `#[fip_impl]` methods and
+/// `fip_fn!` are expanded as usual.
+fn mark_only() -> bool {
+    std::env::var_os(PRELINT_ENV).is_some()
+        && std::env::var_os(MARK_ONLY_ENV).is_some_and(|v| v == "1")
+}
+
+/// The `# FIP` doc section in mark-only mode: nothing was checked by the macro.
+fn mark_only_doc() -> TokenStream {
+    "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Expanded in mark-only mode: not checked by `fip-macros`; only `fip-prelint` checks this function.\"]"
+        .parse()
+        .unwrap_or_default()
+}
 
 /// The inert `#[cfg_attr(fip_prelint, fip::mark(..))]` read by the MIR checker
 /// `fip-prelint` (`tools/fip-prelint`).

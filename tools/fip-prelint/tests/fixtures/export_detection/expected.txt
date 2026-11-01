@@ -1,0 +1,8 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+app/src/lib.rs:21:5: error: fip-prelint: `make_comment_in` is #[fip] but may allocate 1 time(s), at most 0 allowed: `make_comment_in` -> `dep_comment_in::make` (app/src/lib.rs:21) -> `alloc::boxed::Box::<u32>::new` (dep_comment_in/src/lib.rs:9) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+app/src/lib.rs:33:5: error: fip-prelint: `make_nested` is #[fip] but may allocate 1 time(s), at most 0 allowed: `make_nested` -> `dep_nested::make` (app/src/lib.rs:33) -> `alloc::boxed::Box::<u32>::new` (dep_nested/src/lib.rs:13) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+app/src/lib.rs:9:5: error: fip-prelint: `make_multi` is #[fip] but may allocate 1 time(s), at most 0 allowed: `make_multi` -> `dep_multi::make` (app/src/lib.rs:9) -> `alloc::boxed::Box::<u32>::new` (dep_multi/src/lib.rs:9) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+app_text/src/lib.rs:10:5: error: fip-prelint: cannot check `twice_text` (#[fip]): unresolved: `twice_text` -> `dep_text_only::twice` (app_text/src/lib.rs:10): `dep_text_only::twice` (crate `dep_text_only` does not declare `fip::export`)
+note: fip-prelint: crate `app_text`: 1 roots, 0 passed, 1 errors, 0 warnings, 0 notes
+note: fip-prelint: crate `app`: 6 roots, 3 passed, 3 errors, 0 warnings, 0 notes

@@ -169,6 +169,16 @@ fn nonmember_export() {
     check("nonmember_export");
 }
 
+/// Export detection from the crate root's parsed inner attributes (limits plan L10c):
+/// `fip::export` in a `cfg_attr` with several attributes, with a comment inside, and
+/// nested under a combined predicate is found (the dependencies are analysed); the
+/// attribute's text in comments and a raw string is not (the dependency is passed
+/// through to the real rustc, and calls into it are `⊤`).
+#[test]
+fn export_detection() {
+    check("export_detection");
+}
+
 /// Declared parameter bounds at call sites (`param(g = K)`): the reproducer of
 /// `TODOs/fip-prelint.md` (a non-root caller, a `#[fip]` and a `#[fip(1)]` root passing
 /// an allocating `fip_fn!` for `param(g = 0)`), and the argument kinds: allocation-free

@@ -249,6 +249,15 @@ prelint:
     cd tools/fip-prelint && cargo +{{prelint_tc}} fmt --check
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test
 
+# Moves `fip-prelint` to another rustc (limits plan L10a): toolchain and components,
+# driver build, the decision record's probes, the allocator entry-point dump, the std
+# summaries (regenerated; for the pinned version they must equal the committed file),
+# every driver test, then the pin sites and the trusted tables to re-audit by hand.
+# Not in `ci`. `INSTALL=1` installs the toolchain, `APPLY=1` rewrites the driver's pins.
+# Logs under /tmp/fip-prelint-repin-<version>.
+prelint-repin version:
+    tools/fip-prelint/repin.sh {{version}}
+
 # Regenerates the std summaries of `fip-prelint` (limits plan L6, a sidecar stamped with
 # the rustc version and target): `cargo check -Zbuild-std` of the seed crate
 # `tools/fip-prelint/std-summaries/seed` with the release settings of the shipped std,

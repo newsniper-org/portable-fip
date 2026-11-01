@@ -47,6 +47,10 @@ fn main() {
     let dep = std::env::var("PROBE_DEP").expect("PROBE_DEP");
     let func = std::env::var("PROBE_FN").expect("PROBE_FN");
     args.push("--sysroot".into());
-    args.push(std::fs::read_to_string("/tmp/mirprobe/sysroot.txt").unwrap().trim().into());
+    // `PROBE_SYSROOT` (set by `repin.sh`), else the file of the first probe runs.
+    let sysroot = std::env::var("PROBE_SYSROOT").unwrap_or_else(|_| {
+        std::fs::read_to_string("/tmp/mirprobe/sysroot.txt").unwrap().trim().to_string()
+    });
+    args.push(sysroot);
     rustc_driver::run_compiler(&args, &mut Probe { dep, func });
 }
