@@ -549,7 +549,7 @@ impl Crates {
     fn param_mark(&self, def_id: DefId) -> Option<&Mark> {
         self.marks.get(&def_id).filter(|m| !m.params.is_empty())
     }
-    fn exported(&self, c: CrateNum) -> bool {
+    pub(crate) fn exported(&self, c: CrateNum) -> bool {
         self.exported.get(&c).copied().unwrap_or(false)
     }
     /// Exported crates whose metadata lacks MIR, with one function as evidence.
@@ -592,7 +592,7 @@ pub fn declares_export(tcx: TyCtxt<'_>, root: DefId) -> bool {
     })
 }
 
-fn is_std_crate(name: &str) -> bool {
+pub(crate) fn is_std_crate(name: &str) -> bool {
     matches!(name, "core" | "alloc" | "std")
 }
 
@@ -666,6 +666,8 @@ pub struct Analysis<'a, 'tcx> {
     owner_params: Vec<(String, u64)>,
     /// Call sites of callees with `param(..)` found in explored bodies.
     arg_sites: Vec<ArgSite>,
+    /// Return summaries for the value analysis of the explored bodies.
+    vsums: crate::value::Summaries<'a, 'tcx>,
 }
 
 /// Result for one root.
@@ -775,6 +777,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             param_types: Vec::new(),
             owner_params: Vec::new(),
             arg_sites: Vec::new(),
+            vsums: crate::value::Summaries::new(crates),
         };
         a.collect_param_names(owner);
         a
@@ -1139,7 +1142,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         // Asserts proved unable to fire and blocks no feasible path reaches, by the
         // value analysis (run only on bodies with an `Assert` or a `SwitchInt` on a
         // comparison).
-        let proved = crate::value::analyse(tcx, env, body);
+        let proved = crate::value::analyse(tcx, env, inst, body, &self.vsums);
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup {
                 continue;

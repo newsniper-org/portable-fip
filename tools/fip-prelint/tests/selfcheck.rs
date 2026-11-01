@@ -22,6 +22,7 @@ fn workspace_self_check() {
         .env("FIP_PRELINT_TARGET_DIR", &target)
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
         .env_remove("FIP_PRELINT_DUMP")
+        .env_remove("FIP_PRELINT_DUMP_MIR")
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .expect("run cargo-fip-prelint");

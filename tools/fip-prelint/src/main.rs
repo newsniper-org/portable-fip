@@ -17,7 +17,9 @@
 //! - `FIP_PRELINT_WARN_ONLY=1`: report violations as warnings, so that dependants are
 //!   still compiled and checked (used for whole-workspace surveys);
 //! - `FIP_PRELINT_DUMP=1`: print every root's explored call graph to stderr, and every
-//!   checked call site of a callee with `param(..)` with the argument's bound.
+//!   checked call site of a callee with `param(..)` with the argument's bound;
+//! - `FIP_PRELINT_DUMP_MIR=<text>`: print the MIR of every body the value analysis
+//!   reads whose path contains `<text>` (a debugging aid).
 
 #![feature(rustc_private)]
 
@@ -75,6 +77,7 @@ struct Prelint {
 const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_WARN_ONLY",
     "FIP_PRELINT_DUMP",
+    "FIP_PRELINT_DUMP_MIR",
     "FIP_PRELINT_DRIVER_ID",
 ];
 

@@ -284,6 +284,17 @@ stay unknown, and their asserts stay.
 
 **Effort.** L (3–4 days). Depends on L11.
 
+**Implemented** (item 4 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: values returned by calls"). M3's `usize::from`, wrapper
+`len`/`get` and `is_empty` cases pass (fixture `guards`, with controls, among them a
+`Cell`-backed `len`); `limits` 15 → 12 errors; self-check unchanged. Deviations, from
+measurement: no `core` function on the measured paths lacked MIR, so the table holds
+only intrinsics, and only those a fixture uses (`ctpop`, `ctlz`, `cttz` and the
+`_nonzero` forms, behind `count_ones`/`leading_zeros`/`trailing_zeros`); summaries
+are computed with an empty entry context (contexts are L1); a callee whose analysis
+finds no reachable `return` makes the call's successor infeasible; integer fields of
+returned tuples are not tracked (only slice metadata, which `split_at_mut` needs).
+
 ### L3. Iterator adapters are not modelled
 
 **Current.** Only `Range<integer>` through `into_iter`/`next` (`value.rs:1459-1511`).

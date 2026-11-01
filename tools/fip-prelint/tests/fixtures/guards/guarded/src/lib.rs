@@ -357,3 +357,152 @@ pub fn feasible_box(i: usize, n: usize) -> usize {
     }
     0
 }
+
+// Values returned by calls (limits plan L2): return summaries from the callee's MIR.
+
+/// `xs[usize::from(i)]` on a `&[u8; 256]`, `i: u8`: `usize::from` returns its
+/// argument (a widening cast in its body): passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn from_u8(xs: &[u8; 256], i: u8) -> u8 {
+    xs[usize::from(i)]
+}
+
+/// Control: `usize::from(i)` of a `u16` can exceed 255: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn from_u16(xs: &[u8; 256], i: u16) -> u8 {
+    xs[usize::from(i)]
+}
+
+/// A wrapper whose `len` and `get` go through a `Vec` field.
+pub struct Wrap(pub Vec<u8>);
+
+impl Wrap {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn get(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// `if i < w.len() { w.get()[i] }`: both calls return `(*w).0.len` (an access path
+/// through a shared reference to a `Freeze` type): passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn wrapper_len(w: &Wrap, i: usize) -> u8 {
+    if i < w.len() { w.get()[i] } else { 0 }
+}
+
+/// Control: the guard is on `w.len()` but the index is `i + 1`: reported (bounds).
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn wrapper_len_off(w: &Wrap, i: usize) -> u8 {
+    if i < w.len() && i < usize::MAX { w.get()[i + 1] } else { 0 }
+}
+
+/// `xs.len() - 1` after `!xs.is_empty()`: `is_empty` returns `len == 0`: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn last_index(xs: &[u8]) -> usize {
+    if xs.is_empty() { 0 } else { xs.len() - 1 }
+}
+
+/// The same through the wrapper: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn wrapper_last(w: &Wrap) -> u8 {
+    if w.is_empty() { 0 } else { w.get()[w.len() - 1] }
+}
+
+/// Control: `len() - 1` without the `is_empty` guard: reported (overflow).
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn last_index_unguarded(xs: &[u8]) -> usize {
+    xs.len() - 1
+}
+
+/// A length behind interior mutability may change between the guard and the use.
+pub struct CellLen(pub core::cell::Cell<usize>, pub Vec<u8>);
+
+impl CellLen {
+    pub fn len(&self) -> usize {
+        self.0.get()
+    }
+}
+
+/// Control: `CellLen` is not `Freeze`, so `c.len()` is not an access path: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn cell_len(c: &CellLen, xs: &[u8; 8], i: usize) -> u8 {
+    if i < c.len() && c.len() <= 8 { xs[i] } else { 0 }
+}
+
+/// Control: the reference is replaced between the guard and the use: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn wrapper_replaced<'a>(mut w: &'a Wrap, other: &'a Wrap, i: usize) -> u8 {
+    if i < w.len() {
+        w = other;
+        w.get()[i]
+    } else {
+        0
+    }
+}
+
+/// Control: through `&mut`, the vector may change between the guard and the use
+/// (each call reborrows anew): reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn wrapper_mut(w: &mut Wrap, i: usize) -> u8 {
+    if i < w.len() {
+        w.0.clear();
+        w.get()[i]
+    } else {
+        0
+    }
+}
+
+/// `u32::count_ones` calls the intrinsic `ctpop`, which has no MIR: its result is at
+/// most 32 (audited table `fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS`): passes on
+/// a 33-element array.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn count_ones_index(xs: &[u8; 33], x: u32) -> u8 {
+    xs[x.count_ones() as usize]
+}
+
+/// Control: the same on a 32-element array (`x = u32::MAX` gives 32): reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn count_ones_off(xs: &[u8; 32], x: u32) -> u8 {
+    xs[x.count_ones() as usize]
+}

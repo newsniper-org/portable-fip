@@ -591,3 +591,58 @@ The other 18 roots and every other fixture and the self-check are unchanged.
 behind; other panics of the shim builder are caught the same way but are not in a
 fixture. Non-generic drop shims are built as before (rustc builds them for codegen
 too).
+
+## Resolved 2026-11-02: values returned by calls (limits plan L2)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L2 (item 4 of its order).
+A call forgot its destination (except the two `Range` calls of a `for` loop), so a
+guard or an index through `usize::from`, a wrapper's `len()`/`get()` or `is_empty()`
+was not proved (M3).
+
+**Change.** Return summaries in the value analysis (`value::Summaries`, memoized per
+instance and root). A callee with MIR in `core`/`alloc`/`std` or an analysed crate,
+not a source, whose result is an integer, a `bool`, a slice pointer or a tuple with
+slice pointer fields, is analysed by the same analysis with its return place
+tracked; the states at its reachable `return`s are joined and projected onto the
+result (value, slice metadata, tuple fields' metadata, or the comparison a `bool`
+holds) and onto the parameters the body never changes (values, slice metadata,
+access paths). At a call the facts are added over the argument values. New in the
+domain: access paths `(*p).f1…` through a local `p: &T` with `T: Freeze` (a shared
+reference: nothing changes the pointee while `p` is unchanged), tracked also through
+`q = &(*p).f` and `q = copy p`; the metadata of raw slice pointers built from
+`(data, meta)`, of tuple fields, of pointer casts and of `&[T; N]` unsizing (`N`);
+unchecked addition/subtraction (overflow is undefined behaviour) as exact results;
+the difference bound of `a - b` for a subtraction's result; a comparison whose value
+is forgotten is rewritten through an equal value. No reachable `return` makes the
+call's successor infeasible. Intrinsics (no MIR) use a new audited table,
+`fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS` (`ctpop`, `ctlz`, `cttz`,
+`ctlz_nonzero`, `cttz_nonzero`: result in `0..=w - k`), with a differential test that
+runs `count_ones`/`leading_zeros`/`trailing_zeros` and their `NonZero` versions on
+boundary inputs of all 12 integer types and checks that each bound holds and is
+reached. `FIP_PRELINT_DUMP_MIR=<text>` prints the MIR of every analysed body whose
+path contains `<text>`.
+
+**Measured** (before = driver of `a7b7e94`):
+
+| case (fixture `guards`) | before | after |
+|---|---|---|
+| `from_u8`: `xs[usize::from(i)]`, `&[u8; 256]`, `i: u8` (M3) | bounds check reported | passes |
+| `wrapper_len`: `if i < w.len() { w.get()[i] }` over a `Vec` field (M3) | bounds check reported | passes |
+| `last_index`: `xs.len() - 1` after `!xs.is_empty()` (M3) | overflow reported | passes |
+| `wrapper_last`: the same through the wrapper, then `w.get()[w.len() - 1]` | overflow and bounds reported | passes |
+| `count_ones_index`: `xs[x.count_ones() as usize]`, `&[u8; 33]` (table) | bounds check reported | passes |
+| controls: `usize::from(u16)` on 256, `w.get()[i + 1]`, `len() - 1` unguarded, a `Cell`-backed `len`, the reference replaced in between, `&mut Wrap` cleared in between, `count_ones` on 32 | reported | reported |
+
+`guarded`: 40 roots, 14 passed, 28 errors → 19 passed, 22 errors (the 28 earlier
+roots unchanged). M3 probe `limits`: 13 roots, 1 passed, 15 errors → 3 passed, 12
+errors (`from_u8`, `len_through_method` pass; `inclusive_ok` loses the overflow
+report on `xs.len() - 1` and keeps its bounds report, an `0..=` loop: L3). Every
+other fixture is unchanged. **Self-check:** unchanged (`selfcheck.expected`, 67
+roots, 46 notes, 23 of them in `swap_lt`): the `split_at_mut` summary gives the two
+halves' lengths `j` and `len - j` only under the caller's `j < len` (L1). Time of the
+self-check: 4.1 s before, 4.3 s after (one run each, unmeasured variance).
+
+**Open:** results through mutable heap state, interior mutability, non-linear
+arithmetic, access paths through more than one dereference or into enums, and
+callees without MIR outside the table stay unknown; integer fields of returned
+tuples and structs are not tracked (only slice metadata of tuple fields).

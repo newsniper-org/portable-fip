@@ -30,6 +30,7 @@ fn run(name: &str) -> Vec<String> {
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
         .env_remove("FIP_PRELINT_WARN_ONLY")
         .env_remove("FIP_PRELINT_DUMP")
+        .env_remove("FIP_PRELINT_DUMP_MIR")
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .expect("run cargo-fip-prelint");
@@ -113,6 +114,10 @@ fn implicit() {
 /// bounded by the first, `x - 1` after `x == 0` returns, `d != 0` division pass;
 /// unguarded, off-by-one, guards on another variable, a local changed through
 /// `&mut`, a replaced slice, `0..=len`, signed `i - 1` under `i < 0` are reported.
+/// Values returned by calls (return summaries): `usize::from(u8)`, a wrapper's
+/// `len`/`get`/`is_empty` over a `Vec` field, `len() - 1` after `is_empty()`,
+/// `count_ones` (intrinsic table) pass; `usize::from(u16)`, a `Cell`-backed `len`, a
+/// replaced reference, a `&mut` wrapper changed in between are reported.
 #[test]
 fn guards() {
     check("guards");

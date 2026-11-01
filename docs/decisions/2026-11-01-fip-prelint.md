@@ -284,6 +284,22 @@ error and counts it as an error (the crate fails, also under `--warn-only`). Fix
 `generics` (`drop_rows`, `drop_rows_again`); details: `TODOs/fip-prelint.md`,
 "Resolved 2026-11-02: drop shims rustc cannot build are `⊤`".
 
+## Amendment 2026-11-02: values returned by calls (limits plan L2)
+
+The value analysis (amendment "value analysis for `Assert` terminators") is no longer
+blind to calls. A callee with MIR (in `core`/`alloc`/`std` or an analysed crate, not
+a source) whose result is an integer, a `bool`, a slice pointer or a tuple with slice
+pointer fields gets a return summary: the same analysis of its body, projected at its
+reachable `return`s onto the result and its unchanged parameters. The domain gains
+access paths through shared references to `Freeze` types (`(*p).f`, the rule already
+used for shared borrows), raw-pointer and tuple-field slice metadata, unsizing of
+`&[T; N]`, and unchecked arithmetic. Intrinsics use the audited table
+`fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS`, each entry with a differential test.
+Soundness: a summary is computed by the same analysis (a fact holds at every return);
+an unknown callee keeps the old behaviour. Fixture `guards` (5 passes, 7 controls);
+self-check unchanged. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: values
+returned by calls".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

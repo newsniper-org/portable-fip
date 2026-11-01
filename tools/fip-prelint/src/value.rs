@@ -1,60 +1,89 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-//! Intraprocedural value analysis of one MIR body, used to drop `Assert`
-//! terminators that cannot fire (bounds, overflow, division and negation checks
-//! behind guards) and every site in a block that no feasible path reaches.
+//! Value analysis of one MIR body, used to drop `Assert` terminators that cannot
+//! fire (bounds, overflow, division and negation checks behind guards) and every
+//! site in a block that no feasible path reaches. Calls are related to their
+//! callees through return summaries computed by the same analysis.
 //!
 //! **Domain.** Difference bounds (`x - y ≤ c`, a zone) over mathematical integers
 //! between tracked values: integer locals, the length `len(p)` of the slice behind a
 //! slice pointer local `p` (its metadata), the result `t.0` of a checked operation
 //! `t = AddWithOverflow(a, b)`, `start`/`end` of a `Range<integer>` local, the
-//! payload of an `Option<integer>` local, and the constant 0. Only locals connected
-//! to some `Assert` condition, or to the discriminant of a `SwitchInt` on a
-//! comparison, through assignments are tracked. Every tracked value
-//! carries the bounds of its type (`len(p)` lies in `0..=usize::MAX`). Besides the
-//! matrix, the state records which boolean locals hold which comparison
-//! (`c = Lt(a, b)`), which tuple locals hold which checked operation together with
-//! the verdict "cannot overflow" computed when the operation ran, and which pointer
-//! locals share the metadata of which slice local (`q = &(*p)`).
+//! payload of an `Option<integer>` local, the metadata of the slice pointer fields of
+//! a tuple local, access paths `(*p).f1.f2…` (an integer, or a slice pointer's
+//! metadata) through a local `p: &T` with `T: Freeze`, and the constant 0. Only
+//! locals connected to some `Assert` condition, to the discriminant of a `SwitchInt`
+//! on a comparison, or (for a summary) to the return place, through assignments and
+//! summarised calls are tracked. Every tracked value carries the bounds of its type
+//! (`len(p)` lies in `0..=usize::MAX`). Besides the matrix, the state records which
+//! boolean locals hold which comparison (`c = Lt(a, b)`), which tuple locals hold
+//! which checked operation together with the verdict "cannot overflow" computed when
+//! the operation ran, which pointer locals share the metadata of which slice local
+//! (`q = &(*p)`), and which shared reference locals point to which access path
+//! (`q = &(*p).f`, `q = copy p`).
 //!
 //! **Transfer.** Copies and casts that preserve the value are equalities; constants
-//! fix a value; `PtrMetadata` of a slice pointer is its `len`; a `SwitchInt` on a
-//! recorded comparison adds the comparison (or its negation) on each edge, and an
-//! infeasible edge is dropped; the success edge of an `Assert` adds the checked
-//! condition (and, for a checked operation, `t.0 = a op b`). A `for` loop over
-//! `a..b` is modelled from the contract of `Range<integer>`: `into_iter` is the
-//! identity, `next(&mut r)` returns `Some(r.start)` and increments `start` if
-//! `start < end`, else `None`, and never changes `end`. Any other assignment, a
-//! call's destination, `StorageLive`/`StorageDead` and partial writes forget the
-//! local. Writes through pointers cannot change a tracked local: locals whose
-//! address is taken (`&mut x`, `&raw x`, also of a field; `&x` too unless the place
-//! has no interior mutability, since writing through a shared reference to such a
-//! place is undefined behaviour) are never tracked, except a `Range` whose only
-//! borrows are passed directly to `next`. Slice lengths never change while the
-//! pointer local is unchanged. Cleanup (unwind) edges are not followed. Joins take
-//! the weaker bound; at loop heads, after two visits, bounds that grew are dropped
-//! (widening), so the fixpoint terminates.
+//! fix a value; `PtrMetadata` of a slice pointer is its `len`; a raw slice pointer
+//! built from `(data, meta)` has length `meta`; a pointer cast between slice
+//! pointers keeps the length, an unsizing coercion of `&[T; N]` has length `N`; an
+//! unchecked addition or subtraction (overflow is undefined behaviour) is the
+//! mathematical result; a `SwitchInt` on a recorded comparison adds the comparison
+//! (or its negation) on each edge, and an infeasible edge is dropped; the success
+//! edge of an `Assert` adds the checked condition (and, for a checked operation,
+//! `t.0 = a op b`). A `for` loop over `a..b` is modelled from the contract of
+//! `Range<integer>`: `into_iter` is the identity, `next(&mut r)` returns
+//! `Some(r.start)` and increments `start` if `start < end`, else `None`, and never
+//! changes `end`. A call whose callee has a return summary gets the summary's facts
+//! over its argument values; any other call's destination, any other assignment,
+//! `StorageLive`/`StorageDead` and partial writes forget the local (a comparison
+//! that mentions a forgotten value is rewritten through a value equal to it, if
+//! any). Writes through pointers cannot change a tracked local: locals whose address
+//! is taken (`&mut x`, `&raw x`, also of a field; `&x` too unless the place has no
+//! interior mutability, since writing through a shared reference to such a place is
+//! undefined behaviour) are never tracked, except a `Range` whose only borrows are
+//! passed directly to `next`. Slice lengths never change while the pointer local is
+//! unchanged, nor does an access path while its reference local is unchanged (the
+//! pointee is `Freeze` and shared). Cleanup (unwind) edges are not followed. Joins
+//! take the weaker bound; at loop heads, after two visits, bounds that grew are
+//! dropped (widening), so the fixpoint terminates.
+//!
+//! **Return summaries** ([`Summaries`]). For a callee with MIR in `core`/`alloc`/
+//! `std` or an analysed crate (not a source, whose body is out of scope), whose
+//! result is an integer, a `bool`, a slice pointer or a tuple with slice pointer
+//! fields: the same analysis of its body, tracking the return place, joined over the
+//! reachable `return`s and projected onto the result (its value, its metadata, the
+//! metadata of its tuple fields, or the comparison a `bool` holds) and the
+//! parameters the body never changes (their values, slice metadata and access
+//! paths). No reachable `return` means the call does not return. Intrinsics (no MIR)
+//! use the audited table `fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS`. Recursion
+//! and nesting deeper than [`MAX_SUMMARY_DEPTH`] give no summary.
 //!
 //! **Use.** An `Assert` whose condition is decided equal to `expected` in the state
 //! reaching it, or whose block no feasible path reaches, cannot fire. A block that no
 //! feasible path reaches (no feasible edge into it, or its statements contradict the
 //! state) is dead: its terminator never runs, so its call, drop, panic or allocation
 //! is not counted. Anything not modelled keeps the assert and the block: unknown
-//! rvalues, other calls, signed division overflow
+//! rvalues, calls without a summary, signed division overflow
 //! (`BitAnd` of two comparisons), 128-bit arithmetic, bodies with more than
 //! [`MAX_VARS`] tracked values or [`MAX_CELLS`] matrix entries, coroutines; inline
 //! assembly resets the state.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use rustc_hir::attrs::lang_items::LangItem;
+use rustc_hir::def_id::DefId;
 use rustc_middle::mir::visit::{MutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::{
     self, BasicBlock, BinOp, Body, Local, Operand, Place, ProjectionElem, Rvalue, StatementKind,
     TerminatorKind, UnOp,
 };
-use rustc_middle::ty::{self, Ty, TyCtxt, TypingEnv};
+use rustc_middle::ty::adjustment::PointerCoercion;
+use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
+
+use crate::analysis::{Crates, is_std_crate};
 
 /// "No bound". Far above every bound of a 64-bit type, far below `i128::MAX`, so
 /// sums of a few bounds cannot overflow.
@@ -70,6 +99,42 @@ fn add(a: i128, b: i128) -> i128 {
         INF
     } else {
         (a + b).max(-INF)
+    }
+}
+
+/// Up to [`MAX_PATH`] field indices: the fields of an access path `(*p).f1.f2…`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Fields {
+    n: u8,
+    f: [u32; MAX_PATH],
+}
+
+/// Longest access path tracked (fields after the dereference).
+const MAX_PATH: usize = 4;
+
+impl Fields {
+    const EMPTY: Fields = Fields {
+        n: 0,
+        f: [0; MAX_PATH],
+    };
+    fn new(fs: &[u32]) -> Option<Fields> {
+        if fs.len() > MAX_PATH {
+            return None;
+        }
+        let mut f = [0; MAX_PATH];
+        f[..fs.len()].copy_from_slice(fs);
+        Some(Fields {
+            n: u8::try_from(fs.len()).ok()?,
+            f,
+        })
+    }
+    fn as_slice(&self) -> &[u32] {
+        &self.f[..usize::from(self.n)]
+    }
+    fn concat(&self, o: &Fields) -> Option<Fields> {
+        let mut v = self.as_slice().to_vec();
+        v.extend_from_slice(o.as_slice());
+        Fields::new(&v)
     }
 }
 
@@ -89,6 +154,161 @@ enum Var {
     /// For an `Option<integer>` local `o = <Range as Iterator>::next(&mut r)`: the
     /// value of `r.start` when `next` was called.
     NextOld(Local),
+    /// The integer at `(*p).f1.f2…` for a local `p: &T` with `T: Freeze`: nothing
+    /// can change it while `p` holds the same reference.
+    Path(Local, Fields),
+    /// The metadata of the slice pointer stored at such a path.
+    PathLen(Local, Fields),
+    /// The metadata of the slice pointer in field `k` of a tuple local.
+    FieldLen(Local, u32),
+}
+
+/// A value of a callee's interface, as seen from outside its body: its return value
+/// and its parameters (`Arg(i)` is the `i`-th parameter, 0-based), as they were on
+/// entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SVar {
+    Zero,
+    /// The returned integer.
+    Ret,
+    /// The metadata of the returned slice pointer.
+    RetLen,
+    /// The metadata of the slice pointer in field `k` of the returned tuple.
+    RetFieldLen(u32),
+    Arg(u32),
+    ArgLen(u32),
+    ArgPath(u32, Fields),
+    ArgPathLen(u32, Fields),
+}
+
+/// `a - b ≤ c` over interface values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Fact {
+    pub a: SVar,
+    pub b: SVar,
+    pub c: i128,
+}
+
+/// What a call returns, in terms of the callee's parameters (a return summary,
+/// computed from the callee's MIR by this analysis).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetSummary {
+    /// Difference bounds between the return value and the parameters that hold
+    /// whenever the call returns.
+    facts: Vec<Fact>,
+    /// For a `bool` result: the comparison it holds.
+    cond: Option<(CmpOp, SVar, i128, SVar, i128)>,
+    /// No feasible path reaches a `return`: the call does not return.
+    never_returns: bool,
+}
+
+/// Return summaries of the callees met while analysing the bodies of one root,
+/// memoized per instance. A callee is summarised only if it has MIR, is not a
+/// source (whose body is out of scope), and lies in `core`/`alloc`/`std` or a crate
+/// the driver analyses; recursion and nesting deeper than [`MAX_SUMMARY_DEPTH`] give
+/// no summary (the destination is forgotten).
+pub struct Summaries<'a, 'tcx> {
+    map: RefCell<HashMap<Instance<'tcx>, Option<Rc<RetSummary>>>>,
+    stack: RefCell<Vec<Instance<'tcx>>>,
+    crates: &'a Crates,
+}
+
+/// Nested summary computations before a callee is left unknown.
+const MAX_SUMMARY_DEPTH: usize = 8;
+
+impl<'a, 'tcx> Summaries<'a, 'tcx> {
+    pub fn new(crates: &'a Crates) -> Summaries<'a, 'tcx> {
+        Summaries {
+            map: RefCell::new(HashMap::new()),
+            stack: RefCell::new(Vec::new()),
+            crates,
+        }
+    }
+
+    /// `true` if the body of `def_id` may be used for a summary.
+    fn usable(&self, tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
+        let name = tcx.crate_name(def_id.krate);
+        (is_std_crate(name.as_str()) || self.crates.exported(def_id.krate))
+            && self.crates.source_of(tcx, def_id).is_none()
+    }
+
+    /// The summary of `callee`, computed on first use.
+    fn get(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        env: TypingEnv<'tcx>,
+        callee: Instance<'tcx>,
+    ) -> Option<Rc<RetSummary>> {
+        if let Some(s) = self.map.borrow().get(&callee) {
+            return s.clone();
+        }
+        {
+            let stack = self.stack.borrow();
+            if stack.contains(&callee) || stack.len() >= MAX_SUMMARY_DEPTH {
+                return None;
+            }
+        }
+        if let InstanceKind::Intrinsic(def_id) = callee.def {
+            let s = intrinsic_summary(tcx, def_id, callee).map(Rc::new);
+            self.map.borrow_mut().insert(callee, s.clone());
+            return s;
+        }
+        let InstanceKind::Item(def_id) = callee.def else {
+            return None;
+        };
+        if tcx.is_foreign_item(def_id) || !tcx.is_mir_available(def_id) || !self.usable(tcx, def_id)
+        {
+            self.map.borrow_mut().insert(callee, None);
+            return None;
+        }
+        let body = tcx.instance_mir(callee.def);
+        if !summarisable(tcx, body.local_decls[mir::RETURN_PLACE].ty) {
+            self.map.borrow_mut().insert(callee, None);
+            return None;
+        }
+        self.stack.borrow_mut().push(callee);
+        let s = summarise(tcx, env, callee, body, self).map(Rc::new);
+        self.stack.borrow_mut().pop();
+        self.map.borrow_mut().insert(callee, s.clone());
+        s
+    }
+}
+
+/// The summary of an intrinsic from `fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS`:
+/// the result lies in `0..=w - k` for the bit width `w` of its integer type argument.
+fn intrinsic_summary<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    callee: Instance<'tcx>,
+) -> Option<RetSummary> {
+    let width = match callee.args.types().next()?.kind() {
+        ty::Uint(u) => u.bit_width(),
+        ty::Int(i) => i.bit_width(),
+        _ => None,
+    }
+    .unwrap_or(tcx.data_layout.pointer_size().bits());
+    let hi = fip_lint_rules::mir::intrinsic_result_bound(
+        tcx.item_name(def_id).as_str(),
+        u32::try_from(width).ok()?,
+    )?;
+    let fact = |a, b, c| Fact { a, b, c };
+    Some(RetSummary {
+        facts: vec![
+            fact(SVar::Ret, SVar::Zero, i128::from(hi)),
+            fact(SVar::Zero, SVar::Ret, 0),
+        ],
+        cond: None,
+        never_returns: false,
+    })
+}
+
+/// Return types a summary can say something about: integers, `bool`, slice pointers
+/// and tuples with a slice pointer field.
+fn summarisable<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    int_range(tcx, ty).is_some()
+        || ty.is_bool()
+        || is_slice_ptr(ty)
+        || matches!(ty.kind(), ty::Tuple(fs) if fs.iter().any(is_slice_ptr))
 }
 
 /// `var + c`; `var = 0` is the constant zero.
@@ -139,6 +359,21 @@ impl Cmp {
     }
     fn mentions(&self, v: usize) -> bool {
         (self.a.v == v || self.b.v == v) && v != 0
+    }
+    /// `self` with `v` replaced by `u + k` (where `v = u + k` holds).
+    fn rewrite(self, v: usize, u: usize, k: i128) -> Cmp {
+        let r = |x: Lin| {
+            if x.v == v {
+                Lin { v: u, c: x.c + k }
+            } else {
+                x
+            }
+        };
+        Cmp {
+            op: self.op,
+            a: r(self.a),
+            b: r(self.b),
+        }
     }
 }
 
@@ -284,6 +519,9 @@ struct State {
     opt: BTreeMap<Local, OptFacts>,
     /// `d = discriminant(o)`.
     disc: BTreeMap<Local, Local>,
+    /// Shared reference local → the access path it points to: `q = &(*p).f1…` or
+    /// `q = copy p` for `p: &T`, `T: Freeze` (so `(*q).g` is `(*p).f1….g`).
+    refs: BTreeMap<Local, (Local, Fields)>,
 }
 
 impl State {
@@ -296,6 +534,7 @@ impl State {
             borrow: intersect(&self.borrow, &o.borrow),
             opt: intersect(&self.opt, &o.opt),
             disc: intersect(&self.disc, &o.disc),
+            refs: intersect(&self.refs, &o.refs),
         }
     }
     fn widen(&self, next: &State) -> State {
@@ -307,6 +546,7 @@ impl State {
             borrow: intersect(&self.borrow, &next.borrow),
             opt: intersect(&self.opt, &next.opt),
             disc: intersect(&self.disc, &next.disc),
+            refs: intersect(&self.refs, &next.refs),
         }
     }
 }
@@ -327,10 +567,16 @@ struct Ctx<'a, 'tcx> {
     body: &'a Body<'tcx>,
     /// Tracked value → index (1-based; 0 is the constant zero).
     index: HashMap<Var, usize>,
+    /// Indices of the tracked values of each local (all forgotten when it changes).
+    of_local: HashMap<Local, Vec<usize>>,
     /// Type bounds per index.
     bounds: Vec<(i128, i128)>,
     /// Discriminant values of `Option::Some` and `Option::None`.
     some_none: Option<(u128, u128)>,
+    /// Return summaries of the callees of call terminators, per block.
+    calls: HashMap<BasicBlock, Rc<RetSummary>>,
+    /// Shared reference locals to a `Freeze` type.
+    shared: HashSet<Local>,
 }
 
 /// Bounds of an integer type, `None` for other types.
@@ -561,49 +807,364 @@ fn switches_on_comparison(body: &Body<'_>) -> bool {
     })
 }
 
-/// Runs the value analysis on `body` if it has an `Assert` or a `SwitchInt` on a
-/// comparison. If tracking the locals of both exceeds the size limits, the analysis
-/// is retried with the locals of the asserts only (what was tracked before
-/// feasibility was used).
-pub fn analyse<'tcx>(tcx: TyCtxt<'tcx>, env: TypingEnv<'tcx>, body: &Body<'tcx>) -> Proved {
+/// `true` if `body` is a coroutine (not analysed).
+fn is_coroutine(body: &Body<'_>) -> bool {
+    body.coroutine.is_some()
+        || body
+            .basic_blocks
+            .iter()
+            .any(|d| matches!(d.terminator().kind, TerminatorKind::Yield { .. }))
+}
+
+/// With `FIP_PRELINT_DUMP_MIR=<text>`: prints the MIR of every analysed body whose
+/// path contains `<text>` (a debugging aid for the transfer functions).
+fn dump_mir<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) {
+    let Some(filter) = std::env::var_os("FIP_PRELINT_DUMP_MIR") else {
+        return;
+    };
+    let path = tcx.def_path_str(body.source.def_id());
+    if !path.contains(filter.to_string_lossy().as_ref()) {
+        return;
+    }
+    let mut out = Vec::new();
+    if mir::pretty::MirWriter::new(tcx)
+        .write_mir_fn(body, &mut out)
+        .is_ok()
+    {
+        eprintln!(
+            "fip-prelint mir ({:?}):\n{}",
+            body.source.instance,
+            String::from_utf8_lossy(&out)
+        );
+    }
+}
+
+/// Runs the value analysis on the body of `inst` if it has an `Assert` or a
+/// `SwitchInt` on a comparison. If tracking the locals of both exceeds the size
+/// limits, the analysis is retried with the locals of the asserts only (what was
+/// tracked before feasibility was used). Calls with a return summary (`sums`) relate
+/// their result to their arguments.
+pub fn analyse<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
+    body: &Body<'tcx>,
+    sums: &Summaries<'_, 'tcx>,
+) -> Proved {
     let has_assert = body
         .basic_blocks
         .iter()
         .any(|d| !d.is_cleanup && matches!(d.terminator().kind, TerminatorKind::Assert { .. }));
     let switches = switches_on_comparison(body);
-    if !(has_assert || switches)
-        || body.coroutine.is_some()
-        || body
-            .basic_blocks
-            .iter()
-            .any(|d| matches!(d.terminator().kind, TerminatorKind::Yield { .. }))
-    {
+    if !(has_assert || switches) || is_coroutine(body) {
         return Proved::default();
     }
-    if let Some(p) = analyse_with(tcx, env, body, switches) {
-        return p;
+    dump_mir(tcx, body);
+    let calls = call_summaries(tcx, env, inst, body, sums);
+    let mode = |switches| Mode {
+        switches,
+        ret: false,
+    };
+    if let Some((_, o)) = analyse_with(tcx, env, inst, body, mode(switches), &calls) {
+        return o.proved;
     }
     if switches && has_assert {
-        return analyse_with(tcx, env, body, false).unwrap_or_default();
+        return analyse_with(tcx, env, inst, body, mode(false), &calls)
+            .map(|(_, o)| o.proved)
+            .unwrap_or_default();
     }
     Proved::default()
 }
 
-/// The analysis tracking the locals connected to asserts, and to comparisons
-/// switched on if `switches`; `None` if that exceeds the size limits.
-fn analyse_with<'tcx>(
+/// The return summary of `inst` (whose body is `body`): the analysis tracking the
+/// return place, the parameters connected to it and the comparisons switched on,
+/// projected at the reachable `return`s onto the return value and the parameters
+/// that the body never changes.
+fn summarise<'tcx>(
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
     body: &Body<'tcx>,
+    sums: &Summaries<'_, 'tcx>,
+) -> Option<RetSummary> {
+    if is_coroutine(body) {
+        return None;
+    }
+    dump_mir(tcx, body);
+    let calls = call_summaries(tcx, env, inst, body, sums);
+    let mode = |switches| Mode {
+        switches,
+        ret: true,
+    };
+    let (cx, out) = analyse_with(tcx, env, inst, body, mode(true), &calls)
+        .or_else(|| analyse_with(tcx, env, inst, body, mode(false), &calls))?;
+    cx.summary(out.returns?)
+}
+
+/// The callee of the call terminating `bb`, resolved with the arguments of `inst`.
+fn callee_at<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
+    body: &Body<'tcx>,
+    func: &Operand<'tcx>,
+) -> Option<Instance<'tcx>> {
+    let fty = inst
+        .try_instantiate_mir_and_normalize_erasing_regions(
+            tcx,
+            env,
+            EarlyBinder::bind(tcx, func.ty(&body.local_decls, tcx)),
+        )
+        .ok()?;
+    let ty::FnDef(def_id, args) = *fty.kind() else {
+        return None;
+    };
+    Instance::try_resolve(tcx, env, def_id, args.no_bound_vars()?)
+        .ok()
+        .flatten()
+}
+
+/// Return summaries of the callees of the call terminators of `body` whose
+/// destination has a summarisable type.
+fn call_summaries<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
+    body: &Body<'tcx>,
+    sums: &Summaries<'_, 'tcx>,
+) -> HashMap<BasicBlock, Rc<RetSummary>> {
+    let mut out = HashMap::new();
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        if data.is_cleanup {
+            continue;
+        }
+        let TerminatorKind::Call {
+            func,
+            destination,
+            target: Some(_),
+            ..
+        } = &data.terminator().kind
+        else {
+            continue;
+        };
+        if !summarisable(tcx, destination.ty(&body.local_decls, tcx).ty) {
+            continue;
+        }
+        if let Some(callee) = callee_at(tcx, env, inst, body, func)
+            && let Some(s) = sums.get(tcx, env, callee)
+        {
+            out.insert(bb, s);
+        }
+    }
+    out
+}
+
+/// What is tracked: with `switches`, the locals of comparisons switched on (besides
+/// those of asserts); with `ret`, the return place (a summary is computed).
+#[derive(Clone, Copy)]
+struct Mode {
     switches: bool,
-) -> Option<Proved> {
+    ret: bool,
+}
+
+/// The result of [`Ctx::run`]: per-block facts, and the states at the terminators
+/// of the reachable `return` blocks (`None` if the analysis gave up).
+struct Outcome {
+    proved: Proved,
+    returns: Option<Vec<State>>,
+}
+
+/// The type of `ty` instantiated with the arguments of `inst`, or `ty` itself.
+fn inst_ty<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
+    ty: Ty<'tcx>,
+) -> Ty<'tcx> {
+    inst.try_instantiate_mir_and_normalize_erasing_regions(tcx, env, EarlyBinder::bind(tcx, ty))
+        .unwrap_or(ty)
+}
+
+/// `p` is `(*b).f1.f2…` (a dereference, then fields only).
+fn path_of(p: &Place<'_>) -> Option<(Local, Fields)> {
+    let [ProjectionElem::Deref, rest @ ..] = p.projection.as_slice() else {
+        return None;
+    };
+    let mut fs = Vec::new();
+    for e in rest {
+        let ProjectionElem::Field(f, _) = e else {
+            return None;
+        };
+        fs.push(f.as_u32());
+    }
+    Some((p.local, Fields::new(&fs)?))
+}
+
+/// Static definitions of shared reference locals: `q = &(*b).f…` and `q = copy b`
+/// for `b` in `shared` (several if `q` is assigned several times).
+fn ref_defs(body: &Body<'_>, shared: &HashSet<Local>) -> HashMap<Local, Vec<(Local, Fields)>> {
+    let mut out: HashMap<Local, Vec<(Local, Fields)>> = HashMap::new();
+    for data in body.basic_blocks.iter() {
+        for st in &data.statements {
+            let StatementKind::Assign(assign) = &st.kind else {
+                continue;
+            };
+            let (place, rv) = &**assign;
+            let Some(q) = place.as_local() else {
+                continue;
+            };
+            let def = match rv {
+                Rvalue::Ref(_, mir::BorrowKind::Shared, p) => path_of(p),
+                Rvalue::Use(Operand::Copy(p) | Operand::Move(p), ..) => {
+                    p.as_local().map(|b| (b, Fields::EMPTY))
+                }
+                _ => None,
+            };
+            if let Some((b, fs)) = def
+                && b != q
+                && shared.contains(&b)
+            {
+                out.entry(q).or_default().push((b, fs));
+            }
+        }
+    }
+    out
+}
+
+/// `(q, g)` and the paths it stands for through the static definitions of `q`.
+fn expand_path(
+    defs: &HashMap<Local, Vec<(Local, Fields)>>,
+    q: Local,
+    g: Fields,
+    out: &mut BTreeSet<(Local, Fields)>,
+    depth: usize,
+) {
+    if !out.insert((q, g)) || depth == 0 {
+        return;
+    }
+    for (b, fs) in defs.get(&q).map(Vec::as_slice).unwrap_or_default() {
+        if let Some(f) = fs.concat(&g) {
+            expand_path(defs, *b, f, out, depth - 1);
+        }
+    }
+}
+
+/// Access paths worth tracking: those read in the body, and those that the summary
+/// of a callee mentions for an argument; each with the paths it stands for through
+/// shared references copied or reborrowed in the body. `(base, fields, len)`: `len`
+/// for the metadata of a slice pointer at the path.
+fn path_candidates<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    shared: &HashSet<Local>,
+    calls: &HashMap<BasicBlock, Rc<RetSummary>>,
+) -> BTreeSet<Var> {
+    struct Reads<'b, 'tcx> {
+        tcx: TyCtxt<'tcx>,
+        body: &'b Body<'tcx>,
+        shared: &'b HashSet<Local>,
+        found: Vec<(Local, Fields, bool)>,
+    }
+    impl<'tcx> Visitor<'tcx> for Reads<'_, 'tcx> {
+        fn visit_place(&mut self, p: &Place<'tcx>, _: PlaceContext, _: mir::Location) {
+            if let Some((b, fs)) = path_of(p)
+                && self.shared.contains(&b)
+            {
+                let ty = p.ty(&self.body.local_decls, self.tcx).ty;
+                if int_range(self.tcx, ty).is_some() {
+                    self.found.push((b, fs, false));
+                } else if is_slice_ptr(ty) {
+                    self.found.push((b, fs, true));
+                }
+            }
+        }
+    }
+    let mut reads = Reads {
+        tcx,
+        body,
+        shared,
+        found: Vec::new(),
+    };
+    reads.visit_body(body);
+    let mut found = reads.found;
+    for (bb, s) in calls {
+        let TerminatorKind::Call { args, .. } = &body.basic_blocks[*bb].terminator().kind else {
+            continue;
+        };
+        for sv in s.svars() {
+            let (i, fs, len) = match sv {
+                SVar::ArgPath(i, fs) => (i, fs, false),
+                SVar::ArgPathLen(i, fs) => (i, fs, true),
+                _ => continue,
+            };
+            if let Some(a) = args.get(i as usize)
+                && let Operand::Copy(p) | Operand::Move(p) = &a.node
+                && let Some(q) = p.as_local()
+            {
+                found.push((q, fs, len));
+            }
+        }
+    }
+    let defs = ref_defs(body, shared);
+    let mut out = BTreeSet::new();
+    for (q, g, len) in found {
+        let mut paths = BTreeSet::new();
+        expand_path(&defs, q, g, &mut paths, 3);
+        for (b, fs) in paths {
+            if shared.contains(&b) {
+                out.insert(if len {
+                    Var::PathLen(b, fs)
+                } else {
+                    Var::Path(b, fs)
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The analysis tracking the locals connected to asserts, to comparisons switched on
+/// if `mode.switches`, and to the return place if `mode.ret`; `None` if that exceeds
+/// the size limits.
+fn analyse_with<'a, 'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    inst: Instance<'tcx>,
+    body: &'a Body<'tcx>,
+    mode: Mode,
+    calls: &HashMap<BasicBlock, Rc<RetSummary>>,
+) -> Option<(Ctx<'a, 'tcx>, Outcome)> {
     let n_blocks = body.basic_blocks.len();
     let taken = address_taken(tcx, env, body);
-    let relevant = relevant_locals(tcx, body, switches);
+    let relevant = relevant_locals(tcx, body, mode, calls);
+    let shared: HashSet<Local> = body
+        .local_decls
+        .iter_enumerated()
+        .filter(|(l, _)| relevant.contains(l) && !taken.contains(l))
+        .filter(|(_, d)| {
+            matches!(inst_ty(tcx, env, inst, d.ty).kind(),
+                ty::Ref(_, t, ty::Mutability::Not) if t.is_freeze(tcx, env))
+        })
+        .map(|(l, _)| l)
+        .collect();
     let mut index = HashMap::new();
+    let mut of_local: HashMap<Local, Vec<usize>> = HashMap::new();
     let mut bounds = vec![(0, 0)];
     let usize_max = int_range(tcx, tcx.types.usize).map_or(INF, |r| r.1);
     let mut push = |v: Var, r: (i128, i128)| {
+        let l = match v {
+            Var::Local(l)
+            | Var::Len(l)
+            | Var::Field0(l)
+            | Var::RangeStart(l)
+            | Var::RangeEnd(l)
+            | Var::SomeVal(l)
+            | Var::NextOld(l)
+            | Var::Path(l, _)
+            | Var::PathLen(l, _)
+            | Var::FieldLen(l, _) => l,
+        };
+        of_local.entry(l).or_default().push(bounds.len());
         index.insert(v, bounds.len());
         bounds.push(r);
     };
@@ -621,12 +1182,38 @@ fn analyse_with<'tcx>(
             && let Some(r) = int_range(tcx, fields[0])
         {
             push(Var::Field0(local), r);
+        } else if let ty::Tuple(fields) = decl.ty.kind()
+            && fields.iter().any(is_slice_ptr)
+        {
+            for (k, f) in fields.iter().enumerate() {
+                if is_slice_ptr(f)
+                    && let Ok(k) = u32::try_from(k)
+                {
+                    push(Var::FieldLen(local, k), (0, usize_max));
+                }
+            }
         } else if let Some(r) = range_int(tcx, decl.ty).and_then(|t| int_range(tcx, t)) {
             push(Var::RangeStart(local), r);
             push(Var::RangeEnd(local), r);
         } else if let Some(r) = option_int(tcx, decl.ty).and_then(|t| int_range(tcx, t)) {
             push(Var::SomeVal(local), r);
             push(Var::NextOld(local), r);
+        }
+    }
+    for v in path_candidates(tcx, body, &shared, calls) {
+        let (b, fs, len) = match v {
+            Var::Path(b, fs) => (b, fs, false),
+            Var::PathLen(b, fs) => (b, fs, true),
+            _ => continue,
+        };
+        let ty = path_ty(tcx, body.local_decls[b].ty, fs);
+        let r = match ty {
+            Some(t) if len && is_slice_ptr(t) => Some((0, usize_max)),
+            Some(t) if !len => int_range(tcx, t),
+            _ => None,
+        };
+        if let Some(r) = r {
+            push(v, r);
         }
     }
     let n = bounds.len();
@@ -638,10 +1225,36 @@ fn analyse_with<'tcx>(
         env,
         body,
         index,
+        of_local,
         bounds,
         some_none: option_discriminants(tcx),
+        calls: calls.clone(),
+        shared,
     };
-    Some(cx.run(n_blocks))
+    let out = cx.run(n_blocks);
+    Some((cx, out))
+}
+
+/// The type at `(*b).f1.f2…` for `b: base` (a reference), through struct and tuple
+/// fields only.
+fn path_ty<'tcx>(tcx: TyCtxt<'tcx>, base: Ty<'tcx>, fs: Fields) -> Option<Ty<'tcx>> {
+    let ty::Ref(_, mut t, _) = *base.kind() else {
+        return None;
+    };
+    for &f in fs.as_slice() {
+        t = match t.kind() {
+            ty::Adt(def, args) if def.is_struct() => def
+                .non_enum_variant()
+                .fields
+                .iter()
+                .nth(usize::try_from(f).ok()?)?
+                .ty(tcx, args)
+                .skip_normalization(),
+            ty::Tuple(ts) => *ts.get(usize::try_from(f).ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(t)
 }
 
 /// Locals connected to an `Assert` condition, or with `switches` to the discriminant
@@ -649,7 +1262,12 @@ fn analyse_with<'tcx>(
 /// borrows, discriminants, the two `Range` calls of a `for` loop): only these are
 /// tracked. The others cannot constrain a checked value or a branch, so leaving them
 /// untracked loses nothing the analysis could use.
-fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switches: bool) -> HashSet<Local> {
+fn relevant_locals<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    mode: Mode,
+    calls: &HashMap<BasicBlock, Rc<RetSummary>>,
+) -> HashSet<Local> {
     let n = body.local_decls.len();
     let mut parent: Vec<usize> = (0..n).collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -670,7 +1288,10 @@ fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switches: bool) -
         _ => None,
     };
     let mut seeds: Vec<Local> = Vec::new();
-    for data in body.basic_blocks.iter() {
+    if mode.ret {
+        seeds.push(mir::RETURN_PLACE);
+    }
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
         for st in &data.statements {
             let StatementKind::Assign(assign) = &st.kind else {
                 continue;
@@ -686,7 +1307,10 @@ fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switches: bool) -
                     used.extend(op_local(&ops.0));
                     used.extend(op_local(&ops.1));
                 }
-                Rvalue::Ref(_, _, p) | Rvalue::RawPtr(_, p) | Rvalue::Discriminant(p) => {
+                Rvalue::Ref(_, _, p)
+                | Rvalue::RawPtr(_, p)
+                | Rvalue::Discriminant(p)
+                | Rvalue::CopyForDeref(p) => {
                     used.push(p.local);
                 }
                 Rvalue::Aggregate(_, ops) => used.extend(ops.iter().filter_map(op_local)),
@@ -698,7 +1322,7 @@ fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switches: bool) -
         }
         match &data.terminator().kind {
             TerminatorKind::Assert { cond, .. } => seeds.extend(op_local(cond)),
-            TerminatorKind::SwitchInt { discr, .. } if switches && !data.is_cleanup => {
+            TerminatorKind::SwitchInt { discr, .. } if mode.switches && !data.is_cleanup => {
                 seeds.extend(op_local(discr));
             }
             TerminatorKind::Call {
@@ -707,7 +1331,8 @@ fn relevant_locals<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, switches: bool) -
                 destination,
                 ..
             } if is_range_call(tcx, body, func, LangItem::IteratorNext)
-                || is_range_call(tcx, body, func, LangItem::IntoIterIntoIter) =>
+                || is_range_call(tcx, body, func, LangItem::IntoIterIntoIter)
+                || calls.contains_key(&bb) =>
             {
                 for a in args.iter() {
                     if let Some(u) = op_local(&a.node) {
@@ -761,6 +1386,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             borrow: BTreeMap::new(),
             opt: BTreeMap::new(),
             disc: BTreeMap::new(),
+            refs: BTreeMap::new(),
         }
     }
 
@@ -769,8 +1395,23 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
     }
 
     /// Drops the recorded comparisons, operations and `next` facts that mention `v`.
+    /// A comparison is kept if `v` equals another value `u` plus a constant: it is
+    /// rewritten in terms of `u` (which keeps its value when `v` changes).
     fn invalidate(&self, st: &mut State, v: usize) {
-        st.cond.retain(|_, c| !c.mentions(v));
+        let n = st.d.n;
+        let same = (0..n)
+            .find(|&u| u != v && st.d.get(v, u) < INF && st.d.get(v, u) == -st.d.get(u, v))
+            .map(|u| (u, st.d.get(v, u)));
+        st.cond = std::mem::take(&mut st.cond)
+            .into_iter()
+            .filter_map(|(l, c)| {
+                if !c.mentions(v) {
+                    Some((l, c))
+                } else {
+                    same.map(|(u, k)| (l, c.rewrite(v, u, k)))
+                }
+            })
+            .collect();
         st.ovf
             .retain(|_, o| !(o.a.v == v && v != 0) && !(o.b.v == v && v != 0));
         st.opt.retain(|_, f| !f.mentions(v));
@@ -778,27 +1419,19 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
 
     /// Forgets `v` and restores its type bounds.
     fn forget_var(&self, st: &mut State, v: usize) {
+        self.invalidate(st, v);
         st.d.forget(v);
         let (lo, hi) = self.bounds[v];
         st.d.constrain(v, 0, hi);
         if lo > -INF {
             st.d.constrain(0, v, -lo);
         }
-        self.invalidate(st, v);
     }
 
     /// Forgets everything known about local `l`.
     fn kill(&self, st: &mut State, l: Local) {
-        for v in [
-            Var::Local(l),
-            Var::Len(l),
-            Var::Field0(l),
-            Var::RangeStart(l),
-            Var::RangeEnd(l),
-            Var::SomeVal(l),
-            Var::NextOld(l),
-        ] {
-            if let Some(i) = self.var(v) {
+        if let Some(vs) = self.of_local.get(&l) {
+            for &i in vs {
                 self.forget_var(st, i);
             }
         }
@@ -811,6 +1444,8 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         st.opt.remove(&l);
         st.disc.remove(&l);
         st.disc.retain(|_, o| *o != l);
+        st.refs.remove(&l);
+        st.refs.retain(|_, (b, _)| *b != l);
     }
 
     fn reset(&self, st: &mut State) {
@@ -840,9 +1475,12 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         }
     }
 
-    fn place_lin(&self, _st: &State, p: &Place<'tcx>) -> Option<Lin> {
+    fn place_lin(&self, st: &State, p: &Place<'tcx>) -> Option<Lin> {
         if let Some(l) = p.as_local() {
             return self.var(Var::Local(l)).map(|v| Lin { v, c: 0 });
+        }
+        if let Some((b, fs)) = path_of(p) {
+            return self.path_var(st, b, fs, false).map(|v| Lin { v, c: 0 });
         }
         match p.projection.as_slice() {
             [ProjectionElem::Field(f, _)] if f.as_usize() == 0 => {
@@ -854,6 +1492,47 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             }
             _ => None,
         }
+    }
+
+    /// The tracked value at `(*q).fs` (its slice metadata if `len`): through the path
+    /// `q` points to (`st.refs`) if tracked, else directly; only for a shared
+    /// reference `q` to a `Freeze` type.
+    fn path_var(&self, st: &State, q: Local, fs: Fields, len: bool) -> Option<usize> {
+        let mk = |b: Local, f: Fields| {
+            if len {
+                Var::PathLen(b, f)
+            } else {
+                Var::Path(b, f)
+            }
+        };
+        if let Some((b, f0)) = st.refs.get(&q)
+            && let Some(f) = f0.concat(&fs)
+            && let Some(v) = self.var(mk(*b, f))
+        {
+            return Some(v);
+        }
+        if !self.shared.contains(&q) {
+            return None;
+        }
+        self.var(mk(q, fs))
+    }
+
+    /// The tracked length of the slice pointer `op`: of a local (or the slice local
+    /// it was derived from), or stored at an access path.
+    fn len_of(&self, st: &State, op: &Operand<'tcx>) -> Option<usize> {
+        if let Some(b) = self.slice_base(st, op) {
+            return self.var(Var::Len(b));
+        }
+        let (Operand::Copy(p) | Operand::Move(p)) = op else {
+            return None;
+        };
+        if let Some((b, fs)) = path_of(p) {
+            return self.path_var(st, b, fs, true);
+        }
+        if let [ProjectionElem::Field(f, _)] = p.projection.as_slice() {
+            return self.var(Var::FieldLen(p.local, f.as_u32()));
+        }
+        None
     }
 
     /// The slice local whose length `op` (a slice pointer) has.
@@ -984,12 +1663,17 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
 
     /// Adds `t.0 = a op b` (after the overflow check of `t` succeeded).
     fn define_result(&self, st: &mut State, t: Local, o: Ovf) -> bool {
-        let Some(r) = self.var(Var::Field0(t)) else {
-            return true;
-        };
+        match self.var(Var::Field0(t)) {
+            Some(r) => self.define_var(st, r, o.op, o.a, o.b),
+            None => true,
+        }
+    }
+
+    /// Adds `r = a op b` for a result `r` known to be in range (a checked operation
+    /// that succeeded, or an unchecked one, whose overflow is undefined behaviour).
+    fn define_var(&self, st: &mut State, r: usize, op: ArithOp, a: Lin, b: Lin) -> bool {
         let res = Lin { v: r, c: 0 };
-        let (a, b) = (o.a, o.b);
-        match o.op {
+        match op {
             ArithOp::Add => {
                 // r - a = b and r - b = a, each within its bounds.
                 let (lb, ub) = (self.lower(st, b), self.upper(st, b));
@@ -1006,8 +1690,20 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 // r = a - b: r - a.v = a.c - b.
                 let (lb, ub) = (self.lower(st, b), self.upper(st, b));
                 let za = Lin { v: a.v, c: 0 };
+                // And r lies within the bounds known for the difference a - b.
+                let zero = Lin { v: 0, c: 0 };
+                let (hi, lo) = if a.v == b.v {
+                    (a.c - b.c, b.c - a.c)
+                } else {
+                    (
+                        add(st.d.get(a.v, b.v), a.c - b.c),
+                        add(st.d.get(b.v, a.v), b.c - a.c),
+                    )
+                };
                 (lb <= -INF || self.add_le(st, res, za, a.c - lb))
                     && (ub >= INF || self.add_le(st, za, res, ub - a.c))
+                    && (hi >= INF || self.add_le(st, res, zero, hi))
+                    && (lo >= INF || self.add_le(st, zero, res, lo))
             }
             ArithOp::Mul => {
                 let (la, lb) = (self.lower(st, a), self.lower(st, b));
@@ -1087,35 +1783,92 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         })
     }
 
+    /// `l = op` (a copy or move).
+    fn assign_use(&self, st: &mut State, l: Local, op: &Operand<'tcx>) {
+        if let Some(x) = self.lin(st, op) {
+            self.set(st, l, x);
+            return;
+        }
+        let copied = match op {
+            Operand::Copy(p) | Operand::Move(p) => p.as_local(),
+            _ => None,
+        };
+        let cond = copied.and_then(|c| st.cond.get(&c).copied());
+        let base = self.slice_base(st, op);
+        let len = self.len_of(st, op);
+        let range = copied.filter(|c| *c != l).and_then(|c| self.range_vars(c));
+        // `q = copy p` of a shared reference: `q` points where `p` does.
+        let refd = copied.filter(|c| *c != l).and_then(|c| {
+            st.refs
+                .get(&c)
+                .copied()
+                .or_else(|| self.shared.contains(&c).then_some((c, Fields::EMPTY)))
+        });
+        let own_len = len.is_some_and(|v| self.of_local.get(&l).is_some_and(|vs| vs.contains(&v)));
+        self.kill(st, l);
+        if let Some(c) = cond {
+            st.cond.insert(l, c);
+        }
+        if let Some(b) = base
+            && b != l
+        {
+            st.slice.insert(l, b);
+        }
+        if let (Some(v), Some(me)) = (len, self.var(Var::Len(l)))
+            && !own_len
+        {
+            self.equate(st, me, Lin { v, c: 0 });
+        }
+        if let Some((b, fs)) = refd
+            && b != l
+        {
+            st.refs.insert(l, (b, fs));
+        }
+        // `r2 = move r` of a `Range`: same `start` and `end`.
+        if let (Some((s, e)), Some((s2, e2))) = (range, self.range_vars(l)) {
+            self.equate(st, s2, Lin { v: s, c: 0 });
+            self.equate(st, e2, Lin { v: e, c: 0 });
+        }
+    }
+
+    /// `l = op as to` for a slice pointer type `to`: a pointer cast between slice
+    /// pointers keeps the metadata; an unsizing coercion of a pointer to `[T; N]`
+    /// has the metadata `N`.
+    fn assign_slice_cast(&self, st: &mut State, l: Local, kind: mir::CastKind, op: &Operand<'tcx>) {
+        let from = op.ty(&self.body.local_decls, self.tcx);
+        let len = match kind {
+            mir::CastKind::PtrToPtr
+            | mir::CastKind::PointerCoercion(PointerCoercion::MutToConstPointer, _)
+                if is_slice_ptr(from) =>
+            {
+                self.len_of(st, op).map(|v| Lin { v, c: 0 })
+            }
+            mir::CastKind::PointerCoercion(PointerCoercion::Unsize, _) => from
+                .builtin_deref(true)
+                .and_then(|t| match t.kind() {
+                    ty::Array(_, n) => n.try_to_target_usize(self.tcx),
+                    _ => None,
+                })
+                .map(|n| Lin {
+                    v: 0,
+                    c: i128::from(n),
+                }),
+            _ => None,
+        };
+        let len = len.filter(|x| !self.mentions_local(*x, l));
+        self.kill(st, l);
+        if let (Some(x), Some(me)) = (len, self.var(Var::Len(l))) {
+            self.equate(st, me, x);
+        }
+    }
+
     fn assign(&self, st: &mut State, l: Local, rv: &Rvalue<'tcx>) -> bool {
         // Read the operands in the state before the assignment.
         match rv {
-            Rvalue::Use(op, ..) => {
-                if let Some(x) = self.lin(st, op) {
-                    self.set(st, l, x);
-                    return true;
-                }
-                let copied = match op {
-                    Operand::Copy(p) | Operand::Move(p) => p.as_local(),
-                    _ => None,
-                };
-                let cond = copied.and_then(|c| st.cond.get(&c).copied());
-                let base = self.slice_base(st, op);
-                let range = copied.filter(|c| *c != l).and_then(|c| self.range_vars(c));
-                self.kill(st, l);
-                if let Some(c) = cond {
-                    st.cond.insert(l, c);
-                }
-                if let Some(b) = base
-                    && b != l
-                {
-                    st.slice.insert(l, b);
-                }
-                // `r2 = move r` of a `Range`: same `start` and `end`.
-                if let (Some((s, e)), Some((s2, e2))) = (range, self.range_vars(l)) {
-                    self.equate(st, s2, Lin { v: s, c: 0 });
-                    self.equate(st, e2, Lin { v: e, c: 0 });
-                }
+            Rvalue::Use(op, ..) => self.assign_use(st, l, op),
+            Rvalue::CopyForDeref(p) => self.assign_use(st, l, &Operand::Copy(*p)),
+            Rvalue::Cast(kind, op, to) if is_slice_ptr(*to) => {
+                self.assign_slice_cast(st, l, *kind, op);
             }
             Rvalue::Cast(mir::CastKind::IntToInt, op, to) => {
                 let from = op.ty(&self.body.local_decls, self.tcx);
@@ -1127,6 +1880,26 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 match x {
                     Some(x) if keeps => self.set(st, l, x),
                     _ => self.kill(st, l),
+                }
+            }
+            Rvalue::BinaryOp(op @ (BinOp::AddUnchecked | BinOp::SubUnchecked), ops) => {
+                // Overflow of an unchecked operation is undefined behaviour: the result
+                // is the mathematical one.
+                let (a, b) = &**ops;
+                let (la, lb) = (self.lin(st, a), self.lin(st, b));
+                let aop = if *op == BinOp::AddUnchecked {
+                    ArithOp::Add
+                } else {
+                    ArithOp::Sub
+                };
+                let fresh = |x: &Lin| !self.mentions_local(*x, l);
+                self.kill(st, l);
+                if let (Some(x), Some(y), Some(r)) = (la, lb, self.var(Var::Local(l)))
+                    && fresh(&x)
+                    && fresh(&y)
+                    && !self.define_var(st, r, aop, x, y)
+                {
+                    return false;
                 }
             }
             Rvalue::BinaryOp(op, ops) => {
@@ -1195,13 +1968,10 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     st.cond.insert(l, c.negate());
                 }
             }
-            Rvalue::UnaryOp(UnOp::PtrMetadata, op) => {
-                let base = self.slice_base(st, op);
-                match base.and_then(|b| self.var(Var::Len(b))) {
-                    Some(v) => self.set(st, l, Lin { v, c: 0 }),
-                    None => self.kill(st, l),
-                }
-            }
+            Rvalue::UnaryOp(UnOp::PtrMetadata, op) => match self.len_of(st, op) {
+                Some(v) => self.set(st, l, Lin { v, c: 0 }),
+                None => self.kill(st, l),
+            },
             Rvalue::Ref(_, kind, p) => {
                 // `q = &(*p)`, `&mut (*p)`: same metadata as `p`.
                 let base = self.deref_base(st, p);
@@ -1210,27 +1980,32 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     && p.projection.is_empty()
                     && self.range_vars(p.local).is_some())
                 .then_some(p.local);
+                // `q = &(*p).f…` of a shared reference `p` to a `Freeze` type.
+                let refd = match (kind, path_of(p)) {
+                    (mir::BorrowKind::Shared, Some((b, fs))) => match st.refs.get(&b) {
+                        Some((b0, f0)) => f0.concat(&fs).map(|f| (*b0, f)),
+                        None => self.shared.contains(&b).then_some((b, fs)),
+                    },
+                    _ => None,
+                };
                 self.kill(st, l);
-                if let Some(b) = base
-                    && b != l
-                {
-                    st.slice.insert(l, b);
-                }
+                self.link_slice(st, l, base);
                 if let Some(r) = range
                     && r != l
                 {
                     st.borrow.insert(l, r);
+                }
+                if let Some((b, fs)) = refd
+                    && b != l
+                {
+                    st.refs.insert(l, (b, fs));
                 }
             }
             Rvalue::RawPtr(_, p) => {
                 // `q = &raw const (*p)`: same metadata as `p`.
                 let base = self.deref_base(st, p);
                 self.kill(st, l);
-                if let Some(b) = base
-                    && b != l
-                {
-                    st.slice.insert(l, b);
-                }
+                self.link_slice(st, l, base);
             }
             Rvalue::Aggregate(kind, ops) => {
                 // `r = Range { start: a, end: b }`.
@@ -1246,6 +2021,25 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     }
                     _ => None,
                 };
+                // `p = *const [T] from (data, meta)`: the metadata is `meta`.
+                let meta = match &**kind {
+                    mir::AggregateKind::RawPtr(..) => {
+                        ops.iter().nth(1).and_then(|m| self.lin(st, m))
+                    }
+                    _ => None,
+                };
+                // `t = (a, b, ..)`: the slice pointer fields keep their metadata.
+                let tuple: Vec<(u32, Lin)> = match &**kind {
+                    mir::AggregateKind::Tuple => ops
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(k, op)| {
+                            let v = self.len_of(st, op)?;
+                            Some((u32::try_from(k).ok()?, Lin { v, c: 0 }))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 self.kill(st, l);
                 if let (Some((a, b)), Some((s, e))) = (fields, self.range_vars(l))
                     && !self.mentions_local(a, l)
@@ -1253,6 +2047,18 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 {
                     self.equate(st, s, a);
                     self.equate(st, e, b);
+                }
+                if let (Some(m), Some(me)) = (meta, self.var(Var::Len(l)))
+                    && !self.mentions_local(m, l)
+                {
+                    self.equate(st, me, m);
+                }
+                for (k, x) in tuple {
+                    if let Some(me) = self.var(Var::FieldLen(l, k))
+                        && !self.mentions_local(x, l)
+                    {
+                        self.equate(st, me, x);
+                    }
                 }
             }
             Rvalue::Discriminant(p) => {
@@ -1267,6 +2073,18 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             _ => self.kill(st, l),
         }
         true
+    }
+
+    /// `l` now has the metadata of the slice local `base` (`l = &(*base)`, ..).
+    fn link_slice(&self, st: &mut State, l: Local, base: Option<Local>) {
+        if let Some(b) = base
+            && b != l
+        {
+            st.slice.insert(l, b);
+            if let (Some(me), Some(v)) = (self.var(Var::Len(l)), self.var(Var::Len(b))) {
+                self.equate(st, me, Lin { v, c: 0 });
+            }
+        }
     }
 
     /// The slice local whose metadata `&(*p)` has.
@@ -1287,18 +2105,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
 
     /// `x` is a value of local `l` (any of its tracked parts).
     fn mentions_local(&self, x: Lin, l: Local) -> bool {
-        x.v != 0
-            && [
-                Var::Local(l),
-                Var::Len(l),
-                Var::Field0(l),
-                Var::RangeStart(l),
-                Var::RangeEnd(l),
-                Var::SomeVal(l),
-                Var::NextOld(l),
-            ]
-            .iter()
-            .any(|v| self.var(*v) == Some(x.v))
+        x.v != 0 && self.of_local.get(&l).is_some_and(|vs| vs.contains(&x.v))
     }
 
     /// Adds `v = x`.
@@ -1358,6 +2165,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
     fn successors(
         &self,
         st: &State,
+        bb: BasicBlock,
         term: &mir::Terminator<'tcx>,
     ) -> Vec<(BasicBlock, Option<State>)> {
         let mut out = Vec::new();
@@ -1434,8 +2242,8 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             } => {
                 if let Some(t) = target {
                     let mut s = st.clone();
-                    self.call(&mut s, func, args, destination);
-                    out.push((*t, Some(s)));
+                    let ok = self.call(&mut s, bb, func, args, destination);
+                    out.push((*t, ok.then_some(s)));
                 }
             }
             TerminatorKind::InlineAsm { .. } => {
@@ -1505,15 +2313,18 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         Some(out)
     }
 
-    /// The return edge of a call: the destination is forgotten, except for the two
-    /// `Range` calls of a `for` loop, which are modelled.
+    /// The return edge of a call: the two `Range` calls of a `for` loop are
+    /// modelled; a callee with a return summary relates the destination to the
+    /// arguments; otherwise the destination is forgotten. `false` if the call cannot
+    /// return in `st`.
     fn call(
         &self,
         st: &mut State,
+        bb: BasicBlock,
         func: &Operand<'tcx>,
         args: &[rustc_span::Spanned<Operand<'tcx>>],
         destination: &Place<'tcx>,
-    ) {
+    ) -> bool {
         let tcx = self.tcx;
         let arg = match args {
             [a] => match &a.node {
@@ -1536,7 +2347,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 self.equate(st, s2, Lin { v: s, c: 0 });
                 self.equate(st, e2, Lin { v: e, c: 0 });
             }
-            return;
+            return true;
         }
         // `d = <Range<_> as Iterator>::next(&mut r)`: `Some(start)` and `start += 1`
         // if `start < end`, else `None`; `end` is unchanged.
@@ -1575,11 +2386,110 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     ],
                 },
             );
-            return;
+            return true;
+        }
+        if let Some(s) = self.calls.get(&bb) {
+            return self.apply_summary(st, s, args, destination);
         }
         if !destination.is_indirect_first_projection() {
             self.kill(st, destination.local);
         }
+        true
+    }
+
+    /// The value of the callee's interface value `sv` at the call site (arguments
+    /// only), read before the call.
+    fn arg_value(
+        &self,
+        st: &State,
+        sv: SVar,
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+    ) -> Option<Lin> {
+        let op = |i: u32| args.get(usize::try_from(i).ok()?).map(|a| &a.node);
+        let via_ref = |i: u32, fs: Fields, len: bool| {
+            let (Operand::Copy(p) | Operand::Move(p)) = op(i)? else {
+                return None;
+            };
+            self.path_var(st, p.as_local()?, fs, len)
+                .map(|v| Lin { v, c: 0 })
+        };
+        match sv {
+            SVar::Zero => Some(Lin { v: 0, c: 0 }),
+            SVar::Arg(i) => self.lin(st, op(i)?),
+            SVar::ArgLen(i) => self.len_of(st, op(i)?).map(|v| Lin { v, c: 0 }),
+            SVar::ArgPath(i, fs) => via_ref(i, fs, false),
+            SVar::ArgPathLen(i, fs) => via_ref(i, fs, true),
+            SVar::Ret | SVar::RetLen | SVar::RetFieldLen(_) => None,
+        }
+    }
+
+    /// The return edge of a call with summary `s`: the destination gets the facts
+    /// of the summary over the argument values. `false` if the callee cannot return
+    /// (or not with these arguments).
+    fn apply_summary(
+        &self,
+        st: &mut State,
+        s: &RetSummary,
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+        destination: &Place<'tcx>,
+    ) -> bool {
+        let dest = destination.as_local();
+        let mut values: HashMap<SVar, Lin> = HashMap::new();
+        for sv in s.svars() {
+            if let Some(x) = self.arg_value(st, sv, args)
+                && dest.is_none_or(|d| !self.mentions_local(x, d))
+            {
+                values.insert(sv, x);
+            }
+        }
+        if !destination.is_indirect_first_projection() {
+            self.kill(st, destination.local);
+        }
+        if s.never_returns {
+            return false;
+        }
+        if let Some(d) = dest {
+            let ret = |v: Var| self.var(v).map(|v| Lin { v, c: 0 });
+            if let Some(x) = ret(Var::Local(d)) {
+                values.insert(SVar::Ret, x);
+            }
+            if let Some(x) = ret(Var::Len(d)) {
+                values.insert(SVar::RetLen, x);
+            }
+            for sv in s.svars() {
+                if let SVar::RetFieldLen(k) = sv
+                    && let Some(x) = ret(Var::FieldLen(d, k))
+                {
+                    values.insert(sv, x);
+                }
+            }
+        }
+        for f in &s.facts {
+            if let (Some(a), Some(b)) = (values.get(&f.a), values.get(&f.b))
+                && !self.add_le(st, *a, *b, f.c)
+            {
+                return false;
+            }
+        }
+        if let (Some(d), Some((op, a, ka, b, kb))) = (dest, s.cond)
+            && let (Some(x), Some(y)) = (values.get(&a), values.get(&b))
+        {
+            st.cond.insert(
+                d,
+                Cmp {
+                    op,
+                    a: Lin {
+                        v: x.v,
+                        c: x.c + ka,
+                    },
+                    b: Lin {
+                        v: y.v,
+                        c: y.c + kb,
+                    },
+                },
+            );
+        }
+        true
     }
 
     /// Applies `f` to the tracked value of the integer operand `op`, if any (the
@@ -1612,7 +2522,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         Some(st)
     }
 
-    fn run(&self, n_blocks: usize) -> Proved {
+    fn run(&self, n_blocks: usize) -> Outcome {
         let body = self.body;
         let rpo: Vec<BasicBlock> = body
             .basic_blocks
@@ -1640,7 +2550,10 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let mut closed = vec![true; n_blocks];
         let mut visits = vec![0u32; n_blocks];
         let Some(&start) = rpo.first() else {
-            return Proved::default();
+            return Outcome {
+                proved: Proved::default(),
+                returns: None,
+            };
         };
         entry[start.as_usize()] = Some(self.entry());
         let mut work: BTreeSet<usize> = BTreeSet::from([0]);
@@ -1648,7 +2561,10 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let mut budget = 200 * rpo.len() + 1000;
         while let Some(k) = work.pop_first() {
             if budget == 0 {
-                return Proved::default();
+                return Outcome {
+                    proved: Proved::default(),
+                    returns: None,
+                };
             }
             budget -= 1;
             let bb = rpo[k];
@@ -1661,7 +2577,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             let Some(out) = self.through(&in_state, bb) else {
                 continue;
             };
-            for (succ, s) in self.successors(&out, body.basic_blocks[bb].terminator()) {
+            for (succ, s) in self.successors(&out, bb, body.basic_blocks[bb].terminator()) {
                 let Some(s) = s else {
                     continue;
                 };
@@ -1690,6 +2606,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         }
         let mut asserts = vec![false; n_blocks];
         let mut dead = vec![false; n_blocks];
+        let mut returns = Vec::new();
         for bb in &rpo {
             let b = bb.as_usize();
             // The state at the terminator; `None` if no feasible path reaches it.
@@ -1711,14 +2628,142 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 );
                 continue;
             };
-            if let TerminatorKind::Assert { cond, expected, .. } =
-                &body.basic_blocks[*bb].terminator().kind
-            {
-                asserts[b] = self.decide_operand(&st, cond) == Some(*expected);
+            match &body.basic_blocks[*bb].terminator().kind {
+                TerminatorKind::Assert { cond, expected, .. } => {
+                    asserts[b] = self.decide_operand(&st, cond) == Some(*expected);
+                }
+                TerminatorKind::Return => returns.push(st),
+                _ => {}
             }
         }
-        Proved { asserts, dead }
+        Outcome {
+            proved: Proved { asserts, dead },
+            returns: Some(returns),
+        }
     }
+
+    /// The interface values tracked in this body, for a summary: the return value
+    /// and the values of the parameters that the body never changes.
+    fn interface(&self) -> Vec<(SVar, usize)> {
+        let mut out = vec![(SVar::Zero, 0)];
+        let changed = changed_locals(self.body);
+        for (v, &i) in &self.index {
+            let sv = match *v {
+                Var::Local(l) if l == mir::RETURN_PLACE => SVar::Ret,
+                Var::Len(l) if l == mir::RETURN_PLACE => SVar::RetLen,
+                Var::FieldLen(l, k) if l == mir::RETURN_PLACE => SVar::RetFieldLen(k),
+                Var::Local(l) | Var::Len(l) | Var::Path(l, _) | Var::PathLen(l, _)
+                    if l != mir::RETURN_PLACE
+                        && l.as_usize() <= self.body.arg_count
+                        && !changed.contains(&l) =>
+                {
+                    let Ok(a) = u32::try_from(l.as_usize() - 1) else {
+                        continue;
+                    };
+                    match *v {
+                        Var::Local(_) => SVar::Arg(a),
+                        Var::Len(_) => SVar::ArgLen(a),
+                        Var::Path(_, fs) => SVar::ArgPath(a, fs),
+                        Var::PathLen(_, fs) => SVar::ArgPathLen(a, fs),
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            };
+            out.push((sv, i));
+        }
+        out.sort();
+        out
+    }
+
+    /// `x` in terms of an interface value (itself, or one it equals plus a constant).
+    fn express(&self, st: &State, x: Lin, iface: &[(SVar, usize)]) -> Option<(SVar, i128)> {
+        if let Some((sv, _)) = iface.iter().find(|(_, i)| *i == x.v) {
+            return Some((*sv, x.c));
+        }
+        iface.iter().find_map(|(sv, u)| {
+            let k = st.d.get(x.v, *u);
+            (k < INF && k == -st.d.get(*u, x.v)).then_some((*sv, x.c + k))
+        })
+    }
+
+    /// The return summary from the states at the reachable `return`s.
+    fn summary(&self, returns: Vec<State>) -> Option<RetSummary> {
+        let iface = self.interface();
+        let Some(first) = returns.first() else {
+            return Some(RetSummary {
+                never_returns: true,
+                ..RetSummary::default()
+            });
+        };
+        let joined = returns.iter().skip(1).fold(first.clone(), |a, b| a.join(b));
+        let mut facts = Vec::new();
+        for (sa, a) in &iface {
+            for (sb, b) in &iface {
+                let c = joined.d.get(*a, *b);
+                if a != b && c < INF {
+                    facts.push(Fact { a: *sa, b: *sb, c });
+                }
+            }
+        }
+        let mut cond = None;
+        for (k, st) in returns.iter().enumerate() {
+            let c = st.cond.get(&mir::RETURN_PLACE).and_then(|c| {
+                let (a, ka) = self.express(st, c.a, &iface)?;
+                let (b, kb) = self.express(st, c.b, &iface)?;
+                Some((c.op, a, ka, b, kb))
+            });
+            if k == 0 {
+                cond = c;
+            } else if cond != c {
+                cond = None;
+            }
+            if cond.is_none() {
+                break;
+            }
+        }
+        if facts.is_empty() && cond.is_none() {
+            return None;
+        }
+        Some(RetSummary {
+            facts,
+            cond,
+            never_returns: false,
+        })
+    }
+}
+
+impl RetSummary {
+    /// Every interface value the summary mentions.
+    fn svars(&self) -> Vec<SVar> {
+        let mut v: Vec<SVar> = self.facts.iter().flat_map(|f| [f.a, f.b]).collect();
+        if let Some((_, a, _, b, _)) = self.cond {
+            v.push(a);
+            v.push(b);
+        }
+        v.sort();
+        v.dedup();
+        v
+    }
+}
+
+/// Locals that the body may change after entry: assigned (also partly, but not
+/// through a dereference), borrowed mutably or by raw pointer, or used by inline
+/// assembly. A parameter not in this set holds its entry value throughout.
+fn changed_locals(body: &Body<'_>) -> HashSet<Local> {
+    struct Changed(HashSet<Local>);
+    impl<'tcx> Visitor<'tcx> for Changed {
+        fn visit_place(&mut self, p: &Place<'tcx>, ctxt: PlaceContext, _: mir::Location) {
+            let changes =
+                matches!(ctxt, PlaceContext::MutatingUse(_)) && !p.is_indirect_first_projection();
+            if changes {
+                self.0.insert(p.local);
+            }
+        }
+    }
+    let mut c = Changed(HashSet::new());
+    c.visit_body(body);
+    c.0
 }
 
 #[cfg(test)]
@@ -1759,6 +2804,31 @@ mod tests {
         assert!(f.constrain(2, 1, 0));
         assert!(f.close());
         assert_eq!(f.get(1, 2), 0);
+    }
+
+    #[test]
+    fn access_path_fields() {
+        let a = Fields::new(&[0, 1]).unwrap();
+        let b = Fields::new(&[2]).unwrap();
+        assert_eq!(a.concat(&b).unwrap().as_slice(), &[0, 1, 2]);
+        assert_eq!(Fields::EMPTY.concat(&b), Some(b));
+        // Longer than `MAX_PATH`: not a tracked path.
+        assert!(a.concat(&a).unwrap().concat(&b).is_none());
+        assert!(Fields::new(&[0; MAX_PATH + 1]).is_none());
+    }
+
+    #[test]
+    fn comparison_rewritten_through_equal_value() {
+        // c: v1 < v2 + 3; with v1 = v3 - 2, forgetting v1 gives v3 - 2 < v2 + 3.
+        let c = Cmp {
+            op: CmpOp::Lt,
+            a: Lin { v: 1, c: 0 },
+            b: Lin { v: 2, c: 3 },
+        };
+        let r = c.rewrite(1, 3, -2);
+        assert_eq!(r.a, Lin { v: 3, c: -2 });
+        assert_eq!(r.b, Lin { v: 2, c: 3 });
+        assert!(!r.mentions(1));
     }
 
     #[test]

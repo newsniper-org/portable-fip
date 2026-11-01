@@ -516,6 +516,34 @@ pub mod mir {
         UB_CHECK_MARKERS.iter().any(|m| path.contains(m))
     }
 
+    /// Results of intrinsics, which have no MIR, as return summaries for the value
+    /// analysis of `fip-prelint` (limits plan L2; functions with MIR are summarised
+    /// from their MIR instead). `(name, k)`: for an integer type argument `T` of bit
+    /// width `w`, the result lies in `0..=w - k`. Sources (`core` documentation of
+    /// the stable wrappers, which call these intrinsics on rustc 1.99.1):
+    /// `count_ones` ("the number of ones in the binary representation"),
+    /// `leading_zeros`/`trailing_zeros` (the number of leading/trailing zeros, `w` for
+    /// zero), and `NonZero::leading_zeros`/`trailing_zeros` (`ctlz_nonzero`/
+    /// `cttz_nonzero`: undefined behaviour for zero, so at most `w - 1`). Each entry has
+    /// a differential test against the real function on boundary inputs.
+    pub const INTRINSIC_RESULT_BOUNDS: &[(&str, u32)] = &[
+        ("ctpop", 0),
+        ("ctlz", 0),
+        ("cttz", 0),
+        ("ctlz_nonzero", 1),
+        ("cttz_nonzero", 1),
+    ];
+
+    /// The largest result of the intrinsic `name` for an integer type of bit width
+    /// `width` ([`INTRINSIC_RESULT_BOUNDS`]); its smallest result is 0.
+    #[must_use]
+    pub fn intrinsic_result_bound(name: &str, width: u32) -> Option<u32> {
+        INTRINSIC_RESULT_BOUNDS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, k)| width.checked_sub(*k))
+    }
+
     /// `true` for an intrinsic in [`ALLOC_FREE_INTRINSICS`].
     #[must_use]
     pub fn is_alloc_free_intrinsic(name: &str) -> bool {
@@ -532,6 +560,47 @@ pub mod mir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Differential test of `mir::INTRINSIC_RESULT_BOUNDS`: the real stable wrappers of
+    /// each intrinsic, on boundary inputs of every unsigned and signed width, stay
+    /// within the table's bound (and the bound is reached, so it is not loose).
+    #[test]
+    fn intrinsic_result_bounds() {
+        use core::num::NonZero;
+        let bound = |name: &str, w: u32| mir::intrinsic_result_bound(name, w).unwrap();
+        macro_rules! check {
+            ($($t:ty),*) => {$({
+                let w = <$t>::BITS;
+                let inputs: [$t; 7] = [0, 1, !0, <$t>::MAX, <$t>::MIN, <$t>::MAX >> 1, 1 << (w - 1)];
+                let mut seen = [0u32; 5];
+                for x in inputs {
+                    let r = [x.count_ones(), x.leading_zeros(), x.trailing_zeros()];
+                    for (k, name) in ["ctpop", "ctlz", "cttz"].into_iter().enumerate() {
+                        assert!(r[k] <= bound(name, w), "{name}({x}) for {}", stringify!($t));
+                        seen[k] = seen[k].max(r[k]);
+                    }
+                    if let Some(n) = NonZero::new(x) {
+                        let r = [n.leading_zeros(), n.trailing_zeros()];
+                        for (k, name) in ["ctlz_nonzero", "cttz_nonzero"].into_iter().enumerate() {
+                            assert!(r[k] <= bound(name, w), "{name}({x}) for {}", stringify!($t));
+                            seen[3 + k] = seen[3 + k].max(r[k]);
+                        }
+                    }
+                }
+                for (k, name) in ["ctpop", "ctlz", "cttz", "ctlz_nonzero", "cttz_nonzero"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    assert_eq!(seen[k], bound(name, w), "{name} bound reached for {}", stringify!($t));
+                }
+            })*};
+        }
+        check!(
+            u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
+        );
+        assert_eq!(mir::intrinsic_result_bound("ctpop", 32), Some(32));
+        assert_eq!(mir::intrinsic_result_bound("add_with_overflow", 32), None);
+    }
 
     #[test]
     fn core_table_lookup() {
