@@ -3,8 +3,8 @@
 
 # `fip-prelint`: a plan for every remaining limit
 
-**Status:** PROPOSED, 2026-11-02. Nothing here is implemented. The user approves this
-plan before any implementation starts. Builds on
+**Status:** ACCEPTED in full by the user, 2026-11-02; implemented on branch
+`prelint/limits-plan` in the order below (each item its own commit). Builds on
 `docs/decisions/2026-11-01-fip-prelint.md` (ACCEPTED) and `TODOs/fip-prelint.md`
 (open items 2 and 4–8). Code references are to commit `06c99ac`.
 
