@@ -418,3 +418,64 @@ decision record's amendment. The `export_unencoded` fixture now injects `fip::ex
 through RUSTFLAGS into a crate whose source does not declare it, the only remaining
 way to get an active `fip::export` without MIR.
 
+
+## Resolved 2026-11-02: allocation and free sources (limits plan L7)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L7 (item 1 of its order).
+Principle (user): allocation inside an allocator is outside FIP; a source is an opaque
+boundary counted at the call site.
+
+**Before**, measured with the driver built from `f977844` on the fixture
+`alloc_sources` with every `fip::alloc_source`/`fip::free_source` line removed (the
+M2 probe plus the new cases; `/tmp/pd-wave1-before`):
+
+| root | before | after (fixture `alloc_sources`, marked) |
+|---|---|---|
+| `arena_once` (M2) | passed (false pass) | 1 allocation, error |
+| `arena_loop`, `fip(3)` (M2) | passed (false pass) | `∞`, error |
+| `arena_reset` (M2) | passed (false pass) | may free, error |
+| `slab_cycle` (M2) | passed (false pass) | 1 allocation + may free, errors |
+| `galloc::direct_global_alloc` (M2) | passed (false pass) | 1 allocation (`<Bump as GlobalAlloc>::alloc`), error |
+| `slab_cycle_fbip` | passed | 1 allocation, error (the free is allowed) |
+| `slab_pair` (`n = 2` under `fip(2)`) / `slab_pair_over` (`fip(1)`) | passed / passed | passed / 2 allocations, error |
+| `take_slab` / `take_generic::<P>` (source on `Pool::take`) | passed / warning (term `<P as Pool>::take`) | 1 allocation / 1 allocation, errors |
+| `refill_once` (source body: `Box::new` twice in a loop, recursion) | `∞`, may free, recursion (3 errors from the body) | passed (1 allocation within `fip(1)`; nothing from the body) |
+| `direct_alloc_zeroed`, `direct_dealloc` (default/empty `GlobalAlloc` methods) | passed, passed | 1 allocation, may free |
+| `direct_system_alloc` | `⊤` ×3 (`libc::unix::{calloc, malloc, posix_memalign}`) | 1 allocation |
+| `via_dyn` (`&dyn GlobalAlloc`) | `⊤` (dynamic call) | 1 allocation |
+| `ffi_malloc`, `ffi_free` | `⊤`, `⊤` | 1 allocation, may free |
+| `ffi_marked` (foreign, marked) / `ffi_unknown` | `⊤` / `⊤` | 1 allocation / `⊤` |
+| `plain_arena_once` (unmarked arena), `control`, `rust_named_malloc` | passed | passed (pinned: the unmarked arena is the documented residue) |
+| `boxed` (`Box::new` under the custom global allocator) | 1 allocation | 1 allocation |
+
+Summaries: `app` 17 roots, 11 passed, 7 errors, 1 warning → 5 passed, 13 errors, 0
+warnings; `galloc` 7 roots, 3 passed, 7 errors → 0 passed, 8 errors (`vec_push`: 1
+allocation and a possible free before and after, now through
+`<Global as Allocator>::allocate`/`grow`); `bad_sources` 2 roots passed → 6 errors;
+`pools` declares 7 sources. The M2 probe itself,
+unmarked (`/tmp/pd-allocprobe`): `app` 6 roots, 5 passed (unchanged: its pools are
+unmarked; `ffi_malloc` is now 1 allocation instead of `⊤`); `galloc` 3 roots, 1 passed,
+4 errors → 0 passed, 3 errors (one allocation each, no `⊤`).
+
+**Rejected declarations** (crate `bad_sources`): `#[fip]` on a declared source and on
+a `GlobalAlloc` method (error; the root is not analysed), `alloc_source(n = 0)`, an
+unknown key, `free_source(n = 1)`, `fip::alloc_source` on a struct.
+
+**Self-check:** unchanged. `selfcheck.expected` is byte-identical and the per-crate
+summaries (with the note counts) are equal, as the plan predicted. Allocation chains
+through `Vec` now end at `<Global as Allocator>::allocate*` instead of
+`__rust_alloc*` (measured on a `Vec::with_capacity`/`push` probe: 1 allocation and a
+possible free before and after); `Box::new` still ends at `__rust_alloc_zeroed`, and
+the self-check's chains go through `Box`, so no expected line changed.
+
+**Deviations from the plan**, recorded there too: the summary note gains
+", N declared sources" only when the crate declares any (no existing summary
+changes); a `dyn` call of a source's trait method is that source (was `⊤`); a
+misplaced `fip::` attribute on a unit struct was counted twice in the error total
+(also recorded for the struct's constructor), now once; `fip::extern_source`
+(optional item 7) is not implemented, as planned (gated on a use case).
+
+**Open:** an unmarked pure-Rust allocator stays a declared assumption (README row);
+the `Allocator` rule on a user implementation is not in a fixture, because
+`allocator_api` is unstable and the fixtures build without feature gates (it is
+exercised through `Global` by `vec_push`).

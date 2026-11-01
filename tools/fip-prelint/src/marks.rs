@@ -10,12 +10,116 @@
 //!   `kind = "fip" | "fbip"`, `n = N` (allocation bound, default 0),
 //!   `strict = true | false` (default false), `panic_macros = true | false`
 //!   (default true), `param(name = K, ..)` (declared bounds of callable parameters).
+//! - `#[cfg_attr(fip_prelint, fip::alloc_source)]`, `fip::alloc_source(n = N)`
+//!   (`N ≥ 1`, default 1) and `#[cfg_attr(fip_prelint, fip::free_source)]`
+//!   (functions, methods, trait method declarations, foreign functions): a declared
+//!   allocation or free source. A call counts `N` allocations or a possible free (both
+//!   attributes: a reallocation) at the call site; the body is not analysed (allocator
+//!   internals are outside FIP). On a trait method declaration the mark applies to
+//!   every implementation.
 //!
 //! Any other name under `fip::` is rejected: rustc accepts unknown names under a
 //! registered tool silently.
 
 /// Names allowed under `fip::`.
-pub const KNOWN: &[&str] = &["export", "mark"];
+pub const KNOWN: &[&str] = &["export", "mark", "alloc_source", "free_source"];
+
+/// What one call of an allocation or free source does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Source {
+    /// Allocations per call (0: none).
+    pub alloc: u64,
+    /// A possible free.
+    pub free: bool,
+}
+
+impl Source {
+    /// Both declarations of one function (or of an impl method and its trait
+    /// method): the larger allocation count and any free.
+    #[must_use]
+    pub fn merge(self, o: Source) -> Source {
+        Source {
+            alloc: self.alloc.max(o.alloc),
+            free: self.free || o.free,
+        }
+    }
+}
+
+/// `(name, args)` of a printed tool attribute `#[fip::name]` or `#[fip::name(args)]`.
+pub fn tool_attr_of_printed(attr: &str) -> Option<(&str, Option<&str>)> {
+    let s = attr.trim();
+    let s = s.strip_prefix("#[")?.strip_suffix(']')?.trim();
+    let s = s.strip_prefix("fip::")?;
+    match s.find('(') {
+        Some(i) => {
+            let args = s[i..].trim().strip_prefix('(')?.strip_suffix(')')?;
+            Some((s[..i].trim(), Some(args)))
+        }
+        None => Some((s.trim(), None)),
+    }
+}
+
+/// Allocations per call declared by `fip::alloc_source` (`args`: the list inside the
+/// parentheses, if any). `n = 0` is rejected: it would declare an allocation-free
+/// function whose body is never analysed.
+pub fn parse_alloc_source(args: Option<&str>) -> Result<u64, String> {
+    let mut n = 1;
+    for part in split_top(args.unwrap_or("")) {
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            format!("expected `n = N` in `fip::alloc_source(..)`, found `{part}`")
+        })?;
+        match key.trim() {
+            "n" => n = parse_u64("n", value.trim())?,
+            other => return Err(format!("unknown key `{other}` in `fip::alloc_source(..)`")),
+        }
+    }
+    if n == 0 {
+        return Err(
+            "`fip::alloc_source(n = 0)` would declare an allocation-free function without checking it; the count is at least 1"
+                .to_string(),
+        );
+    }
+    Ok(n)
+}
+
+/// `fip::free_source` takes no arguments.
+pub fn parse_free_source(args: Option<&str>) -> Result<(), String> {
+    match args.map(str::trim) {
+        None | Some("") => Ok(()),
+        Some(a) => Err(format!(
+            "`fip::free_source` takes no arguments, found `{a}`"
+        )),
+    }
+}
+
+/// The source declared by the printed tool attributes of one function: `Ok(None)` if
+/// it has neither `fip::alloc_source` nor `fip::free_source`.
+pub fn source_of_printed<'a>(
+    attrs: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<Source>, String> {
+    let mut found: Option<Source> = None;
+    for attr in attrs {
+        let Some((name, args)) = tool_attr_of_printed(attr) else {
+            continue;
+        };
+        let s = match name {
+            "alloc_source" => Source {
+                alloc: parse_alloc_source(args)?,
+                free: false,
+            },
+            "free_source" => {
+                parse_free_source(args)?;
+                Source {
+                    alloc: 0,
+                    free: true,
+                }
+            }
+            _ => continue,
+        };
+        found = Some(found.map_or(s, |f| f.merge(s)));
+    }
+    Ok(found)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -186,5 +290,44 @@ mod tests {
         assert!(parse_mark(r#"kind = "fop""#).is_err());
         assert!(parse_mark(r#"kind = "fip", strict = yes"#).is_err());
         assert!(parse_mark(r#"kind = "fip", bound = 1"#).is_err());
+    }
+
+    #[test]
+    fn source_marks() {
+        let s = |a: &[&str]| source_of_printed(a.iter().copied());
+        assert_eq!(
+            s(&["#[fip::alloc_source]"]),
+            Ok(Some(Source {
+                alloc: 1,
+                free: false
+            }))
+        );
+        assert_eq!(
+            s(&["#[fip::alloc_source(n = 3)]"]),
+            Ok(Some(Source {
+                alloc: 3,
+                free: false
+            }))
+        );
+        assert_eq!(
+            s(&["#[fip::free_source]", "#[fip::alloc_source]"]),
+            Ok(Some(Source {
+                alloc: 1,
+                free: true
+            }))
+        );
+        assert_eq!(s(&[r#"#[fip::mark(kind = "fip")]"#]), Ok(None));
+        assert!(s(&["#[fip::alloc_source(n = 0)]"]).is_err());
+        assert!(s(&["#[fip::alloc_source(count = 2)]"]).is_err());
+        assert!(s(&["#[fip::alloc_source(2)]"]).is_err());
+        assert!(s(&["#[fip::free_source(n = 1)]"]).is_err());
+        assert_eq!(
+            tool_attr_of_printed("#[fip::alloc_source(n = 2)]"),
+            Some(("alloc_source", Some("n = 2")))
+        );
+        assert_eq!(
+            tool_attr_of_printed("#[fip::free_source]"),
+            Some(("free_source", None))
+        );
     }
 }

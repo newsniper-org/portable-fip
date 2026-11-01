@@ -28,6 +28,13 @@
 //! value analysis of its body ([`crate::value`]) proves unable to fire on every path
 //! reaching it is not a panic path.
 //!
+//! **Sources** ([`Crates::source_of`]): functions declared `fip::alloc_source`/
+//! `fip::free_source` (on themselves or on the trait method they implement), the
+//! methods of `GlobalAlloc`/`Allocator` implementations, and foreign C allocation
+//! functions. A source is an opaque boundary: checked before any table and before
+//! MIR, it is a leaf with exactly its declared events, and its body is never
+//! analysed (allocation inside an allocator is outside FIP).
+//!
 //! **Declared parameter bounds at call sites.** A call whose resolved callee carries
 //! `fip::mark(.., param(g = K))` passes, for `g`, a value of the callee's generic type
 //! parameter `F` (`g: F`, `g: &F`, `g: &mut F`). The argument's bound is the bound of
@@ -56,7 +63,7 @@ use rustc_middle::ty::{
 };
 use rustc_span::{DUMMY_SP, Span};
 
-use crate::marks::{self, Mark};
+use crate::marks::{self, Mark, Source};
 
 /// Explored instances per root before the rest is `⊤` ("analysis limit").
 const MAX_NODES: usize = 20_000;
@@ -382,6 +389,44 @@ pub struct Crates {
     unencoded: HashMap<CrateNum, String>,
     /// `fip::mark` of functions in the local crate and in exported crates.
     marks: HashMap<DefId, Mark>,
+    /// `fip::alloc_source`/`fip::free_source` of functions, trait method declarations
+    /// and foreign functions in the local crate and in exported crates.
+    sources: HashMap<DefId, Source>,
+}
+
+/// Why a function is an allocation or free source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceKind {
+    /// `fip::alloc_source`/`fip::free_source` on the function.
+    Declared,
+    /// The same on the trait method it implements.
+    TraitDeclared,
+    /// A method of `GlobalAlloc` or `Allocator` (`fip_lint_rules::mir::ALLOCATOR_TRAIT_METHODS`).
+    AllocatorTrait,
+    /// A foreign C allocation function (`fip_lint_rules::mir::FOREIGN_ALLOC_SYMBOLS`).
+    Foreign,
+}
+
+impl SourceKind {
+    pub fn describe(self) -> &'static str {
+        match self {
+            SourceKind::Declared => "declared source",
+            SourceKind::TraitDeclared => "source declared on the trait method",
+            SourceKind::AllocatorTrait => "allocator trait method",
+            SourceKind::Foreign => "foreign allocation function",
+        }
+    }
+}
+
+/// The trait method that `def_id` is or implements.
+fn trait_method(tcx: TyCtxt<'_>, def_id: DefId) -> Option<DefId> {
+    if tcx.trait_of_assoc(def_id).is_some() {
+        Some(def_id)
+    } else if tcx.trait_impl_of_assoc(def_id).is_some() {
+        tcx.trait_item_of(def_id)
+    } else {
+        None
+    }
 }
 
 impl Crates {
@@ -393,6 +438,7 @@ impl Crates {
         exported.insert(LOCAL_CRATE, true);
         let mut unencoded = HashMap::new();
         let mut marks = HashMap::new();
+        let mut sources = HashMap::new();
         for krate in rustc_public::external_crates() {
             let Some(&cnum) = tcx
                 .crates(())
@@ -407,15 +453,26 @@ impl Crates {
             for f in krate.fn_defs() {
                 let def_id: DefId =
                     rustc_public::rustc_internal::internal(tcx, rustc_public::CrateDef::def_id(&f));
-                if def_id.krate != cnum || !has_source_body(tcx, def_id) {
+                if def_id.krate != cnum {
+                    continue;
+                }
+                let attrs: Vec<String> = rustc_public::CrateDef::all_tool_attrs(&f)
+                    .iter()
+                    .map(|a| a.as_str().to_string())
+                    .collect();
+                // Sources may also be foreign functions and trait method declarations.
+                // Malformed marks were reported where that crate was checked.
+                if let Ok(Some(s)) = marks::source_of_printed(attrs.iter().map(String::as_str)) {
+                    sources.insert(def_id, s);
+                }
+                if !has_source_body(tcx, def_id) {
                     continue;
                 }
                 if !unencoded.contains_key(&cnum) && !tcx.is_mir_available(def_id) {
                     unencoded.insert(cnum, tcx.def_path_str(def_id));
                 }
-                // Malformed marks were reported where that crate was checked.
-                for attr in rustc_public::CrateDef::all_tool_attrs(&f) {
-                    if let Some(args) = marks::mark_args_of_printed(attr.as_str())
+                for attr in &attrs {
+                    if let Some(args) = marks::mark_args_of_printed(attr)
                         && let Ok(m) = marks::parse_mark(args)
                     {
                         marks.insert(def_id, m);
@@ -427,6 +484,7 @@ impl Crates {
             exported,
             unencoded,
             marks,
+            sources,
         }
     }
     /// Adds the marks of the local crate (the roots).
@@ -434,6 +492,49 @@ impl Crates {
         for (d, m) in roots {
             self.marks.insert(*d, m.clone());
         }
+    }
+    /// Adds the declared sources of the local crate.
+    pub fn add_local_sources(&mut self, sources: &[(DefId, Source)]) {
+        for (d, s) in sources {
+            self.sources.insert(*d, *s);
+        }
+    }
+    /// What a call of `def_id` does if it is an allocation or free source, and why:
+    /// declared on the function or on the trait method it implements, a method of an
+    /// allocator trait, or a foreign C allocation function. `None` for every other
+    /// function, which is analysed through its MIR.
+    pub fn source_of(&self, tcx: TyCtxt<'_>, def_id: DefId) -> Option<(Source, SourceKind)> {
+        if let Some(s) = self.sources.get(&def_id) {
+            return Some((*s, SourceKind::Declared));
+        }
+        if let Some(tm) = trait_method(tcx, def_id) {
+            if let Some(s) = self.sources.get(&tm) {
+                return Some((*s, SourceKind::TraitDeclared));
+            }
+            if let Some(trait_id) = tcx.trait_of_assoc(tm)
+                && tcx.crate_name(trait_id.krate).as_str() == "core"
+                && let Some((a, f)) = rules::allocator_trait_method(
+                    &def_path(tcx, trait_id),
+                    tcx.item_name(tm).as_str(),
+                )
+            {
+                let s = Source {
+                    alloc: u64::from(a),
+                    free: f,
+                };
+                return Some((s, SourceKind::AllocatorTrait));
+            }
+        }
+        if tcx.is_foreign_item(def_id)
+            && let Some((a, f)) = rules::foreign_alloc_symbol(tcx.item_name(def_id).as_str())
+        {
+            let s = Source {
+                alloc: u64::from(a),
+                free: f,
+            };
+            return Some((s, SourceKind::Foreign));
+        }
+        None
     }
     /// `true` if some known function declares `param(..)`: only then can a call site
     /// violate a declared parameter bound.
@@ -825,10 +926,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 "LLVM intrinsic `{}`",
                 def_path(tcx, def_id)
             ))]),
-            InstanceKind::Virtual(def_id, _) => NodeKind::Leaf(vec![Ev::Unknown(format!(
-                "dynamic call to `{}` (trait object)",
-                def_path_args(tcx, def_id, inst.args)
-            ))]),
+            // A dynamic call of a source's trait method is that source in every
+            // implementation (declared on the trait, or an allocator trait).
+            InstanceKind::Virtual(def_id, _) => match self.source_leaf(def_id) {
+                Some(leaf) => leaf,
+                None => NodeKind::Leaf(vec![Ev::Unknown(format!(
+                    "dynamic call to `{}` (trait object)",
+                    def_path_args(tcx, def_id, inst.args)
+                ))]),
+            },
             InstanceKind::Shim(ShimKind::DropGlue(_, None)) => NodeKind::Leaf(Vec::new()),
             InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty))) if ty.has_param() => {
                 NodeKind::Leaf(vec![Ev::Unknown(format!(
@@ -886,8 +992,35 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         ))])
     }
 
+    /// A source (see [`Crates::source_of`]) is an opaque boundary: a leaf with exactly
+    /// the declared events, `n` allocations and/or a possible free. Its body is never
+    /// analysed, so nothing inside it (bookkeeping, a backing allocator, loops,
+    /// recursion, panics, `⊤`) is reported.
+    fn source_leaf(&self, def_id: DefId) -> Option<NodeKind> {
+        let tcx = self.tcx;
+        let (s, kind) = self.crates.source_of(tcx, def_id)?;
+        let path = def_path(tcx, def_id);
+        let why = kind.describe();
+        let mut evs = Vec::new();
+        let count = if s.alloc > 1 {
+            format!(" (n = {})", s.alloc)
+        } else {
+            String::new()
+        };
+        for _ in 0..s.alloc {
+            evs.push(Ev::Alloc(format!("allocation: {why} `{path}`{count}")));
+        }
+        if s.free {
+            evs.push(Ev::Free(format!("free: {why} `{path}`")));
+        }
+        Some(NodeKind::Leaf(evs))
+    }
+
     fn classify_item(&mut self, inst: Instance<'tcx>, def_id: DefId) -> NodeKind {
         let tcx = self.tcx;
+        if let Some(leaf) = self.source_leaf(def_id) {
+            return leaf;
+        }
         let path = def_path(tcx, def_id);
         if rules::is_realloc_entry(&path) {
             return NodeKind::Leaf(vec![
@@ -1227,6 +1360,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
 
     fn unresolved(&mut self, def_id: DefId, args: GenericArgsRef<'tcx>) -> Item {
         let tcx = self.tcx;
+        // A source's trait method is that source for every implementation: the call
+        // is the declared event, not a term.
+        if self.crates.source_of(tcx, def_id).is_some() {
+            return Item::Call(self.node_for(Instance::new_raw(def_id, args)));
+        }
         if let Some(trait_id) = tcx.trait_of_assoc(def_id)
             && let Some(self_ty) = args.types().next()
             && let ty::Param(p) = self_ty.peel_refs().kind()
@@ -1521,7 +1659,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     match ev {
                         Ev::Alloc(what) => {
                             s.alloc = s.alloc.add(&Cost::one());
-                            s.alloc_w.push(w(what));
+                            // A source with `n = N` is N events and one witness.
+                            if s.alloc_w.iter().all(|x| x.what != *what) {
+                                s.alloc_w.push(w(what));
+                            }
                         }
                         Ev::Free(what) => s.free.push(w(what)),
                         Ev::Panic(what) => s.panics.push(w(what)),
@@ -1650,6 +1791,30 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     }
                     eprintln!("  [{i}] {} : body {}", node.label, items.join(", "));
                 }
+            }
+        }
+        // Every source the root uses, with the location of its declaration: source
+        // marks are trusted, so they are listed.
+        for node in &self.nodes {
+            let def_id = match node.inst.def {
+                InstanceKind::Item(d) | InstanceKind::Virtual(d, _) => d,
+                _ => continue,
+            };
+            if let NodeKind::Leaf(_) = node.kind
+                && let Some((s, kind)) = self.crates.source_of(self.tcx, def_id)
+            {
+                let at = self
+                    .tcx
+                    .sess
+                    .source_map()
+                    .span_to_diagnostic_string(self.tcx.def_span(def_id));
+                eprintln!(
+                    "fip-prelint dump: source: `{}` ({}, {} allocation(s), free: {}) at {at}",
+                    node.label,
+                    kind.describe(),
+                    s.alloc,
+                    s.free
+                );
             }
         }
     }

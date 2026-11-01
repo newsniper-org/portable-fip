@@ -158,6 +158,20 @@ fn param_bounds() {
     check("param_bounds");
 }
 
+/// Allocation and free sources (limits plan L7), from the allocator probe: marked
+/// arena and slab in an exported crate (one allocation, `∞` in a loop, a free,
+/// `alloc_source(n = 2)`, `fbip`), the unmarked arena as the pinned residue (passes),
+/// a source whose body loops, recurses and allocates (counts 1, nothing from its body),
+/// a source declared on a trait method (an implementation and a generic call),
+/// `GlobalAlloc` methods called directly, by default body and through `dyn`, the
+/// system allocator, foreign `malloc`/`free`, a marked foreign function, an unknown
+/// one (`⊤`), a Rust function named `malloc`; rejected: a FIP mark on a source or on
+/// a `GlobalAlloc` method, `n = 0`, unknown keys, a misplaced source mark.
+#[test]
+fn alloc_sources() {
+    check("alloc_sources");
+}
+
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.
 #[test]
 fn clean() {

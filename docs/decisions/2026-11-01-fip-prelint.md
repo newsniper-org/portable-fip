@@ -196,6 +196,43 @@ anything unknown keeps the assert. Measured on this workspace: 64 → 40 notes (
 caller precondition). Fixture `guards`; details `TODOs/fip-prelint.md`, "Resolved
 2026-11-01: path-insensitive panics".
 
+## Amendment 2026-11-02: allocation and free sources (limits plan L7)
+
+What counts as an allocation changes (plan `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`,
+L7; user principle: allocation inside an allocator is outside FIP). Before, only the
+`fip_lint_rules::mir` entry points (`__rust_alloc*`, `alloc::alloc::*`) allocated and
+every other function with MIR was descended into, so a pure-Rust arena or slab in an
+exported crate, and a direct call of a pure-Rust `GlobalAlloc::alloc`, passed `#[fip]`
+(5 false passes measured, M2).
+
+- **Sources.** An allocation or free source is a function declared
+  `#[cfg_attr(fip_prelint, fip::alloc_source)]` (`fip::alloc_source(n = N)`, `N ≥ 1`)
+  or `fip::free_source` (both: a reallocation), on a function, a method, a trait
+  method declaration (then every implementation, and a call on a generic parameter
+  or through `dyn`, is the source) or a foreign function; every method of a
+  `GlobalAlloc` or `Allocator` implementation (by trait `DefId`, table
+  `ALLOCATOR_TRAIT_METHODS`); and a foreign C allocation function (`malloc`, `calloc`,
+  `aligned_alloc`, `posix_memalign`, `memalign`, `free`, `realloc`, `reallocarray`;
+  foreign items only; table `FOREIGN_ALLOC_SYMBOLS`).
+- **Opaque boundary.** A source is checked before any table and before MIR: a leaf
+  with exactly its declared events. Its body (bookkeeping, a backing allocator, loops,
+  recursion, panics, `⊤`) is never analysed. Costs at call sites follow the existing
+  path, loop and recursion rules (a source in a loop is `∞`).
+- **Checks.** `n = 0`, unknown keys and a misplaced source mark are errors; a FIP mark
+  on a source (including `GlobalAlloc`/`Allocator` methods) is an error, the root is
+  not analysed. Source marks are trusted declarations: the per-crate summary note
+  ends with "N declared sources" when the crate declares any, and
+  `FIP_PRELINT_DUMP=1` lists every source a root uses with its location.
+- **Residue.** An unmarked pure-Rust pool is ordinary code (no MIR property separates
+  "hand out a slice of a buffer" from buffer use). The `fip::export` contract now
+  reads: a crate that declares `fip::export` and hands out memory from its own pools
+  must mark them.
+
+Measured: fixture `alloc_sources` (the M2 probe, marked) turns all 5 M2 false passes
+into errors; the self-check is unchanged (`selfcheck.expected` byte-identical, same
+note counts). Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: allocation and
+free sources".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

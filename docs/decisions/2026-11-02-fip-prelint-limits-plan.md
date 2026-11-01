@@ -588,6 +588,27 @@ Unit tests for the mark parser.
 **Effort.** M (2 days). No dependency. **First in the order**, because it is the only
 measured false pass.
 
+**Implemented** (item 1 of the order; measurements in `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: allocation and free sources"). The 5 M2 false passes are errors
+in fixture `alloc_sources`; `selfcheck.expected` is unchanged, as predicted.
+Deviations, from measurement or detail:
+
+- The summary note gains ", N declared sources" only when the crate declares at least
+  one source, so no existing summary changes.
+- A `dyn` call of a source's trait method (`&dyn GlobalAlloc`, a trait whose method is
+  marked) is that source; it was `⊤`. This follows from the trait rule (every
+  implementation is the source).
+- On rustc 1.99.1, `std::alloc::System`'s `GlobalAlloc` methods come from a blanket
+  impl over `core::alloc::GlobalAllocator`; the trait rule matches them by trait, as
+  designed (event text `<A as GlobalAlloc>::alloc`).
+- Measured: `Vec` reaches `<Global as Allocator>::allocate`/`grow` before
+  `__rust_alloc*`, so its chains now end there (counts unchanged); `Box::new` does not
+  go through `Allocator`. A user `Allocator` impl is not in a fixture: `allocator_api`
+  is unstable and the fixtures build without feature gates.
+- A misplaced `fip::` attribute on a unit struct counted twice in the error total
+  (recorded for the struct and its constructor); it now counts once.
+- Item 7 (`fip::extern_source`) is not implemented, as planned.
+
 ### L8. Uniqueness and interior mutability (`Cell`, `RefCell`, `UnsafeCell`)
 
 The label "F4" does not occur in the repository (searched all `*.md` and `*.rs`). It

@@ -13,8 +13,11 @@
 //! | terms left: callable parameters without `param(..)`, trait methods on generic parameters, drops of generic values | warning |
 //! | a call site passing, for a callee's `param(g = K)`, an argument that may allocate more than `K` times per call, or `⊤` (in any analysed body: roots, what they reach in analysed crates, every local function and closure) | error, at the call site |
 //! | unknown name under `fip::`, misplaced or malformed attribute | error |
+//! | a FIP mark (`fip::mark`) on an allocation/free source, including `GlobalAlloc`/`Allocator` methods | error |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
+//! The per-crate summary note ends with the number of declared sources when the crate
+//! declares any (`fip::alloc_source`/`fip::free_source` are trusted declarations).
 
 use std::collections::HashSet;
 
@@ -26,7 +29,7 @@ use rustc_public::CrateDef;
 use rustc_span::Span;
 
 use crate::analysis::{Analysis, ArgViolation, Crates, RootResult, Witness};
-use crate::marks::{self, Kind, Mark};
+use crate::marks::{self, Kind, Mark, Source};
 
 struct Out<'tcx> {
     tcx: TyCtxt<'tcx>,
@@ -196,14 +199,19 @@ fn validate_tool_attrs(out: &mut Out<'_>) {
                     "export" => Some("`fip::export` belongs at the crate root: `#![cfg_attr(fip_prelint, fip::export)]`".to_string()),
                     "mark" if on_fn => None,
                     "mark" => Some("`fip::mark` applies to functions with a body".to_string()),
-                    other => Some(format!(
-                        "unknown attribute `fip::{other}`; the tool `fip` has only {}",
-                        marks::KNOWN
-                            .iter()
-                            .map(|k| format!("`fip::{k}`"))
-                            .collect::<Vec<_>>()
-                            .join(" and ")
+                    "alloc_source" | "free_source" if on_fn => None,
+                    "alloc_source" | "free_source" => Some(format!(
+                        "`fip::{name}` applies to functions, methods, trait method declarations and foreign functions"
                     )),
+                    other => {
+                        let names: Vec<String> =
+                            marks::KNOWN.iter().map(|k| format!("`fip::{k}`")).collect();
+                        let (last, rest) = names.split_last().expect("KNOWN is not empty");
+                        Some(format!(
+                            "unknown attribute `fip::{other}`; the tool `fip` has only {} and {last}",
+                            rest.join(", ")
+                        ))
+                    }
                 };
                 if let Some(m) = msg {
                     bad.push((item.span, m));
@@ -212,6 +220,9 @@ fn validate_tool_attrs(out: &mut Out<'_>) {
         }
     }
     bad.sort_by_key(|(sp, _)| *sp);
+    // The attribute of a unit or tuple struct is also recorded for its constructor:
+    // one error per attribute.
+    bad.dedup();
     for (sp, m) in bad {
         out.error(sp, &m);
     }
@@ -235,6 +246,30 @@ fn roots(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Mark)> {
     }
     roots.sort_by_key(|(d, _)| tcx.def_span(*d));
     roots
+}
+
+/// Local functions, trait method declarations and foreign functions carrying
+/// `fip::alloc_source` or `fip::free_source`, through `rustc_public`.
+fn local_sources(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Source)> {
+    let mut sources = Vec::new();
+    for f in rustc_public::local_crate().fn_defs() {
+        let attrs: Vec<String> = f
+            .all_tool_attrs()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
+        let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
+        match marks::source_of_printed(attrs.iter().map(String::as_str)) {
+            Ok(Some(s)) => sources.push((def_id, s)),
+            Ok(None) => {}
+            Err(e) => out.error(
+                tcx.def_span(def_id),
+                &format!("malformed allocation/free source: {e}"),
+            ),
+        }
+    }
+    sources.sort_by_key(|(d, _)| tcx.def_span(*d));
+    sources
 }
 
 /// Verdicts of one root.
@@ -439,11 +474,33 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     }
     let roots = roots(tcx, &mut out);
     crates.add_local_marks(&roots);
+    let sources = local_sources(tcx, &mut out);
+    crates.add_local_sources(&sources);
     // A violation reached from several roots (or also found in the body scan below) is
     // reported once, for the first root in source order.
     let mut seen: HashSet<String> = HashSet::new();
     let mut passed = 0usize;
     for (def_id, mark) in &roots {
+        // The body of an allocation or free source is outside FIP and never analysed:
+        // a verdict on it would be vacuous, and would contradict its callers, which
+        // count it as an allocation or a free.
+        if let Some((s, kind)) = crates.source_of(tcx, *def_id) {
+            let what = match (s.alloc, s.free) {
+                (0, _) => "a possible free".to_string(),
+                (n, false) => format!("{n} allocation(s)"),
+                (n, true) => format!("{n} allocation(s) and a possible free"),
+            };
+            out.error(
+                tcx.def_span(*def_id),
+                &format!(
+                    "`{}` is {} but is an allocation/free source ({}): its body is outside FIP and is not analysed, and its callers count each call as {what}; remove the FIP attribute",
+                    tcx.def_path_str(*def_id),
+                    mark.tag(),
+                    kind.describe()
+                ),
+            );
+            continue;
+        }
         let before = (out.errors, out.warnings);
         let r = Analysis::run(tcx, &crates, *def_id, mark);
         verdict(&mut out, *def_id, mark, &r);
@@ -471,12 +528,19 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             }
         }
     }
-    if roots.is_empty() && outside_roots == 0 {
+    if roots.is_empty() && outside_roots == 0 && sources.is_empty() {
         return;
     }
+    // Source marks are trusted declarations (they hide a body): their number is part
+    // of the summary whenever the crate declares any.
+    let declared = if sources.is_empty() {
+        String::new()
+    } else {
+        format!(", {} declared sources", sources.len())
+    };
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
-        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes",
+        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}",
         roots.len(),
         out.errors,
         out.warnings,

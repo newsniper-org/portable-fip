@@ -264,6 +264,62 @@ pub mod mir {
     /// fails; the allocation itself is the `__rust_alloc*` call next to it.
     pub const ALLOC_FREE_SYMBOLS: &[&str] = &["__rust_no_alloc_shim_is_unstable_v2"];
 
+    /// Foreign C allocation functions: `(symbol, allocates, frees)`. Matched only on
+    /// foreign items (functions declared in an `extern` block), never on a Rust
+    /// function of the same name. A call is an opaque allocation or free source: one
+    /// allocation, a possible free, or both (reallocation).
+    pub const FOREIGN_ALLOC_SYMBOLS: &[(&str, bool, bool)] = &[
+        ("malloc", true, false),
+        ("calloc", true, false),
+        ("aligned_alloc", true, false),
+        ("posix_memalign", true, false),
+        ("memalign", true, false),
+        ("free", false, true),
+        ("realloc", true, true),
+        ("reallocarray", true, true),
+    ];
+
+    /// Allocator traits, by defining path of the trait in `core`, and their methods:
+    /// `(trait, method, allocates, frees)`. Every implementation of such a method (and
+    /// the trait's default body) is an opaque allocation or free source: a call counts
+    /// at the call site and its body is not analysed (allocator internals are outside
+    /// FIP). Methods not listed (`Allocator::by_ref`) are analysed as usual.
+    pub const ALLOCATOR_TRAIT_METHODS: &[(&str, &str, bool, bool)] = &[
+        ("core::alloc::global::GlobalAlloc", "alloc", true, false),
+        (
+            "core::alloc::global::GlobalAlloc",
+            "alloc_zeroed",
+            true,
+            false,
+        ),
+        ("core::alloc::global::GlobalAlloc", "dealloc", false, true),
+        ("core::alloc::global::GlobalAlloc", "realloc", true, true),
+        ("core::alloc::Allocator", "allocate", true, false),
+        ("core::alloc::Allocator", "allocate_zeroed", true, false),
+        ("core::alloc::Allocator", "deallocate", false, true),
+        ("core::alloc::Allocator", "grow", true, true),
+        ("core::alloc::Allocator", "grow_zeroed", true, true),
+        ("core::alloc::Allocator", "shrink", true, true),
+    ];
+
+    /// `(allocates, frees)` of a [`FOREIGN_ALLOC_SYMBOLS`] entry.
+    #[must_use]
+    pub fn foreign_alloc_symbol(name: &str) -> Option<(bool, bool)> {
+        FOREIGN_ALLOC_SYMBOLS
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|&(_, a, f)| (a, f))
+    }
+
+    /// `(allocates, frees)` of an [`ALLOCATOR_TRAIT_METHODS`] entry.
+    #[must_use]
+    pub fn allocator_trait_method(trait_path: &str, method: &str) -> Option<(bool, bool)> {
+        ALLOCATOR_TRAIT_METHODS
+            .iter()
+            .find(|(t, m, _, _)| *t == trait_path && *m == method)
+            .map(|&(_, _, a, f)| (a, f))
+    }
+
     /// Path prefixes of the panic machinery: a call is a panic path and is not
     /// looked into (its allocations happen only while panicking).
     pub const PANIC_PREFIXES: &[&str] = &[
@@ -505,6 +561,28 @@ mod tests {
         assert!(mir::is_alloc_free_intrinsic("typed_swap_nonoverlapping"));
         assert!(!mir::is_alloc_free_intrinsic("catch_unwind"));
         assert!(mir::is_panic_intrinsic("abort"));
+        assert_eq!(mir::foreign_alloc_symbol("malloc"), Some((true, false)));
+        assert_eq!(mir::foreign_alloc_symbol("free"), Some((false, true)));
+        assert_eq!(mir::foreign_alloc_symbol("realloc"), Some((true, true)));
+        assert_eq!(mir::foreign_alloc_symbol("memcpy"), None);
+        assert_eq!(
+            mir::allocator_trait_method("core::alloc::global::GlobalAlloc", "dealloc"),
+            Some((false, true))
+        );
+        assert_eq!(
+            mir::allocator_trait_method("core::alloc::Allocator", "grow"),
+            Some((true, true))
+        );
+        assert_eq!(
+            mir::allocator_trait_method("core::alloc::Allocator", "by_ref"),
+            None
+        );
+        assert!(mir::FOREIGN_ALLOC_SYMBOLS.iter().all(|(_, a, f)| *a || *f));
+        assert!(
+            mir::ALLOCATOR_TRAIT_METHODS
+                .iter()
+                .all(|(_, _, a, f)| *a || *f)
+        );
         assert!(
             mir::ALLOC_FREE_INTRINSICS
                 .iter()
