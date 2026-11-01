@@ -41,6 +41,9 @@ fn pipeline(xs: &mut [u8], slot: &mut u8) -> (usize, usize) {
     let kept = fip_core::strict::dedup_by(xs, fip_fn!(|a: &u8, b: &u8| *a == *b));
     let (mapped, _) = fip_core::strict::compact_map(xs, 0, fip_fn!(|v: u8| (v * 2, v > 1)));
     let _ = fip_core::strict::update(slot, 0, fip_fn!(|v: u8| v + 10));
+    let (_, _) = fip_core::strict::map_in_place_st(xs, 0, 0_u8, fip_fn!(|c: u8, v: u8| (c, v)));
+    let (_, _, _) =
+        fip_core::strict::compact_map_st(xs, 0, 0_u8, fip_fn!(|c: u8, v: u8| (c, v, true)));
     (kept, mapped)
 }
 
@@ -72,7 +75,7 @@ fn strict_variants_match_the_fn_versions() {
         ));
         assert_eq!((n, &a[..n]), (m, &b[..m]));
 
-        let (mut a, mut b) = (v.clone(), v);
+        let (mut a, mut b) = (v.clone(), v.clone());
         let _ = fip_core::map_in_place(&mut a, 0, |x| x + 7);
         let _ = assert_fip!(fip_core::strict::map_in_place(
             &mut b,
@@ -80,6 +83,26 @@ fn strict_variants_match_the_fn_versions() {
             fip_fn!(|x: u8| x + 7)
         ));
         assert_eq!(a, b);
+
+        let (mut a, mut b) = (v.clone(), v.clone());
+        let ra = fip_core::map_in_place_st(&mut a, 0, 1_u8, |c, x| (c ^ x, x | c));
+        let rb = assert_fip!(fip_core::strict::map_in_place_st(
+            &mut b,
+            0,
+            1_u8,
+            fip_fn!(|c: u8, x: u8| (c ^ x, x | c))
+        ));
+        assert_eq!((ra, a), (rb, b));
+
+        let (mut a, mut b) = (v.clone(), v);
+        let (n, sa, _) = fip_core::compact_map_st(&mut a, 0, 1_u8, |c, x| (c ^ x, x | c, x != 2));
+        let (m, sb, _) = assert_fip!(fip_core::strict::compact_map_st(
+            &mut b,
+            0,
+            1_u8,
+            fip_fn!(|c: u8, x: u8| (c ^ x, x | c, x != 2))
+        ));
+        assert_eq!((n, sa, &a[..n]), (m, sb, &b[..m]));
     }
     let mut x = 4_u8;
     assert_eq!(

@@ -83,6 +83,33 @@ the pre-verification lemmas of `compact_post` and the `FipFn` forms), `fip-alloc
 strict function claiming the negation of `FipFn::post`; the drift test rejects a
 mutated `FipFn::call` declaration.
 
+## Measured (2026-11-01, state-passing variants)
+
+Same Verus and Singular: `fip-core` 51 verified (`map_in_place_st`, `compact_map_st`,
+their strict forms, and the pre-verification lemmas of `spec::state`),
+`verify/compose_state.rs` 4 verified (a counter threaded through `map_in_place_st`,
+state 10 → elements `[11, 12, 13]`, final 13; an odd count through
+`compact_map_st`); `fip-strict`, `fip-alloc`, `compose.rs`, `compose_strict.rs`
+unchanged. 23 Verus mutants rejected (the 17 above, 5 that reverse the order or stop
+threading the state, 1 that drops the state chain from `map_st_post`), and claiming
+a wrong final state in either verified caller is rejected (`postcondition not
+satisfied`).
+
+Two findings constrain how the specs are written:
+
+- **No ghost outputs under `--no-cheating`.** Attribute-mode `verus_spec(r => with
+  -> trace: Ghost<..>)` verifies, but the macro also emits a copy of the function for
+  unverified callers marked `external_body` with `requires false`
+  (`builtin_macros/src/attr_rewrite.rs`, `rewrite_unverified_func`), and
+  `--no-cheating` rejects every `external_body` outside `vstd`
+  (`vir/src/well_formed.rs`). The trace is therefore existential, in named `*_post`
+  predicates triggered on the elements, and callers `choose` it.
+- **Per-module SMT context.** Verus gives each module's queries all of that module's
+  definitions. With the new predicates added to `spec`, Z3 failed the existing
+  `lemma_compact_map_spec_rejects_extra` deterministically (5 seeds); each wrapper
+  alone did not. The new predicates live in the submodule `spec::state`, which leaves
+  the context of `spec` as it was.
+
 ## Gaps this layout creates, and how they are closed
 
 - **Unspecified functions are silently unverified.** Under the attribute syntax a

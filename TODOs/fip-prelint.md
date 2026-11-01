@@ -245,6 +245,13 @@ argument `alloc(keep)` is instantiated by its own `param(keep = 0)`), 11 from te
 functions and closures that are not roots. All are within their bounds; the
 argument check changed nothing in `selfcheck.expected`.
 
+Update 2026-11-01 (state-passing variants): `fip_core::strict::{map_in_place_st,
+compact_map_st}` add 2 roots to `fip_core` (8) and 6 checked call sites (22 in total:
+2 more from `pipeline`, 2 from `strict_variants_match_the_fn_versions`, 2 from
+`panic_state`), all within their bounds. Notes 40 → 44: `compact_map_st`'s call of
+`swap_lt` adds its `split_at_mut` and bounds notes in `fip_core` and again through
+`strict_behaviour::pipeline`; `map_in_place_st` adds none (its index is guarded).
+
 ### Comparison with the token-level checker (`fip_testkit::summaries`)
 
 | scope | token-level (2026-10-31) | `fip-prelint` |

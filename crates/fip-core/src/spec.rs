@@ -484,3 +484,258 @@ pub proof fn lemma_compact_map_fip_spec_follows_post<F: FipFn<(u8,), Output = (u
 }
 
 } // verus!
+
+/// Specifications of the state-passing variants (`map_in_place_st`, `compact_map_st`
+/// and their strict forms). A separate module so that they do not enter the SMT
+/// context of the module above: Verus gives each module's queries all of that
+/// module's definitions, and with these definitions added there Z3 failed
+/// `lemma_compact_map_spec_rejects_extra` (measured, deterministic across seeds).
+pub mod state {
+
+    use super::{lemma_swap_multiset, strictly_increasing_below};
+    use fip_strict::FipFn;
+    use vstd::prelude::*;
+
+    verus! {
+
+    // The callable takes the state by value and returns the next one, so the
+    // specification can name every intermediate state. Written and pre-verified before
+    // the functions were implemented.
+
+    /// Postcondition of `map_in_place_st` on `old` → `new`, from state `s0` to the
+    /// returned state `s`, where `step(a, x, b, y)` means "the function may map state `a`
+    /// and element `x` to state `b` and element `y`".
+    ///
+    /// Witness: `ss` is the state trace, `ss[0] == s0`, `ss[len] == s`; step `k` took
+    /// `(ss[k], old[k])` to `(ss[k + 1], new[k])`, so the calls happened once per
+    /// element, in index order, each on the state the previous one returned.
+    pub open spec fn map_st_post<S, A>(
+        old: Seq<A>,
+        new: Seq<A>,
+        step: spec_fn(S, A, S, A) -> bool,
+        s0: S,
+        s: S,
+        ss: Seq<S>,
+    ) -> bool {
+        &&& new.len() == old.len()
+        &&& ss.len() == old.len() + 1
+        &&& ss[0] == s0
+        &&& ss[old.len() as int] == s
+        &&& forall|k: int| 0 <= k < old.len() ==> step(ss[k], old[k], ss[k + 1], #[trigger] new[k])
+    }
+
+    /// `map_st_post` for an exec function `f`.
+    pub open spec fn map_st_by_post<S, A, F: Fn(S, A) -> (S, A)>(
+        old: Seq<A>,
+        new: Seq<A>,
+        f: F,
+        s0: S,
+        s: S,
+        ss: Seq<S>,
+    ) -> bool {
+        map_st_post(old, new, |a: S, x: A, b: S, y: A| f.ensures((a, x), (b, y)), s0, s, ss)
+    }
+
+    /// `map_st_post` for a `FipFn` function.
+    pub open spec fn map_st_fip_post<S, A, F: FipFn<(S, A), Output = (S, A)>>(
+        old: Seq<A>,
+        new: Seq<A>,
+        f: F,
+        s0: S,
+        s: S,
+        ss: Seq<S>,
+    ) -> bool {
+        map_st_post(old, new, |a: S, x: A, b: S, y: A| f.post((a, x), (b, y)), s0, s, ss)
+    }
+
+    /// Postcondition of `compact_map_st`, where `step(a, x, b, y, k)` means "the
+    /// function may map state `a` and element `x` to state `b`, value `y` and keep flag
+    /// `k`".
+    ///
+    /// Witnesses as in `compact_map_post`, plus the state trace `ss` (`ss[0] == s0`,
+    /// `ss[len] == s`): step `j` took `(ss[j], old[j])` to `(ss[j + 1], ys[j], ks[j])`.
+    /// The arrangement conjuncts are those of `compact_map_post` (`new` is a permutation
+    /// of `ys`; the first `w` are the kept ones, in original order; every kept one is
+    /// among them).
+    pub open spec fn compact_map_st_post<S, A>(
+        old: Seq<A>,
+        new: Seq<A>,
+        w: int,
+        step: spec_fn(S, A, S, A, bool) -> bool,
+        s0: S,
+        s: S,
+        ss: Seq<S>,
+        ys: Seq<A>,
+        ks: Seq<bool>,
+        idx: Seq<int>,
+        pos: Seq<int>,
+    ) -> bool {
+        &&& ss.len() == old.len() + 1
+        &&& ss[0] == s0
+        &&& ss[old.len() as int] == s
+        &&& ys.len() == old.len()
+        &&& ks.len() == old.len()
+        &&& forall|j: int| 0 <= j < old.len() ==> step(ss[j], old[j], ss[j + 1], #[trigger] ys[j], ks[j])
+        &&& new.len() == old.len()
+        &&& new.to_multiset() == ys.to_multiset()
+        &&& 0 <= w <= old.len()
+        &&& idx.len() == w
+        &&& strictly_increasing_below(idx, old.len() as int)
+        &&& forall|i: int| 0 <= i < w ==> #[trigger] new[i] == ys[idx[i]] && ks[idx[i]]
+        &&& pos.len() == old.len()
+        &&& forall|j: int| 0 <= j < old.len() && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j
+    }
+
+    /// `compact_map_st_post` for an exec function `f`.
+    pub open spec fn compact_map_st_by_post<S, A, F: Fn(S, A) -> (S, A, bool)>(
+        old: Seq<A>,
+        new: Seq<A>,
+        w: int,
+        f: F,
+        s0: S,
+        s: S,
+        ss: Seq<S>,
+        ys: Seq<A>,
+        ks: Seq<bool>,
+        idx: Seq<int>,
+        pos: Seq<int>,
+    ) -> bool {
+        compact_map_st_post(old, new, w, |a: S, x: A, b: S, y: A, k: bool| f.ensures((a, x), (b, y, k)),
+            s0, s, ss, ys, ks, idx, pos)
+    }
+
+    /// `compact_map_st_post` for a `FipFn` function.
+    pub open spec fn compact_map_st_fip_post<S, A, F: FipFn<(S, A), Output = (S, A, bool)>>(
+        old: Seq<A>,
+        new: Seq<A>,
+        w: int,
+        f: F,
+        s0: S,
+        s: S,
+        ss: Seq<S>,
+        ys: Seq<A>,
+        ks: Seq<bool>,
+        idx: Seq<int>,
+        pos: Seq<int>,
+    ) -> bool {
+        compact_map_st_post(old, new, w, |a: S, x: A, b: S, y: A, k: bool| f.post((a, x), (b, y, k)),
+            s0, s, ss, ys, ks, idx, pos)
+    }
+
+    /// Example step: a counter state; each element becomes its value plus the new count.
+    pub open spec fn count_up(s: u8, x: u8, s2: u8, y: u8) -> bool {
+        s2 == s + 1 && y == x + s2
+    }
+
+    /// Accepts the intended answer: counter 10 over `[0, 0, 0]` → `[11, 12, 13]`, final 13.
+    pub proof fn lemma_map_st_spec_accepts_intended()
+        ensures
+            map_st_post(seq![0u8, 0u8, 0u8], seq![11u8, 12u8, 13u8], |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y),
+                10u8, 13u8, seq![10u8, 11u8, 12u8, 13u8]),
+    {
+        let new = seq![11u8, 12u8, 13u8];
+        assert(new[0] == 11 && new[1] == 12 && new[2] == 13);
+    }
+
+    /// Rejects a wrong final state (14), whatever the elements and the trace.
+    pub proof fn lemma_map_st_spec_rejects_wrong_final(new: Seq<u8>, ss: Seq<u8>)
+        ensures
+            !map_st_post(seq![0u8, 0u8, 0u8], new, |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y), 10u8, 14u8, ss),
+    {
+        let old = seq![0u8, 0u8, 0u8];
+        if map_st_post(old, new, |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y), 10u8, 14u8, ss) {
+            assert(count_up(ss[0], old[0], ss[1], new[0]));
+            assert(count_up(ss[1], old[1], ss[2], new[1]));
+            assert(count_up(ss[2], old[2], ss[3], new[2]));
+        }
+    }
+
+    /// Rejects a state that is not threaded (every call sees `s0`: `[11, 11, 11]`).
+    pub proof fn lemma_map_st_spec_rejects_unthreaded(s: u8, ss: Seq<u8>)
+        ensures
+            !map_st_post(seq![0u8, 0u8, 0u8], seq![11u8, 11u8, 11u8], |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y), 10u8, s, ss),
+    {
+        let old = seq![0u8, 0u8, 0u8];
+        let new = seq![11u8, 11u8, 11u8];
+        if map_st_post(old, new, |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y), 10u8, s, ss) {
+            assert(count_up(ss[0], old[0], ss[1], new[0]));
+            assert(count_up(ss[1], old[1], ss[2], new[1]));
+        }
+    }
+
+    /// Rejects the state threaded in reverse index order (`[13, 12, 11]`).
+    pub proof fn lemma_map_st_spec_rejects_reversed(s: u8, ss: Seq<u8>)
+        ensures
+            !map_st_post(seq![0u8, 0u8, 0u8], seq![13u8, 12u8, 11u8], |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y), 10u8, s, ss),
+    {
+        let old = seq![0u8, 0u8, 0u8];
+        let new = seq![13u8, 12u8, 11u8];
+        if map_st_post(old, new, |a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y), 10u8, s, ss) {
+            assert(count_up(ss[0], old[0], ss[1], new[0]));
+        }
+    }
+
+    /// Example step: a counter state; each element becomes its value plus the new count,
+    /// kept if the input was odd.
+    pub open spec fn count_up_keep_odd(s: u8, x: u8, s2: u8, y: u8, k: bool) -> bool {
+        count_up(s, x, s2, y) && k == (x % 2 == 1)
+    }
+
+    /// Accepts the intended answer: counter 0 over `[1, 2, 3]` → `[2, 6 | 4]`, `w = 2`,
+    /// final 3.
+    pub proof fn lemma_compact_map_st_spec_accepts_intended()
+        ensures
+            compact_map_st_post(seq![1u8, 2u8, 3u8], seq![2u8, 6u8, 4u8], 2,
+                |a: u8, x: u8, b: u8, y: u8, k: bool| count_up_keep_odd(a, x, b, y, k), 0u8, 3u8,
+                seq![0u8, 1u8, 2u8, 3u8], seq![2u8, 4u8, 6u8], seq![true, false, true], seq![0int, 2int], seq![0int, -1int, 1int]),
+    {
+        let ys = seq![2u8, 4u8, 6u8];
+        let new = seq![2u8, 6u8, 4u8];
+        lemma_swap_multiset(ys, 1, 2);
+        assert(new =~= ys.update(1, ys[2]).update(2, ys[1]));
+        assert(ys[0] == 2 && ys[1] == 4 && ys[2] == 6);
+    }
+
+    /// Rejects a wrong final state (4), whatever the witnesses.
+    pub proof fn lemma_compact_map_st_spec_rejects_wrong_final(
+        new: Seq<u8>, w: int, ss: Seq<u8>, ys: Seq<u8>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>,
+    )
+        ensures
+            !compact_map_st_post(seq![1u8, 2u8, 3u8], new, w,
+                |a: u8, x: u8, b: u8, y: u8, k: bool| count_up_keep_odd(a, x, b, y, k), 0u8, 4u8, ss, ys, ks, idx, pos),
+    {
+        let old = seq![1u8, 2u8, 3u8];
+        if compact_map_st_post(old, new, w, |a: u8, x: u8, b: u8, y: u8, k: bool| count_up_keep_odd(a, x, b, y, k),
+            0u8, 4u8, ss, ys, ks, idx, pos) {
+            assert(count_up_keep_odd(ss[0], old[0], ss[1], ys[0], ks[0]));
+            assert(count_up_keep_odd(ss[1], old[1], ss[2], ys[1], ks[1]));
+            assert(count_up_keep_odd(ss[2], old[2], ss[3], ys[2], ks[2]));
+        }
+    }
+
+    /// The `FipFn` forms are the relational specs with `post` as the relation.
+    pub proof fn lemma_st_fip_specs_follow_post<
+        M: FipFn<(u8, u8), Output = (u8, u8)>,
+        C: FipFn<(u8, u8), Output = (u8, u8, bool)>,
+    >(m: M, c: C, new: Seq<u8>, w: int, ss: Seq<u8>, ys: Seq<u8>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>)
+        requires
+            forall|a: u8, x: u8, b: u8, y: u8| #[trigger] m.post((a, x), (b, y)) == count_up(a, x, b, y),
+            forall|a: u8, x: u8, b: u8, y: u8, k: bool| #[trigger] c.post((a, x), (b, y, k)) == count_up_keep_odd(a, x, b, y, k),
+        ensures
+            map_st_fip_post(seq![0u8, 0u8, 0u8], seq![11u8, 12u8, 13u8], m, 10u8, 13u8, seq![10u8, 11u8, 12u8, 13u8]),
+            !map_st_fip_post(seq![0u8, 0u8, 0u8], new, m, 10u8, 14u8, ss),
+            compact_map_st_fip_post(seq![1u8, 2u8, 3u8], seq![2u8, 6u8, 4u8], 2, c, 0u8, 3u8,
+                seq![0u8, 1u8, 2u8, 3u8], seq![2u8, 4u8, 6u8], seq![true, false, true], seq![0int, 2int], seq![0int, -1int, 1int]),
+            !compact_map_st_fip_post(seq![1u8, 2u8, 3u8], new, w, c, 0u8, 4u8, ss, ys, ks, idx, pos),
+    {
+        assert((|a: u8, x: u8, b: u8, y: u8| m.post((a, x), (b, y))) =~= (|a: u8, x: u8, b: u8, y: u8| count_up(a, x, b, y)));
+        assert((|a: u8, x: u8, b: u8, y: u8, k: bool| c.post((a, x), (b, y, k)))
+            =~= (|a: u8, x: u8, b: u8, y: u8, k: bool| count_up_keep_odd(a, x, b, y, k)));
+        lemma_map_st_spec_accepts_intended();
+        lemma_map_st_spec_rejects_wrong_final(new, ss);
+        lemma_compact_map_st_spec_accepts_intended();
+        lemma_compact_map_st_spec_rejects_wrong_final(new, w, ss, ys, ks, idx, pos);
+    }
+
+    } // verus!
+} // mod state

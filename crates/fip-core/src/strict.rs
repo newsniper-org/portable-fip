@@ -10,7 +10,9 @@
 //! Specified like their `Fn` counterparts, with `FipFn::pre` / `FipFn::post` in place
 //! of a closure's `requires` / `ensures`; `compact`, `dedup_by` and `compact_map` use
 //! the pre-verified predicates `compact_fip_post`, `dedup_fip_post` and
-//! `compact_map_fip_post` (`spec.rs`). Verified with `--no-cheating`.
+//! `compact_map_fip_post` (`spec.rs`), and `map_in_place_st` / `compact_map_st` use
+//! `map_st_fip_post` / `compact_map_st_fip_post` (`spec::state`). Verified with
+//! `--no-cheating`.
 //!
 //! The strict check runs in plain builds only (`cfg_attr(not(verus_keep_ghost))`);
 //! under `verus` the bodies are verified as written.
@@ -30,6 +32,8 @@
 use fip_strict::FipFn;
 
 #[cfg(verus_keep_ghost)]
+use crate::spec::state::{compact_map_st_fip_post, map_st_fip_post};
+#[cfg(verus_keep_ghost)]
 use crate::spec::{
     compact_fip_post, compact_map_fip_post, dedup_fip_post, dedup_src_ok, prefix_ok,
     strictly_increasing_below,
@@ -38,7 +42,8 @@ use crate::spec::{
 use vstd::prelude::*;
 
 /// Transforms `*slot` in place with `f`, using `hole` as the temporary occupant, and
-/// returns `hole`. Strict variant of [`crate::update`].
+/// returns `hole`. Strict variant of [`crate::update`]; if `f` panics, `*slot` holds
+/// `hole`.
 ///
 /// ```
 /// use fip_strict::FipFn;
@@ -63,7 +68,7 @@ pub fn update<T, F: FipFn<(T,), Output = T>>(slot: &mut T, hole: T, f: F) -> T {
 
 /// Replaces every element `x` of `xs` with `f(x)`, in place, using `hole` as the
 /// temporary occupant of each slot, and returns `hole`. Strict variant of
-/// [`crate::map_in_place`].
+/// [`crate::map_in_place`]; if `f` panics, the slice is left as by that function.
 ///
 /// ```
 /// use fip_strict::FipFn;
@@ -104,13 +109,79 @@ pub fn map_in_place<T, F: FipFn<(T,), Output = T>>(xs: &mut [T], hole: T, f: F) 
     spare
 }
 
+/// Replaces every element `x` of `xs` with the value of `f(s, x)`, threading the state
+/// `s` through the calls in index order, and returns the final state and `hole`.
+/// Strict variant of [`crate::map_in_place_st`].
+///
+/// Verified (`map_st_fip_post`).
+///
+/// # Panics
+///
+/// Only if `f` panics; the slice is then left as by [`crate::map_in_place_st`].
+///
+/// ```
+/// use fip_strict::FipFn;
+/// let mut xs = [0, 0, 0];
+/// let (count, hole) = fip_core::strict::map_in_place_st(&mut xs, 0, 10, fip_macros::fip_fn!(|c: i32, _v: i32| (c + 1, c + 1)));
+/// assert_eq!((xs, count, hole), ([11, 12, 13], 13, 0));
+/// ```
+#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true, param(f = 0)))]
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.pre((s, old(xs)@[i])),
+    ensures
+        r.1 == hole,
+        exists|ss: Seq<S>| #[trigger] map_st_fip_post(old(xs)@, final(xs)@, f, s0, r.0, ss),
+))]
+pub fn map_in_place_st<S, T, F: FipFn<(S, T), Output = (S, T)>>(
+    xs: &mut [T],
+    hole: T,
+    s0: S,
+    f: F,
+) -> (S, T) {
+    let n = <[T]>::len(xs);
+    let mut spare = hole;
+    proof_decl! { let ghost mut ss: Seq<S> = seq![s0]; }
+    let mut s = s0;
+    let mut i: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            i <= n,
+            n == old(xs)@.len(),
+            xs@.len() == n,
+            spare == hole,
+            ss.len() == i + 1,
+            ss[0] == s0,
+            ss[i as int] == s,
+            forall|k: int| i <= k < n ==> xs@[k] == old(xs)@[k],
+            forall|k: int| 0 <= k < i ==> f.post((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
+            forall|s: S, k: int| 0 <= k < n ==> #[trigger] f.pre((s, old(xs)@[k])),
+        decreases n - i,
+    ))]
+    while i < n {
+        let prev = crate::slot::replace(&mut xs[i], spare);
+        let (s1, next) = f.call((s, prev));
+        spare = crate::slot::replace(&mut xs[i], next);
+        s = s1;
+        proof! { ss = ss.push(s); }
+        i += 1;
+    }
+    proof_decl! { let ghost last = s; }
+    let res = (s, spare);
+    proof! {
+        assert(res.0 == last);
+        assert(map_st_fip_post(old(xs)@, xs@, f, s0, res.0, ss));
+    }
+    res
+}
+
 /// Moves the elements for which `keep` returns `true` to the front of `xs`, in their
 /// original order, and returns how many there are. Strict variant of
 /// [`crate::compact`].
 ///
 /// Verified (`compact_fip_post`): the slice is permuted; `keep` returned `true`
 /// before the returned length and `false` after it; the kept elements keep their
-/// original order.
+/// original order. If `keep` panics, the slice is left as by [`crate::compact`].
 ///
 /// ```
 /// use fip_strict::FipFn;
@@ -171,7 +242,8 @@ pub fn compact<T, F: for<'a> FipFn<(&'a T,), Output = bool>>(xs: &mut [T], keep:
 /// of each run, by moving the kept elements to the front. Returns how many are kept.
 /// Strict variant of [`crate::dedup_by`] (same comparison order: `(kept, candidate)`).
 ///
-/// Verified (`dedup_fip_post`).
+/// Verified (`dedup_fip_post`). If `same` panics, the slice is left as by
+/// [`crate::dedup_by`].
 ///
 /// ```
 /// use fip_strict::FipFn;
@@ -269,7 +341,8 @@ pub fn dedup_by<T, F: for<'a, 'b> FipFn<(&'a T, &'b T), Output = bool>>(
 /// in their original order. Returns how many are kept, and `hole`. Strict variant of
 /// [`crate::compact_map`].
 ///
-/// Verified (`compact_map_fip_post`).
+/// Verified (`compact_map_fip_post`). If `f` panics, the slice is left as by
+/// [`crate::compact_map`].
 ///
 /// ```
 /// use fip_strict::FipFn;
@@ -375,6 +448,141 @@ pub fn compact_map<T, F: FipFn<(T,), Output = (T, bool)>>(
     proof! {
         assert(res.0 == w);
         assert(compact_map_fip_post(old(xs)@, xs@, res.0 as int, f, ys, ks, idx, pos));
+    }
+    res
+}
+
+/// Maps every element through `f(s, x)`, threading the state `s` through the calls in
+/// index order, and moves the values `f` marks to keep to the front, in their
+/// original order. Returns how many are kept, the final state, and `hole`. Strict
+/// variant of [`crate::compact_map_st`].
+///
+/// Verified (`compact_map_st_fip_post`).
+///
+/// # Panics
+///
+/// Only if `f` panics; the slice is then left as by [`crate::compact_map_st`].
+///
+/// ```
+/// use fip_strict::FipFn;
+/// let mut xs = [1, 2, 3, 4];
+/// let (n, odd, hole) = fip_core::strict::compact_map_st(&mut xs, 0, 0, fip_macros::fip_fn!(|c: i32, v: i32| {
+///     if v % 2 == 1 { (c + 1, v * 10 + c, true) } else { (c, v, false) }
+/// }));
+/// assert_eq!((&xs[..n], odd, hole), (&[10, 31][..], 2, 0));
+/// ```
+#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true, param(f = 0)))]
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.pre((s, old(xs)@[i])),
+    ensures
+        r.2 == hole,
+        exists|ss: Seq<S>, ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
+            #[trigger] compact_map_st_fip_post(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1, ss, ys, ks, idx, pos),
+))]
+#[must_use = "elements at and after the returned length are the dropped ones"]
+pub fn compact_map_st<S, T, F: FipFn<(S, T), Output = (S, T, bool)>>(
+    xs: &mut [T],
+    hole: T,
+    s0: S,
+    f: F,
+) -> (usize, S, T) {
+    let len = <[T]>::len(xs);
+    let mut spare = hole;
+    proof_decl! { let ghost mut ss: Seq<S> = seq![s0]; }
+    let mut s = s0;
+    let mut w: usize = 0;
+    let mut r: usize = 0;
+    proof_decl! {
+        let ghost mut ys: Seq<T> = Seq::empty();
+        let ghost mut ks: Seq<bool> = Seq::empty();
+        let ghost mut idx: Seq<int> = Seq::empty();
+        let ghost mut pos: Seq<int> = Seq::empty();
+    }
+    proof! { assert(xs@.subrange(0, 0) =~= ys); }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            w <= r <= len,
+            len == old(xs)@.len(),
+            xs@.len() == len,
+            spare == hole,
+            forall|k: int| r <= k < len ==> xs@[k] == old(xs)@[k],
+            forall|s: S, i: int| 0 <= i < len ==> #[trigger] f.pre((s, old(xs)@[i])),
+            ss.len() == r + 1,
+            ss[0] == s0,
+            ss[r as int] == s,
+            ys.len() == r,
+            ks.len() == r,
+            forall|j: int| 0 <= j < r ==> f.post((ss[j], old(xs)@[j]), (ss[j + 1], #[trigger] ys[j], ks[j])),
+            xs@.subrange(0, r as int).to_multiset() == ys.to_multiset(),
+            idx.len() == w,
+            strictly_increasing_below(idx, r as int),
+            prefix_ok(xs@, ys, ks, idx, w as int),
+            pos.len() == r,
+            forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+        decreases len - r,
+    ))]
+    while r < len {
+        proof_decl! { let ghost pre = xs@; let ghost pys = ys; let ghost pks = ks; let ghost pss = ss; }
+        let item = crate::slot::replace(&mut xs[r], spare);
+        let (s1, mapped, keep) = f.call((s, item));
+        spare = crate::slot::replace(&mut xs[r], mapped);
+        s = s1;
+        proof_decl! { let ghost stored = xs@; }
+        proof! {
+            assert(stored =~= pre.update(r as int, mapped));
+            assert(stored.subrange(0, r as int) =~= pre.subrange(0, r as int));
+            assert(stored.subrange(0, r as int + 1) =~= stored.subrange(0, r as int).push(mapped));
+            vstd::seq_lib::to_multiset_build(stored.subrange(0, r as int), mapped);
+            vstd::seq_lib::to_multiset_build(pys, mapped);
+            ys = pys.push(mapped);
+            ks = pks.push(keep);
+            ss = pss.push(s);
+            assert(stored.subrange(0, r as int + 1).to_multiset() == ys.to_multiset());
+            crate::spec::lemma_prefix_frame(pre, stored, pys, pks, ys, ks, idx, w as int, mapped, keep);
+            assert forall|j: int| 0 <= j < r + 1 && #[trigger] ks[j] implies 0 <= pos[j] < w && idx[pos[j]] == j || j == r by {
+                if j < r { assert(ks[j] == pks[j]); }
+            };
+            assert forall|j: int| 0 <= j < r + 1 implies f.post((ss[j], old(xs)@[j]), (ss[j + 1], #[trigger] ys[j], ks[j])) by {
+                if j < r {
+                    assert(pys[j] == ys[j] && pks[j] == ks[j] && pss[j] == ss[j] && pss[j + 1] == ss[j + 1]);
+                }
+            };
+            assert(ys[r as int] == mapped && ks[r as int] == keep);
+        }
+        if keep {
+            if w < r {
+                crate::slice::swap_lt(xs, w, r);
+                proof! {
+                    let p = stored.subrange(0, r as int + 1);
+                    crate::spec::lemma_swap_multiset(p, w as int, r as int);
+                    assert(xs@.subrange(0, r as int + 1) =~= p.update(w as int, p[r as int]).update(r as int, p[w as int]));
+                }
+            }
+            proof! {
+                assert(xs@[w as int] == mapped);
+                crate::spec::lemma_prefix_push(stored, xs@, ys, ks, idx, w as int, r as int);
+                pos = pos.push(w as int);
+                idx = idx.push(r as int);
+            }
+            w += 1;
+        }
+        proof! {
+            if !keep {
+                pos = pos.push(-1);
+            }
+        }
+        r += 1;
+    }
+    proof! {
+        assert(xs@.subrange(0, len as int) =~= xs@);
+        assert(compact_map_st_fip_post(old(xs)@, xs@, w as int, f, s0, s, ss, ys, ks, idx, pos));
+    }
+    proof_decl! { let ghost last = s; }
+    let res = (w, s, spare);
+    proof! {
+        assert(res.0 == w && res.1 == last);
+        assert(compact_map_st_fip_post(old(xs)@, xs@, res.0 as int, f, s0, res.1, ss, ys, ks, idx, pos));
     }
     res
 }

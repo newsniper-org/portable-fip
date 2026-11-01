@@ -5,6 +5,8 @@
 //! allocated, cloned or dropped.
 
 #[cfg(verus_keep_ghost)]
+use crate::spec::state::{compact_map_st_by_post, map_st_by_post};
+#[cfg(verus_keep_ghost)]
 use crate::spec::{
     compact_map_by_post, dedup_by_post, dedup_src_ok, prefix_ok, strictly_increasing_below,
 };
@@ -67,6 +69,13 @@ pub fn swap<T>(xs: &mut [T], i: usize, j: usize) {
 /// returned `true` for every element before the returned length and `false` for every
 /// element after it; and the retained elements appear in their original order.
 ///
+/// # Panics
+///
+/// Only if `keep` panics. The slice is then still a permutation of the input
+/// (elements are only swapped, none is dropped): the elements accepted so far are at
+/// the front in order, followed by the rejected ones and the unexamined rest
+/// (`tests/panic_state.rs`).
+///
 /// ```
 /// let mut xs = [1, 2, 3, 4, 5, 6];
 /// let n = fip_core::compact(&mut xs, |v| v % 2 == 0);
@@ -128,6 +137,14 @@ pub fn compact<T, F: Fn(&T) -> bool>(xs: &mut [T], keep: F) -> usize {
 ///
 /// `f` is bound once and called once per element, in index order.
 ///
+/// # Panics
+///
+/// Only if `f` panics. Then the elements before the failing one hold `f`'s values,
+/// the failing slot holds `hole`, and the elements after it are unchanged; the
+/// failing element was moved into `f` and is dropped by it. Measured: `[1, 2, 3]`,
+/// `hole = 0`, `f = |v| v * 10` panicking on 2 leaves `[10, 0, 3]`
+/// (`tests/panic_state.rs`).
+///
 /// ```
 /// let mut xs = [1, 2, 3];
 /// let hole = fip_core::map_in_place(&mut xs, 0, |v| v * 2);
@@ -165,6 +182,75 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
     spare
 }
 
+/// [`map_in_place`] with an explicit state: replaces every element `x` of `xs` with
+/// the value of `f(s, x)`, threading the state `s` through the calls in index order
+/// (starting from `s0`), and returns the final state and `hole`.
+///
+/// The state is passed by value instead of being captured mutably by an `FnMut`
+/// closure, so Verus can state what the calls did to it.
+///
+/// Verified (`map_st_by_post` in `spec::state`): there is a state trace `ss` with
+/// `ss[0] == s0` and `ss[len]` the returned state, and call `k` took
+/// `(ss[k], old xs[k])` to `(ss[k + 1], new xs[k])`: `f` was called once per element,
+/// in index order, each time on the state the previous call returned.
+/// `f` must accept every element with any state.
+///
+/// # Panics
+///
+/// Only if `f` panics. Then the elements before the failing one hold `f`'s values,
+/// the failing slot holds `hole`, and the elements after it are unchanged; the
+/// state and the failing element were moved into `f` and are dropped by it
+/// (`tests/panic_state.rs`).
+///
+/// ```
+/// let mut xs = [0, 0, 0];
+/// let (count, hole) = fip_core::map_in_place_st(&mut xs, 0, 10, |c, _v| (c + 1, c + 1));
+/// assert_eq!((xs, count, hole), ([11, 12, 13], 13, 0));
+/// ```
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.requires((s, old(xs)@[i])),
+    ensures
+        r.1 == hole,
+        exists|ss: Seq<S>| #[trigger] map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, ss),
+))]
+pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S, f: F) -> (S, T) {
+    let n = xs.len();
+    let mut spare = hole;
+    proof_decl! { let ghost mut ss: Seq<S> = seq![s0]; }
+    let mut s = s0;
+    let mut i: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            i <= n,
+            n == old(xs)@.len(),
+            xs@.len() == n,
+            spare == hole,
+            ss.len() == i + 1,
+            ss[0] == s0,
+            ss[i as int] == s,
+            forall|k: int| i <= k < n ==> xs@[k] == old(xs)@[k],
+            forall|k: int| 0 <= k < i ==> f.ensures((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
+            forall|s: S, k: int| 0 <= k < n ==> #[trigger] f.requires((s, old(xs)@[k])),
+        decreases n - i,
+    ))]
+    while i < n {
+        let prev = crate::slot::replace(&mut xs[i], spare);
+        let (s1, next) = f(s, prev);
+        spare = crate::slot::replace(&mut xs[i], next);
+        s = s1;
+        proof! { ss = ss.push(s); }
+        i += 1;
+    }
+    proof_decl! { let ghost last = s; }
+    let res = (s, spare);
+    proof! {
+        assert(res.0 == last);
+        assert(map_st_by_post(old(xs)@, xs@, f, s0, res.0, ss));
+    }
+    res
+}
+
 /// Removes consecutive runs of elements that `same` considers equal, keeping the first
 /// of each run, by moving the kept elements to the front. Returns how many are kept.
 ///
@@ -176,6 +262,13 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
 /// appear in their original order, starting with the first; each kept element was
 /// found different from the one kept before it; every removed element was found the
 /// same as the last element kept before it.
+///
+/// # Panics
+///
+/// Only if `same` panics. The slice is then still a permutation of the input
+/// (elements are only swapped, none is dropped): the elements kept so far are at the
+/// front in order, followed by the removed ones and the uncompared rest
+/// (`tests/panic_state.rs`).
 ///
 /// ```
 /// let mut xs = [1, 1, 2, 3, 3, 3, 1];
@@ -277,6 +370,13 @@ pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
 /// and replaced by `f`'s value; the result is a permutation of those values; the
 /// first `w` are exactly the ones marked `keep`, in original order.
 ///
+/// # Panics
+///
+/// Only if `f` panics. Then the slots before the failing one hold the values `f`
+/// returned for the elements before it (those marked keep first, in order), the
+/// failing slot holds `hole`, and the elements after it are unchanged; the failing
+/// element was moved into `f` and is dropped by it (`tests/panic_state.rs`).
+///
 /// ```
 /// let mut xs = [1, 2, 3, 4];
 /// let (n, hole) = fip_core::compact_map(&mut xs, 0, |v| (v * 10, v % 2 == 1));
@@ -375,6 +475,150 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
     proof! {
         assert(res.0 == w);
         assert(compact_map_by_post(old(xs)@, xs@, res.0 as int, f, ys, ks, idx, pos));
+    }
+    res
+}
+
+/// [`compact_map`] with an explicit state: maps every element through `f(s, x)`,
+/// threading the state `s` through the calls in index order (starting from `s0`), and
+/// moves the values `f` marks to keep to the front, in their original order. Returns
+/// how many are kept, the final state, and `hole`.
+///
+/// The state is passed by value instead of being captured mutably by an `FnMut`
+/// closure, so Verus can state what the calls did to it.
+///
+/// Verified (`compact_map_st_by_post` in `spec::state`): everything
+/// [`compact_map`] guarantees, and a state trace `ss` with `ss[0] == s0` and
+/// `ss[len]` the returned state such that call `j` took `(ss[j], old xs[j])` to
+/// `(ss[j + 1], ys[j], ks[j])`, where `ys[j]`, `ks[j]` are the value and keep flag
+/// it returned. `f` must accept every element with any state.
+///
+/// # Panics
+///
+/// Only if `f` panics. Then the slice holds the values `f` returned for the elements
+/// before the failing one (those marked keep at the front, in order, then the others),
+/// `hole` in the failing slot, and the original elements after it; the state and the
+/// failing element were moved into `f` and are dropped by it (`tests/panic_state.rs`).
+///
+/// ```
+/// let mut xs = [1, 2, 3, 4];
+/// // Number the odd elements: each becomes 10 * value + how many odd ones came before.
+/// let (n, odd, hole) = fip_core::compact_map_st(&mut xs, 0, 0, |c, v| {
+///     if v % 2 == 1 { (c + 1, v * 10 + c, true) } else { (c, v, false) }
+/// });
+/// assert_eq!((&xs[..n], odd, hole), (&[10, 31][..], 2, 0));
+/// ```
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        forall|s: S, i: int| 0 <= i < old(xs)@.len() ==> #[trigger] f.requires((s, old(xs)@[i])),
+    ensures
+        r.2 == hole,
+        exists|ss: Seq<S>, ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
+            #[trigger] compact_map_st_by_post(old(xs)@, final(xs)@, r.0 as int, f, s0, r.1, ss, ys, ks, idx, pos),
+))]
+#[must_use = "elements at and after the returned length are the dropped ones"]
+pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
+    xs: &mut [T],
+    hole: T,
+    s0: S,
+    f: F,
+) -> (usize, S, T) {
+    let len = xs.len();
+    let mut spare = hole;
+    proof_decl! { let ghost mut ss: Seq<S> = seq![s0]; }
+    let mut s = s0;
+    let mut w: usize = 0;
+    let mut r: usize = 0;
+    proof_decl! {
+        let ghost mut ys: Seq<T> = Seq::empty();
+        let ghost mut ks: Seq<bool> = Seq::empty();
+        let ghost mut idx: Seq<int> = Seq::empty();
+        let ghost mut pos: Seq<int> = Seq::empty();
+    }
+    proof! { assert(xs@.subrange(0, 0) =~= ys); }
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            w <= r <= len,
+            len == old(xs)@.len(),
+            xs@.len() == len,
+            spare == hole,
+            forall|k: int| r <= k < len ==> xs@[k] == old(xs)@[k],
+            forall|s: S, i: int| 0 <= i < len ==> #[trigger] f.requires((s, old(xs)@[i])),
+            ss.len() == r + 1,
+            ss[0] == s0,
+            ss[r as int] == s,
+            ys.len() == r,
+            ks.len() == r,
+            forall|j: int| 0 <= j < r ==> f.ensures((ss[j], old(xs)@[j]), (ss[j + 1], #[trigger] ys[j], ks[j])),
+            xs@.subrange(0, r as int).to_multiset() == ys.to_multiset(),
+            idx.len() == w,
+            strictly_increasing_below(idx, r as int),
+            prefix_ok(xs@, ys, ks, idx, w as int),
+            pos.len() == r,
+            forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+        decreases len - r,
+    ))]
+    while r < len {
+        proof_decl! { let ghost pre = xs@; let ghost pys = ys; let ghost pks = ks; let ghost pss = ss; }
+        let item = crate::slot::replace(&mut xs[r], spare);
+        let (s1, mapped, keep) = f(s, item);
+        spare = crate::slot::replace(&mut xs[r], mapped);
+        s = s1;
+        proof_decl! { let ghost stored = xs@; }
+        proof! {
+            assert(stored =~= pre.update(r as int, mapped));
+            assert(stored.subrange(0, r as int) =~= pre.subrange(0, r as int));
+            assert(stored.subrange(0, r as int + 1) =~= stored.subrange(0, r as int).push(mapped));
+            vstd::seq_lib::to_multiset_build(stored.subrange(0, r as int), mapped);
+            vstd::seq_lib::to_multiset_build(pys, mapped);
+            ys = pys.push(mapped);
+            ks = pks.push(keep);
+            ss = pss.push(s);
+            assert(stored.subrange(0, r as int + 1).to_multiset() == ys.to_multiset());
+            crate::spec::lemma_prefix_frame(pre, stored, pys, pks, ys, ks, idx, w as int, mapped, keep);
+            assert forall|j: int| 0 <= j < r + 1 && #[trigger] ks[j] implies 0 <= pos[j] < w && idx[pos[j]] == j || j == r by {
+                if j < r { assert(ks[j] == pks[j]); }
+            };
+            assert forall|j: int| 0 <= j < r + 1 implies f.ensures((ss[j], old(xs)@[j]), (ss[j + 1], #[trigger] ys[j], ks[j])) by {
+                if j < r {
+                    assert(pys[j] == ys[j] && pks[j] == ks[j] && pss[j] == ss[j] && pss[j + 1] == ss[j + 1]);
+                }
+            };
+            assert(ys[r as int] == mapped && ks[r as int] == keep);
+        }
+        if keep {
+            if w < r {
+                swap_lt(xs, w, r);
+                proof! {
+                    let p = stored.subrange(0, r as int + 1);
+                    crate::spec::lemma_swap_multiset(p, w as int, r as int);
+                    assert(xs@.subrange(0, r as int + 1) =~= p.update(w as int, p[r as int]).update(r as int, p[w as int]));
+                }
+            }
+            proof! {
+                assert(xs@[w as int] == mapped);
+                crate::spec::lemma_prefix_push(stored, xs@, ys, ks, idx, w as int, r as int);
+                pos = pos.push(w as int);
+                idx = idx.push(r as int);
+            }
+            w += 1;
+        }
+        proof! {
+            if !keep {
+                pos = pos.push(-1);
+            }
+        }
+        r += 1;
+    }
+    proof! {
+        assert(xs@.subrange(0, len as int) =~= xs@);
+        assert(compact_map_st_by_post(old(xs)@, xs@, w as int, f, s0, s, ss, ys, ks, idx, pos));
+    }
+    proof_decl! { let ghost last = s; }
+    let res = (w, s, spare);
+    proof! {
+        assert(res.0 == w && res.1 == last);
+        assert(compact_map_st_by_post(old(xs)@, xs@, res.0 as int, f, s0, res.1, ss, ys, ks, idx, pos));
     }
     res
 }

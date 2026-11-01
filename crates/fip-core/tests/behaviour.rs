@@ -107,3 +107,49 @@ fn other_functions_are_allocation_free() {
     assert_eq!(assert_fip!(fip_core::update(&mut slot, 0, |v| v * 7)), 0);
     assert_eq!(slot, 14);
 }
+
+#[test]
+fn map_in_place_st_threads_the_state_in_index_order() {
+    // Y4's closure-state case (`fip_map!` with a captured counter), state passed explicitly.
+    let mut xs = [0_u32, 0, 0];
+    let (c, hole) = assert_fip!(fip_core::map_in_place_st(&mut xs, 0, 10_u32, |c, _v| (
+        c + 1,
+        c + 1
+    )));
+    assert_eq!((xs, c, hole), ([11, 12, 13], 13, 0));
+    for v in inputs() {
+        let step = |c: u8, x: u8| (c.wrapping_add(x).wrapping_add(1), x.wrapping_add(c));
+        let mut expected = v.clone();
+        let mut s = 7_u8;
+        for x in &mut expected {
+            (s, *x) = step(s, *x);
+        }
+        let mut xs = v;
+        let (st, hole) = assert_fip!(fip_core::map_in_place_st(&mut xs, 0, 7_u8, step));
+        assert_eq!((xs, st, hole), (expected, s, 0));
+    }
+}
+
+#[test]
+fn compact_map_st_matches_a_sequential_model() {
+    for v in inputs() {
+        let step = |c: u8, x: u8| (c.wrapping_add(x), x.wrapping_add(c), x % 2 == 1);
+        let mut s = 3_u8;
+        let mut mapped = Vec::new();
+        let mut kept = Vec::new();
+        for &x in &v {
+            let (s2, y, k) = step(s, x);
+            s = s2;
+            mapped.push(y);
+            if k {
+                kept.push(y);
+            }
+        }
+        let mut xs = v;
+        let (n, st, hole) = assert_fip!(fip_core::compact_map_st(&mut xs, 0, 3_u8, step));
+        assert_eq!((&xs[..n], st, hole), (&kept[..], s, 0));
+        mapped.sort_unstable();
+        xs.sort_unstable();
+        assert_eq!(xs, mapped, "not a permutation of the mapped values");
+    }
+}

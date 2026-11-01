@@ -50,9 +50,15 @@ verify-strict:
     rm -rf target/verus-strict && mkdir -p target/verus-strict
     VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --crate-name fip_strict --no-cheating crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict
 
-# fip-core proofs, no trusted items (--no-cheating); imports fip-strict's Verus build.
+# Verus metadata and library of fip-core (needs fip-strict's on the library path),
+# imported by verified callers in `verify/`.
+verus_core := "--import fip_core=target/verus-core/fip_core.vir --extern fip_core=target/verus-core/libfip_core.rlib -L target/verus-strict"
+
+# fip-core proofs, no trusted items (--no-cheating); imports fip-strict's Verus build
+# and exports fip-core's for `verify/compose_state.rs`.
 verify-core: verify-strict
-    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating crates/fip-core/src/lib.rs {{verus_strict}}
+    rm -rf target/verus-core && mkdir -p target/verus-core
+    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
 
 # fip-alloc proofs, no trusted items (--no-cheating).
 verify-alloc:
@@ -60,7 +66,8 @@ verify-alloc:
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
 # Strict functions with `FipFn` parameters verify against fip-strict's Verus build.
-verify-compose: verify-strict
+# Callers of the state-passing combinators verify against fip-core's Verus build.
+verify-compose: verify-strict verify-core
     #!/usr/bin/env bash
     set -euo pipefail
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
@@ -70,6 +77,7 @@ verify-compose: verify-strict
     run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
     run verify/compose.rs
     run verify/compose_strict.rs
+    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating {{verus_strict}} {{verus_core}} verify/compose_state.rs
     out=target/verify-compose; mkdir -p "$out"
     sed 's/^#\[fip\]$//; s/^pub fn count/#[fip]\npub fn count/' verify/compose.rs > "$out/below.rs"
     if run "$out/below.rs" 2> "$out/below.err"; then echo "FAIL: #[fip] below verus_spec was accepted"; exit 1; fi
@@ -93,7 +101,7 @@ verify-compose: verify-strict
 
 # Mutated copies must FAIL; a gate that cannot fail proves nothing.
 # Each mutation is scoped to one function with a sed address range.
-verify-negative: verify-strict
+verify-negative: verify-strict verify-core
     #!/usr/bin/env bash
     set -euo pipefail
     out=target/verify-negative; rm -rf "$out"; mkdir -p "$out"
@@ -128,6 +136,26 @@ verify-negative: verify-strict
     expect_verus_fail strict-update-keeps-old    fip-core strict.rs '/^pub fn update</,/^}/ s/^    let next = f.call((prev,));$/    let next = prev; let _ = \&f;/' "$errs"
     expect_verus_fail strict-dedup-wrong-compare fip-core strict.rs '/^pub fn dedup_by</,/^}/ s/same.call((&xs\[w - 1\], &xs\[r\]))/same.call((\&xs[r - 1], \&xs[r]))/' "$errs"
     expect_verus_fail strict-compact-map-invert  fip-core strict.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$errs"
+    # State-passing variants: the state must be threaded once per element, in index
+    # order. Each must fail on the state-chain invariant or assertion, not elsewhere.
+    chain='\(ss\[[jk]\], old\(xs\)@\[[jk]\]\), \(ss\[[jk] \+ 1\]'
+    expect_verus_fail map-st-reverse-order              fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
+    expect_verus_fail map-st-not-threaded               fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { s/^pub fn map_in_place_st<S, /pub fn map_in_place_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail compact-map-st-not-threaded       fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ { s/^pub fn compact_map_st<S, /pub fn compact_map_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail strict-map-st-reverse-order       fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
+    expect_verus_fail strict-compact-map-st-not-threaded fip-core strict.rs '/^pub fn compact_map_st</,/^}/ { s/^pub fn compact_map_st<S, /pub fn compact_map_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    # Pre-verified state spec: without the state chain, the rejecting lemmas fail.
+    expect_verus_fail spec-st-no-chain fip-core spec.rs '/^    pub open spec fn map_st_post</,/^    }/ s/^        &&& forall|k: int| 0 <= k < old.len() ==> step(.*$/        \&\&\& true/' "$errs"
+    # Verified callers (verify/compose_state.rs): a wrong final state must be rejected.
+    for c in 's/^        r == 13,$/        r == 14,/' 's/^        r == 2,$/        r == 3,/'; do
+      sed "$c" verify/compose_state.rs > "$out/state_wrong.rs"
+      if cmp -s verify/compose_state.rs "$out/state_wrong.rs"; then echo "FAIL: control $c did not apply"; exit 1; fi
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating {{verus_strict}} {{verus_core}} "$out/state_wrong.rs" > "$out/state_wrong.log" 2>&1; then
+        echo "FAIL: wrong final state accepted ($c)"; exit 1
+      fi
+      grep -q "postcondition not satisfied" "$out/state_wrong.log" || { echo "FAIL: control $c failed for another reason"; cat "$out/state_wrong.log"; exit 1; }
+      echo "control $c rejected by Verus"
+    done
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.
