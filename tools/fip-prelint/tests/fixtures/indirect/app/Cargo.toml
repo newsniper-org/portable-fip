@@ -11,6 +11,7 @@ publish = false
 shapes = { path = "../shapes" }
 legacy = { path = "../legacy" }
 plugins = { path = "../plugins" }
+fip-macros = { path = "../../../../../../crates/fip-macros" }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow" }

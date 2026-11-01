@@ -7,5 +7,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+fip-macros = { path = "../../../../../../crates/fip-macros" }
+
 [lints.rust]
 unexpected_cfgs = { level = "allow" }

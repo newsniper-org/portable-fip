@@ -16,9 +16,10 @@
 //! | a FIP mark (`fip::mark`) on an allocation/free source, including `GlobalAlloc`/`Allocator` methods | error |
 //! | a call site that does not establish the callee's `fip::requires(..)`, a function with `fip::requires(..)` used as a function value | panic path (above) |
 //! | a malformed or unsatisfiable `fip::requires(..)` | error |
-//! | an implementation (in this crate) of a trait method whose declaration carries `fip::mark` (a contract) that breaks it | error, as for a root (also when the driver compiles a dependency that declares `fip::export`) |
+//! | an implementation (in this crate) of a trait method whose declaration carries `fip::mark` (a contract) that breaks it, checked without any `fip::requires(..)` (a dynamic call checks none) | error, as for a root (also when the driver compiles a dependency that declares `fip::export`) |
+//! | an implementation of a contracted trait method whose own `fip::mark` is weaker than the contract (more allocations, `fbip` for a `fip` contract, less strict) | error, at the implementation |
 //! | an implementation of a contracted trait method in a crate without `fip::export` | error (`⊤`), at the implementation |
-//! | `param(..)` in a trait method contract | error |
+//! | `param(..)` or `fip::requires(..)` in a trait method contract | error |
 //! | a standard-library function without MIR not covered by the std summaries, or summaries not used (missing file, stamp of another rustc or target) | `⊤` (error), with the reason |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
@@ -592,6 +593,12 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
                 "`param(..)` is not supported in the contract of a trait method: its dynamic calls are `⊤`",
             );
         }
+        if decl && crates.requires_of(*def_id).is_some() {
+            out.error(
+                tcx.def_span(*def_id),
+                "`fip::requires(..)` is not supported in the contract of a trait method: a dynamic call of the method does not check it, so implementations (and a default body) are checked against the contract without it",
+            );
+        }
         if !decl || tcx.defaultness(*def_id).has_value() {
             roots.push((*def_id, mark.clone()));
         }
@@ -805,7 +812,9 @@ fn implementations(tcx: TyCtxt<'_>, method: DefId) -> Vec<DefId> {
 
 /// Checks the implementation of `method` in `impl_def` against the method's contract
 /// `mark`, as a root: the impl's own method, or the trait's default body for that
-/// impl. `None` if neither has MIR here (an error).
+/// impl, without any `fip::requires(..)` (a dynamic call checks none). An impl
+/// method's own `fip::mark` that is weaker than the contract is an error. `None` if
+/// neither has MIR here (an error).
 fn check_implementation(
     out: &mut Out<'_>,
     crates: &Crates,
@@ -819,17 +828,27 @@ fn check_implementation(
         .impl_item_implementor_ids(impl_def)
         .get(&method)
         .copied();
+    if let Some(item) = item
+        && let Some(own) = crates.mark_of(item)
+    {
+        let weaker = own.weaker_than(mark);
+        if !weaker.is_empty() {
+            out.error(
+                tcx.def_span(item),
+                &format!(
+                    "`{}` is declared {} but implements `{contract}`, whose contract is {}: the declaration is weaker than the contract ({}); declare the contract's mark or a stronger one",
+                    tcx.def_path_str(item),
+                    own.tag(),
+                    mark.tag(),
+                    weaker.join("; ")
+                ),
+            );
+        }
+    }
     let r = match item {
         Some(item) if tcx.is_mir_available(item) => {
-            let r = Analysis::run(tcx, crates, item, mark);
-            verdict(
-                out,
-                item,
-                mark,
-                crates.requires_of(item),
-                Some(&contract),
-                &r,
-            );
+            let r = Analysis::run_contract(tcx, crates, item, mark);
+            verdict(out, item, mark, None, Some(&contract), &r);
             Some(r)
         }
         Some(_) => None,

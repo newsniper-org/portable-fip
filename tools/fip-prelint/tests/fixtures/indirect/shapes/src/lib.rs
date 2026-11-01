@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-//! Traits with contracts (`fip::mark` on the method declaration) and implementations
-//! that meet them, in an exported workspace member.
+//! Traits with contracts (`#[fip]` on the method declaration; `Grow`'s by hand, the
+//! same mark) and implementations that meet them, in an exported workspace member.
 #![cfg_attr(fip_prelint, fip::export)]
 
 /// Every implementation of `area` is allocation-free (checked in the crate of the
 /// implementation, and wherever a dynamic call relies on it).
 pub trait Shape {
-    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    #[fip_macros::fip]
     fn area(&self) -> u32;
 }
 
-/// Every implementation of `grow` allocates at most once.
+/// Every implementation of `grow` allocates at most once (`#[fip(1)]`, by hand).
 pub trait Grow {
     #[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1))]
     fn grow(&self) -> u32;
@@ -26,7 +26,7 @@ pub trait Plain {
 /// A contract on a method with a default body: the default body is checked as a
 /// root, and for every implementation that keeps it.
 pub trait Scaled {
-    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    #[fip_macros::fip]
     fn scaled(&self) -> u32 {
         3
     }

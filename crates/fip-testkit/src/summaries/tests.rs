@@ -493,3 +493,24 @@ fn for_loops_call_the_iterator_implicitly() {
         "{r}"
     );
 }
+
+/// A FIP attribute on a bodiless trait method declaration (a contract, checked by
+/// `fip-prelint` only) is not a root and does not mark the next item; a default body
+/// is a root like a function.
+#[test]
+fn trait_method_declarations_are_not_roots() {
+    let r = report(
+        "trait T {\n    #[fip]\n    fn f(&self) -> Box<u8>;\n    #[fip(1)]\n    fn g(&self) -> u8;\n    #[fbip]\n    fn h(&self);\n    fn d(&self) -> Box<u8> { Box::new(1) }\n}\nfn free() -> Box<u8> { Box::new(2) }\n",
+    );
+    assert_eq!(r.violations, Vec::new(), "{r}");
+    assert!(r.roots.is_empty(), "{:?}", r.roots);
+    let r = report("trait T {\n    #[fip]\n    fn f(&self) -> Box<u8> { Box::new(1) }\n}\n");
+    assert_eq!(
+        kinds(&r),
+        vec![ViolationKind::BoundExceeded {
+            bound: Bound::Finite(1),
+            allowed: 0
+        }]
+    );
+    assert_eq!(r.roots.len(), 1);
+}

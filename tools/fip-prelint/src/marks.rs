@@ -11,8 +11,9 @@
 //!   `strict = true | false` (default false), `panic_macros = true | false`
 //!   (default true), `param(name = K, ..)` (declared bounds of callable parameters:
 //!   of a generic type, a function pointer or `&dyn Fn*`/`&dyn FipFn`). On a trait
-//!   method declaration (written by hand): a contract that every implementation is
-//!   checked against and that dynamic calls of the method cost.
+//!   method declaration (emitted by `#[fip]`/`#[fip(N)]`/`#[fbip]` there, or written
+//!   by hand for a strict contract): a contract that every implementation is checked
+//!   against and that dynamic calls of the method cost.
 //! - `#[cfg_attr(fip_prelint, fip::alloc_source)]`, `fip::alloc_source(n = N)`
 //!   (`N ≥ 1`, default 1) and `#[cfg_attr(fip_prelint, fip::free_source)]`
 //!   (functions, methods, trait method declarations, foreign functions): a declared
@@ -182,6 +183,50 @@ impl Mark {
             format!("#[{kind}({})]", args.join(", "))
         }
     }
+
+    /// Allocations per call the mark allows (`fip`: `n`, `fbip`: 0).
+    pub fn allowed(&self) -> u64 {
+        match self.kind {
+            Kind::Fip => self.n,
+            Kind::Fbip => 0,
+        }
+    }
+
+    /// How strictly panic paths are checked: 0 not at all (not strict), 1 reported as
+    /// notes (`strict = true`), 2 errors (`strict = true, panic_macros = false`).
+    fn panic_rank(&self) -> u8 {
+        match (self.strict, self.panic_macros) {
+            (false, _) => 0,
+            (true, true) => 1,
+            (true, false) => 2,
+        }
+    }
+
+    /// What this mark (of an implementation) allows that the contract `c` (of the
+    /// trait method it implements) does not; empty if it is at least as strong.
+    /// `param(..)` is not compared: the implementation is checked against the
+    /// contract without its parameter bounds.
+    pub fn weaker_than(&self, c: &Mark) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.allowed() > c.allowed() {
+            v.push(format!(
+                "it allows {} allocation(s) per call, the contract {}",
+                self.allowed(),
+                c.allowed()
+            ));
+        }
+        if self.kind == Kind::Fbip && c.kind == Kind::Fip {
+            v.push("it allows frees and recursion (`fbip`), the contract does not".to_string());
+        }
+        if self.panic_rank() < c.panic_rank() {
+            v.push(match c.panic_rank() {
+                2 => "the contract rejects panic paths (`strict = true, panic_macros = false`)"
+                    .to_string(),
+                _ => "the contract reports panic paths (`strict = true`)".to_string(),
+            });
+        }
+        v
+    }
 }
 
 /// Splits at top-level commas (not inside parentheses or string literals).
@@ -306,6 +351,30 @@ mod tests {
         let m = parse_mark(mark_args_of_printed(a).unwrap()).unwrap();
         assert_eq!(m.kind, Kind::Fbip);
         assert_eq!(m.tag(), "#[fbip]");
+    }
+
+    #[test]
+    fn weaker_than_a_contract() {
+        let m = |s: &str| parse_mark(s).unwrap();
+        let fip = m(r#"kind = "fip""#);
+        let fip1 = m(r#"kind = "fip", n = 1"#);
+        let fbip = m(r#"kind = "fbip""#);
+        let strict = m(r#"kind = "fip", strict = true"#);
+        let tight = m(r#"kind = "fip", strict = true, panic_macros = false"#);
+        assert!(fip.weaker_than(&fip).is_empty());
+        assert!(fip.weaker_than(&fip1).is_empty());
+        assert!(fip.weaker_than(&fbip).is_empty());
+        assert!(tight.weaker_than(&strict).is_empty());
+        assert!(tight.weaker_than(&fip).is_empty());
+        assert_eq!(fip1.weaker_than(&fip).len(), 1);
+        assert_eq!(fip1.weaker_than(&fbip).len(), 1);
+        assert_eq!(fbip.weaker_than(&fip).len(), 1);
+        assert_eq!(fip.weaker_than(&strict).len(), 1);
+        assert_eq!(strict.weaker_than(&tight).len(), 1);
+        assert_eq!(
+            m(r#"kind = "fip", n = 2, param(g = 0)"#).weaker_than(&fip1),
+            vec!["it allows 2 allocation(s) per call, the contract 1".to_string()]
+        );
     }
 
     #[test]

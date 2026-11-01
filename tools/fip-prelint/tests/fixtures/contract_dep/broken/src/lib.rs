@@ -6,7 +6,7 @@
 #![cfg_attr(fip_prelint, fip::export)]
 
 pub trait Area {
-    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    #[fip_macros::fip]
     fn area(&self) -> u32;
 }
 

@@ -428,6 +428,40 @@ panic_macros = false`); `Cell`, aliasing `&Cell`s, an `UnsafeCell` write,
 `try_borrow_mut`, `Rc::get_mut`, `Rc::clone` and a `RefMut` store pass. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-02: uniqueness and interior mutability".
 
+## Amendment 2026-11-02: `#[fip]` on trait method declarations (contracts)
+
+The L4 contracts were written by hand (`fip-macros` rejected a bodiless item).
+`#[fip]`, `#[fip(N)]` and `#[fbip]` now accept a trait method declaration, bodiless
+or with a default body. On a bodiless one the macro checks nothing (it sees only the
+declaration) and emits the item with a `# FIP` section and, under the driver, the same
+`fip::mark(kind = .., n = .., strict = false, panic_macros = true)` as on a function;
+a default body gets the usual token-level checks. Rejected on a declaration, with a
+compile error: `param(..)` (the driver rejects it in a contract too), `strict = true`
+(a certificate belongs to one body; nothing could make every implementation carry
+one; a strict contract stays hand-written) and `requires(..)`. `strict = true` on a
+default body does not compile either (with a receiver: the existing "needs
+`#[fip_impl]`" error; without one, the certificate's `pub(self)` is rejected in a
+trait, E0449). The macro cannot tell a trait method declaration from a foreign
+function; on the latter the driver reports the mark as `⊤`.
+
+Driver changes, from the consistency check of item (4) and a hole found while adding
+it: an implementation is checked against a contract **without** its own
+`fip::requires(..)` (a `dyn` call does not establish it; before, an implementation of
+a strict contract whose precondition made `xs[i]` safe passed, and a `dyn` caller
+with `strict = true, panic_macros = false` passed while the call could panic,
+measured); `fip::requires(..)` in a contract is rejected like `param(..)`; an
+implementation's own `fip::mark` weaker than the contract (more allocations, `fbip`
+for a `fip` contract, less strict) is an error at the implementation.
+
+Measured: fixtures `indirect` and `contract_dep` with their contracts converted to
+`#[fip]` (one hand-written contract kept, `shapes::Grow::grow`): output identical,
+line for line, to the hand-written version (and the old driver reads the macro's
+marks identically). With the new cases in `indirect/app` (`Tight`, `Loose`, `Pick`
+/ `Indexed`, `pick_dyn`, `Bounded`): old driver 21 roots, 13 passed, 12 errors; new
+driver 21 roots, 11 passed, 15 errors (the weaker mark, the panic path of `Indexed`
+under the contract, `requires` in a contract). Details: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: `#[fip]` on trait method declarations".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

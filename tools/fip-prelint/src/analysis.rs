@@ -756,10 +756,17 @@ impl Crates {
     fn param_mark(&self, def_id: DefId) -> Option<&Mark> {
         self.marks.get(&def_id).filter(|m| !m.params.is_empty())
     }
+    /// The `fip::mark` of `def_id` itself (a local root, or a function of an exported
+    /// crate).
+    pub fn mark_of(&self, def_id: DefId) -> Option<&Mark> {
+        self.marks.get(&def_id)
+    }
     /// The contract of a trait method: the `fip::mark` on its declaration (local
     /// crate or an exported crate). A dynamic call of the method costs the contract;
-    /// every implementation is checked against it. A contract with `param(..)` is
-    /// rejected where it is declared and not used.
+    /// every implementation is checked against it, without its own or the
+    /// declaration's `fip::requires(..)`. A contract with `param(..)` is rejected
+    /// where it is declared and not used; one with `fip::requires(..)` is rejected
+    /// where it is declared.
     pub fn contract_of(&self, tcx: TyCtxt<'_>, def_id: DefId) -> Option<&Mark> {
         tcx.trait_of_assoc(def_id)?;
         self.marks.get(&def_id).filter(|m| m.params.is_empty())
@@ -1050,7 +1057,23 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     pub fn run(tcx: TyCtxt<'tcx>, crates: &'a Crates, root: DefId, mark: &Mark) -> RootResult {
         let a = Analysis::new(tcx, crates, root);
         let inst = a.identity(root);
-        a.run_root(root, inst, mark)
+        a.run_root(root, inst, mark, true)
+    }
+
+    /// An implementation of a trait method checked against the method's contract:
+    /// as [`Analysis::run`], but without assuming the implementation's own
+    /// `fip::requires(..)`. A dynamic call, which relies on the contract, does not
+    /// check that precondition, so assuming it would accept a panic path that a
+    /// dynamic call reaches.
+    pub fn run_contract(
+        tcx: TyCtxt<'tcx>,
+        crates: &'a Crates,
+        root: DefId,
+        mark: &Mark,
+    ) -> RootResult {
+        let a = Analysis::new(tcx, crates, root);
+        let inst = a.identity(root);
+        a.run_root(root, inst, mark, false)
     }
 
     /// Generating std summaries: the standard-library functions without MIR in the
@@ -1140,8 +1163,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     }
 
     /// The default body of the trait method `method` as `impl_def` uses it (the impl
-    /// does not override it), analysed as a root in the impl's typing environment;
-    /// `None` if it does not resolve to that body.
+    /// does not override it), analysed as a root in the impl's typing environment,
+    /// against the method's contract: without the declaration's `fip::requires(..)`,
+    /// as [`Analysis::run_contract`]; `None` if it does not resolve to that body.
     pub fn run_default(
         tcx: TyCtxt<'tcx>,
         crates: &'a Crates,
@@ -1159,16 +1183,26 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if inst.def != InstanceKind::Item(method) {
             return None;
         }
-        Some(a.run_root(method, inst, mark))
+        Some(a.run_root(method, inst, mark, false))
     }
 
-    fn run_root(self, root: DefId, inst: Instance<'tcx>, mark: &Mark) -> RootResult {
+    /// `assume_requires`: analyse under the root's declared precondition (a root:
+    /// its callers check it), or under none (an implementation checked against a
+    /// contract: dynamic calls check no precondition).
+    fn run_root(
+        self,
+        root: DefId,
+        inst: Instance<'tcx>,
+        mark: &Mark,
+        assume_requires: bool,
+    ) -> RootResult {
         let crates = self.crates;
         let mut a = self;
         a.owner_params = mark.params.clone();
         // A root is analysed under its own precondition (checked at its callers).
         let ctx = crates
             .requires_of(root)
+            .filter(|_| assume_requires)
             .map(|r| r.facts.clone())
             .unwrap_or_default();
         let r = a.node_in(inst, ctx, 0);

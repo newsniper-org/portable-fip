@@ -255,8 +255,11 @@ fn cells() {
 /// `⊤` for two origins, data or an unknown receiver; contracts on trait methods: a
 /// dynamic call costs the contract (`n`, panic paths of a non-strict contract), every
 /// implementation is checked in its crate (a default body for each impl keeping it),
-/// one in a crate without `fip::export` is `⊤`, `param(..)` in a contract is
-/// rejected.
+/// one in a crate without `fip::export` is `⊤`, `param(..)` and `fip::requires(..)`
+/// in a contract are rejected. Contracts are written with `#[fip]` (`Shape::area`, the
+/// default body `Scaled::scaled`) or by hand (`Grow::grow`, the strict `Pick::pick`):
+/// the same mark. An implementation's own mark weaker than the contract is rejected;
+/// an implementation is checked against a contract without its own precondition.
 #[test]
 fn indirect() {
     check("indirect");

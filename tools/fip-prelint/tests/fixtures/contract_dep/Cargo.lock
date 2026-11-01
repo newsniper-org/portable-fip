@@ -5,6 +5,20 @@ version = 4
 [[package]]
 name = "broken"
 version = "0.1.0"
+dependencies = [
+ "fip-macros",
+]
+
+[[package]]
+name = "fip-lint-rules"
+version = "0.1.0"
+
+[[package]]
+name = "fip-macros"
+version = "0.1.0"
+dependencies = [
+ "fip-lint-rules",
+]
 
 [[package]]
 name = "user"

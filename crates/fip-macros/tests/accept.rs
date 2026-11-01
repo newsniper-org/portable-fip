@@ -72,6 +72,37 @@ pub(crate) const unsafe extern "C" fn qualified(x: u32) -> u32 {
     x
 }
 
+/// Trait method declarations (contracts) and a default body.
+pub trait Shape {
+    #[fip]
+    fn area(&self) -> u32;
+    #[fip(1)]
+    fn boxed(&self) -> Box<u32>;
+    #[fbip]
+    fn depth(&self) -> u32;
+    /// A default body; it calls no method of `Self` (`fip-prelint` would analyse such a
+    /// call for an unknown `Self` as a term, not through the contract).
+    #[fip]
+    fn twice(&self, x: u32) -> u32 {
+        x + x
+    }
+}
+
+struct Square(u32);
+
+impl Shape for Square {
+    #[fip]
+    fn area(&self) -> u32 {
+        self.0
+    }
+    fn boxed(&self) -> Box<u32> {
+        Box::new(self.0)
+    }
+    fn depth(&self) -> u32 {
+        0
+    }
+}
+
 #[test]
 fn accepted_functions_behave() {
     let (mut a, mut b) = (1, 2);
@@ -88,4 +119,8 @@ fn accepted_functions_behave() {
     assert_eq!(xs, [2, 3]);
     // SAFETY: `qualified` has no safety requirements; `unsafe` is only there to test parsing.
     assert_eq!(unsafe { qualified(7) }, 7);
+    let sq = Square(3);
+    assert_eq!(sq.twice(sq.area()), 6);
+    assert_eq!(*sq.boxed(), 3);
+    assert_eq!(sq.depth(), 0);
 }

@@ -135,3 +135,58 @@ impl Shape for Leaky {
 pub fn from_dependencies(x: u32) -> u32 {
     contract_call(&legacy::Legacy(x)).wrapping_add(contract_call(&plugins::Doubled(x)))
 }
+
+// (4) Implementations with their own marks, preconditions.
+
+pub struct Tight(pub u32);
+
+/// An implementation declaring the contract's mark: passes (as a root, and against
+/// the contract).
+impl Shape for Tight {
+    #[fip_macros::fip]
+    fn area(&self) -> u32 {
+        self.0
+    }
+}
+
+pub struct Loose(pub u32);
+
+/// An implementation declaring a weaker mark than the contract `#[fip]`: rejected,
+/// although its body passes both checks.
+impl Shape for Loose {
+    #[fip_macros::fip(1)]
+    fn area(&self) -> u32 {
+        self.0
+    }
+}
+
+/// A strict contract (by hand: `#[fip]` rejects `strict = true` on a declaration).
+pub trait Pick {
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true, panic_macros = false))]
+    fn pick(&self, xs: &[u32], i: usize) -> u32;
+}
+
+pub struct Indexed;
+
+/// An implementation whose own precondition rules out the bounds check failing: it
+/// is checked against the contract without it (a dynamic call does not establish
+/// it), so the bounds check is a reachable panic path, reported.
+impl Pick for Indexed {
+    #[cfg_attr(fip_prelint, fip::requires(i < xs.len()))]
+    fn pick(&self, xs: &[u32], i: usize) -> u32 {
+        xs[i]
+    }
+}
+
+/// Relies on the strict contract: passes (`Indexed` is reported instead).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true, panic_macros = false))]
+pub fn pick_dyn(p: &dyn Pick, xs: &[u32]) -> u32 {
+    p.pick(xs, 7)
+}
+
+/// `fip::requires(..)` in a contract is rejected.
+pub trait Bounded {
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    #[cfg_attr(fip_prelint, fip::requires(i < xs.len()))]
+    fn at(&self, xs: &[u32], i: usize) -> u32;
+}

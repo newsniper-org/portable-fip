@@ -439,6 +439,16 @@ function with a freeing argument would pass); `param(..)` in a contract is rejec
 written (undeclared parameters); with `param(g = 0)` and a contract on `area` they
 pass.
 
+**Follow-up** (2026-11-02, amendment "`#[fip]` on trait method declarations" of
+`docs/decisions/2026-11-01-fip-prelint.md`): contracts are no longer written by
+hand. `#[fip]`, `#[fip(N)]` and `#[fbip]` accept a trait method declaration (bodiless
+or with a default body) and emit the contract's `fip::mark`; `param(..)`,
+`requires(..)` and `strict = true` are rejected there (a strict contract is still
+written by hand). The driver checks an implementation against a contract without its
+own `fip::requires(..)` (a `dyn` call does not check it: a soundness fix, measured),
+rejects `fip::requires(..)` in a contract, and rejects an implementation's own mark
+that is weaker than the contract.
+
 ### L5. Drops of generic values are terms or warnings
 
 **Current.**

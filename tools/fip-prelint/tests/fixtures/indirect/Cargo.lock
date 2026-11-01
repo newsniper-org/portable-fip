@@ -6,9 +6,21 @@ version = 4
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "fip-macros",
  "legacy",
  "plugins",
  "shapes",
+]
+
+[[package]]
+name = "fip-lint-rules"
+version = "0.1.0"
+
+[[package]]
+name = "fip-macros"
+version = "0.1.0"
+dependencies = [
+ "fip-lint-rules",
 ]
 
 [[package]]
@@ -28,3 +40,6 @@ dependencies = [
 [[package]]
 name = "shapes"
 version = "0.1.0"
+dependencies = [
+ "fip-macros",
+]

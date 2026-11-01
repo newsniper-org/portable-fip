@@ -3,7 +3,9 @@
 
 //! `#[fip]` (token lint) and `fip_testkit::summaries` (crate-wide checker) agree:
 //! every behaviour-related, non-strict `compile_fail` example of `src/lib.rs` is a
-//! violation for the checker, the accepted examples in `tests/accept.rs` are not,
+//! violation for the checker (also a trait method's default body), the accepted
+//! examples in `tests/accept.rs` are not (a trait method declaration, a contract, is
+//! not a root of either),
 //! and the checker reports no violation over this crate's tests together with the
 //! crates they call.
 
@@ -26,6 +28,7 @@ const REJECTED: &[&str] = &[
     "# // prelint: may allocate ∞ time(s), at most 1 allowed\n#[fip_macros::fip(1)]\nfn f(n: u32) -> u32 { let mut s = 0; for i in 0..n { let b = Box::new(i); s += *b; } s }",
     "# // prelint: may allocate 2 time(s), at most 1 allowed\n#[fip_macros::fip(1)]\nfn f(a: u8, b: u8) -> (Box<u8>, Box<u8>) { (Box::new(a), Box::new(b)) }",
     "# // prelint: `f` is #[fbip] but may allocate ∞ time(s), at most 0 allowed\n#[fip_macros::fbip]\nfn f(x: u8) -> String { format!(\"{x}\") }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Box::new` in the body\ntrait T {\n    #[fip_macros::fip]\n    fn f(&self) -> Box<u8> { Box::new(1) }\n}",
 ];
 
 fn manifest() -> PathBuf {
@@ -75,6 +78,13 @@ fn accepted_examples_are_not_violations() {
     assert!(r.violations.is_empty(), "{r}");
     assert!(r.conditional.is_empty(), "{r}");
     assert!(r.roots.len() >= 8, "{r:?}");
+    // The default body and the implementation are roots; the bodiless declarations
+    // (contracts, checked by `fip-prelint` only) are not.
+    let roots: Vec<&str> = r.roots.iter().map(|s| s.root.as_str()).collect();
+    assert!(roots.contains(&"Shape::twice"), "{roots:?}");
+    assert!(roots.contains(&"Square::area"), "{roots:?}");
+    assert!(!roots.contains(&"Shape::area"), "{roots:?}");
+    assert!(!roots.contains(&"Shape::boxed"), "{roots:?}");
 }
 
 #[test]

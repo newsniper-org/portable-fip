@@ -887,9 +887,9 @@ function with a freeing argument would pass.
 **Open:** `Box<dyn ..>` receivers and parameters; a generic `F` instantiated with a
 function pointer (the `Fn` shim calls through the pointer, `⊤`); pointers stored in
 fields, tables or statics; interprocedural origins (a pointer passed down without
-`param(..)`); contracts with `param(..)`; `#[fip]` on a trait method declaration is rejected
-by `fip-macros` ("FIP attributes apply only to functions with a body", measured), so
-contracts are written as `#[cfg_attr(fip_prelint, fip::mark(..))]` by hand.
+`param(..)`); contracts with `param(..)`. (`#[fip]` on a trait method declaration,
+rejected by `fip-macros` when this item was implemented, is accepted since; see
+"Resolved 2026-11-02: `#[fip]` on trait method declarations".)
 
 ## Resolved 2026-11-02: generated std summaries (limits plan L6 + L10e)
 
@@ -1186,3 +1186,64 @@ roots, 10 passed, 5 errors:
 
 Deviation from the plan's measurement M3: there `RefCell::borrow_mut` showed a panic
 path because the probe's root was strict; non-strict roots report none.
+
+## Resolved 2026-11-02: `#[fip]` on trait method declarations
+
+Follow-up of L4 (above): contracts on trait methods had to be written by hand as
+`#[cfg_attr(fip_prelint, fip::mark(..))]`, because `fip-macros` rejected a bodiless
+item ("FIP attributes apply only to functions with a body").
+
+**Macro.** `#[fip]`, `#[fip(N)]` and `#[fbip]` accept a trait method declaration:
+
+| form | result |
+|---|---|
+| bodiless (`fn area(&self) -> u32;`) | the item unchanged, a `# FIP` section ("contract of every implementation; not checked by `fip-macros`"), and under the driver the same `fip::mark(..)` as on a function (mark-only mode: the same) |
+| default body | the usual token-level body checks; the mark is the contract of every implementation |
+| `param(..)` on a declaration | compile error (the driver rejects it in a contract: its dynamic calls cannot check argument bounds) |
+| `strict = true` on a declaration (so also `panic_macros`, `crate = ..`) | compile error: a certificate belongs to one function body; nothing could make every implementation carry one (the macro on the declaration sees no implementation, and `#[fip_impl]` cannot add an item the trait does not declare). A strict contract, which the driver supports, is written by hand |
+| `strict = true` on a default body | does not compile: with a receiver, the existing "needs `#[fip_impl]`" error (message extended); without one, the certificate is now emitted with `pub(self)` (identical at module level), which rustc rejects on a trait item (E0449). Before, it compiled into two associated constants that no strict caller could name and whose bound check was never evaluated (measured) |
+| `requires(..)` on a declaration | compile error: a dynamic call does not check a precondition |
+| `type F = fn();`, `struct`, `const`, `static`, `async fn` | still rejected ("FIP attributes apply only to functions (with a body, or trait method declarations)"); `const` and `static` examples added |
+
+A bodiless `fn f();` is also what a foreign function looks like; the macro cannot tell
+them apart and accepts it; the driver reports a mark on a foreign function as `⊤`
+(`cannot check .. foreign function`, measured).
+
+**Driver.** (a) An implementation is checked against a contract without its own
+`fip::requires(..)`, and a kept default body without the declaration's: a dynamic
+call relies on the contract and checks no precondition. Measured before the fix on a
+probe crate: a strict contract `pick(&self, xs: &[u32], i: usize)` (`strict = true,
+panic_macros = false`), an implementation with `fip::requires(i < xs.len())` indexing
+`xs[i]`, and a strict root calling `p.pick(xs, 99)` through `&dyn`: 5 roots, 5 passed,
+0 errors; after: the implementation's bounds check is a reachable panic path (error).
+(b) `fip::requires(..)` in a contract is an error at the declaration. (c) An
+implementation whose own `fip::mark` is weaker than the contract (`Mark::weaker_than`:
+more allocations, `fbip` under a `fip` contract, less strict panic checking;
+`param(..)` not compared) is an error at the implementation, also when its body
+passes.
+
+**Measured.**
+
+| fixture | before | after |
+|---|---|---|
+| `indirect`, contracts `Shape::area` and `Scaled::scaled` (default body) converted to `#[fip_macros::fip]`, `Grow::grow` kept hand-written | expected.txt of the hand-written version | identical (no line changed); the old driver on the converted sources: the same 12 `app` lines |
+| `contract_dep`, `broken::Area::area` converted | expected.txt | identical |
+| `indirect/app` with the new cases (`Tight`: impl `#[fip]` = contract; `Loose`: impl `#[fip(1)]` under `#[fip]`; `Pick`/`Indexed`: hand-written strict contract, impl with `fip::requires`; `pick_dyn`; `Bounded`: `requires` in a contract) | old driver: 21 roots, 13 passed, 12 errors | 21 roots, 11 passed, 15 errors (+ `Loose` weaker, `Indexed` panic path, `Bounded` requires) |
+| `compile-fail-reasons` | 54/54 | 62/62 (+2 non-function items, +6 trait method cases) |
+| `compile_fail.rs` (driver, mark-only) | 15 examples | 16 (a default body that allocates) |
+| self-check, crate `accept` (`crates/fip-macros/tests/accept.rs` gains `trait Shape` with three bodiless contracts and a default body, and `impl Shape for Square` with `#[fip]` on `area`) | 8 roots, 8 passed | 14 roots, 14 passed (the default body, `Square::area` as a root, and the 4 implementations against their contracts) |
+
+`fip_testkit`: `callgraph` and `summaries` skip a bodiless function (the attribute
+does not mark the next item; tests `trait_method_declarations_are_not_roots` in both);
+a default body is a root (`Shape::twice` in `crates/fip-macros/tests/accept.rs`,
+asserted in `checker_agreement.rs`, whose `REJECTED` list gains the default-body
+example).
+
+**Open:** a call of a contracted method on `Self` or a type parameter inside a
+generic body (a default body calling `self.area()`) is a term, a warning, not the
+contract (measured on `accept.rs` before it was simplified: "`<Self as Shape>::twice`
+is #[fip] only relative to its generic parameters"); costing the contract there would
+be sound for the same reason as for a `dyn` call. A strict contract still needs the
+hand-written mark; implementations of a
+contract are not required to carry `#[fip]` (the driver checks them either way); a
+foreign function with `#[fip]` is accepted by the macro (reported `⊤` by the driver).

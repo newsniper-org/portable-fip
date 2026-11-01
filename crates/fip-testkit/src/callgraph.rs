@@ -449,6 +449,18 @@ mod tests {
         assert_eq!(c, vec![names(&["a", "m::f", "a"])]);
     }
 
+    /// A FIP attribute on a bodiless trait method declaration marks nothing: the next
+    /// item is not a root, the declaration has no body to follow.
+    #[test]
+    fn trait_method_declarations_are_not_roots() {
+        let c = cycles(
+            "trait K {\n    #[fip]\n    fn f(&self);\n    fn g(&self) { self.g() }\n}\nfn h() { h() }\n",
+        );
+        assert_eq!(c, Vec::<Cycle>::new());
+        let c = cycles("trait K {\n    #[fip]\n    fn f(&self) { self.f() }\n}\n");
+        assert_eq!(c.len(), 1, "{c:?}");
+    }
+
     // TODOs/callgraph-limitations.md #9
     #[test]
     fn generic_parameter_paths_do_not_reach_free_functions() {

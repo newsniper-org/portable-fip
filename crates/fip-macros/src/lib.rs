@@ -46,12 +46,15 @@
 //! The macros add a `# FIP` section **after** the item's own documentation saying
 //! what was checked; they never claim more than that.
 //!
+//! On a trait method declaration (`fn area(&self) -> u32;`) the attribute declares
+//! a *contract* of every implementation; see [Trait methods](#trait-methods).
+//!
 //! Compiled by the MIR-level checker `fip-prelint` (`tools/fip-prelint`), they also
 //! emit `#[cfg_attr(fip_prelint, fip::mark(..))]` with the mode, bound, `strict`,
 //! `panic_macros` and `param(..)` bounds; the driver checks those functions over MIR
 //! (callees, implicit calls, panics). Plain builds get no such attribute. With
 //! `FIP_MACROS_MARK_ONLY=1` as well (honoured only inside the driver), `#[fip]` and
-//! `#[fbip]` on free functions skip their token-level behaviour checks and emit only
+//! `#[fbip]` outside `#[fip_impl]` skip their token-level behaviour checks and emit only
 //! the mark, so the driver alone decides (used to run the rejected examples below
 //! through it; each carries a hidden `# // prelint: ..` line with the driver's reason).
 //!
@@ -182,6 +185,18 @@
 //! ```
 //! ```compile_fail
 //! #[fip_macros::fip]
+//! const C: fn() = g;
+//! fn g() {}
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! #[fip_macros::fip]
+//! static S: fn() = g;
+//! fn g() {}
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! #[fip_macros::fip]
 //! async fn f() {}
 //! # fn main() {}
 //! ```
@@ -195,6 +210,127 @@
 //! # // expect: `requires(..)`: `k` is not a parameter of `f`
 //! #[fip_macros::fip(requires(i < k))]
 //! fn f(i: usize) -> usize { i }
+//! # fn main() {}
+//! ```
+//!
+//! ## Trait methods
+//!
+//! On a trait method **declaration** the attribute is a *contract* of every
+//! implementation of the method: `#[fip]` (no allocation, no free, no recursion),
+//! `#[fip(N)]` (at most `N` allocations per call, no free, no recursion) or `#[fbip]`
+//! (no allocation). The macro sees only the declaration, so it checks nothing there;
+//! it emits the declaration unchanged with a `# FIP` section and, under
+//! `fip-prelint`, the same `fip::mark(..)` as on a function. The driver makes it a
+//! contract: every implementation is checked against it in the crate that contains
+//! it (a crate without `fip::export` cannot be checked: an error), a dynamic call
+//! (`&dyn Trait`) of the method costs the contract, and an implementation's own
+//! `#[fip(..)]` that is weaker than the contract is an error. Plain builds check
+//! no implementation: use `fip-prelint` (`docs/decisions/2026-11-01-fip-prelint.md`).
+//!
+//! With a **default body**, the body gets the usual checks (above), and the mark is
+//! still the contract of every implementation (a kept default body is checked for
+//! each implementation by the driver).
+//!
+//! ```
+//! use fip_macros::{fbip, fip};
+//!
+//! pub trait Shape {
+//!     /// Area; every implementation is allocation-free.
+//!     #[fip]
+//!     fn area(&self) -> u32;
+//!     /// At most one allocation per call.
+//!     #[fip(1)]
+//!     fn boxed(&self) -> Box<u32>;
+//!     /// No allocation; frees and recursion allowed.
+//!     #[fbip]
+//!     fn depth(&self) -> u32;
+//!     /// A default body, checked like a function body.
+//!     #[fip]
+//!     fn twice(&self) -> u32 {
+//!         self.area().wrapping_mul(2)
+//!     }
+//! }
+//!
+//! pub struct Square(pub u32);
+//!
+//! impl Shape for Square {
+//!     /// An implementation may repeat the contract (or declare a stronger one).
+//!     #[fip]
+//!     fn area(&self) -> u32 { self.0.wrapping_mul(self.0) }
+//!     fn boxed(&self) -> Box<u32> { Box::new(self.0) }
+//!     fn depth(&self) -> u32 { 0 }
+//! }
+//! # fn main() { assert_eq!(Square(3).twice(), 18); }
+//! ```
+//!
+//! Rejected on a declaration, because no implementation could be held to it:
+//! `param(..)` (a dynamic call cannot check the arguments' bounds), `strict = true`
+//! (a certificate `__fip_strict_..` belongs to one function body, and a declaration
+//! has none; so also `panic_macros = ..` and `crate = ..`, which need it) and
+//! `requires(..)` (a dynamic call does not check a precondition). A strict contract,
+//! which `fip-prelint` supports, is written by hand:
+//! `#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = true, panic_macros = false))]`.
+//! `strict = true` on a default body is rejected as well: with a receiver by the
+//! check for methods outside `#[fip_impl]`, without one because its certificate
+//! would be a trait item (rustc rejects its `pub(self)`, E0449).
+//!
+//! The macro cannot tell a trait method declaration from a foreign function
+//! (`unsafe extern "C" { fn f(); }`); on the latter the mark has no body to check,
+//! and `fip-prelint` reports it as unresolved (`⊤`).
+//!
+//! a default body that allocates:
+//! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
+//! # // expect: #[fip]: allocation site `Box::new` in the body
+//! trait T {
+//!     #[fip_macros::fip]
+//!     fn f(&self) -> Box<u8> { Box::new(1) }
+//! }
+//! # fn main() {}
+//! ```
+//! `strict = true` on a declaration:
+//! ```compile_fail
+//! # // expect: `strict = true` is not supported on a trait method declaration
+//! trait T {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn f(&self) -> u8;
+//! }
+//! # fn main() {}
+//! ```
+//! `param(..)` on a declaration:
+//! ```compile_fail
+//! # // expect: `param(..)` is not supported in the contract of a trait method declaration
+//! trait T {
+//!     #[fip_macros::fip(strict = true, param(g = 0))]
+//!     fn f(&self, g: fn(u8) -> u8) -> u8;
+//! }
+//! # fn main() {}
+//! ```
+//! `requires(..)` on a declaration:
+//! ```compile_fail
+//! # // expect: `requires(..)` is not supported on a trait method declaration
+//! trait T {
+//!     #[fip_macros::fip(requires(i < xs.len()))]
+//!     fn f(&self, xs: &[u8], i: usize) -> u8;
+//! }
+//! # fn main() {}
+//! ```
+//! `strict = true` on a default body with a receiver:
+//! ```compile_fail
+//! # // expect: strict mode is not available on trait method declarations
+//! trait T {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn f(&self) -> u8 { 1 }
+//! }
+//! # fn main() {}
+//! ```
+//! `strict = true` on a default body without a receiver:
+//! ```compile_fail
+//! # // expect: visibility qualifiers are not permitted here
+//! trait T {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn f() -> u8 { 1 }
+//! }
 //! # fn main() {}
 //! ```
 
@@ -902,16 +1038,20 @@ struct FnShape {
     name: String,
     /// Parameter list `( .. )`.
     params: Option<Group>,
-    body: Group,
+    /// `{ body }`; `None` for a declaration ending in `;` (a trait method declaration:
+    /// a contract, see [`expand_decl`]).
+    body: Option<Group>,
 }
 
-/// Recognises `#[attr]* vis? (const|async|unsafe|safe|extern "abi"?)* fn name ... { body }`.
+/// Recognises `#[attr]* vis? (const|async|unsafe|safe|extern "abi"?)* fn name ... { body }`
+/// and the bodiless `... fn name ... ;`.
 fn parse_fn(toks: &[TokenTree]) -> Result<FnShape, (Span, String)> {
     let first_span = toks.first().map_or_else(Span::call_site, TokenTree::span);
     let not_fn = || {
         (
             first_span,
-            "FIP attributes apply only to functions with a body".to_string(),
+            "FIP attributes apply only to functions (with a body, or trait method declarations)"
+                .to_string(),
         )
     };
     let mut i = 0;
@@ -970,19 +1110,18 @@ fn parse_fn(toks: &[TokenTree]) -> Result<FnShape, (Span, String)> {
     let Some(TokenTree::Ident(name)) = toks.get(i + 1) else {
         return Err(not_fn());
     };
-    let Some(TokenTree::Group(body)) = toks.last() else {
-        return Err(not_fn());
+    let body = match toks.last() {
+        Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => Some(g.clone()),
+        Some(t) if is_punct(t, ';') => None,
+        _ => return Err(not_fn()),
     };
-    if body.delimiter() != Delimiter::Brace {
-        return Err(not_fn());
-    }
     let params = param_list(&toks[i + 2..]);
     Ok(FnShape {
         after_attrs,
         vis,
         name: name.to_string(),
         params,
-        body: body.clone(),
+        body,
     })
 }
 
@@ -1180,12 +1319,15 @@ fn expand_parts(
 ) -> Result<(TokenStream, TokenStream), TokenStream> {
     let toks: Vec<TokenTree> = item.clone().into_iter().collect();
     let shape = parse_fn(&toks).map_err(|(span, msg)| compile_error(span, &msg))?;
+    let Some(body) = shape.body.clone() else {
+        return expand_decl(mode, args, &toks, &shape, ctx);
+    };
     let mut scan = Scan {
         fn_name: &shape.name,
         sites: Vec::new(),
         recursion: Vec::new(),
     };
-    scan.stream(shape.body.stream(), false);
+    scan.stream(body.stream(), false);
 
     let tag = mode.name();
     // Mark-only mode (`fip-prelint`'s behaviour check of rejected examples): no
@@ -1199,14 +1341,15 @@ fn expand_parts(
     let strict_args = args.filter(|a| a.strict && !mark_only);
     if strict_args.is_some() && ctx.is_none() && has_receiver(shape.params.as_ref()) {
         errors.extend(compile_error(
-            shape.body.span(),
+            body.span(),
             &format!(
-                "{tag} strict: a method needs `#[fip_macros::fip_impl]` on its `impl` block, which names its certificate `__fip_strict_<Type>__{}`",
+                "{tag} strict: a method needs `#[fip_macros::fip_impl]` on its `impl` block, which names its certificate `__fip_strict_<Type>__{}` (strict mode is not available on trait method declarations, see the crate documentation)",
                 shape.name
             ),
         ));
     }
-    let strict_scan = strict_args.map(|a| run_strict_scan(a, &shape, &tag, ctx, &mut errors));
+    let strict_scan =
+        strict_args.map(|a| run_strict_scan(a, &shape, &body, &tag, ctx, &mut errors));
     if let Some((cs, sp)) = args.and_then(|a| a.requires.as_ref()) {
         errors.extend(check_requires(cs, *sp, &shape, &toks[..shape.after_attrs]));
     }
@@ -1232,14 +1375,22 @@ fn expand_parts(
                 trait_name: Some(_),
                 ..
             }) => vec![TokenTree::Ident(Ident::new("pub", Span::call_site()))],
-            _ => shape.vis.clone(),
+            // A free function without visibility: `pub(self)` (the same), which rustc
+            // rejects on a trait item (E0449). So `strict = true` on a trait method
+            // with a default body and no receiver, whose certificate would become an
+            // associated constant that no strict caller names and that is not evaluated
+            // eagerly, does not compile; one with a receiver is rejected above.
+            None if shape.vis.is_empty() => "pub(self)"
+                .parse::<TokenStream>()
+                .map_or_else(|_| Vec::new(), |ts| ts.into_iter().collect()),
+            Some(_) | None => shape.vis.clone(),
         };
         let (cert_items, stmt) = ss.emit_fn(&tag, &cert_name(&shape.name, ctx), &vis, n, local);
         items.extend(cert_items);
-        let mut body = stmt;
-        body.extend(shape.body.stream());
-        let mut g = Group::new(Delimiter::Brace, body);
-        g.set_span(shape.body.span());
+        let mut new_body = stmt;
+        new_body.extend(body.stream());
+        let mut g = Group::new(Delimiter::Brace, new_body);
+        g.set_span(body.span());
         if let Some(last) = toks.last_mut() {
             *last = TokenTree::Group(g);
         }
@@ -1250,6 +1401,91 @@ fn expand_parts(
     f.extend(mark);
     f.extend(toks[shape.after_attrs..].iter().cloned());
     Ok((items, f))
+}
+
+/// A function declaration without a body: in valid Rust a trait method declaration
+/// (`fn m(&self) -> u8;`) or a foreign function. On a trait method the mark is a
+/// *contract* for `fip-prelint`: every implementation is checked against it, and a
+/// dynamic call of the method costs it. `fip-macros` checks nothing (there is no
+/// body): the item is emitted unchanged with the `# FIP` section and, under the
+/// driver, the same `fip::mark(..)` a hand-written contract carries. Rejected:
+///
+/// - `param(..)`: a dynamic call cannot check the arguments' bounds (the driver
+///   rejects it in a contract too);
+/// - `strict = true` (and so `panic_macros = ..` and `crate = ..`, which need it): a
+///   certificate `__fip_strict_..` belongs to one function body, and a declaration
+///   has none; nothing could make every implementation carry one;
+/// - `requires(..)`: a dynamic call does not check a precondition, so an
+///   implementation could not assume it.
+fn expand_decl(
+    mode: Mode,
+    args: Option<&FipArgs>,
+    toks: &[TokenTree],
+    shape: &FnShape,
+    ctx: Option<&ImplCtx>,
+) -> Result<(TokenStream, TokenStream), TokenStream> {
+    let tag = mode.name();
+    let span = Span::call_site();
+    if ctx.is_some() {
+        return Err(compile_error(
+            span,
+            "FIP attributes apply only to functions with a body inside an `impl` block",
+        ));
+    }
+    let mut errors = TokenStream::new();
+    if let Some(a) = args {
+        if let Some((_, _, sp)) = a.params.first() {
+            errors.extend(compile_error(
+                *sp,
+                &format!(
+                    "{tag}: `param(..)` is not supported in the contract of a trait method declaration: its dynamic calls cannot check the arguments' bounds"
+                ),
+            ));
+        } else if a.strict {
+            errors.extend(compile_error(
+                span,
+                &format!(
+                    "{tag}: `strict = true` is not supported on a trait method declaration: a certificate (`__fip_strict_..`) belongs to one function body and a declaration has none; declare the contract without `strict` (`fip-prelint` checks every implementation) and certify implementations with `#[fip_impl]`, or write a strict contract by hand (`#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", n = 0, strict = true, panic_macros = false))]`)"
+                ),
+            ));
+        }
+        if let Some((_, sp)) = &a.requires {
+            errors.extend(compile_error(
+                *sp,
+                &format!(
+                    "{tag}: `requires(..)` is not supported on a trait method declaration: a dynamic call of `{}` does not check a precondition, so an implementation could not assume it",
+                    shape.name
+                ),
+            ));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let mut f = TokenStream::new();
+    f.extend(toks[..shape.after_attrs].iter().cloned());
+    f.extend(decl_doc(mode));
+    f.extend(prelint_mark(mode, args));
+    f.extend(toks[shape.after_attrs..].iter().cloned());
+    Ok((TokenStream::new(), f))
+}
+
+/// The `# FIP` doc section of a trait method declaration (a contract).
+fn decl_doc(mode: Mode) -> TokenStream {
+    let what = match mode {
+        Mode::Fip => "no allocation, no free and no recursion".to_string(),
+        Mode::FipN(n) => format!("at most {n} allocations per call, no free and no recursion"),
+        Mode::Fbip => "no allocation (frees and recursion allowed)".to_string(),
+    };
+    let doc = format!(
+        "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = {:?}] #[doc = \"\"] \
+         #[doc = \"Not checked by `fip-macros`, which sees only this declaration. The MIR checker `fip-prelint` checks every implementation (and a default body) against the contract; a dynamic call of the method costs it.\"]",
+        format!(
+            "Contract `{}` of every implementation: {what}.",
+            mode.name()
+        )
+    );
+    doc.parse().unwrap_or_default()
 }
 
 /// Names of the parameters in `( .. )`: the last identifier before the first `:` of
@@ -1484,6 +1720,7 @@ fn fip_doc(mode: Mode, strict: bool) -> TokenStream {
 fn run_strict_scan(
     args: &FipArgs,
     shape: &FnShape,
+    body: &Group,
     tag: &str,
     ctx: Option<&ImplCtx>,
     errors: &mut TokenStream,
@@ -1516,7 +1753,7 @@ fn run_strict_scan(
             bound: Some(*k),
         });
     }
-    ss.stream(shape.body.stream(), false);
+    ss.stream(body.stream(), false);
     ss.check_params();
     for (sp, msg) in &ss.errors {
         errors.extend(compile_error(*sp, &format!("{tag} strict: {msg}")));
