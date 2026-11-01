@@ -1,0 +1,19 @@
+{
+    "rust-analyzer.diagnostics.enable": false,
+    "[rust]": {
+        "editor.defaultFormatter": "verus-lang.verus-analyzer",
+        "editor.formatOnSave": true
+    },
+    "verus-analyzer.cargo.verusEnable": true,
+    "verus-analyzer.cargo.autoreload": true,
+    "verus-analyzer.checkOnSave": true,
+    "verus-analyzer.check.extraEnv": {
+        "VERUS_SINGULAR_PATH": "/usr/bin/Singular"
+    },
+    "verus-analyzer.cargo.extraEnv": {
+        "VERUS_SINGULAR_PATH": "/usr/bin/Singular"
+    },
+    "verus-analyzer.server.extraEnv": {
+        "VERUS_SINGULAR_PATH": "/usr/bin/Singular"
+    },
+}
