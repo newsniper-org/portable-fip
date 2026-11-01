@@ -71,6 +71,15 @@
 //! that meets them. A dynamic call of a trait method whose declaration carries a
 //! `fip::mark` costs that contract ([`Crates::contract_of`]); every implementation
 //! is checked against it in its own crate (`crate::report`). Anything else is `⊤`.
+//!
+//! **Bindings and std summaries.** A node is also keyed by what its parameters hold,
+//! known at its call sites ([`Bind`]): the output behind a `&mut dyn fmt::Write` or a
+//! `&mut fmt::Formatter`, and the formatting functions of a value containing
+//! `fmt::Arguments`. They resolve the dynamic calls and formatting-function pointers of
+//! `core::fmt`, and the open terms of a standard-library function without MIR taken
+//! from the generated std summaries ([`crate::stdsum`], used only when its stamp
+//! matches). Generating them (`--std-summaries`), the summarised function's own
+//! parameters are bound symbolically and the calls through them become those terms.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -386,6 +395,9 @@ enum Item {
     /// Several events of one call: a call through a parameter declared
     /// `param(g = K)`, which may do what the function's own mark allows.
     Evs(Vec<Ev>),
+    /// Several callees of one call site (the formatting functions a formatting may
+    /// call); only returned by `call_item`, flattened into the block.
+    Many(Vec<Item>),
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +427,9 @@ struct Node<'tcx> {
     ctx: Vec<Fact>,
     /// Non-empty contexts on the way from the root (at most [`MAX_CONTEXT_DEPTH`]).
     depth: u8,
+    /// What parameters hold, known at the call sites that reach this node (outputs
+    /// and formatting functions of a formatting, [`Bind`]). Empty: any call.
+    binds: Binds<'tcx>,
     /// The node whose body first called this one (`None` for the root).
     parent: Option<usize>,
     label: String,
@@ -510,6 +525,43 @@ pub struct Crates {
     sources: HashMap<DefId, Source>,
     /// `fip::requires(..)` of functions in the local crate and in exported crates.
     requires: HashMap<DefId, Requires>,
+    /// Generated summaries of standard-library functions without MIR, or why they
+    /// are not used ([`crate::stdsum`]).
+    pub std_summaries: Result<crate::stdsum::Sidecar, String>,
+}
+
+/// The rustc version of this driver (`1.99.1 (<commit> <date>)`).
+pub fn rustc_version() -> &'static str {
+    rustc_interface::util::rustc_version_str().unwrap_or("unknown")
+}
+
+/// The std summaries file for this compiler and `target` (`FIP_PRELINT_STD_SUMMARIES`
+/// overrides it).
+pub fn std_summaries_path(target: &str) -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("FIP_PRELINT_STD_SUMMARIES") {
+        return std::path::PathBuf::from(p);
+    }
+    let release = rustc_version().split(' ').next().unwrap_or("unknown");
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("std-summaries")
+        .join(format!("{release}-{target}.txt"))
+}
+
+/// Loads the std summaries for this compiler and the crate's target; any problem
+/// (missing file, parse error, stamp mismatch) is the reason they are not used.
+fn load_std_summaries(tcx: TyCtxt<'_>) -> Result<crate::stdsum::Sidecar, String> {
+    let target = tcx.sess.opts.target_triple.tuple().to_string();
+    let path = std_summaries_path(&target);
+    // The file name only: diagnostics stay independent of the checkout's location.
+    let name = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read `{name}`: {e}"))?;
+    let sc = crate::stdsum::Sidecar::parse(&text).map_err(|e| format!("`{name}`: {e}"))?;
+    sc.check_stamp(rustc_version(), &target)
+        .map_err(|e| format!("`{name}`: {e}"))?;
+    Ok(sc)
 }
 
 /// Why a function is an allocation or free source.
@@ -554,6 +606,19 @@ impl Crates {
             exported.insert(cnum, declares_export(tcx, cnum.as_def_id()));
         }
         exported.insert(LOCAL_CRATE, true);
+        let generate = std::env::var_os(crate::GENERATE_ENV).is_some();
+        if generate {
+            // The standard library of a `-Zbuild-std` build and its dependencies,
+            // all compiled with their MIR encoded.
+            for v in exported.values_mut() {
+                *v = true;
+            }
+        }
+        let std_summaries = if generate {
+            Err("generating std summaries".to_string())
+        } else {
+            load_std_summaries(tcx)
+        };
         let mut unencoded = HashMap::new();
         let mut marks = HashMap::new();
         let mut sources = HashMap::new();
@@ -620,6 +685,7 @@ impl Crates {
             marks,
             sources,
             requires,
+            std_summaries,
         }
     }
     /// Adds the marks of the local crate (the roots).
@@ -816,7 +882,7 @@ pub struct Analysis<'a, 'tcx> {
     env: TypingEnv<'tcx>,
     crates: &'a Crates,
     nodes: Vec<Node<'tcx>>,
-    index: HashMap<(Instance<'tcx>, Vec<Fact>), usize>,
+    index: HashMap<(Instance<'tcx>, Vec<Fact>, Binds<'tcx>), usize>,
     /// The node being classified.
     current: usize,
     queue: Vec<usize>,
@@ -863,6 +929,11 @@ struct ArgSite {
     indirect: Option<Mark>,
 }
 
+/// The argument passed for a declared parameter: its type as shown, the callable
+/// entry points (label, item), and whether the parameter is a function pointer or a
+/// callable trait object (called by its declaration in the callee).
+type ArgItems = (String, Vec<(String, Item)>, bool);
+
 /// A call site passing, for a parameter declared `param(g = K)`, an argument whose
 /// bound per call is `⊤` or, with no terms left, above `K`.
 pub struct ArgViolation {
@@ -896,6 +967,11 @@ impl ArgViolation {
             self.span, self.callee, self.param, self.arg
         )
     }
+}
+
+/// The definition path the std summaries are keyed by.
+pub fn def_path_pub(tcx: TyCtxt<'_>, def_id: DefId) -> String {
+    def_path(tcx, def_id)
 }
 
 fn def_path(tcx: TyCtxt<'_>, def_id: DefId) -> String {
@@ -975,6 +1051,92 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let a = Analysis::new(tcx, crates, root);
         let inst = a.identity(root);
         a.run_root(root, inst, mark)
+    }
+
+    /// Generating std summaries: the standard-library functions without MIR in the
+    /// shipped `std` that the analysis of the seed `root` reaches.
+    pub fn reached_std(
+        tcx: TyCtxt<'tcx>,
+        crates: &'a Crates,
+        root: DefId,
+        mark: &Mark,
+    ) -> Vec<DefId> {
+        let mut a = Analysis::new(tcx, crates, root);
+        a.owner_params = mark.params.clone();
+        let inst = a.identity(root);
+        a.node_in(inst, Vec::new(), 0);
+        while let Some(i) = a.queue.pop() {
+            a.classify(i);
+        }
+        a.std_defs()
+    }
+
+    /// Generating std summaries: the summary of the standard-library function `def`,
+    /// analysed as a root whose `&mut dyn fmt::Write`, `&mut fmt::Formatter` and
+    /// `fmt::Arguments` parameters are left open (terms over them), and the functions
+    /// without shipped MIR it reaches.
+    pub fn summarize(
+        tcx: TyCtxt<'tcx>,
+        crates: &'a Crates,
+        def: DefId,
+    ) -> (crate::stdsum::FnSummary, Vec<DefId>) {
+        let mut a = Analysis::new(tcx, crates, def);
+        let inst = a.identity(def);
+        let mut binds: Binds<'tcx> = Vec::new();
+        if matches!(tcx.def_kind(def), DefKind::Fn | DefKind::AssocFn) {
+            let inputs = tcx.fn_sig(def).skip_binder().skip_binder().inputs();
+            for (i, t) in inputs.iter().enumerate() {
+                let (Ok(local), Ok(i)) = (u32::try_from(i + 1), u32::try_from(i)) else {
+                    break;
+                };
+                let b = if is_dyn_write_ref(tcx, *t) {
+                    Some(Bind::Dyn(Out::Param(i)))
+                } else if is_formatter_ref(tcx, *t) {
+                    Some(Bind::Formatter(Out::Param(i)))
+                } else if mentions_fmt_args(tcx, *t, 2) {
+                    Some(Bind::Fmt(Vec::new(), vec![i]))
+                } else {
+                    None
+                };
+                if let Some(b) = b {
+                    binds.push((local, b));
+                }
+            }
+        }
+        let r = a.node_bound(inst, Vec::new(), 0, binds);
+        while let Some(i) = a.queue.pop() {
+            a.classify(i);
+        }
+        let sums = a.evaluate();
+        let reached = a.std_defs();
+        (to_fn_summary(&sums[r]), reached)
+    }
+
+    /// The explored standard-library functions that the shipped `std` has no MIR
+    /// for: not generic and not cross-crate inlinable (closures inside them too).
+    fn std_defs(&self) -> Vec<DefId> {
+        let tcx = self.tcx;
+        let mut v: Vec<DefId> = self
+            .nodes
+            .iter()
+            .filter_map(|n| match n.inst.def {
+                InstanceKind::Item(d) => Some(d),
+                _ => None,
+            })
+            .filter(|&d| {
+                is_std_crate(tcx.crate_name(d.krate).as_str())
+                    && matches!(
+                        tcx.def_kind(d),
+                        DefKind::Fn | DefKind::AssocFn | DefKind::Closure
+                    )
+                    && !tcx.is_foreign_item(d)
+                    && !tcx.generics_of(d).requires_monomorphization(tcx)
+                    && !tcx.cross_crate_inlinable(d)
+            })
+            .collect();
+        v.sort_by_key(|d| def_path(tcx, *d));
+        v.dedup();
+        v
     }
 
     /// The default body of the trait method `method` as `impl_def` uses it (the impl
@@ -1121,7 +1283,19 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
 
     /// The node of `inst` entered in context `ctx` (facts over its parameters).
     fn node_in(&mut self, inst: Instance<'tcx>, ctx: Vec<Fact>, depth: u8) -> usize {
-        let key = (inst, ctx);
+        self.node_bound(inst, ctx, depth, Vec::new())
+    }
+
+    /// The node of `inst` entered in context `ctx` with its parameters bound to
+    /// `binds`.
+    fn node_bound(
+        &mut self,
+        inst: Instance<'tcx>,
+        ctx: Vec<Fact>,
+        depth: u8,
+        binds: Binds<'tcx>,
+    ) -> usize {
+        let key = (inst, ctx, binds);
         if let Some(&i) = self.index.get(&key) {
             return i;
         }
@@ -1132,6 +1306,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             inst,
             ctx: key.1.clone(),
             depth,
+            binds: key.2.clone(),
             parent,
             label,
             kind: NodeKind::Pending,
@@ -1353,14 +1528,169 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
         if !tcx.is_mir_available(def_id) {
             let why = if std_like {
-                "no MIR: not generic and not #[inline]"
+                match &self.crates.std_summaries {
+                    Ok(sc) => match sc.fns.get(&path) {
+                        Some(s) => return self.summary_node(&path, s),
+                        None => "no MIR: not generic and not #[inline]; not in the std summaries"
+                            .to_string(),
+                    },
+                    Err(e) => format!(
+                        "no MIR: not generic and not #[inline]; std summaries not used: {e}"
+                    ),
+                }
             } else {
-                "no MIR although the crate declares `fip::export`: it was built without `-Zalways-encode-mir`"
+                "no MIR although the crate declares `fip::export`: it was built without `-Zalways-encode-mir`".to_string()
             };
             return NodeKind::Leaf(vec![Ev::Unknown(format!("`{path}` ({why})"))]);
         }
         let body = tcx.instance_mir(inst.def);
         NodeKind::Body(self.scan_body(inst, body))
+    }
+
+    /// A standard-library function without MIR, from its generated summary
+    /// ([`crate::stdsum`]): its events, and its open calls through parameters
+    /// resolved with this node's bindings (`⊤` where they are not known). Calls with
+    /// multiplicity `∞` sit in a loop block.
+    fn summary_node(&mut self, path: &str, s: &crate::stdsum::FnSummary) -> NodeKind {
+        use crate::stdsum::Count;
+        let mut once: Vec<Site> = Vec::new();
+        let mut looped: Vec<Site> = Vec::new();
+        let site = |item| Site {
+            item,
+            span: DUMMY_SP,
+        };
+        let w = |what: &str| format!("std summary of `{path}`: {what}");
+        match s.alloc {
+            Count::Fin(0) => {}
+            Count::Fin(n) => once.push(site(Item::Ev(Ev::Bound(n, w("allocation"))))),
+            Count::Inf => looped.push(site(Item::Ev(Ev::Alloc(w("allocation"))))),
+        }
+        for f in &s.free {
+            once.push(site(Item::Ev(Ev::Free(w(f)))));
+        }
+        for f in &s.panic {
+            once.push(site(Item::Ev(Ev::Panic(w(f)))));
+        }
+        for f in &s.top {
+            once.push(site(Item::Ev(Ev::Unknown(w(f)))));
+        }
+        if let Some(r) = &s.recursion {
+            once.push(site(Item::Ev(Ev::Recurse(w(r)))));
+        }
+        for (mult, key) in &s.terms {
+            let items = self.resolve_term(path, key);
+            match mult {
+                Count::Fin(k) if *k <= 16 => {
+                    for _ in 0..*k {
+                        once.extend(items.iter().cloned().map(site));
+                    }
+                }
+                _ => looped.extend(items.into_iter().map(site)),
+            }
+        }
+        NodeKind::Body(BodyInfo {
+            blocks: vec![once, looped],
+            succ: vec![vec![1], vec![1]],
+            reachable: vec![true, true],
+            in_loop: vec![false, true],
+        })
+    }
+
+    /// The calls a summary term stands for, from this node's bindings.
+    fn resolve_term(&mut self, path: &str, key: &str) -> Vec<Item> {
+        let unknown = |why: String| {
+            vec![Item::Ev(Ev::Unknown(format!(
+                "std summary of `{path}`: {why} (`{key}`)"
+            )))]
+        };
+        let parts: Vec<&str> = key.split(' ').collect();
+        let param_local = |i: &str| {
+            i.parse::<u32>()
+                .ok()
+                .and_then(|i| i.checked_add(1))
+                .map(mir::Local::from_u32)
+        };
+        match parts.as_slice() {
+            ["§out", i, method] => {
+                let Some(l) = param_local(i) else {
+                    return unknown("malformed term".to_string());
+                };
+                let out = match self.bind_of(l) {
+                    Some(Bind::Dyn(o) | Bind::Formatter(o)) => o,
+                    _ => return unknown("the output it writes to is not known here".to_string()),
+                };
+                let Some(m) = self.trait_method_by_path(method) else {
+                    return unknown(format!("trait method `{method}` not found"));
+                };
+                let Out::Ty(t) = out else {
+                    return unknown("the output it writes to is not known here".to_string());
+                };
+                let args = self.tcx.mk_args(&[t.into()]);
+                match Instance::try_resolve(self.tcx, self.env, m, args) {
+                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                        vec![Item::Call(self.node_for(c))]
+                    }
+                    _ => unknown(format!("`{method}` for `{t}` does not resolve")),
+                }
+            }
+            ["§fmt", i, "out", how, what @ ..] => {
+                let Some(l) = param_local(i) else {
+                    return unknown("malformed term".to_string());
+                };
+                let (fns, params) = match self.bind_of(l) {
+                    Some(Bind::Fmt(f, p)) => (f, p),
+                    _ => {
+                        return unknown(
+                            "the formatting functions it calls are not known here".to_string(),
+                        );
+                    }
+                };
+                if !params.is_empty() {
+                    return unknown(
+                        "the formatting functions it calls are not known here".to_string(),
+                    );
+                }
+                let what = what.join(" ");
+                let out = match *how {
+                    "param" => match param_local(&what).and_then(|l| self.bind_of(l)) {
+                        Some(Bind::Dyn(o) | Bind::Formatter(o)) => o,
+                        _ => {
+                            return unknown(
+                                "the output it writes to is not known here".to_string(),
+                            );
+                        }
+                    },
+                    "ty" if what == "alloc::string::String" => {
+                        match self.tcx.lang_items().string() {
+                            Some(d) => {
+                                Out::Ty(self.tcx.type_of(d).instantiate_identity().skip_norm_wip())
+                            }
+                            None => return unknown("`String` not found".to_string()),
+                        }
+                    }
+                    _ => return unknown("the output type is not supported".to_string()),
+                };
+                fns.into_iter()
+                    .map(|f| self.formatter_item(f, &out))
+                    .collect()
+            }
+            _ => unknown("unknown term".to_string()),
+        }
+    }
+
+    /// The trait method with the definition path `path` (e.g.
+    /// `core::fmt::Write::write_str`).
+    fn trait_method_by_path(&self, path: &str) -> Option<DefId> {
+        let (tr, name) = path.rsplit_once("::")?;
+        let tcx = self.tcx;
+        tcx.all_traits_including_private()
+            .find(|d| def_path(tcx, *d) == tr)
+            .and_then(|t| {
+                tcx.associated_items(t)
+                    .in_definition_order()
+                    .find(|m| m.is_fn() && tcx.item_name(m.def_id).as_str() == name)
+                    .map(|m| m.def_id)
+            })
     }
 
     fn diverges(&self, def_id: DefId) -> bool {
@@ -1447,7 +1777,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     for a in args.iter() {
                         self.reified(inst, body, &a.node, span, &mut blocks[b]);
                     }
-                    blocks[b].push(Site { item, span });
+                    match item {
+                        Item::Many(items) => {
+                            blocks[b].extend(items.into_iter().map(|item| Site { item, span }));
+                        }
+                        item => blocks[b].push(Site { item, span }),
+                    }
                 }
                 TerminatorKind::Drop { place, .. } => {
                     let ty = place.ty(&body.local_decls, tcx).ty;
@@ -1642,7 +1977,20 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                             && self.vsums.wants_context(self.tcx, callee) =>
                     {
                         let ctx = here.cloned().unwrap_or_default();
-                        Item::Call(self.node_in(callee, ctx, depth + 1))
+                        let binds = self.call_binds(inst, body, callee, args);
+                        Item::Call(self.node_bound(callee, ctx, depth + 1, binds))
+                    }
+                    // Bindings make a separate node even for a callee already on the
+                    // path (nested formatting: `core::fmt::write` reached again from
+                    // a `Display` impl); they range over finitely many types, and equal
+                    // bindings reuse the node (recursion stays a cycle).
+                    Ok(Some(callee)) if !matches!(callee.def, InstanceKind::Virtual(..)) => {
+                        let binds = self.call_binds(inst, body, callee, args);
+                        if binds.is_empty() {
+                            self.resolve(def_id, fargs)
+                        } else {
+                            Item::Call(self.node_bound(callee, Vec::new(), 0, binds))
+                        }
                     }
                     Ok(Some(callee)) if matches!(callee.def, InstanceKind::Virtual(..)) => {
                         match args.first() {
@@ -1656,11 +2004,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 },
                 None => Item::Ev(Ev::Unknown(format!("callee `{fty}` with bound variables"))),
             },
-            ty::FnPtr(..) => self.pointer_target(inst, body, func).unwrap_or_else(|| {
-                Item::Ev(Ev::Unknown(format!(
-                    "call through a function pointer `{fty}`"
-                )))
-            }),
+            ty::FnPtr(..) => self
+                .pointer_target(inst, body, func)
+                .or_else(|| self.formatter_call(inst, body, fty, args))
+                .unwrap_or_else(|| {
+                    Item::Ev(Ev::Unknown(format!(
+                        "call through a function pointer `{fty}`"
+                    )))
+                }),
             _ => Item::Ev(Ev::Unknown(format!("call of `{fty}`"))),
         }
     }
@@ -1677,7 +2028,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         match origin_of(self.tcx, body, op)? {
             Origin::Fn(t) => self.function_item(inst, t),
             Origin::Arg(l) => self.declared_param_call(inst, body, l),
-            Origin::Pointee(_) => None,
+            Origin::Pointee(_) | Origin::BufOf(_) => None,
         }
     }
 
@@ -1726,13 +2077,296 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
             }
             Origin::Arg(l) => {
+                if let Some(Bind::Dyn(out) | Bind::Formatter(out)) = self.bind_of(l) {
+                    return self.output_call(def_id, callee, &out);
+                }
                 let trait_id = tcx.trait_of_assoc(def_id)?;
                 if !self.is_callable_trait(trait_id) {
                     return None;
                 }
                 self.declared_param_call(inst, body, l)
             }
+            Origin::BufOf(l) => match self.bind_of(l) {
+                Some(Bind::Formatter(out)) => self.output_call(def_id, callee, &out),
+                _ => None,
+            },
             Origin::Fn(_) => None,
+        }
+    }
+
+    /// The binding of parameter local `l` of the node being classified.
+    fn bind_of(&self, l: mir::Local) -> Option<Bind<'tcx>> {
+        let l = u32::try_from(l.as_usize()).ok()?;
+        self.nodes[self.current]
+            .binds
+            .iter()
+            .find(|(k, _)| *k == l)
+            .map(|(_, b)| b.clone())
+    }
+
+    /// A dynamic call of `def_id` (`callee` is `Virtual`) on the output `out` of a
+    /// formatting: the method of its type, or (generating std summaries) the term
+    /// `§out <i> <method>` over the summarised function's parameter `i`.
+    fn output_call(
+        &mut self,
+        def_id: DefId,
+        callee: Instance<'tcx>,
+        out: &Out<'tcx>,
+    ) -> Option<Item> {
+        let tcx = self.tcx;
+        match out {
+            Out::Ty(t) => {
+                let args = tcx.mk_args_from_iter(
+                    std::iter::once((*t).into()).chain(callee.args.iter().skip(1)),
+                );
+                match Instance::try_resolve(tcx, self.env, def_id, args) {
+                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                        Some(Item::Call(self.node_for(c)))
+                    }
+                    _ => None,
+                }
+            }
+            Out::Param(i) => Some(Item::Term(format!("§out {i} {}", def_path(tcx, def_id)))),
+        }
+    }
+
+    /// The parameter bindings of a call of `callee` in `inst`'s body: for each
+    /// argument that is a `&mut dyn fmt::Write`, a `&mut fmt::Formatter` or a value
+    /// containing `fmt::Arguments`, what it is known to hold here (its output, its
+    /// formatting functions). Arguments that are not known are not bound.
+    fn call_binds(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        callee: Instance<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
+    ) -> Binds<'tcx> {
+        let tcx = self.tcx;
+        let mut binds = Vec::new();
+        // Closures and other "rust-call" bodies take their arguments untupled: only
+        // the first parameter (the closure) lines up with the call's arguments.
+        let untupled = matches!(callee.def, InstanceKind::Item(d) if tcx.is_closure_like(d))
+            || matches!(callee.def, InstanceKind::Shim(_));
+        for (k, a) in args.iter().enumerate() {
+            if untupled && k > 0 {
+                break;
+            }
+            let Some(ty) = self.subst(inst, a.node.ty(&body.local_decls, tcx)) else {
+                continue;
+            };
+            let Ok(local) = u32::try_from(k + 1) else {
+                break;
+            };
+            let bind = if is_dyn_write_ref(tcx, ty) {
+                self.out_of(inst, body, &a.node).map(Bind::Dyn)
+            } else if is_formatter_ref(tcx, ty) {
+                self.formatter_out(inst, body, &a.node).map(Bind::Formatter)
+            } else if mentions_fmt_args(tcx, ty, 2) {
+                self.fmt_set(inst, body, &a.node)
+                    .map(|(fns, params)| Bind::Fmt(fns, params))
+            } else {
+                None
+            };
+            if let Some(b) = bind {
+                binds.push((local, b));
+            }
+        }
+        binds
+    }
+
+    /// The output a `&mut dyn fmt::Write` operand of `inst`'s body writes to.
+    fn out_of(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> Option<Out<'tcx>> {
+        match origin_of(self.tcx, body, op)? {
+            Origin::Pointee(t) => Some(Out::Ty(self.subst(inst, t)?)),
+            Origin::Arg(l) => match self.bind_of(l)? {
+                Bind::Dyn(o) | Bind::Formatter(o) => Some(o),
+                Bind::Fmt(..) => None,
+            },
+            Origin::BufOf(l) => match self.bind_of(l)? {
+                Bind::Formatter(o) => Some(o),
+                _ => None,
+            },
+            Origin::Fn(_) => None,
+        }
+    }
+
+    /// The output of a `&mut fmt::Formatter` operand of `inst`'s body: a parameter
+    /// bound to a formatter, or a `Formatter::new(out, ..)` made in the body.
+    fn formatter_out(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> Option<Out<'tcx>> {
+        let cx = OriginCx::new(self.tcx, body);
+        match cx.formatter_src(op, 0)? {
+            FmtrSrc::Param(l) => match self.bind_of(l)? {
+                Bind::Formatter(o) => Some(o),
+                _ => None,
+            },
+            FmtrSrc::New(out) => self.out_of(inst, body, out),
+        }
+    }
+
+    /// The formatting functions an operand containing `fmt::Arguments` (or
+    /// `fmt::rt::Argument`) of `inst`'s body may carry: those reified by the
+    /// `rt::Argument` constructors that built it in the body, and those of the
+    /// parameters it comes from (and, generating std summaries, the summarised
+    /// function's parameters). `None` if any part of it has another origin.
+    fn fmt_set(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> Option<(Vec<Ty<'tcx>>, Vec<u32>)> {
+        let tcx = self.tcx;
+        let cx = OriginCx::new(tcx, body);
+        let mut fns: Vec<Ty<'tcx>> = Vec::new();
+        let mut params: Vec<u32> = Vec::new();
+        for src in cx.fmt_sources(op, 0)? {
+            match src {
+                FmtSrc::Param(l) => match self.bind_of(l)? {
+                    Bind::Fmt(f, p) => {
+                        fns.extend(f);
+                        params.extend(p);
+                    }
+                    _ => return None,
+                },
+                FmtSrc::Ctor(t) => {
+                    let ty::FnDef(d, a) = *self.subst(inst, t)?.kind() else {
+                        return None;
+                    };
+                    let ctor =
+                        Instance::try_resolve(tcx, self.env, d, a.no_bound_vars()?).ok()??;
+                    fns.extend(self.reified_in(ctor)?);
+                }
+            }
+        }
+        fns.sort_by_key(|t| t.to_string());
+        fns.dedup();
+        params.sort_unstable();
+        params.dedup();
+        Some((fns, params))
+    }
+
+    /// The function items and closures reified to function pointers in the body of
+    /// the `rt::Argument` constructor `ctor` (the formatting function it stores).
+    fn reified_in(&self, ctor: Instance<'tcx>) -> Option<Vec<Ty<'tcx>>> {
+        use rustc_middle::ty::adjustment::PointerCoercion;
+        let tcx = self.tcx;
+        if !tcx.is_mir_available(ctor.def_id()) {
+            return None;
+        }
+        let body = tcx.instance_mir(ctor.def);
+        let mut v = Vec::new();
+        for data in body.basic_blocks.iter() {
+            for st in &data.statements {
+                if let mir::StatementKind::Assign(assign) = &st.kind
+                    && let mir::Rvalue::Cast(
+                        mir::CastKind::PointerCoercion(
+                            PointerCoercion::ReifyFnPointer(_)
+                            | PointerCoercion::ClosureFnPointer(_),
+                            _,
+                        ),
+                        op,
+                        _,
+                    ) = &assign.1
+                {
+                    v.push(self.subst(ctor, op.ty(&body.local_decls, tcx))?);
+                }
+            }
+        }
+        Some(v)
+    }
+
+    /// A call through a formatting function pointer (`unsafe fn(NonNull<()>,
+    /// &mut Formatter) -> Result`, stored in `rt::Argument`) in a body bound to
+    /// formatting functions: each of them, with a `Formatter` writing to the output
+    /// of the call's formatter argument. Generating std summaries, the term
+    /// `§fmt <i> out ..` over the summarised function's parameter `i`.
+    fn formatter_call(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        fty: Ty<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
+    ) -> Option<Item> {
+        let tcx = self.tcx;
+        let ty::FnPtr(sig_tys, _) = fty.kind() else {
+            return None;
+        };
+        let inputs = sig_tys.skip_binder().inputs();
+        if inputs.len() != 2 || !is_formatter_ref(tcx, inputs[1]) || args.len() != 2 {
+            return None;
+        }
+        // The function pointers come from `rt::Argument` values of the node's
+        // bound parameters; a body that builds its own may call others.
+        if body_builds_arguments(tcx, body) {
+            return None;
+        }
+        let mut fns: Vec<Ty<'tcx>> = Vec::new();
+        let mut params: Vec<u32> = Vec::new();
+        let mut bound = false;
+        for (_, b) in self.nodes[self.current].binds.clone() {
+            if let Bind::Fmt(f, p) = b {
+                fns.extend(f);
+                params.extend(p);
+                bound = true;
+            }
+        }
+        if !bound {
+            return None;
+        }
+        let out = self.formatter_out(inst, body, &args[1].node)?;
+        let mut items = Vec::new();
+        for i in params {
+            let desc = match &out {
+                Out::Param(j) => format!("param {j}"),
+                Out::Ty(t) => format!(
+                    "ty {}",
+                    with_no_visible_paths!(with_no_trimmed_paths!(t.to_string()))
+                ),
+            };
+            items.push(Item::Term(format!("§fmt {i} out {desc}")));
+        }
+        for f in fns {
+            items.push(self.formatter_item(f, &out));
+        }
+        Some(Item::Many(items))
+    }
+
+    /// The call of the formatting function `f` (a function item or closure type)
+    /// with a `Formatter` writing to `out`.
+    fn formatter_item(&mut self, f: Ty<'tcx>, out: &Out<'tcx>) -> Item {
+        match *f.kind() {
+            ty::FnDef(d, a) => match a
+                .no_bound_vars()
+                .map(|a| (a, Instance::try_resolve(self.tcx, self.env, d, a)))
+            {
+                None => Item::Ev(Ev::Unknown(format!(
+                    "formatting function `{f}` with bound variables"
+                ))),
+                Some((a, r)) => match r {
+                    Ok(Some(c)) => {
+                        // `fn fmt(&self, f: &mut Formatter)`: the formatter is local 2.
+                        let binds = vec![(2, Bind::Formatter(out.clone()))];
+                        Item::Call(self.node_bound(c, Vec::new(), 0, binds))
+                    }
+                    _ => self.resolve(d, a),
+                },
+            },
+            ty::Closure(d, a) => {
+                let c = Instance::resolve_closure(self.tcx, d, a, ty::ClosureKind::FnOnce);
+                Item::Call(self.node_for(c))
+            }
+            _ => Item::Ev(Ev::Unknown(format!(
+                "formatting function of type `{f}` (not a function item or closure)"
+            ))),
         }
     }
 
@@ -1942,7 +2576,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         callee: DefId,
         args: GenericArgsRef<'tcx>,
         g: &str,
-    ) -> Option<(String, Vec<(String, Item)>, bool)> {
+    ) -> Option<ArgItems> {
         let tcx = self.tcx;
         let pos = tcx
             .fn_arg_idents(callee)
@@ -2208,6 +2842,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         }
                         cost = cost.max(&c);
                     }
+                    Item::Many(_) => {
+                        let what = "several callees (internal)".to_string();
+                        push_w(&mut s.unknown, unknown(&what), MAX_UNKNOWN, key_what);
+                    }
                 }
             }
             s.alloc = cost.clone();
@@ -2417,6 +3055,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                         .add(&local_event(&mut s, ev, local).looped(in_loop));
                                 }
                             }
+                            // Flattened by `scan_body`; never stored.
+                            Item::Many(_) => {
+                                let what = "several callees (internal)".to_string();
+                                push_w(&mut s.unknown, local(&what), MAX_UNKNOWN, key_what);
+                            }
                         }
                     }
                 }
@@ -2484,6 +3127,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                 Item::Term(k) => items.push(format!("term {k}{l}")),
                                 Item::Ev(e) => items.push(format!("{e:?}{l}")),
                                 Item::Evs(es) => items.push(format!("{es:?}{l}")),
+                                Item::Many(is) => items.push(format!("{is:?}{l}")),
                             }
                         }
                     }
@@ -2549,6 +3193,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         }
                         cost = cost.max(&c);
                     }
+                    Item::Many(_) => unknown = true,
                 }
             }
             let bound = if unknown {
@@ -2585,6 +3230,44 @@ fn param_events(g: &str, k: u64, m: &Mark) -> Vec<Ev> {
         );
     }
     evs
+}
+
+/// A witness as one line: `a` -> `b`: what.
+fn plain_witness(w: &Witness) -> String {
+    if w.steps.is_empty() {
+        return w.what.clone();
+    }
+    let chain: Vec<String> = w.steps.iter().map(|s| format!("`{}`", s.label)).collect();
+    format!("{}: {}", chain.join(" -> "), w.what)
+}
+
+/// A root summary as a std summary entry: terms over parameters stay open; any other
+/// term (none is expected for a non-generic function) is `⊤`.
+fn to_fn_summary(s: &Summary) -> crate::stdsum::FnSummary {
+    use crate::stdsum::Count;
+    let count = |b: B| match b {
+        B::Fin(n) => Count::Fin(n),
+        B::Inf => Count::Inf,
+    };
+    let mut f = crate::stdsum::FnSummary {
+        alloc: count(s.alloc.c),
+        ..Default::default()
+    };
+    for (k, m) in &s.alloc.terms {
+        if m.is_zero() {
+            continue;
+        }
+        if k.starts_with('§') {
+            f.terms.push((count(*m), k.clone()));
+        } else {
+            f.top.push(format!("open term `{k}`"));
+        }
+    }
+    f.free = s.free.iter().map(plain_witness).collect();
+    f.panic = s.panics.iter().map(plain_witness).collect();
+    f.top.extend(s.unknown.iter().map(plain_witness));
+    f.recursion = s.recursion.as_ref().map(plain_witness);
+    f
 }
 
 /// Adds one event found in a body (witness `w`) to `s`; returns its allocation cost.
@@ -2670,6 +3353,112 @@ enum Origin<'tcx> {
     Pointee(Ty<'tcx>),
     /// The value of a parameter of the body, never reassigned.
     Arg(mir::Local),
+    /// The output (`buf`) of the `fmt::Formatter` that the parameter in this local
+    /// points to.
+    BufOf(mir::Local),
+}
+
+/// The output of a formatting: a concrete type implementing `fmt::Write`, or
+/// (generating std summaries) a parameter of the summarised function.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Out<'tcx> {
+    Ty(Ty<'tcx>),
+    Param(u32),
+}
+
+/// What a parameter of an analysed body holds, known at the call sites of its node.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Bind<'tcx> {
+    /// A `&mut dyn fmt::Write` writing to this output.
+    Dyn(Out<'tcx>),
+    /// A `&mut fmt::Formatter` writing to this output.
+    Formatter(Out<'tcx>),
+    /// A value containing `fmt::Arguments`/`fmt::rt::Argument`: the formatting
+    /// functions it may carry (function item or closure types) and, generating std
+    /// summaries, the summarised function's parameters whose functions it carries.
+    Fmt(Vec<Ty<'tcx>>, Vec<u32>),
+}
+
+/// Bindings of a node's parameters, by local (`1..=arg_count`).
+type Binds<'tcx> = Vec<(u32, Bind<'tcx>)>;
+
+fn adt_is(tcx: TyCtxt<'_>, ty: Ty<'_>, path: &str) -> bool {
+    matches!(ty.kind(), ty::Adt(def, _) if def_path(tcx, def.did()) == path)
+}
+
+/// `&mut fmt::Formatter` (or a shared reference to one).
+fn is_formatter_ref(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
+    matches!(ty.kind(), ty::Ref(..)) && adt_is(tcx, ty.peel_refs(), "core::fmt::Formatter")
+}
+
+/// `&mut dyn fmt::Write` (or a shared reference to one).
+fn is_dyn_write_ref(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
+    let ty::Ref(_, inner, _) = *ty.kind() else {
+        return false;
+    };
+    matches!(inner.kind(), ty::Dynamic(preds, ..)
+        if preds.principal_def_id().is_some_and(|d| def_path(tcx, d) == "core::fmt::Write"))
+}
+
+/// `true` if a value of `ty` may contain `fmt::Arguments` or `fmt::rt::Argument`
+/// (through generic arguments, closure captures, references, and ADT fields up to
+/// `depth` levels).
+fn mentions_fmt_args<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, depth: u8) -> bool {
+    for t in ty.walk() {
+        let Some(t) = t.as_type() else {
+            continue;
+        };
+        if adt_is(tcx, t, "core::fmt::Arguments") || adt_is(tcx, t, "core::fmt::rt::Argument") {
+            return true;
+        }
+        if depth > 0
+            && let ty::Adt(def, args) = *t.kind()
+        {
+            for f in def.all_fields() {
+                if mentions_fmt_args(tcx, f.ty(tcx, args).skip_norm_wip(), depth - 1) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// `true` if `body` calls a `fmt::Arguments` or `fmt::rt::Argument` constructor
+/// (`new*`, `from*`).
+fn body_builds_arguments<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
+    body.basic_blocks.iter().any(|data| {
+        matches!(&data.terminator().kind, TerminatorKind::Call { func, .. }
+            if matches!(*func.ty(&body.local_decls, tcx).kind(), ty::FnDef(d, _) if {
+                let p = def_path(tcx, d);
+                let name = tcx.item_name(d);
+                let ctor = name.as_str().starts_with("new") || name.as_str().starts_with("from");
+                ctor && (p.starts_with("core::fmt::rt::Argument::") || p.starts_with("core::fmt::Arguments::"))
+            }))
+    })
+}
+
+/// Where a part of a value containing `fmt::Arguments` comes from.
+enum FmtSrc<'tcx> {
+    /// A parameter (never reassigned) of the body.
+    Param(mir::Local),
+    /// A call of an `rt::Argument` constructor (its function item type).
+    Ctor(Ty<'tcx>),
+}
+
+/// Where a `&mut fmt::Formatter` comes from.
+enum FmtrSrc<'b, 'tcx> {
+    /// A parameter (never reassigned) of the body.
+    Param(mir::Local),
+    /// `Formatter::new(out, ..)` in the body: `out`.
+    New(&'b Operand<'tcx>),
+}
+
+/// One assignment of a whole local.
+enum Def<'b, 'tcx> {
+    Rv(&'b mir::Rvalue<'tcx>),
+    /// The destination of a call: its callee and arguments.
+    Call(&'b Operand<'tcx>, &'b [Spanned<Operand<'tcx>>]),
 }
 
 /// Locals whose value may change other than by an assignment of the whole local:
@@ -2690,7 +3479,10 @@ impl<'tcx> mir::visit::Visitor<'tcx> for Unstable {
         };
         let through_deref = place.projection.first() == Some(&mir::ProjectionElem::Deref);
         let whole = place.projection.is_empty()
-            && matches!(m, MutatingUseContext::Store | MutatingUseContext::Drop);
+            && matches!(
+                m,
+                MutatingUseContext::Store | MutatingUseContext::Drop | MutatingUseContext::Call
+            );
         if !through_deref && !whole {
             self.0[place.local.as_usize()] = true;
         }
@@ -2707,38 +3499,264 @@ fn origin_of<'tcx>(
     body: &Body<'tcx>,
     op: &Operand<'tcx>,
 ) -> Option<Origin<'tcx>> {
-    use mir::visit::Visitor;
-    let n = body.local_decls.len();
-    let mut unstable = Unstable(vec![false; n]);
-    unstable.visit_body(body);
-    let mut writes: Vec<Vec<&mir::Rvalue<'tcx>>> = vec![Vec::new(); n];
-    for data in body.basic_blocks.iter() {
-        for st in &data.statements {
-            if let mir::StatementKind::Assign(assign) = &st.kind
-                && assign.0.projection.is_empty()
-            {
-                writes[assign.0.local.as_usize()].push(&assign.1);
-            }
-        }
-    }
-    let cx = OriginCx {
-        tcx,
-        body,
-        unstable: unstable.0,
-        writes,
-    };
-    cx.operand(op, 0)
+    OriginCx::new(tcx, body).operand(op, 0)
 }
 
 struct OriginCx<'b, 'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &'b Body<'tcx>,
     unstable: Vec<bool>,
-    writes: Vec<Vec<&'b mir::Rvalue<'tcx>>>,
+    writes: Vec<Vec<Def<'b, 'tcx>>>,
 }
 
-impl<'tcx> OriginCx<'_, 'tcx> {
+impl<'b, 'tcx> OriginCx<'b, 'tcx> {
     const MAX_DEPTH: usize = 32;
+
+    /// The assignments of every whole local of `body` (statements and call
+    /// destinations) and the locals changed in any other way.
+    fn new(tcx: TyCtxt<'tcx>, body: &'b Body<'tcx>) -> OriginCx<'b, 'tcx> {
+        use mir::visit::Visitor;
+        let n = body.local_decls.len();
+        let mut unstable = Unstable(vec![false; n]);
+        unstable.visit_body(body);
+        let mut writes: Vec<Vec<Def<'b, 'tcx>>> = (0..n).map(|_| Vec::new()).collect();
+        for data in body.basic_blocks.iter() {
+            for st in &data.statements {
+                if let mir::StatementKind::Assign(assign) = &st.kind
+                    && assign.0.projection.is_empty()
+                {
+                    writes[assign.0.local.as_usize()].push(Def::Rv(&assign.1));
+                }
+            }
+            if let TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                ..
+            } = &data.terminator().kind
+                && destination.projection.is_empty()
+            {
+                writes[destination.local.as_usize()].push(Def::Call(func, args));
+            }
+        }
+        OriginCx {
+            tcx,
+            body,
+            unstable: unstable.0,
+            writes,
+        }
+    }
+
+    /// `true` for a parameter local (`1..=arg_count`).
+    fn is_arg(&self, l: mir::Local) -> bool {
+        (1..=self.body.arg_count).contains(&l.as_usize())
+    }
+
+    /// `(*f).buf` with `f: &mut fmt::Formatter` a parameter: `f`.
+    fn buf_of(&self, p: mir::Place<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
+        let [
+            mir::ProjectionElem::Deref,
+            mir::ProjectionElem::Field(_, fty),
+        ] = p.projection.as_slice()
+        else {
+            return None;
+        };
+        let base = self.body.local_decls[p.local].ty;
+        if !is_formatter_ref(self.tcx, base) || !is_dyn_write_ref(self.tcx, *fty) {
+            return None;
+        }
+        match self.local(p.local, depth)? {
+            Origin::Arg(l) => Some(Origin::BufOf(l)),
+            _ => None,
+        }
+    }
+
+    /// The sources of the formatting functions in a value containing
+    /// `fmt::Arguments` (see [`Analysis::fmt_set`]).
+    fn fmt_sources(&self, op: &Operand<'tcx>, depth: usize) -> Option<Vec<FmtSrc<'tcx>>> {
+        match op {
+            Operand::Copy(p) | Operand::Move(p) => self.fmt_place(*p, depth),
+            Operand::Constant(c) => (!mentions_fmt_args(self.tcx, c.ty(), 2)).then(Vec::new),
+            _ => None,
+        }
+    }
+
+    /// A part of a value (fields, elements, the pointee) carries no formatting
+    /// function the value does not.
+    fn fmt_place(&self, p: mir::Place<'tcx>, depth: usize) -> Option<Vec<FmtSrc<'tcx>>> {
+        let parts = p.projection.iter().all(|e| {
+            matches!(
+                e,
+                mir::ProjectionElem::Deref
+                    | mir::ProjectionElem::Field(..)
+                    | mir::ProjectionElem::Index(_)
+                    | mir::ProjectionElem::ConstantIndex { .. }
+                    | mir::ProjectionElem::Subslice { .. }
+                    | mir::ProjectionElem::Downcast(..)
+            )
+        });
+        if !parts {
+            return None;
+        }
+        self.fmt_local(p.local, depth)
+    }
+
+    fn fmt_local(&self, l: mir::Local, depth: usize) -> Option<Vec<FmtSrc<'tcx>>> {
+        if depth > Self::MAX_DEPTH || self.unstable[l.as_usize()] {
+            return None;
+        }
+        let writes = &self.writes[l.as_usize()];
+        if self.is_arg(l) {
+            return writes.is_empty().then(|| vec![FmtSrc::Param(l)]);
+        }
+        if writes.is_empty() {
+            return None;
+        }
+        let mut v = Vec::new();
+        for w in writes {
+            let part = match w {
+                Def::Rv(rv) => self.fmt_rvalue(rv, depth + 1)?,
+                Def::Call(func, args) => self.fmt_call(func, args, depth + 1)?,
+            };
+            v.extend(part);
+        }
+        Some(v)
+    }
+
+    fn fmt_rvalue(&self, rv: &mir::Rvalue<'tcx>, depth: usize) -> Option<Vec<FmtSrc<'tcx>>> {
+        match rv {
+            mir::Rvalue::Use(op, ..) | mir::Rvalue::Cast(_, op, _) | mir::Rvalue::Repeat(op, _) => {
+                self.fmt_sources(op, depth)
+            }
+            mir::Rvalue::CopyForDeref(p)
+            | mir::Rvalue::Ref(_, _, p)
+            | mir::Rvalue::RawPtr(_, p) => self.fmt_place(*p, depth),
+            mir::Rvalue::Aggregate(_, ops) => {
+                let mut v = Vec::new();
+                for op in ops {
+                    let t = op.ty(&self.body.local_decls, self.tcx);
+                    if mentions_fmt_args(self.tcx, t, 2) {
+                        v.extend(self.fmt_sources(op, depth)?);
+                    }
+                }
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+
+    /// The result of a call: an `rt::Argument` constructor; an `Arguments`
+    /// constructor or a `core::ptr` method (pointer arithmetic) carries what its
+    /// arguments carry; anything else is not known.
+    fn fmt_call(
+        &self,
+        func: &Operand<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
+        depth: usize,
+    ) -> Option<Vec<FmtSrc<'tcx>>> {
+        let ft = func.ty(&self.body.local_decls, self.tcx);
+        let ty::FnDef(d, _) = *ft.kind() else {
+            return None;
+        };
+        let path = def_path(self.tcx, d);
+        if path.starts_with("core::fmt::rt::Argument::") {
+            return Some(vec![FmtSrc::Ctor(ft)]);
+        }
+        if path.starts_with("core::fmt::Arguments::") || path.starts_with("core::ptr::") {
+            let mut v = Vec::new();
+            for a in args {
+                let t = a.node.ty(&self.body.local_decls, self.tcx);
+                if mentions_fmt_args(self.tcx, t, 2) {
+                    v.extend(self.fmt_sources(&a.node, depth)?);
+                }
+            }
+            return Some(v);
+        }
+        None
+    }
+
+    /// Where a `&mut fmt::Formatter` operand comes from.
+    fn formatter_src(&self, op: &Operand<'tcx>, depth: usize) -> Option<FmtrSrc<'b, 'tcx>> {
+        let (Operand::Copy(p) | Operand::Move(p)) = op else {
+            return None;
+        };
+        if !p.projection.is_empty() {
+            return None;
+        }
+        self.formatter_local(p.local, depth)
+    }
+
+    fn formatter_local(&self, l: mir::Local, depth: usize) -> Option<FmtrSrc<'b, 'tcx>> {
+        if depth > Self::MAX_DEPTH || self.unstable[l.as_usize()] {
+            return None;
+        }
+        let writes = &self.writes[l.as_usize()];
+        if self.is_arg(l) {
+            return writes.is_empty().then_some(FmtrSrc::Param(l));
+        }
+        let [w] = writes.as_slice() else {
+            return None;
+        };
+        match w {
+            Def::Rv(mir::Rvalue::Use(Operand::Copy(p) | Operand::Move(p), ..))
+                if p.projection.is_empty() =>
+            {
+                self.formatter_local(p.local, depth + 1)
+            }
+            // `&mut f` of a `Formatter` value, or `&mut *f` of a reference to one.
+            Def::Rv(mir::Rvalue::Ref(_, _, p)) if p.projection.is_empty() => {
+                self.formatter_value(p.local, depth + 1)
+            }
+            Def::Rv(mir::Rvalue::Ref(_, _, p))
+                if p.projection.as_slice() == [mir::ProjectionElem::Deref] =>
+            {
+                self.formatter_local(p.local, depth + 1)
+            }
+            _ => None,
+        }
+    }
+
+    /// A local holding a `Formatter` value: `Formatter::new(out, ..)`, or the
+    /// aggregate `Formatter { buf: out, .. }` it is inlined to. The value is passed
+    /// on as `&mut Formatter`, so it is "unstable"; its `buf` is still `out`: the field
+    /// is private to `core`, and `core` never assigns it (audited in the sources of
+    /// rustc 1.99.1, which the std summaries' stamp pins: `buf` is set only where a
+    /// `Formatter` is built).
+    fn formatter_value(&self, l: mir::Local, depth: usize) -> Option<FmtrSrc<'b, 'tcx>> {
+        if depth > Self::MAX_DEPTH || self.is_arg(l) {
+            return None;
+        }
+        if let [Def::Rv(mir::Rvalue::Aggregate(kind, ops))] = self.writes[l.as_usize()].as_slice()
+            && let mir::AggregateKind::Adt(did, variant, ..) = **kind
+            && def_path(self.tcx, did) == "core::fmt::Formatter"
+        {
+            let fields = &self.tcx.adt_def(did).variant(variant).fields;
+            let buf = fields
+                .iter_enumerated()
+                .find(|(_, f)| f.name.as_str() == "buf")
+                .map(|(i, _)| i)?;
+            return ops.get(buf).map(FmtrSrc::New);
+        }
+        let [Def::Call(func, args)] = self.writes[l.as_usize()].as_slice() else {
+            return None;
+        };
+        let ty::FnDef(d, _) = *func.ty(&self.body.local_decls, self.tcx).kind() else {
+            return None;
+        };
+        let tcx = self.tcx;
+        let is_new = tcx.item_name(d).as_str() == "new"
+            && tcx.impl_of_assoc(d).is_some_and(|i| {
+                adt_is(
+                    tcx,
+                    tcx.type_of(i).instantiate_identity().skip_norm_wip(),
+                    "core::fmt::Formatter",
+                )
+            });
+        if !is_new {
+            return None;
+        }
+        args.first().map(|a| FmtrSrc::New(&a.node))
+    }
 
     fn operand(&self, op: &Operand<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
         match op {
@@ -2758,7 +3776,10 @@ impl<'tcx> OriginCx<'_, 'tcx> {
             return writes.is_empty().then_some(Origin::Arg(l));
         }
         let mut found = None;
-        for rv in writes {
+        for w in writes {
+            let Def::Rv(rv) = w else {
+                return None;
+            };
             let o = self.rvalue(rv, depth + 1)?;
             if found.is_some_and(|f| f != o) {
                 return None;
@@ -2772,8 +3793,14 @@ impl<'tcx> OriginCx<'_, 'tcx> {
         use rustc_middle::ty::adjustment::PointerCoercion;
         let ty_of = |op: &Operand<'tcx>| op.ty(&self.body.local_decls, self.tcx);
         match rv {
+            mir::Rvalue::Use(Operand::Copy(p) | Operand::Move(p), ..)
+            | mir::Rvalue::CopyForDeref(p)
+                if !p.projection.is_empty() =>
+            {
+                self.buf_of(*p, depth)
+            }
             mir::Rvalue::Use(op, ..) => self.operand(op, depth),
-            mir::Rvalue::CopyForDeref(p) if p.projection.is_empty() => self.local(p.local, depth),
+            mir::Rvalue::CopyForDeref(p) => self.local(p.local, depth),
             mir::Rvalue::Cast(
                 mir::CastKind::PointerCoercion(
                     PointerCoercion::ReifyFnPointer(_) | PointerCoercion::ClosureFnPointer(_),

@@ -1,0 +1,13 @@
+fip-prelint std summaries
+# Test file: a real entry under a stamp for another compiler (fixture std_summaries_stale).
+format 1
+rustc 1.98.0 (0000000ff 2026-09-01)
+target x86_64-unknown-linux-gnu
+settings opt-level=3 debug-assertions=off overflow-checks=off (-Zbuild-std, -Zalways-encode-mir)
+std-src 8c984727c053b13f
+
+fn core::fmt::write
+alloc 0
+term inf §fmt 1 out param 0
+term inf §out 0 core::fmt::Write::write_str
+end

@@ -20,7 +20,14 @@
 //! - `FIP_PRELINT_DUMP=1`: print every root's explored call graph to stderr, and every
 //!   checked call site of a callee with `param(..)` with the argument's bound;
 //! - `FIP_PRELINT_DUMP_MIR=<text>`: print the MIR of every body the value analysis
-//!   reads whose path contains `<text>` (a debugging aid).
+//!   reads whose path contains `<text>` (a debugging aid);
+//! - `FIP_PRELINT_STD_SUMMARIES=<file>`: the std summaries to use (default: the file
+//!   for this compiler and target in `tools/fip-prelint/std-summaries/`);
+//! - `FIP_PRELINT_STD_SUMMARIES_OUT=<file>` (set by `cargo fip-prelint
+//!   --std-summaries`): generation mode. Crates of a `-Zbuild-std` build are compiled
+//!   by the driver with `-Zalways-encode-mir` and the release settings of the shipped
+//!   `std`; the workspace member (the seed crate) is not checked, its roots seed the
+//!   summaries written to `<file>` ([`stdsum`]).
 
 #![feature(rustc_private)]
 
@@ -38,6 +45,7 @@ extern crate rustc_span;
 mod analysis;
 mod marks;
 mod report;
+mod stdsum;
 mod value;
 
 use std::path::Path;
@@ -80,6 +88,22 @@ const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_DUMP",
     "FIP_PRELINT_DUMP_MIR",
     "FIP_PRELINT_DRIVER_ID",
+    "FIP_PRELINT_STD_SUMMARIES",
+    "FIP_PRELINT_STD_SUMMARIES_OUT",
+];
+
+/// Generation mode of the std summaries (see the module documentation).
+pub const GENERATE_ENV: &str = "FIP_PRELINT_STD_SUMMARIES_OUT";
+
+/// Release settings of the shipped `std` (rustc's `dist` profile), applied to the
+/// standard library crates of a `-Zbuild-std` build in generation mode; later `-C`
+/// options override cargo's profile.
+const STD_RELEASE_FLAGS: &[&str] = &[
+    "-Zalways-encode-mir",
+    "-Copt-level=3",
+    "-Cdebug-assertions=off",
+    "-Coverflow-checks=off",
+    "-Cdebuginfo=0",
 ];
 
 impl Callbacks for Prelint {
@@ -89,16 +113,28 @@ impl Callbacks for Prelint {
             let value = std::env::var(var).ok().map(|v| Symbol::intern(&v));
             deps.insert((Symbol::intern(var), value));
         }
+        // A regenerated std summaries file re-checks the crate.
+        if self.role == Role::Primary {
+            let target = tcx.sess.opts.target_triple.tuple().to_string();
+            let path = analysis::std_summaries_path(&target);
+            if path.is_file() {
+                tcx.sess
+                    .file_depinfo
+                    .borrow_mut()
+                    .insert(Symbol::intern(&path.to_string_lossy()));
+            }
+        }
         Compilation::Continue
     }
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let check = match self.role {
+            Role::Primary if std::env::var_os(GENERATE_ENV).is_some() => report::generate,
             Role::Primary => report::check_crate,
             // An exported dependency's implementations of trait methods with a
             // contract are checked where they are compiled (limits plan L4).
             Role::ExportedDependency => report::check_dependency,
-            Role::PassThrough => return Compilation::Continue,
+            Role::PassThrough | Role::StdBuild => return Compilation::Continue,
         };
         let run = rustc_public::rustc_internal::run(tcx, || check(tcx));
         if run.is_err() {
@@ -116,7 +152,7 @@ fn is_rustc_path(arg: &str) -> bool {
             .is_some_and(|s| s == "rustc" || s.to_string_lossy().starts_with("rustc-"))
 }
 
-fn sysroot(real_rustc: Option<&str>) -> String {
+pub(crate) fn sysroot(real_rustc: Option<&str>) -> String {
     if let Ok(s) = std::env::var("FIP_PRELINT_SYSROOT")
         && !s.is_empty()
     {
@@ -148,6 +184,10 @@ enum Role {
     ExportedDependency,
     /// Any other crate (other dependencies, version probes): the real rustc, unchanged.
     PassThrough,
+    /// Generation mode only: a standard library crate of a `-Zbuild-std` build
+    /// (`-Z force-unstable-if-unmarked`), compiled with its MIR encoded and the release
+    /// settings of the shipped `std`; no analysis.
+    StdBuild,
 }
 
 /// The crate root source file: the `.rs` argument that is not an option value.
@@ -212,6 +252,13 @@ fn role(args: &[String]) -> Role {
     if !args.iter().any(|a| a == "--crate-name") {
         return Role::PassThrough;
     }
+    if std::env::var_os(GENERATE_ENV).is_some()
+        && args
+            .iter()
+            .any(|a| a.ends_with("force-unstable-if-unmarked"))
+    {
+        return Role::StdBuild;
+    }
     if std::env::var_os("CARGO_PRIMARY_PACKAGE").is_some() {
         return Role::Primary;
     }
@@ -249,7 +296,10 @@ fn main() -> std::process::ExitCode {
         args.push("--sysroot".to_string());
         args.push(sysroot(real_rustc.as_deref()));
     }
-    let compiles = role != Role::PassThrough;
+    if role == Role::StdBuild {
+        args.extend(STD_RELEASE_FLAGS.iter().map(|f| (*f).to_string()));
+    }
+    let compiles = matches!(role, Role::Primary | Role::ExportedDependency);
     if compiles {
         // Skip flags already present (e.g. from RUSTFLAGS): a repeated
         // `register_tool(fip)` is an error.

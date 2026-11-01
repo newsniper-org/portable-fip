@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Seed of the std summaries (`cargo fip-prelint --std-summaries`): its roots decide
+# which standard-library functions without MIR are summarised. Not part of any
+# workspace; built only with `-Zbuild-std` by the generator.
+[package]
+name = "fip_std_seed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow" }

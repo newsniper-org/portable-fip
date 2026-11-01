@@ -886,3 +886,91 @@ fields, tables or statics; interprocedural origins (a pointer passed down withou
 `param(..)`); contracts with `param(..)`; `#[fip]` on a trait method declaration is rejected
 by `fip-macros` ("FIP attributes apply only to functions with a body", measured), so
 contracts are written as `#[cfg_attr(fip_prelint, fip::mark(..))]` by hand.
+
+## Resolved 2026-11-02: generated std summaries (limits plan L6 + L10e)
+
+Plan: `docs/decisions/2026-11-02-fip-prelint-limits-plan.md`, L6 and L10e (item 8 of
+its order). A standard-library function that is neither generic nor `#[inline]` has no
+MIR in the shipped `std` and was `⊤`: `format!` (`alloc::fmt::format::format_inner`)
+and every `write!` (`core::fmt::write`) were uncheckable.
+
+**Generation** (`cargo fip-prelint --std-summaries`, recipe
+`just prelint-std-summaries`): `cargo check -Zbuild-std=core,alloc,std,panic_abort,panic_unwind`
+of the seed crate `tools/fip-prelint/std-summaries/seed` with the driver as wrapper in
+generation mode. The standard-library crates (recognised by `-Z
+force-unstable-if-unmarked`) are compiled by the driver with `-Zalways-encode-mir
+-Copt-level=3 -Cdebug-assertions=off -Coverflow-checks=off -Cdebuginfo=0` (the release
+settings of the shipped `std`; M4's overflow panics of a dev-profile `std` do not
+appear). The seed's roots are analysed; every reached standard-library function that
+the shipped `std` has no MIR for (not generic, not cross-crate inlinable) is analysed as
+a root, and so is every such function those reach. Its `&mut dyn fmt::Write`,
+`&mut fmt::Formatter` and `fmt::Arguments` parameters are left open: the summary
+holds the allocation bound, frees, panic paths, `⊤` leaves, recursion, and terms over
+the parameters (`§out <i> <method>`: a call on the output reached through parameter `i`;
+`§fmt <i> out ..`: the formatting functions carried by the `Arguments` in parameter
+`i`, called with a `Formatter` writing to a given output).
+
+**Bindings** (`analysis::Bind`, also at check time): a node is keyed by what its
+parameters hold, known at the call site by a must-analysis of the caller's body: the
+concrete output type behind a `&mut dyn fmt::Write` (unsized from a type, or passed
+on), the output of a `&mut Formatter` (`Formatter::new(out, ..)` or its inlined
+aggregate, or passed on; `(*f).buf` of a bound formatter), and the formatting functions
+of a value containing `fmt::Arguments` (reified in the `rt::Argument` constructors
+that built it in the body, through `Arguments` constructors, arrays, references,
+fields, closure captures and `core::ptr` pointer methods; anything else is unbound).
+A dynamic `fmt::Write` call on a bound output is that type's method; a call through a
+formatting function pointer in a body with bound formatting functions calls each of
+them with a bound `Formatter`. Unbound: `⊤`, as before. Trusted fact, audited in the
+1.99.1 sources: `core` never assigns `Formatter::buf` after building a `Formatter`.
+
+**Sidecar** (`stdsum.rs`, plain text, parser with unit tests): stamped with the format
+version, the driver's rustc version string (release, commit, date), the target, the
+settings, and an FNV-1a hash of the `core`/`alloc`/`std` sources (provenance). The
+driver loads `std-summaries/<release>-<target>.txt` (or `FIP_PRELINT_STD_SUMMARIES`)
+and uses an entry only where the shipped `std` has no MIR; a missing or malformed file,
+another format, rustc or target: not used, such functions stay `⊤` with the reason in
+the witness (fixture `std_summaries_stale`). A unit test fails when no committed file
+matches the driver's rustc version (a repin without regeneration).
+
+**Committed, not generated in CI** (decision): generation needs `rust-src` and a
+`-Zbuild-std` build; measured in 3 cold runs 130.7 s, 98.7 s and 94.4 s (of which
+the analysis, debug driver: 45.0 s, 32.8 s, 32.1 s), against ~4 min for all of
+`just ci`. Three generations (two build directories, two driver builds) gave
+byte-identical files (560 lines, 60 functions), so the committed file is reproducible
+and reviewable as a diff; its stamp, not CI, prevents its use with another compiler.
+Regenerate with `just prelint-std-summaries` after a repin or a seed change.
+
+**Measured** (before = driver of `1e4b6c4`):
+
+| case | before | after |
+|---|---|---|
+| fixture `std_summaries`: `write!` of `u32`/`i64`/`&str`/`{:x}` into a fixed buffer | `⊤` (`core::fmt::write`, no MIR) | passes |
+| `write!` of a user `Display` that writes through the `Formatter` (nested `write!`, `pad`) | `⊤` | passes |
+| `format!("{x}")` under `#[fip]` | 1 allocation and `⊤` (`format_inner`) | may allocate `∞` (`String` growth in the summary) and may free; no `⊤` |
+| `{:?}` of a derived `Debug` | `⊤` (`core::fmt::write`) | `⊤` (`Formatter::debug_struct_field2_finish`, not covered: `core` formats fields through `&dyn Debug`) |
+| `write!` of a `u8` under `strict = true, panic_macros = false` | `⊤` plus the user buffer's bounds check | 6 panic paths (bounds checks in `core`'s integer formatting, from the summary) |
+| fixture totals (`fmtuse`) | 5 roots, 0 passed, 7 errors | 5 roots, 2 passed, 9 errors (1 `⊤`) |
+| the same with a stale file (`std_summaries_stale`) | — | 5 roots, 0 passed, 7 errors, every no-MIR function `⊤` with "std summaries not used: .. generated for rustc `1.98.0 ..`" |
+| M3 probe `limits` row `format!` | 1 allocation + `⊤` | `∞` allocations + may free, no `⊤` (`limits`: 13 roots, 7 passed, 7 errors, unchanged count) |
+
+The sidecar (60 functions): 63 open terms, 246 panic witnesses, 3 `⊤` witnesses (debug
+builders: `&dyn Debug` fields and a `Formatter` made by `wrap_buf`). The 28 overflow
+checks in it come from generic `core` iterators (`#[rustc_inherit_overflow_checks]`,
+decided by the instantiating crate's settings, as at check time), not from the
+release-built `std`. Self-check and all other fixtures unchanged.
+
+**Deviations from the plan:** the file name carries the target
+(`<release>-<target>.txt`; summaries are target-specific); the stamp holds the format
+version instead of `FIP_PRELINT_DRIVER_ID` (a driver rebuild must not invalidate a
+committed file; the format version is bumped when an entry's meaning changes), and the
+std source hash is recorded for provenance, not compared at load (the rustc version
+string already pins the commit); open indirect calls are terms over parameters
+resolved by bindings, keyed in the node, rather than resolved from the caller's
+`Argument::new_display` constructions only, so that `Arguments` passed through `std`'s
+generic layers (`write_fmt`, `spec_write_fmt`, `format`'s closure) are followed; the
+summaries cover what the seed crate reaches, not every public function.
+
+**Open:** `{:?}` through the debug builders (`&dyn Debug`), floats (`{:.2}` of `f64`),
+`Formatter`s made by `wrap_buf`, functions the seed does not reach, other targets
+(one file per target; only x86_64 Linux generated), `std::io` and `println!` (stdout
+handles, locks, foreign calls).

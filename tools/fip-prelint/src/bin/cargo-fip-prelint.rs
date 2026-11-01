@@ -11,6 +11,14 @@
 //!
 //! `--warn-only` reports violations as warnings, so every crate is checked even if a
 //! dependency has violations. The exit status is cargo's.
+//!
+//! `cargo fip-prelint --std-summaries [--target <triple>] [--out <file>]` (maintainers)
+//! regenerates the std summaries (limits plan L6, sidecar of L10e): `cargo check
+//! -Zbuild-std=core,alloc,std,panic_abort,panic_unwind` of the seed crate
+//! `std-summaries/seed` (or `--manifest-path`) with the driver in generation mode,
+//! into `FIP_PRELINT_TARGET_DIR` (default: a directory under the system temporary
+//! directory, never the repository's `target/`), writing
+//! `std-summaries/<release>-<target>.txt` (or `--out`).
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -76,12 +84,122 @@ fn workspace_root(toolchain: &str, manifest: Option<&str>) -> Result<PathBuf, St
         .map_or_else(|| PathBuf::from("."), PathBuf::from))
 }
 
+/// `rustc -vV` of the toolchain: (release, host).
+fn rustc_vv(toolchain: &str) -> Result<(String, String), String> {
+    let out = Command::new("rustc")
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .arg("-vV")
+        .output()
+        .map_err(|e| format!("cannot run rustc: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let field = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(k).map(|v| v.trim().to_string()))
+    };
+    match (field("release:"), field("host:")) {
+        (Some(r), Some(h)) => Ok((r, h)),
+        _ => Err(format!("unexpected `rustc -vV` output: {text}")),
+    }
+}
+
+/// The value after `flag` in `args` (removing both), or of `flag=value`.
+fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    if let Some(i) = args.iter().position(|a| a == flag)
+        && i + 1 < args.len()
+    {
+        let v = args.remove(i + 1);
+        args.remove(i);
+        return Some(v);
+    }
+    let prefix = format!("{flag}=");
+    let i = args.iter().position(|a| a.starts_with(&prefix))?;
+    Some(args.remove(i)[prefix.len()..].to_string())
+}
+
+/// `--std-summaries`: regenerates the std summaries (see the module documentation).
+fn std_summaries(mut args: Vec<String>, toolchain: &str, sysroot: &str, ld: &str) -> ExitCode {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (release, host) = match rustc_vv(toolchain) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cargo-fip-prelint: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let target = take_value(&mut args, "--target").unwrap_or(host);
+    let out = take_value(&mut args, "--out").map_or_else(
+        || {
+            here.join("std-summaries")
+                .join(format!("{release}-{target}.txt"))
+        },
+        PathBuf::from,
+    );
+    let manifest = take_value(&mut args, "--manifest-path").map_or_else(
+        || here.join("std-summaries").join("seed").join("Cargo.toml"),
+        PathBuf::from,
+    );
+    let target_dir = std::env::var_os("FIP_PRELINT_TARGET_DIR").map_or_else(
+        || std::env::temp_dir().join("fip-prelint-std-summaries"),
+        PathBuf::from,
+    );
+    let driver = driver_path();
+    let start = std::time::Instant::now();
+    let status = Command::new("cargo")
+        .env("RUSTUP_TOOLCHAIN", toolchain)
+        .env("FIP_PRELINT_DRIVER_ID", driver_id(&driver))
+        .env("RUSTC_WRAPPER", &driver)
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("LD_LIBRARY_PATH", ld)
+        .env("FIP_PRELINT_SYSROOT", sysroot)
+        .env("FIP_PRELINT_STD_SUMMARIES_OUT", &out)
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTC")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("FIP_PRELINT_WARN_ONLY")
+        .args([
+            "check",
+            "-Zbuild-std=core,alloc,std,panic_abort,panic_unwind",
+            "--target",
+            &target,
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .args(&args)
+        .status();
+    match status {
+        Ok(st) if st.success() => {
+            eprintln!(
+                "cargo-fip-prelint: std summaries for `{target}` written to {} ({:.1} s)",
+                out.display(),
+                start.elapsed().as_secs_f64()
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(st) => ExitCode::from(u8::try_from(st.code().unwrap_or(1)).unwrap_or(1)),
+        Err(e) => {
+            eprintln!("cargo-fip-prelint: cannot run cargo: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `cargo fip-prelint ..` passes the subcommand name first.
     if args.first().is_some_and(|a| a == "fip-prelint") {
         args.remove(0);
     }
+    let mut generate = false;
+    args.retain(|a| {
+        if a == "--std-summaries" {
+            generate = true;
+            false
+        } else {
+            true
+        }
+    });
     let mut warn_only = false;
     args.retain(|a| {
         if a == "--warn-only" {
@@ -108,6 +226,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if generate {
+        let lib = format!("{sysroot}/lib");
+        let ld = match std::env::var("LD_LIBRARY_PATH") {
+            Ok(old) if !old.is_empty() => format!("{lib}:{old}"),
+            _ => lib,
+        };
+        return std_summaries(args, &toolchain, &sysroot, &ld);
+    }
     let target_dir = match std::env::var_os("FIP_PRELINT_TARGET_DIR") {
         Some(d) => PathBuf::from(d),
         None => match workspace_root(&toolchain, manifest.as_deref()) {
@@ -123,6 +249,7 @@ fn main() -> ExitCode {
         Ok(old) if !old.is_empty() => format!("{lib}:{old}"),
         _ => lib,
     };
+
     let selects_packages = args
         .iter()
         .any(|a| a == "-p" || a.starts_with("--package") || a == "--workspace");

@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! Runs `cargo fip-prelint --message-format short` on every workspace under
-//! `tests/fixtures/` and compares its diagnostics with `expected.txt` there.
+//! `tests/fixtures/` and compares its diagnostics with `expected.txt` there (or
+//! `expected-<variant>.txt` for a run with extra environment variables).
 //!
 //! Compared: every line mentioning `fip-prelint` and every rustc error code line
 //! (`error[E..]`), sorted and deduplicated (cargo checks `lib` and `lib test`), plus
@@ -18,22 +19,26 @@ fn fixtures_dir() -> PathBuf {
         .join("fixtures")
 }
 
-fn run(name: &str) -> Vec<String> {
+fn run(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) -> Vec<String> {
     let dir = fixtures_dir().join(name);
     let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("fixtures")
-        .join(name);
-    let out = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"))
-        .args(["fip-prelint", "--message-format", "short"])
+        .join(format!("{name}{variant}"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"));
+    cmd.args(["fip-prelint", "--message-format", "short"])
         .current_dir(&dir)
         .env("FIP_PRELINT_TARGET_DIR", &target)
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
         .env_remove("FIP_PRELINT_WARN_ONLY")
         .env_remove("FIP_PRELINT_DUMP")
         .env_remove("FIP_PRELINT_DUMP_MIR")
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .expect("run cargo-fip-prelint");
+        .env_remove("FIP_PRELINT_STD_SUMMARIES")
+        .env_remove("FIP_PRELINT_STD_SUMMARIES_OUT")
+        .env_remove("CARGO_TARGET_DIR");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run cargo-fip-prelint");
     let stderr = String::from_utf8_lossy(&out.stderr);
     let mut lines: Vec<String> = stderr
         .lines()
@@ -56,8 +61,15 @@ fn run(name: &str) -> Vec<String> {
 }
 
 fn check(name: &str) {
-    let got = run(name);
-    let path = fixtures_dir().join(name).join("expected.txt");
+    check_with(name, "", &[]);
+}
+
+/// `check` with extra environment variables, compared with `expected{variant}.txt`.
+fn check_with(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) {
+    let got = run(name, variant, envs);
+    let path = fixtures_dir()
+        .join(name)
+        .join(format!("expected{variant}.txt"));
     if std::env::var("FIP_PRELINT_BLESS").is_ok_and(|v| v == "1") {
         let mut text = String::from(
             "# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).\n",
@@ -66,7 +78,7 @@ fn check(name: &str) {
             text.push_str(l);
             text.push('\n');
         }
-        std::fs::write(&path, text).expect("write expected.txt");
+        std::fs::write(&path, text).expect("write the expected file");
         return;
     }
     let text = std::fs::read_to_string(&path)
@@ -80,7 +92,7 @@ fn check(name: &str) {
         let missing: Vec<&String> = want.iter().filter(|l| !got.contains(l)).collect();
         let extra: Vec<&String> = got.iter().filter(|l| !want.contains(l)).collect();
         panic!(
-            "fixture `{name}` differs from expected.txt\nmissing:\n{}\nunexpected:\n{}",
+            "fixture `{name}` differs from expected{variant}.txt\nmissing:\n{}\nunexpected:\n{}",
             missing
                 .iter()
                 .map(|s| format!("  {s}"))
@@ -224,6 +236,31 @@ fn indirect() {
 #[test]
 fn contract_dep() {
     check("contract_dep");
+}
+
+/// Generated std summaries (limits plan L6, sidecar of L10e): `write!` into a fixed
+/// buffer through a local `fmt::Write` impl (integers, strings, a user `Display`
+/// writing through the `Formatter`) passes; `format!` is a violation (allocations,
+/// a free) without `⊤`; `{:?}` of a derived `Debug` (`&dyn Debug` inside `core`) stays
+/// `⊤`; under `strict = true` the bounds checks inside `core`'s integer formatting
+/// are panic paths.
+#[test]
+fn std_summaries() {
+    check("std_summaries");
+}
+
+/// The same crate with a std summaries file stamped for another compiler: not used,
+/// every function without MIR stays `⊤` (never a silent pass).
+#[test]
+fn std_summaries_stale() {
+    let stale = fixtures_dir()
+        .join("std_summaries")
+        .join("stale-summaries.txt");
+    check_with(
+        "std_summaries",
+        "-stale",
+        &[("FIP_PRELINT_STD_SUMMARIES", stale.into_os_string())],
+    );
 }
 
 /// Negative control: marks from `fip-macros`, every root passes, exit status 0.

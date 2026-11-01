@@ -537,6 +537,23 @@ allocates (a `String`), so FIP roots cannot use it whatever the summary says.
 
 **Effort.** L (3–4 days). Depends on L4 (indirect calls) and L10e (format).
 
+**Implemented** (item 8 of the order, with L10e's sidecar; measurements in
+`TODOs/fip-prelint.md`, "Resolved 2026-11-02: generated std summaries"). Mode
+`cargo fip-prelint --std-summaries` (recipe `just prelint-std-summaries`) with
+release settings (`-Copt-level=3`, no debug assertions, no overflow checks) for the
+`-Zbuild-std` crates; seed crate `tools/fip-prelint/std-summaries/seed`; sidecar
+committed (decision: generation needs `rust-src` and a `-Zbuild-std` build, measured
+94–131 s cold, and is byte-for-byte reproducible; a unit test fails when no committed
+file matches the driver's rustc). Fixture `std_summaries`: `write!` into a fixed buffer
+passes (also through a user `Display`), `format!` is a violation without `⊤`, and a
+file stamped for another rustc is ignored (`⊤`). Deviations: the file name and stamp
+carry the target; the stamp has a format version instead of the driver identity, and
+the std source hash is recorded, not compared (the rustc version string pins the
+commit); open indirect calls are terms resolved through bindings of the node's
+parameters (so `Arguments` passed through `std`'s generic layers are followed), not
+only from the caller's `Argument::new_display` constructions; coverage is what the
+seed reaches. `{:?}` through the debug builders stays `⊤` (`&dyn Debug`).
+
 ### L7. User-declared allocation and free sources
 
 **Current.**

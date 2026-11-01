@@ -248,3 +248,13 @@ compile-fail-reasons:
 prelint:
     cd tools/fip-prelint && cargo +{{prelint_tc}} fmt --check
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test
+
+# Regenerates the std summaries of `fip-prelint` (limits plan L6, a sidecar stamped with
+# the rustc version and target): `cargo check -Zbuild-std` of the seed crate
+# `tools/fip-prelint/std-summaries/seed` with the release settings of the shipped std,
+# analysed by the driver; writes `tools/fip-prelint/std-summaries/<release>-<target>.txt`.
+# Maintainer-run after a repin or a seed change (measured 2026-11-02: 94-131 s cold in 3 runs,
+# 32-45 s of it the analysis); the result is committed. Build directory under /tmp.
+prelint-std-summaries target="x86_64-unknown-linux-gnu":
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build
+    cd tools/fip-prelint && FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGET_DIR=/tmp/fip-prelint-std-summaries target/debug/cargo-fip-prelint fip-prelint --std-summaries --target {{target}}

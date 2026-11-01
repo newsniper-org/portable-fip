@@ -19,6 +19,7 @@
 //! | an implementation (in this crate) of a trait method whose declaration carries `fip::mark` (a contract) that breaks it | error, as for a root (also when the driver compiles a dependency that declares `fip::export`) |
 //! | an implementation of a contracted trait method in a crate without `fip::export` | error (`⊤`), at the implementation |
 //! | `param(..)` in a trait method contract | error |
+//! | a standard-library function without MIR not covered by the std summaries, or summaries not used (missing file, stamp of another rustc or target) | `⊤` (error), with the reason |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
 //! The per-crate summary note ends with the number of declared sources when the crate
@@ -827,4 +828,80 @@ fn check_implementation(
         );
     }
     r
+}
+
+/// Generation mode (`cargo fip-prelint --std-summaries`): the local crate is the seed.
+/// Every standard-library function without MIR in the shipped `std` that its roots
+/// reach, and every such function those reach, is summarised from the `-Zbuild-std`
+/// MIR ([`Analysis::summarize`]) and written to the file named by
+/// `FIP_PRELINT_STD_SUMMARIES_OUT`, stamped with this compiler and the target.
+pub fn generate(tcx: TyCtxt<'_>) {
+    const MAX_FUNCTIONS: usize = 5_000;
+    let start = std::time::Instant::now();
+    let crates = Crates::new(tcx);
+    let mut out = Out {
+        tcx,
+        warn_only: false,
+        errors: 0,
+        warnings: 0,
+        notes: 0,
+    };
+    let seeds = roots(tcx, &mut out);
+    let mut todo: Vec<DefId> = Vec::new();
+    for (d, m) in &seeds {
+        todo.extend(Analysis::reached_std(tcx, &crates, *d, m));
+    }
+    todo.reverse();
+    let mut seen: HashSet<DefId> = HashSet::new();
+    let mut fns = std::collections::BTreeMap::new();
+    while let Some(d) = todo.pop() {
+        if !seen.insert(d) {
+            continue;
+        }
+        if seen.len() > MAX_FUNCTIONS {
+            tcx.dcx().err(format!(
+                "fip-prelint: more than {MAX_FUNCTIONS} standard-library functions reached; summaries not written"
+            ));
+            return;
+        }
+        let (s, reached) = Analysis::summarize(tcx, &crates, d);
+        fns.insert(crate::analysis::def_path_pub(tcx, d), s);
+        todo.extend(reached.into_iter().rev());
+    }
+    let sc = crate::stdsum::Sidecar {
+        stamp: crate::stdsum::Stamp {
+            format: crate::stdsum::FORMAT,
+            rustc: crate::analysis::rustc_version().to_string(),
+            target: tcx.sess.opts.target_triple.tuple().to_string(),
+            settings: "opt-level=3 debug-assertions=off overflow-checks=off (-Zbuild-std, -Zalways-encode-mir)"
+                .to_string(),
+            std_src: {
+                let lib = std::path::Path::new(&crate::sysroot(None))
+                    .join("lib/rustlib/src/rust/library");
+                let dirs: Vec<std::path::PathBuf> = ["core", "alloc", "std"]
+                    .iter()
+                    .map(|c| lib.join(c).join("src"))
+                    .collect();
+                crate::stdsum::hash_tree(&dirs).unwrap_or_else(|e| format!("unknown ({e})"))
+            },
+        },
+        fns,
+    };
+    let Some(path) = std::env::var_os(crate::GENERATE_ENV) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(&path, sc.render()) {
+        tcx.dcx().err(format!(
+            "fip-prelint: cannot write `{}`: {e}",
+            std::path::Path::new(&path).display()
+        ));
+        return;
+    }
+    tcx.dcx().note(format!(
+        "fip-prelint: std summaries: {} functions from {} seed roots in {:.1} s, written to `{}`",
+        sc.fns.len(),
+        seeds.len(),
+        start.elapsed().as_secs_f64(),
+        std::path::Path::new(&path).display()
+    ));
 }
