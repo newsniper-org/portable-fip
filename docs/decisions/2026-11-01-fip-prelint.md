@@ -507,6 +507,20 @@ Design:
 - Implementations under `#[fip_impl]` are checked against the contract at compile time via a typed const assertion
   (`Cert::allocs_for(__fip_strict_Self__Tr__m, ..) <= Cert::allocs_for(<dyn Tr>::__fip_strict_m, ..)`, failing with E0080 if weaker, impossible to forge without `unsafe`).
 - Hand-written mark case (`Grow::grow` in `indirect/shapes`) kept as equivalence check.
+
+## Amendment 2026-11-02: FFI functions (certified XOR excluded XOR error)
+
+Every foreign function (`extern` block item) reachable from a FIP-checked function must be in exactly one of:
+- (a) **certified**: carries `#[fip_cert(evidence = "..", allocs = N)]` (or `#[fip(..., evidence = "..")]`) under `#[fip_extern]` on the `extern` block. Requires non-empty `evidence = ".."`. Emits `<vis> const __fip_strict_<name>: Cert = unsafe { Cert::assume(..) }` at module level for strict callers and driver mark `fip::cert` for `fip-prelint`. Counted and listed in the crate summary note (`N certified foreign functions`).
+- (b) **excluded**: `#[fip_exclude]` (standalone or inside `#[fip_extern]`, optional `reason = ".."`). Calls contribute no events to FIP aggregation. User assumption; counted and listed in crate summary note (`N excluded foreign functions`) and in `FIP_PRELINT_DUMP`. No certificate emitted; strict callers cannot call it (E0425).
+- (c) **otherwise**: specific error `foreign function <x> is neither certified nor excluded` (not a generic ⊤).
+
+Both (a) and (b) on one function is an error. Direct `#[fip]` on a foreign function without `evidence` is rejected at compile time under `#[fip_extern]` and by the driver always. Allocator FFI (`alloc_source`/`free_source` and `FOREIGN_ALLOC_SYMBOLS`) is treated as allocator certificates and counted under declared sources (no double counting).
+
+Measured:
+- `tools/fip-prelint/tests/fixtures/ffi`: 7 roots, 4 passed, 4 errors, 3 certified foreign functions, 1 excluded foreign functions.
+- `tools/fip-prelint/tests/fixtures/alloc_sources`: `mystery` updated from generic ⊤ to specific error `foreign function mystery is neither certified nor excluded`.
+- `compile-fail-reasons`: 72/72 passed (+6 FFI compile_fail examples).
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

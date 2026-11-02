@@ -4,7 +4,7 @@ app/src/lib.rs:106:14: error: fip-prelint: `ffi_malloc` is #[fip] but may alloca
 app/src/lib.rs:10:11: error: fip-prelint: `arena_once` is #[fip] but may allocate 1 time(s), at most 0 allowed: `arena_once` -> `pools::Arena::alloc` (app/src/lib.rs:10): allocation: declared source `pools::Arena::alloc`
 app/src/lib.rs:112:14: error: fip-prelint: `ffi_free` is #[fip] but may free: `ffi_free` -> `free` (app/src/lib.rs:112): free: foreign allocation function `free`
 app/src/lib.rs:118:14: error: fip-prelint: `ffi_marked` is #[fip] but may allocate 1 time(s), at most 0 allowed: `ffi_marked` -> `pool_get` (app/src/lib.rs:118): allocation: declared source `pool_get`
-app/src/lib.rs:124:14: error: fip-prelint: cannot check `ffi_unknown` (#[fip]): unresolved: `ffi_unknown` -> `mystery` (app/src/lib.rs:124): foreign function `mystery`
+app/src/lib.rs:124:14: error: fip-prelint: foreign function `mystery` is neither certified nor excluded: `ffi_unknown` -> `mystery` (app/src/lib.rs:124)
 app/src/lib.rs:21:12: error: fip-prelint: `arena_loop` is #[fip(3)] but may allocate ∞ time(s), at most 3 allowed: `arena_loop` -> `pools::Arena::alloc` (in loop) (app/src/lib.rs:21): allocation: declared source `pools::Arena::alloc`
 app/src/lib.rs:31:5: error: fip-prelint: `arena_reset` is #[fip] but may free: `arena_reset` -> `pools::Arena::reset` (app/src/lib.rs:31): free: declared source `pools::Arena::reset`
 app/src/lib.rs:37:13: error: fip-prelint: `slab_cycle` is #[fip] but may allocate 1 time(s), at most 0 allowed: `slab_cycle` -> `pools::Slab::insert` (app/src/lib.rs:37): allocation: declared source `pools::Slab::insert`

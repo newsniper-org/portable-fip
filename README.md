@@ -20,7 +20,7 @@ a kernel.
 | `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
 | `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
 | `fip-strict` | yes | no | 3 declarations | `Cert` (named), `FipBound`, `FipFn` (with Verus `pre`/`post` specs), `Certified`: allocation certificates for strict mode; Verus-verified |
-| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints (on a trait method declaration: a contract of every implementation, checked by `fip-prelint`); `strict = true` mode; `#[fip_trait]`; `#[fip_impl]`; `fip_fn!` |
+| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints (on a trait method declaration: a contract of every implementation, checked by `fip-prelint`); `strict = true` mode; `#[fip_trait]`; `#[fip_impl]`; `#[fip_extern]`; `#[fip_cert]`; `#[fip_exclude]`; `fip_fn!` |
 | `fip-lint-rules` | yes | no | forbidden | the rule tables shared by `fip-macros` and `fip-testkit` (allocation sites, ghost macros, audited `core` table) |
 | `fip-testkit` | no (tests) | — | 1 `impl` | counting allocator (`assert_fip!`, `assert_fbip!`, `assert_fip_n!`, `assert_fip_all_threads!`); `callgraph` (recursion across crates); `summaries` (interprocedural `fip`/`fip(N)` allocation bounds); `surface`, `certs` (source gates) |
 
@@ -112,6 +112,12 @@ emits the contract certificates `<dyn Trait>::__fip_strict_<m>` and
 `<dyn Trait>::m(x)`. Implementations under `#[fip_impl]` are checked against the
 contract at compile time (impl certificate bound ≤ contract bound) and by the driver
 always.
+Foreign functions: `#[fip_extern]` on an `extern` block certifies foreign
+functions with `#[fip_cert(evidence = "..")]` (or `#[fip(evidence = "..")]`),
+emitting module-level certificates for strict callers and driver marks for
+`fip-prelint`, or excludes them with `#[fip_exclude]` (user assumption, contributing
+no events). Every foreign function reachable from a FIP root must be certified or
+excluded; unannotated calls are rejected with a specific error.
 The `core` table is **audited** (at rustc 1.97.1 and 1.99.1; a test fails on any
 other compiler) rather than machine-proved, except that "no allocation" follows from
 `core` having no allocator; the installed `vstd` specifies 7 of its 11 entries.
@@ -291,7 +297,7 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 | `prelint` | rustfmt and clippy (`-D warnings`) on the driver; `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, allocation and free sources, drops through their glue, declared preconditions, function pointers, trait objects and trait method contracts, std summaries (and a stale one ignored), bad attributes) a self-check of this workspace against `selfcheck.expected`, the same for every installed target (`targets.expected`), stack bounds of one fixture in two stated builds, and the rejected behaviour examples of `fip-macros` through the driver (mark-only mode) |
 | `prelint-repin` | not in `ci`: `just prelint-repin <version>` runs the checks of a move to another rustc (driver build, probes, entry points, std summaries, driver tests) and lists the pins and tables to re-audit |
 | `prelint-std-summaries` | not in `ci`: regenerates `tools/fip-prelint/std-summaries/<release>-<target>.txt` (`-Zbuild-std` of the seed crate, ~2 min); run after a repin or a seed change, and commit the result |
-| `compile-fail-reasons` | each of the 66 `compile_fail` examples of `fip-macros` (39 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |
+| `compile-fail-reasons` | each of the 72 `compile_fail` examples of `fip-macros` (45 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |
 
 ## Usage notes
 

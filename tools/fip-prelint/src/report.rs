@@ -172,6 +172,48 @@ fn render(tcx: TyCtxt<'_>, root: &str, w: &Witness) -> String {
         None => format!("{chain}: {}{in_loop}", w.what),
     }
 }
+fn render_chain(tcx: TyCtxt<'_>, root: &str, w: &Witness) -> String {
+    let mut parts = vec![format!("`{root}`")];
+    let n = w.steps.len();
+    let mut elided = false;
+    let mut elided_loop = false;
+    for (k, s) in w.steps.iter().enumerate() {
+        let place = locate(tcx, s.span);
+        let shown = !matches!(place, Loc::Std);
+        let loc = match place {
+            Loc::User(l) => Some(l),
+            Loc::Std | Loc::External => None,
+        };
+        if k == 0 || shown || k + 1 == n {
+            if elided {
+                parts.push(if elided_loop {
+                    "… (in loop)".to_string()
+                } else {
+                    "…".to_string()
+                });
+                elided = false;
+                elided_loop = false;
+            }
+            let mut p = format!("`{}`", s.label);
+            if s.in_loop {
+                p.push_str(" (in loop)");
+            }
+            if let Some(l) = loc {
+                p.push_str(&format!(" ({l})"));
+            }
+            parts.push(p);
+        } else {
+            elided = true;
+            elided_loop |= s.in_loop;
+        }
+    }
+    let chain = parts.join(" -> ");
+    let in_loop = if w.in_loop { " (in loop)" } else { "" };
+    match user_location(tcx, w.span) {
+        Some(l) => format!("{chain}{in_loop} ({l})"),
+        None => format!("{chain}{in_loop}"),
+    }
+}
 
 /// Primary span of a witness: the call site (or event) in the root's body.
 fn primary(w: &Witness, fallback: Span) -> Span {
@@ -203,17 +245,26 @@ fn validate_tool_attrs(out: &mut Out<'_>) {
                 let on_root = owner == CRATE_OWNER_ID && on_owner;
                 let on_fn = on_owner
                     && matches!(tcx.def_kind(owner.def_id), DefKind::Fn | DefKind::AssocFn);
+                let is_foreign = tcx.is_foreign_item(owner.def_id);
                 let msg = match name.as_str() {
                     "export" if on_root => None,
                     "export" => Some("`fip::export` belongs at the crate root: `#![cfg_attr(fip_prelint, fip::export)]`".to_string()),
-                    "mark" if on_fn => None,
+                    "mark" if on_fn && !is_foreign => None,
+                    "mark" if on_fn && is_foreign => Some(format!(
+                        "`fip::mark` on foreign function `{}` is rejected: foreign functions must be certified with `fip::cert` or excluded with `fip::exclude`",
+                        tcx.def_path_str(owner.def_id)
+                    )),
                     "mark" => Some("`fip::mark` applies to functions with a body".to_string()),
                     "alloc_source" | "free_source" if on_fn => None,
-                    "requires" if on_fn => None,
+                    "requires" if on_fn && !is_foreign => None,
                     "requires" => Some("`fip::requires` applies to functions".to_string()),
                     "alloc_source" | "free_source" => Some(format!(
                         "`fip::{name}` applies to functions, methods, trait method declarations and foreign functions"
                     )),
+                    "cert" if on_fn && is_foreign => None,
+                    "cert" => Some("`fip::cert` applies to foreign functions".to_string()),
+                    "exclude" if on_fn && is_foreign => None,
+                    "exclude" => Some("`fip::exclude` applies to foreign functions".to_string()),
                     other => {
                         let names: Vec<String> =
                             marks::KNOWN.iter().map(|k| format!("`fip::{k}`")).collect();
@@ -281,6 +332,52 @@ fn local_sources(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Source)> {
     }
     sources.sort_by_key(|(d, _)| tcx.def_span(*d));
     sources
+}
+type LocalFfi = (
+    Vec<(DefId, marks::FfiCert)>,
+    Vec<(DefId, marks::FfiExclude)>,
+);
+
+/// Local foreign functions carrying `fip::cert` or `fip::exclude`, through `rustc_public`.
+fn local_ffi(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> LocalFfi {
+    let mut certs = Vec::new();
+    let mut excls = Vec::new();
+    for f in rustc_public::local_crate().fn_defs() {
+        let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
+        if !tcx.is_foreign_item(def_id) {
+            continue;
+        }
+        let attrs: Vec<String> = f
+            .all_tool_attrs()
+            .iter()
+            .map(|a| a.as_str().to_string())
+            .collect();
+        let cert = marks::cert_of_printed(attrs.iter().map(String::as_str));
+        let excl = marks::exclude_of_printed(attrs.iter().map(String::as_str));
+        match (cert, excl) {
+            (Ok(Some(_c)), Ok(Some(_))) => {
+                out.error(
+                    tcx.def_span(def_id),
+                    &format!(
+                        "foreign function `{}` is both certified and excluded: choose exactly one",
+                        tcx.def_path_str(def_id)
+                    ),
+                );
+            }
+            (Ok(Some(c)), Ok(None)) => certs.push((def_id, c)),
+            (Ok(None), Ok(Some(e))) => excls.push((def_id, e)),
+            (Err(e), _) | (_, Err(e)) => {
+                out.error(
+                    tcx.def_span(def_id),
+                    &format!("malformed FFI attribute: {e}"),
+                );
+            }
+            (Ok(None), Ok(None)) => {}
+        }
+    }
+    certs.sort_by_key(|(d, _)| tcx.def_span(*d));
+    excls.sort_by_key(|(d, _)| tcx.def_span(*d));
+    (certs, excls)
 }
 
 /// Local functions carrying `fip::requires(..)`, through `rustc_public`; a malformed
@@ -381,13 +478,31 @@ fn verdict(
         }
     }
     for w in &s.unknown {
-        out.error(
-            primary(w, fspan),
-            &format!(
-                "cannot check `{label}` ({tag}): unresolved: {}",
-                render(tcx, label, w)
-            ),
-        );
+        if let Some(target) = w.what.strip_prefix("neither_ffi:") {
+            out.error(
+                primary(w, fspan),
+                &format!(
+                    "foreign function `{target}` is neither certified nor excluded: {}",
+                    render_chain(tcx, label, w)
+                ),
+            );
+        } else if let Some(target) = w.what.strip_prefix("both_ffi:") {
+            out.error(
+                primary(w, fspan),
+                &format!(
+                    "foreign function `{target}` is both certified and excluded: {}",
+                    render_chain(tcx, label, w)
+                ),
+            );
+        } else {
+            out.error(
+                primary(w, fspan),
+                &format!(
+                    "cannot check `{label}` ({tag}): unresolved: {}",
+                    render(tcx, label, w)
+                ),
+            );
+        }
     }
     if mark.strict {
         for w in &s.panics {
@@ -581,11 +696,16 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     crates.add_local_sources(&sources);
     let requires = local_requires(tcx, &mut out);
     crates.add_local_requires(&requires);
+    let (local_certs, local_excls) = local_ffi(tcx, &mut out);
+    crates.add_local_ffi(&local_certs, &local_excls);
     // A mark on a trait method declaration is a contract of every implementation, not
     // a root; a declaration with a default body is also checked as a root (the
     // default body, for any `Self`).
     let mut roots: Vec<(DefId, Mark)> = Vec::new();
     for (def_id, mark) in &marked {
+        if tcx.is_foreign_item(*def_id) {
+            continue;
+        }
         let decl = tcx.trait_of_assoc(*def_id).is_some();
         if decl && !mark.params.is_empty() {
             out.error(
@@ -693,7 +813,13 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             }
         }
     }
-    if marked.is_empty() && checked == 0 && outside_roots == 0 && sources.is_empty() {
+    if marked.is_empty()
+        && checked == 0
+        && outside_roots == 0
+        && sources.is_empty()
+        && local_certs.is_empty()
+        && local_excls.is_empty()
+    {
         return;
     }
     // Source marks are trusted declarations (they hide a body): their number is part
@@ -703,9 +829,19 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     } else {
         format!(", {} declared sources", sources.len())
     };
+    let certified = if local_certs.is_empty() {
+        String::new()
+    } else {
+        format!(", {} certified foreign functions", local_certs.len())
+    };
+    let excluded = if local_excls.is_empty() {
+        String::new()
+    } else {
+        format!(", {} excluded foreign functions", local_excls.len())
+    };
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
-        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}",
+        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}{certified}{excluded}",
         checked,
         out.errors,
         out.warnings,

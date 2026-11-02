@@ -377,3 +377,9 @@ fn stack() {
 fn clean() {
     check("clean");
 }
+
+/// Foreign functions: certified, excluded, neither, both.
+#[test]
+fn ffi() {
+    check("ffi");
+}

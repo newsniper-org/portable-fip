@@ -785,6 +785,67 @@
 //! fn f(s: &S) -> u8 { <S as Tr<u8>>::m(s) }
 //! # fn main() {}
 //! ```
+//! `#[fip_cert]` directly on a foreign function without `#[fip_extern]`:
+//! ```compile_fail
+//! # // expect: #[fip_cert] cannot emit a certificate from inside an `extern` block: put `#[fip_extern]` on the enclosing `extern` block
+//! unsafe extern "C" {
+//!     #[fip_macros::fip_cert(evidence = "audit")]
+//!     fn c_f();
+//! }
+//! # fn main() {}
+//! ```
+//! `#[fip_cert]` missing `evidence = ".."`:
+//! ```compile_fail
+//! # // expect: `evidence = ".."` is required to certify a foreign function
+//! #[fip_macros::fip_extern]
+//! unsafe extern "C" {
+//!     #[fip_cert]
+//!     fn c_f();
+//! }
+//! # fn main() {}
+//! ```
+//! `#[fip]` inside `#[fip_extern]` without evidence:
+//! ```compile_fail
+//! # // expect: certifying a foreign function requires `evidence = ".."`
+//! #[fip_macros::fip_extern]
+//! unsafe extern "C" {
+//!     #[fip]
+//!     fn c_f();
+//! }
+//! # fn main() {}
+//! ```
+//! both certified and excluded on one foreign function:
+//! ```compile_fail
+//! # // expect: is both certified and excluded: choose exactly one
+//! #[fip_macros::fip_extern]
+//! unsafe extern "C" {
+//!     #[fip_cert(evidence = "audit")]
+//!     #[fip_exclude]
+//!     fn c_f();
+//! }
+//! # fn main() {}
+//! ```
+//! `#[fip_exclude]` on a function with a body:
+//! ```compile_fail
+//! # // expect: #[fip_exclude] applies to foreign functions in `extern` blocks
+//! #[fip_macros::fip_exclude]
+//! fn f() {}
+//! # fn main() {}
+//! ```
+//! strict caller of an excluded foreign function has no certificate:
+//! ```compile_fail
+//! # // expect: cannot find value `__fip_strict_c_log` in this scope
+//! #[fip_macros::fip_extern]
+//! unsafe extern "C" {
+//!     #[fip_exclude]
+//!     fn c_log();
+//! }
+//! #[fip_macros::fip(strict = true)]
+//! fn call_log() {
+//!     unsafe { c_log() };
+//! }
+//! # fn main() {}
+//! ```
 
 #![forbid(unsafe_code)]
 
@@ -2229,6 +2290,495 @@ fn fip_trait_inner(
     let mut out = module_items;
     out.extend(new_trait_toks);
     Ok(out)
+}
+/// Marks a foreign function as excluded from FIP aggregation.
+///
+/// Calls to an excluded function contribute no events to FIP. This represents a
+/// user assumption that the function satisfies the relevant FIP properties.
+/// Excluded foreign functions are counted and listed in the crate summary and
+/// cannot be called from strict code (no certificate is generated).
+#[proc_macro_attribute]
+pub fn fip_exclude(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let toks: Vec<TokenTree> = item.clone().into_iter().collect();
+    if let Ok(shape) = parse_fn(&toks)
+        && shape.body.is_some()
+    {
+        return compile_error(
+            toks.first().map_or_else(Span::call_site, TokenTree::span),
+            "#[fip_exclude] applies to foreign functions in `extern` blocks",
+        );
+    }
+    let reason = match parse_exclude_attr(attr) {
+        Ok(r) => r,
+        Err((sp, msg)) => return compile_error(sp, &format!("#[fip_exclude]: {msg}")),
+    };
+    let mark = if let Some(r) = reason {
+        format!("#[cfg_attr(fip_prelint, fip::exclude(reason = {r:?}))]")
+    } else {
+        "#[cfg_attr(fip_prelint, fip::exclude)]".to_string()
+    };
+    let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"]";
+    let mut out = doc.parse::<TokenStream>().unwrap_or_default();
+    if let Ok(m) = mark.parse::<TokenStream>() {
+        out.extend(m);
+    }
+    out.extend(item);
+    out
+}
+
+/// Standalone certificate attribute: instructs the user to place `#[fip_extern]`
+/// on the enclosing `extern` block.
+#[proc_macro_attribute]
+pub fn fip_cert(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let sp = item
+        .clone()
+        .into_iter()
+        .next()
+        .map_or_else(Span::call_site, |t| t.span());
+    let mut out = compile_error(
+        sp,
+        "#[fip_cert] cannot emit a certificate from inside an `extern` block: put `#[fip_extern]` on the enclosing `extern` block",
+    );
+    out.extend(item);
+    out
+}
+
+/// Certifies and excludes foreign functions in an `extern` block.
+///
+/// Inside `#[fip_extern]`, foreign function declarations can be:
+/// - certified: `#[fip_cert(evidence = "..", allocs = N)]` or `#[fip(evidence = "..")]`
+///   (requires non-empty `evidence = ".."`, emits `<vis> const __fip_strict_<name>: Cert`
+///   outside the block for strict callers and a driver mark for `fip-prelint`);
+/// - excluded: `#[fip_exclude]` (optionally with `reason = ".."`), removing calls
+///   from FIP aggregation (counted and listed in the crate summary);
+/// - allocator sources: `#[fip::alloc_source]` / `#[fip::free_source]` (or in the foreign
+///   allocation table);
+/// - unannotated: reachable calls will produce a specific error in `fip-prelint`.
+///
+/// `#[fip_extern(crate = path::to::fip_strict)]` sets the path of the `fip_strict` crate.
+#[proc_macro_attribute]
+pub fn fip_extern(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let krate = match split_commas(attr).as_slice() {
+        [] => Ok(None),
+        [part] => match part.as_slice() {
+            [TokenTree::Ident(key), eq, rest @ ..]
+                if key.to_string() == "crate" && is_punct(eq, '=') =>
+            {
+                parse_krate(key.span(), rest).map(Some)
+            }
+            _ => Err((
+                part.first().map_or_else(Span::call_site, TokenTree::span),
+                FIP_IMPL_ARGS.to_string(),
+            )),
+        },
+        [_, second, ..] => Err((
+            second.first().map_or_else(Span::call_site, TokenTree::span),
+            FIP_IMPL_ARGS.to_string(),
+        )),
+    };
+    let krate = match krate {
+        Ok(k) => k,
+        Err((span, msg)) => return compile_error(span, &format!("#[fip_extern]: {msg}")),
+    };
+    match fip_extern_inner(&item, krate.as_ref()) {
+        Ok(out) => out,
+        Err((span, msg)) => compile_error(span, &format!("#[fip_extern]: {msg}")),
+    }
+}
+
+struct FfiCertArgs {
+    kind: String,
+    allocs: u64,
+    frees: bool,
+    evidence: String,
+    krate: Option<TokenStream>,
+}
+
+fn parse_exclude_attr(attr: TokenStream) -> Result<Option<String>, (Span, String)> {
+    let parts = split_commas(attr);
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    match parts.as_slice() {
+        [] => Ok(None),
+        [part] => match part.as_slice() {
+            [TokenTree::Ident(key), eq, TokenTree::Literal(l)]
+                if key.to_string() == "reason" && is_punct(eq, '=') =>
+            {
+                let s = l.to_string();
+                let reason = s
+                    .strip_prefix('"')
+                    .and_then(|x| x.strip_suffix('"'))
+                    .unwrap_or(&s);
+                Ok(Some(reason.to_string()))
+            }
+            _ => Err((
+                part.first().map_or_else(Span::call_site, TokenTree::span),
+                "expected `reason = \"..\"` in `#[fip_exclude(..)]`".to_string(),
+            )),
+        },
+        [_, second, ..] => Err((
+            second.first().map_or_else(Span::call_site, TokenTree::span),
+            "expected at most one argument `reason = \"..\"` in `#[fip_exclude(..)]`".to_string(),
+        )),
+    }
+}
+fn parse_cert_kind(s: &str, span: Span) -> Result<(String, bool), (Span, String)> {
+    let s = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(s);
+    if s != "fip" && s != "fbip" {
+        return Err((span, "`kind` must be \"fip\" or \"fbip\"".to_string()));
+    }
+    Ok((s.to_string(), s == "fbip"))
+}
+
+fn parse_ffi_cert_args(attr_name: &str, attr: TokenStream) -> Result<FfiCertArgs, (Span, String)> {
+    let mut kind = if attr_name == "fbip" {
+        "fbip".to_string()
+    } else {
+        "fip".to_string()
+    };
+    let mut allocs = 0u64;
+    let mut frees = kind == "fbip";
+    let mut evidence = None;
+    let mut krate = None;
+    for (k, part) in split_commas(attr).into_iter().enumerate() {
+        let sp = part.first().map_or_else(Span::call_site, TokenTree::span);
+        match part.as_slice() {
+            [lit] if k == 0 && int_literal(lit).is_some() => {
+                allocs = int_literal(lit).unwrap_or(0);
+            }
+            [TokenTree::Ident(key), eq, TokenTree::Literal(l)]
+                if key.to_string() == "evidence" && is_punct(eq, '=') =>
+            {
+                let s = l.to_string();
+                let ev = s
+                    .strip_prefix('"')
+                    .and_then(|x| x.strip_suffix('"'))
+                    .unwrap_or(&s);
+                if ev.trim().is_empty() {
+                    return Err((
+                        l.span(),
+                        "`evidence` must be a non-empty string reference to the proof or audit"
+                            .to_string(),
+                    ));
+                }
+                evidence = Some(ev.to_string());
+            }
+            [TokenTree::Ident(key), eq, lit]
+                if (key.to_string() == "allocs" || key.to_string() == "n")
+                    && is_punct(eq, '=')
+                    && int_literal(lit).is_some() =>
+            {
+                allocs = int_literal(lit).unwrap_or(0);
+            }
+            [TokenTree::Ident(key), eq, val] if key.to_string() == "kind" && is_punct(eq, '=') => {
+                let (k, f) = parse_cert_kind(&val.to_string(), val.span())?;
+                kind = k;
+                if f {
+                    frees = true;
+                }
+            }
+            [TokenTree::Ident(key), eq, TokenTree::Ident(v)]
+                if key.to_string() == "frees" && is_punct(eq, '=') =>
+            {
+                frees = match v.to_string().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err((v.span(), "`frees` takes `true` or `false`".to_string())),
+                };
+            }
+            [TokenTree::Ident(key), eq, rest @ ..]
+                if key.to_string() == "crate" && is_punct(eq, '=') && krate.is_none() =>
+            {
+                krate = Some(parse_krate(key.span(), rest)?);
+            }
+            _ => {
+                return Err((
+                    sp,
+                    "expected `evidence = \"..\"`, optionally with `allocs = N`, `kind = \"fip\"|\"fbip\"`, `frees = true|false`, `crate = ..`".to_string(),
+                ));
+            }
+        }
+    }
+    let Some(evidence) = evidence else {
+        return Err((
+            Span::call_site(),
+            "`evidence = \"..\"` is required to certify a foreign function (reference the proof or audit)".to_string(),
+        ));
+    };
+    Ok(FfiCertArgs {
+        kind,
+        allocs,
+        frees,
+        evidence,
+        krate,
+    })
+}
+
+fn parse_extern_header(toks: &[TokenTree]) -> Result<usize, (Span, String)> {
+    let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
+    let not_extern = || (first, "expected an `extern` block".to_string());
+    let mut pos = 0;
+    while pos + 1 < toks.len()
+        && is_punct(&toks[pos], '#')
+        && is_group(&toks[pos + 1], Delimiter::Bracket)
+    {
+        pos += 2;
+    }
+    if toks.get(pos).is_some_and(|t| is_ident(t, "unsafe")) {
+        pos += 1;
+    }
+    if !toks.get(pos).is_some_and(|t| is_ident(t, "extern")) {
+        return Err(not_extern());
+    }
+    pos += 1;
+    if matches!(toks.get(pos), Some(TokenTree::Literal(_))) {
+        pos += 1;
+    }
+    if pos >= toks.len() {
+        return Err(not_extern());
+    }
+    Ok(pos)
+}
+
+fn filter_fip_attrs(item_toks: &[TokenTree], indices: &[usize]) -> Vec<TokenTree> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < item_toks.len() {
+        if indices.contains(&i) {
+            i += 2;
+        } else {
+            out.push(item_toks[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
+fn process_extern_item(
+    item_toks: &[TokenTree],
+    krate: Option<&TokenStream>,
+) -> Result<(TokenStream, TokenStream), (Span, String)> {
+    let shape = parse_fn(item_toks);
+    let fn_name = shape.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+
+    let mut exclude_attr = None;
+    let mut cert_attr = None;
+    let mut fip_no_evidence = None;
+    let mut at = 0;
+    let mut fip_attr_indices = Vec::new();
+
+    while at + 1 < item_toks.len() && is_punct(&item_toks[at], '#') {
+        if let TokenTree::Group(g) = &item_toks[at + 1]
+            && let Some((attr_name, args)) = attr_name_and_args(g)
+        {
+            if attr_name == "fip_exclude" {
+                let parsed = parse_exclude_attr(args)?;
+                exclude_attr = Some((at, parsed));
+                fip_attr_indices.push(at);
+            } else if attr_name == "fip_cert" {
+                let parsed = parse_ffi_cert_args(&attr_name, args)?;
+                cert_attr = Some((at, parsed));
+                fip_attr_indices.push(at);
+            } else if attr_name == "fip" || attr_name == "fbip" {
+                match parse_ffi_cert_args(&attr_name, args.clone()) {
+                    Ok(parsed) => {
+                        cert_attr = Some((at, parsed));
+                        fip_attr_indices.push(at);
+                    }
+                    Err(_) => {
+                        fip_no_evidence = Some(item_toks[at].span());
+                    }
+                }
+            }
+        }
+        at += 2;
+    }
+
+    if let Some(sp) = fip_no_evidence
+        && cert_attr.is_none()
+        && exclude_attr.is_none()
+    {
+        return Err((
+            sp,
+            format!(
+                "foreign function `{fn_name}` carries `#[fip]` without evidence: certifying a foreign function requires `evidence = \"..\"` under `#[fip_extern]`, or use `#[fip_exclude]`"
+            ),
+        ));
+    }
+
+    if let (Some((excl_at, _)), Some(_)) = (&exclude_attr, &cert_attr) {
+        let sp = item_toks[*excl_at].span();
+        return Err((
+            sp,
+            format!(
+                "foreign function `{fn_name}` is both certified and excluded: choose exactly one"
+            ),
+        ));
+    }
+
+    if let Some((_, excl)) = exclude_attr {
+        let shape = shape?;
+        let mark = if let Some(r) = excl {
+            format!("#[cfg_attr(fip_prelint, fip::exclude(reason = {r:?}))]")
+        } else {
+            "#[cfg_attr(fip_prelint, fip::exclude)]".to_string()
+        };
+        let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"]";
+        let mut mark_ts = doc.parse::<TokenStream>().unwrap_or_default();
+        mark_ts.extend(mark.parse::<TokenStream>().unwrap_or_default());
+        let mut final_item = TokenStream::new();
+        final_item.extend(filter_fip_attrs(
+            &item_toks[..shape.after_attrs],
+            &fip_attr_indices,
+        ));
+        final_item.extend(mark_ts);
+        final_item.extend(item_toks[shape.after_attrs..].iter().cloned());
+        return Ok((TokenStream::new(), final_item));
+    }
+
+    if let Some((_, cert)) = cert_attr {
+        let shape = shape?;
+        return emit_ffi_cert_item(&shape, &fn_name, &cert, krate, item_toks, &fip_attr_indices);
+    }
+
+    let mut item_ts = TokenStream::new();
+    item_ts.extend(item_toks.iter().cloned());
+    Ok((TokenStream::new(), item_ts))
+}
+
+fn emit_ffi_cert_item(
+    shape: &FnShape,
+    fn_name: &str,
+    cert: &FfiCertArgs,
+    krate: Option<&TokenStream>,
+    item_toks: &[TokenTree],
+    fip_attr_indices: &[usize],
+) -> Result<(TokenStream, TokenStream), (Span, String)> {
+    if !shape.generics.is_empty() {
+        let sp = shape
+            .generics
+            .first()
+            .map_or_else(Span::call_site, TokenTree::span);
+        return Err((
+            sp,
+            "foreign functions may not have generic parameters".to_string(),
+        ));
+    }
+    let cert_krate = cert.krate.as_ref().or(krate);
+    let krate_path = cert_krate.cloned().unwrap_or_else(strict::default_krate);
+    let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
+    let cert_ty = format!("{krate_str}::Cert");
+    let assume_fn = format!("{krate_str}::Cert::assume");
+    let vis_str: String = shape.vis.iter().map(ToString::to_string).collect();
+    let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] ";
+    let cert_str = format!(
+        "{attrs} {vis_str} const __fip_strict_{fn_name}: {cert_ty} = unsafe {{ {assume_fn}({fn_name:?}, {}u64) }};",
+        cert.allocs
+    );
+    let module_items = cert_str.parse::<TokenStream>().unwrap_or_default();
+
+    let free_part = if cert.frees { ", frees = true" } else { "" };
+    let mark = format!(
+        "#[cfg_attr(fip_prelint, fip::cert(kind = {:?}, n = {}, evidence = {:?}{free_part}))]",
+        cert.kind, cert.allocs, cert.evidence
+    );
+    let doc = format!(
+        "#[doc = \"\"] #[doc = \"# FIP Certificate\"] #[doc = \"\"] \
+         #[doc = {:?}] #[doc = \"\"] #[doc = {:?}]",
+        format!(
+            "Certified {}: at most {} allocation(s).",
+            cert.kind, cert.allocs
+        ),
+        format!("Evidence: {}", cert.evidence)
+    );
+    let mut mark_ts = doc.parse::<TokenStream>().unwrap_or_default();
+    mark_ts.extend(mark.parse::<TokenStream>().unwrap_or_default());
+
+    let mut final_item = TokenStream::new();
+    final_item.extend(filter_fip_attrs(
+        &item_toks[..shape.after_attrs],
+        fip_attr_indices,
+    ));
+    final_item.extend(mark_ts);
+    final_item.extend(item_toks[shape.after_attrs..].iter().cloned());
+    Ok((module_items, final_item))
+}
+
+fn fip_extern_inner(
+    item: &TokenStream,
+    krate: Option<&TokenStream>,
+) -> Result<TokenStream, (Span, String)> {
+    let toks: Vec<TokenTree> = item.clone().into_iter().collect();
+    let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
+    let not_extern = || (first, "expected an `extern` block".to_string());
+    let header_end = parse_extern_header(&toks)?;
+    let Some(TokenTree::Group(body)) = toks.get(header_end) else {
+        return Err(not_extern());
+    };
+    if body.delimiter() != Delimiter::Brace {
+        return Err(not_extern());
+    }
+    let mut module_items = TokenStream::new();
+    let mut new_body = TokenStream::new();
+    let body_toks: Vec<TokenTree> = body.stream().into_iter().collect();
+    let mut next = 0;
+    while next < body_toks.len() {
+        let start = next;
+        let mut end = next;
+        while end < body_toks.len() {
+            let t = &body_toks[end];
+            if is_punct(t, '#')
+                && body_toks
+                    .get(end + 1)
+                    .is_some_and(|n| is_group(n, Delimiter::Bracket))
+            {
+                end += 2;
+                continue;
+            }
+            end += 1;
+            if is_punct(t, ';') {
+                break;
+            }
+        }
+        next = end;
+        let (mods, rewritten) = process_extern_item(&body_toks[start..end], krate)?;
+        module_items.extend(mods);
+        new_body.extend(rewritten);
+    }
+    let mut new_extern_toks = toks[..header_end].to_vec();
+    let mut g = Group::new(Delimiter::Brace, new_body);
+    g.set_span(body.span());
+    new_extern_toks.push(TokenTree::Group(g));
+    let mut out = module_items;
+    out.extend(new_extern_toks);
+    Ok(out)
+}
+
+/// Returns the last segment of the attribute path and its argument tokens.
+fn attr_name_and_args(g: &Group) -> Option<(String, TokenStream)> {
+    let toks: Vec<TokenTree> = g.stream().into_iter().collect();
+    let (args, path) = match toks.split_last() {
+        Some((TokenTree::Group(a), path)) if a.delimiter() == Delimiter::Parenthesis => {
+            (a.stream(), path)
+        }
+        _ => (TokenStream::new(), toks.as_slice()),
+    };
+    let plain_path = path
+        .iter()
+        .all(|t| matches!(t, TokenTree::Ident(_)) || is_punct(t, ':'));
+    if !plain_path {
+        return None;
+    }
+    let last = path.last()?;
+    if let TokenTree::Ident(id) = last {
+        Some((id.to_string(), args))
+    } else {
+        None
+    }
 }
 
 const FIP_IMPL_ARGS: &str = "the only argument is `crate = path::to::fip_strict`";

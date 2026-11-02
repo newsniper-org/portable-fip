@@ -525,6 +525,10 @@ pub struct Crates {
     sources: HashMap<DefId, Source>,
     /// `fip::requires(..)` of functions in the local crate and in exported crates.
     requires: HashMap<DefId, Requires>,
+    /// Certified foreign functions in the local crate and in exported crates.
+    certified_ffi: HashMap<DefId, crate::marks::FfiCert>,
+    /// Excluded foreign functions in the local crate and in exported crates.
+    excluded_ffi: HashMap<DefId, crate::marks::FfiExclude>,
     /// Generated summaries of standard-library functions without MIR, or why they
     /// are not used ([`crate::stdsum`]).
     pub std_summaries: Result<crate::stdsum::Sidecar, String>,
@@ -623,6 +627,8 @@ impl Crates {
         let mut marks = HashMap::new();
         let mut sources = HashMap::new();
         let mut requires = HashMap::new();
+        let mut certified_ffi = HashMap::new();
+        let mut excluded_ffi = HashMap::new();
         for krate in rustc_public::external_crates() {
             let Some(&cnum) = tcx
                 .crates(())
@@ -648,6 +654,17 @@ impl Crates {
                 // Malformed marks were reported where that crate was checked.
                 if let Ok(Some(s)) = marks::source_of_printed(attrs.iter().map(String::as_str)) {
                     sources.insert(def_id, s);
+                }
+                if tcx.is_foreign_item(def_id) {
+                    if let Ok(Some(cert)) = marks::cert_of_printed(attrs.iter().map(String::as_str))
+                    {
+                        certified_ffi.insert(def_id, cert);
+                    }
+                    if let Ok(Some(excl)) =
+                        marks::exclude_of_printed(attrs.iter().map(String::as_str))
+                    {
+                        excluded_ffi.insert(def_id, excl);
+                    }
                 }
                 if let Ok(Some(cs)) = marks::requires_of_printed(attrs.iter().map(String::as_str))
                     && let Ok(facts) = requires_facts(tcx, def_id, &cs)
@@ -685,6 +702,8 @@ impl Crates {
             marks,
             sources,
             requires,
+            certified_ffi,
+            excluded_ffi,
             std_summaries,
         }
     }
@@ -709,6 +728,27 @@ impl Crates {
         for (d, s) in sources {
             self.sources.insert(*d, *s);
         }
+    }
+    /// Adds the certified foreign functions and exclusions of the local crate.
+    pub fn add_local_ffi(
+        &mut self,
+        certs: &[(DefId, crate::marks::FfiCert)],
+        excls: &[(DefId, crate::marks::FfiExclude)],
+    ) {
+        for (d, c) in certs {
+            self.certified_ffi.insert(*d, c.clone());
+        }
+        for (d, e) in excls {
+            self.excluded_ffi.insert(*d, e.clone());
+        }
+    }
+    /// Returns the certified properties of `def_id` if it is a certified foreign function.
+    pub fn certified_ffi(&self, def_id: DefId) -> Option<&crate::marks::FfiCert> {
+        self.certified_ffi.get(&def_id)
+    }
+    /// Returns the exclusion of `def_id` if it is an excluded foreign function.
+    pub fn excluded_ffi(&self, def_id: DefId) -> Option<&crate::marks::FfiExclude> {
+        self.excluded_ffi.get(&def_id)
     }
     /// What a call of `def_id` does if it is an allocation or free source, and why:
     /// declared on the function or on the trait method it implements, a method of an
@@ -1569,7 +1609,34 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             if rules::is_alloc_free_symbol(name) {
                 return NodeKind::Leaf(Vec::new());
             }
-            return NodeKind::Leaf(vec![Ev::Unknown(format!("foreign function `{path}`"))]);
+            let cert = self.crates.certified_ffi(def_id);
+            let excl = self.crates.excluded_ffi(def_id);
+            if cert.is_some() && excl.is_some() {
+                return NodeKind::Leaf(vec![Ev::Unknown(format!("both_ffi:{path}"))]);
+            }
+            if let Some(c) = cert {
+                let mut evs = Vec::new();
+                let count = if c.alloc > 1 {
+                    format!(" (n = {})", c.alloc)
+                } else {
+                    String::new()
+                };
+                for _ in 0..c.alloc {
+                    evs.push(Ev::Alloc(format!(
+                        "allocation: certified foreign function `{path}`{count}"
+                    )));
+                }
+                if c.free {
+                    evs.push(Ev::Free(format!(
+                        "free: certified foreign function `{path}`"
+                    )));
+                }
+                return NodeKind::Leaf(evs);
+            }
+            if excl.is_some() {
+                return NodeKind::Leaf(Vec::new());
+            }
+            return NodeKind::Leaf(vec![Ev::Unknown(format!("neither_ffi:{path}"))]);
         }
         let crate_name = tcx.crate_name(def_id.krate);
         let crate_name = crate_name.as_str();
@@ -3217,6 +3284,35 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     s.alloc,
                     s.free
                 );
+            }
+            if let NodeKind::Leaf(_) = node.kind {
+                if let Some(cert) = self.crates.certified_ffi(def_id) {
+                    let at = self
+                        .tcx
+                        .sess
+                        .source_map()
+                        .span_to_diagnostic_string(self.tcx.def_span(def_id));
+                    eprintln!(
+                        "fip-prelint dump: certified foreign function: `{}` ({} allocation(s), free: {}, evidence: {:?}) at {at}",
+                        node.label, cert.alloc, cert.free, cert.evidence
+                    );
+                }
+                if let Some(excl) = self.crates.excluded_ffi(def_id) {
+                    let at = self
+                        .tcx
+                        .sess
+                        .source_map()
+                        .span_to_diagnostic_string(self.tcx.def_span(def_id));
+                    let reason = excl
+                        .reason
+                        .as_deref()
+                        .map(|r| format!(": {r}"))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "fip-prelint dump: excluded foreign function: `{}` (user assumption{reason}) at {at}",
+                        node.label
+                    );
+                }
             }
         }
     }

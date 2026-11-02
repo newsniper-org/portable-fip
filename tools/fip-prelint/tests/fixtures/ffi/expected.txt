@@ -1,0 +1,7 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+app/src/lib.rs:32:5: error: fip-prelint: foreign function `c_both` is both certified and excluded: choose exactly one
+app/src/lib.rs:50:14: error: fip-prelint: `call_weaker` is #[fip(1)] but may allocate 2 time(s), at most 1 allowed: `call_weaker` -> `c_alloc_two` (app/src/lib.rs:50): allocation: certified foreign function `c_alloc_two` (n = 2)
+app/src/lib.rs:62:14: error: fip-prelint: foreign function `c_mystery` is neither certified nor excluded: `call_neither` -> `c_mystery` (app/src/lib.rs:62)
+app/src/lib.rs:68:14: error: fip-prelint: foreign function `c_both` is neither certified nor excluded: `call_both` -> `c_both` (app/src/lib.rs:68)
+note: fip-prelint: crate `app`: 7 roots, 4 passed, 4 errors, 0 warnings, 0 notes, 3 certified foreign functions, 1 excluded foreign functions

@@ -31,7 +31,15 @@
 //! registered tool silently.
 
 /// Names allowed under `fip::`.
-pub const KNOWN: &[&str] = &["export", "mark", "alloc_source", "free_source", "requires"];
+pub const KNOWN: &[&str] = &[
+    "export",
+    "mark",
+    "alloc_source",
+    "free_source",
+    "requires",
+    "cert",
+    "exclude",
+];
 
 /// The conjuncts of the printed `fip::requires(..)` attributes of one function
 /// (several attributes are one conjunction); `Ok(None)` if it has none.
@@ -144,6 +152,122 @@ pub fn source_of_printed<'a>(
         found = Some(found.map_or(s, |f| f.merge(s)));
     }
     Ok(found)
+}
+/// What a certified foreign function satisfies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfiCert {
+    pub kind: Kind,
+    pub alloc: u64,
+    pub free: bool,
+    pub evidence: String,
+}
+
+/// Parses `fip::cert(kind = .., n = .., frees = .., evidence = "..")`.
+pub fn parse_ffi_cert(args: Option<&str>) -> Result<FfiCert, String> {
+    let mut kind = None;
+    let mut n = 0;
+    let mut free = None;
+    let mut evidence = None;
+    for part in split_top(args.unwrap_or("")) {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("expected `key = value` in `fip::cert(..)`, found `{part}`"))?;
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "kind" => {
+                let v = value.trim_matches('"');
+                match v {
+                    "fip" => kind = Some(Kind::Fip),
+                    "fbip" => kind = Some(Kind::Fbip),
+                    other => return Err(format!("`kind` is \"fip\" or \"fbip\", found `{other}`")),
+                }
+            }
+            "n" => n = parse_u64("n", value)?,
+            "frees" => match value {
+                "true" => free = Some(true),
+                "false" => free = Some(false),
+                other => return Err(format!("`frees` takes `true` or `false`, found `{other}`")),
+            },
+            "evidence" => {
+                let ev = value.trim_matches('"');
+                if ev.is_empty() {
+                    return Err("`evidence` in `fip::cert(..)` must not be empty".to_string());
+                }
+                evidence = Some(ev.to_string());
+            }
+            other => return Err(format!("unknown key `{other}` in `fip::cert(..)`")),
+        }
+    }
+    let kind = kind.unwrap_or(Kind::Fip);
+    let free = free.unwrap_or(kind == Kind::Fbip);
+    let evidence =
+        evidence.ok_or_else(|| "`evidence = \"..\"` is required in `fip::cert(..)`".to_string())?;
+    Ok(FfiCert {
+        kind,
+        alloc: n,
+        free,
+        evidence,
+    })
+}
+
+/// The certified properties of one foreign function from its printed tool attributes.
+pub fn cert_of_printed<'a>(
+    attrs: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<FfiCert>, String> {
+    let mut cert = None;
+    for attr in attrs {
+        let Some(("cert", args)) = tool_attr_of_printed(attr) else {
+            continue;
+        };
+        if cert.is_some() {
+            return Err("duplicate `fip::cert`".to_string());
+        }
+        cert = Some(parse_ffi_cert(args)?);
+    }
+    Ok(cert)
+}
+
+/// An excluded foreign function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfiExclude {
+    pub reason: Option<String>,
+}
+
+/// Parses `fip::exclude` or `fip::exclude(reason = "..")`.
+pub fn parse_ffi_exclude(args: Option<&str>) -> Result<FfiExclude, String> {
+    let mut reason = None;
+    if let Some(args) = args
+        && !args.trim().is_empty()
+    {
+        for part in split_top(args) {
+            let (key, value) = part.split_once('=').ok_or_else(|| {
+                format!("expected `reason = \"..\"` in `fip::exclude(..)`, found `{part}`")
+            })?;
+            match key.trim() {
+                "reason" => reason = Some(value.trim().trim_matches('"').to_string()),
+                other => return Err(format!("unknown key `{other}` in `fip::exclude(..)`")),
+            }
+        }
+    }
+    Ok(FfiExclude { reason })
+}
+
+/// The exclusion of one foreign function from its printed tool attributes.
+pub fn exclude_of_printed<'a>(
+    attrs: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<FfiExclude>, String> {
+    let mut excl = None;
+    for attr in attrs {
+        let Some(("exclude", args)) = tool_attr_of_printed(attr) else {
+            continue;
+        };
+        if excl.is_some() {
+            return Err("duplicate `fip::exclude`".to_string());
+        }
+        excl = Some(parse_ffi_exclude(args)?);
+    }
+    Ok(excl)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,6 +545,41 @@ mod tests {
         assert_eq!(
             tool_attr_of_printed("#[fip::free_source]"),
             Some(("free_source", None))
+        );
+    }
+    #[test]
+    fn ffi_marks() {
+        let c = |a: &[&str]| cert_of_printed(a.iter().copied());
+        let e = |a: &[&str]| exclude_of_printed(a.iter().copied());
+        assert_eq!(
+            c(&[r#"#[fip::cert(kind = "fip", n = 0, evidence = "proof A")]"#]),
+            Ok(Some(FfiCert {
+                kind: Kind::Fip,
+                alloc: 0,
+                free: false,
+                evidence: "proof A".to_string(),
+            }))
+        );
+        assert_eq!(
+            c(&[r#"#[fip::cert(kind = "fbip", n = 2, evidence = "audit B")]"#]),
+            Ok(Some(FfiCert {
+                kind: Kind::Fbip,
+                alloc: 2,
+                free: true,
+                evidence: "audit B".to_string(),
+            }))
+        );
+        assert!(c(&[r#"#[fip::cert(n = 0)]"#]).is_err()); // missing evidence
+        assert!(c(&[r#"#[fip::cert(evidence = "")]"#]).is_err()); // empty evidence
+        assert_eq!(
+            e(&["#[fip::exclude]"]),
+            Ok(Some(FfiExclude { reason: None }))
+        );
+        assert_eq!(
+            e(&[r#"#[fip::exclude(reason = "hardware")]"#]),
+            Ok(Some(FfiExclude {
+                reason: Some("hardware".to_string())
+            }))
         );
     }
 }

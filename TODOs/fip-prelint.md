@@ -1288,4 +1288,19 @@ and strict callers could not call contracted methods through `dyn`/generic with 
 |---|---|---|
 | `crates/fip-macros/tests/strict_impl.rs` | 11 roots, 10 passed | 15 roots (+ `Step::step`, `step_dyn`, `step_gen`, checked against contract), 14 passed |
 | `compile-fail-reasons` | 62/62 | 66/66 (+1 weaker impl, +1 uncontracted caller, +1 decl without `#[fip_trait]`, +1 generic trait, +1 generic method) |
-**Open:** FFI foreign functions: exactly one of certified, excluded, or compile/lint error (user-specified XOR).
+## Resolved 2026-11-02: FFI foreign functions: certified XOR excluded XOR error
+
+Every foreign function (`extern` block item) reachable from a FIP-checked function must be in exactly one of:
+- (a) **certified**: `#[fip_cert(evidence = "..", allocs = N)]` (or `#[fip(..., evidence = "..")]`) under `#[fip_extern]` on the `extern` block. Requires non-empty `evidence = ".."`. Emits module-level `<vis> const __fip_strict_<name>: Cert = unsafe { Cert::assume(..) }` for strict callers and driver mark `fip::cert` for `fip-prelint`. Counted and listed in the crate summary (`N certified foreign functions`).
+- (b) **excluded**: `#[fip_exclude]` (standalone or under `#[fip_extern]`, optional `reason = ".."`). Calls contribute no events to FIP aggregation. User assumption; counted and listed in crate summary (`N excluded foreign functions`) and `FIP_PRELINT_DUMP`. No certificate emitted; strict callers cannot call it (E0425).
+- (c) **otherwise**: specific error `foreign function <x> is neither certified nor excluded` (not a generic ⊤).
+
+Both (a) and (b) on one function is an error. Direct `#[fip]` on a foreign function without `evidence` is rejected at compile time under `#[fip_extern]` and by the driver always. Allocator FFI (`alloc_source`/`free_source` and `FOREIGN_ALLOC_SYMBOLS`) is treated as allocator certificates and counted under declared sources (no double counting).
+
+**Measured.**
+
+| fixture / crate | before | after |
+|---|---|---|
+| `compile-fail-reasons` | 66/66 | 72/72 (+6 FFI compile_fail examples) |
+| `fixtures` | 18 passed | 19 passed (+ fixture `ffi` covering all 6 outcomes) |
+| `alloc_sources` (`mystery`) | generic ⊤ (`unresolved: ...`) | specific error: `foreign function mystery is neither certified nor excluded` |
