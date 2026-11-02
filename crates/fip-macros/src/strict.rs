@@ -832,9 +832,21 @@ impl StrictScan {
         items.extend([brace(self.checks(tag, n, local, false))]);
         items.extend(ts(";"));
 
-        let mut stmt = ts(
-            "#[cfg(not(verus_keep_ghost))] #[allow(clippy::all, clippy::pedantic)] let () = const ",
-        );
+        // Verus does not take the inline-const statement in a verified body, so under
+        // Verus's driver it is left out of the `verus_keep_ghost` pass. The cfg is
+        // emitted only there: in any other build it would be an undeclared cfg, an
+        // `unexpected_cfgs` warning in every crate without
+        // `check-cfg = ["cfg(verus_keep_ghost)"]` (measured: 5 in a facade consumer;
+        // `#[allow(unexpected_cfgs)]` on the statement does not silence it), and
+        // outside Verus it is never set, so the statement is kept as before.
+        let mut stmt = if under_verus() {
+            ts("#[cfg(not(verus_keep_ghost))]")
+        } else {
+            TokenStream::new()
+        };
+        stmt.extend(ts(
+            "#[allow(clippy::all, clippy::pedantic)] let () = const ",
+        ));
         stmt.extend([brace(self.checks(tag, n, local, true))]);
         stmt.extend(ts(";"));
         (items, stmt)
@@ -846,6 +858,18 @@ impl StrictScan {
         body.extend(self.sum_expr(local));
         body
     }
+}
+
+/// `true` when the expanding compiler is Verus's driver: proc macros run in the
+/// compiler's process, whose executable is `rust_verify` for the upstream `verus`
+/// launcher and for a source build (measured: `argv[0]` of both). Verus passes
+/// `--cfg verus_keep_ghost` to rustc through its driver API, not in `argv`.
+fn under_verus() -> bool {
+    std::env::args_os().next().is_some_and(|a| {
+        std::path::Path::new(&a)
+            .file_stem()
+            .is_some_and(|s| s == "rust_verify")
+    })
 }
 
 #[cfg(test)]

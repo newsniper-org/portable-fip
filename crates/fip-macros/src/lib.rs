@@ -492,6 +492,12 @@
 //! operators, `Deref`, `Index`); `fip_testkit::assert_fip!` counts what they free or
 //! allocate. Details and limits: `docs/decisions/2026-11-01-strict-core-table.md`.
 //!
+//! A strict body starts with a statement re-checking the bound after
+//! monomorphisation (`let () = const { .. };`). Verus does not support inline `const`
+//! blocks, so under Verus's driver (executable `rust_verify`) the statement carries
+//! `#[cfg(not(verus_keep_ghost))]`; in every other build it carries no cfg, so
+//! consumers need no `check-cfg` entry and get no `unexpected_cfgs` warning.
+//!
 //! ### The `fip_strict` path: `crate = ..`
 //!
 //! Generated code names three items of `fip-strict`: `Cert` (certificates and the
