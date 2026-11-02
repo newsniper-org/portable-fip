@@ -813,7 +813,13 @@ impl StrictScan {
         items.extend(ts(&format!("const __fip_strict_{cert_name}: ")));
         items.extend(self.krate_item("Cert"));
         items.extend(ts("= unsafe"));
-        let mut ctor = self.krate_item("Cert::assume");
+        // A body checked with `panic_macros = false` says so in its certificate, so
+        // `#[fip_impl]` can compare it with a contract's (`Cert::no_panic_macros_for`).
+        let mut ctor = self.krate_item(if self.no_panic_macros {
+            "Cert::assume_no_panic_macros"
+        } else {
+            "Cert::assume"
+        });
         let mut args = ts(&format!("{cert_name:?},"));
         args.extend(self.sum_expr(local));
         ctor.extend([paren(args)]);

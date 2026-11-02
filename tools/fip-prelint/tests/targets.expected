@@ -13,7 +13,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == aarch64-pc-windows-gnullvm std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -27,7 +27,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == aarch64-unknown-linux-gnu std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -41,7 +41,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == armv7-unknown-linux-gnueabihf std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -55,7 +55,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == i686-unknown-linux-gnu std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -69,7 +69,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == wasm32-unknown-unknown std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -83,7 +83,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == wasm32-wasip1 std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -97,7 +97,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == wasm32-wasip2 std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -111,7 +111,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == x86_64-pc-windows-gnullvm std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -125,7 +125,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == x86_64-unknown-linux-gnu std
 crates/fip-macros/tests/strict_gaps.rs:23:1: warning: fip-prelint [error]: `consume` is #[fip(strict = true)] but may free: `consume` -> `drop glue of alloc::boxed::Box<u8>` (crates/fip-macros/tests/strict_gaps.rs:23) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
@@ -139,7 +139,7 @@ note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warni
 note: fip-prelint: crate `strict_behaviour`: 2 roots, 2 passed, 0 errors, 0 warnings, 3 notes
 note: fip-prelint: crate `strict_crate_path`: 6 roots, 6 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `strict_gaps`: 3 roots, 1 passed, 3 errors, 0 warnings, 3 notes
-note: fip-prelint: crate `strict_impl`: 15 roots, 14 passed, 0 errors, 1 warnings, 10 notes
+note: fip-prelint: crate `strict_impl`: 17 roots, 16 passed, 0 errors, 1 warnings, 10 notes
 
 == x86_64-unknown-none no_std
 note: fip-prelint: crate `fip_core`: 8 roots, 8 passed, 0 errors, 0 warnings, 0 notes

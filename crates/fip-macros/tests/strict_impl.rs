@@ -80,6 +80,22 @@ mod shapes {
         }
     }
 
+    /// A contract with `panic_macros = false`: an implementation must be checked
+    /// with `panic_macros = false` too (`#[fip_impl]` compares the certificates).
+    #[fip_trait]
+    pub trait Peek {
+        #[fip(strict = true, panic_macros = false)]
+        fn peek_n(&self) -> u32;
+    }
+
+    #[fip_impl]
+    impl Peek for Ticker {
+        #[fip(strict = true, panic_macros = false)]
+        fn peek_n(&self) -> u32 {
+            self.n
+        }
+    }
+
     /// An inherent method with the same name as the trait method: `Ticker::step`
     /// is this one, `<Ticker as Step>::step` the trait's.
     #[fip_impl]
@@ -154,6 +170,7 @@ fn generic_and_trait_methods_are_callable_from_strict_code() {
     assert_eq!(assert_fip!(step_dyn(&mut t)), 18);
     assert_eq!(assert_fip!(step_gen(&mut t)), 19);
     assert_eq!(assert_fip!(slot_step(&mut s)), 7);
+    assert_eq!(assert_fip!(shapes::Peek::peek_n(&t)), 20);
 }
 
 #[test]
@@ -169,4 +186,9 @@ fn certificates_are_named_after_type_trait_and_method() {
     assert_eq!(__fip_strict_box_it.allocs_for("box_it"), 1);
     assert_eq!(shapes::__fip_strict_Step__step.name(), "Step__step");
     assert_eq!(<dyn Step>::__fip_strict_step.allocs(), 0);
+    // Panic strictness is part of the certificate.
+    assert!(!<dyn Step>::__fip_strict_step.no_panic_macros());
+    assert!(<dyn shapes::Peek>::__fip_strict_peek_n.no_panic_macros());
+    assert!(shapes::__fip_strict_Ticker__Peek__peek_n.no_panic_macros_for("Ticker__Peek__peek_n"));
+    assert!(!shapes::__fip_strict_Ticker__step.no_panic_macros());
 }

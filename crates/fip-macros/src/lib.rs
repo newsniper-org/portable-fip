@@ -295,9 +295,24 @@
 //! }
 //! # fn main() {}
 //! ```
-//! Implementation with a certificate weaker than the trait's contract:
+//! What `#[fip_impl]` compares at compile time for a strict implementation of a
+//! strict contract, mirroring the driver's `Mark::weaker_than` as far as a
+//! certificate (`fip_strict::Cert`, made only by `unsafe` constructors) carries it:
+//! the allocation bound (impl ≤ contract) and panic strictness (a contract with
+//! `panic_macros = false` needs an implementation with `panic_macros = false`). The
+//! kind needs no comparison: every certificate is `fip` (`#[fbip]` has no strict
+//! mode). Not compared by the macro, only by `fip-prelint`: an implementation that is
+//! not strict (`#[fbip]`, `#[fip]` without `strict = true`, or no attribute) has no
+//! certificate, and the impl block cannot see whether the trait method has a contract
+//! (a probe through `<dyn Trait>` would break impls of traits that are not
+//! dyn-compatible); the driver reports it (measured: an `#[fbip]` implementation of a
+//! strict contract compiles and is a `fip-prelint` error, "the declaration is weaker
+//! than the contract").
+//!
+//! Implementation with a certificate weaker than the trait's contract (more
+//! allocations):
 //! ```compile_fail
-//! # // expect: #[fip_impl]: impl certificate is weaker than contract
+//! # // expect: #[fip_impl]: impl certificate is weaker than contract (more allocations)
 //! use fip_macros::{fip, fip_impl, fip_trait};
 //! #[fip_trait]
 //! pub trait Shape {
@@ -309,6 +324,24 @@
 //! impl Shape for Square {
 //!     #[fip(1, strict = true)]
 //!     fn area(&self) -> u32 { *Box::new(self.0) }
+//! }
+//! # fn main() {}
+//! ```
+//! An implementation that allows the panicking macros under a contract with
+//! `panic_macros = false`:
+//! ```compile_fail
+//! # // expect: #[fip_impl]: impl certificate is weaker than contract (the contract has `panic_macros = false`, the implementation does not)
+//! use fip_macros::{fip, fip_impl, fip_trait};
+//! #[fip_trait]
+//! pub trait Step {
+//!     #[fip(strict = true, panic_macros = false)]
+//!     fn step(&self, x: u8) -> u8;
+//! }
+//! pub struct Id;
+//! #[fip_impl]
+//! impl Step for Id {
+//!     #[fip(strict = true)]
+//!     fn step(&self, x: u8) -> u8 { x }
 //! }
 //! # fn main() {}
 //! ```
@@ -2173,7 +2206,11 @@ fn emit_trait_method_cert(
     let krate_path = args.krate.clone().unwrap_or_else(strict::default_krate);
     let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
     let cert_ty = format!("{krate_str}::Cert");
-    let assume_fn = format!("{krate_str}::Cert::assume");
+    let assume_fn = if args.panic_macros {
+        format!("{krate_str}::Cert::assume")
+    } else {
+        format!("{krate_str}::Cert::assume_no_panic_macros")
+    };
     let vis_str: String = vis.iter().map(ToString::to_string).collect();
     let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] ";
 
@@ -3123,14 +3160,23 @@ fn rewrite_impl_body(
                     let tr_path: String = ctx.trait_toks.iter().map(ToString::to_string).collect();
                     let krate_path = args.krate.clone().unwrap_or_else(strict::default_krate);
                     let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
+                    // Mirrors the driver's `Mark::weaker_than` as far as a certificate
+                    // carries it: the allocation bound and panic strictness. The kind
+                    // is always `fip` (no strict `#[fbip]`), so there is nothing to
+                    // compare; `param(..)` is not compared by the driver either.
+                    let impl_name = format!("{self_ty}__{t}__{m}");
+                    let contract_name = format!("{t}__{m}");
                     let check_str = format!(
                         "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] \
-                         const _: () = {{ let impl_allocs = {krate_str}::Cert::allocs_for(__fip_strict_{self_ty}__{t}__{m}, {:?}); \
-                         let contract_allocs = {krate_str}::Cert::allocs_for(<dyn {tr_path}>::__fip_strict_{m}, {:?}); \
-                         ::core::assert!(impl_allocs <= contract_allocs, {:?}); }};",
-                        format!("{self_ty}__{t}__{m}"),
-                        format!("{t}__{m}"),
-                        "#[fip_impl]: impl certificate is weaker than contract"
+                         const _: () = {{ let impl_cert = __fip_strict_{self_ty}__{t}__{m}; \
+                         let contract_cert = <dyn {tr_path}>::__fip_strict_{m}; \
+                         let impl_allocs = {krate_str}::Cert::allocs_for(impl_cert, {impl_name:?}); \
+                         let contract_allocs = {krate_str}::Cert::allocs_for(contract_cert, {contract_name:?}); \
+                         ::core::assert!(impl_allocs <= contract_allocs, {:?}); \
+                         ::core::assert!(!{krate_str}::Cert::no_panic_macros_for(contract_cert, {contract_name:?}) \
+                         || {krate_str}::Cert::no_panic_macros_for(impl_cert, {impl_name:?}), {:?}); }};",
+                        "#[fip_impl]: impl certificate is weaker than contract (more allocations)",
+                        "#[fip_impl]: impl certificate is weaker than contract (the contract has `panic_macros = false`, the implementation does not)"
                     );
                     if let Ok(ts) = check_str.parse::<TokenStream>() {
                         module_items.extend(ts);

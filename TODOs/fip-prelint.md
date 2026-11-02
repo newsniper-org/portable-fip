@@ -1357,3 +1357,42 @@ a std function without MIR before any foreign call, `process::abort`/`exit` dive
 | summary | 14 roots, 5 passed, 11 errors | 14 roots, 6 passed, 11 errors, 3 by symbol |
 
 The original seven cases of the fixture are unchanged except the `c_both` call's wording.
+
+## Resolved 2026-11-02: `#[fip_impl]` compares panic strictness with the contract
+
+`#[fip_impl]` checked a strict implementation against a `#[fip_trait]` contract at
+compile time by the allocation bound only, while the driver's `Mark::weaker_than` also
+compares the kind (`fbip` under `fip`) and panic strictness (`panic_macros`).
+
+**Certificate.** `fip_strict::Cert` gains a private `no_panic_macros` flag, set only by
+the new `unsafe` constructor `Cert::assume_no_panic_macros(name, allocs)` (generated for
+bodies and contracts with `panic_macros = false`); `Cert::assume` and the three
+hand-written certificates in `fip_strict::certs` state `false` (the weaker claim), so
+existing users compile unchanged. Read through `Cert::no_panic_macros()` and the
+name-checked `Cert::no_panic_macros_for(name)` (as `allocs_for`). The flag is as
+non-forgeable as the bound: no safe way to make a `Cert` with it set.
+
+**Check.** The impl-side `const _` now asserts both: `allocs(impl) ≤ allocs(contract)`
+("weaker than contract (more allocations)") and `no_panic_macros(contract) ⇒
+no_panic_macros(impl)` ("weaker than contract (the contract has `panic_macros = false`,
+the implementation does not)"), E0080 at compile time.
+
+**Kind, and what stays driver-only.** Every certificate is of kind `fip` (it promises
+no deallocation; `#[fbip]` takes no arguments, so it has no strict mode): there is no
+`fbip` certificate to compare. An implementation that is not strict (`#[fbip]`, plain
+`#[fip]`, or unmarked) has no certificate, and `#[fip_impl]` cannot see whether the
+trait method has a contract: a probe through `<dyn Trait>::__fip_strict_m` would fail to
+compile for every trait without `#[fip_trait]`, and `dyn Trait` itself is an error for
+traits that are not dyn-compatible (e.g. `Clone`). So these are checked by
+`fip-prelint` only.
+
+**Measured.**
+
+| case (probe crate under `/tmp`) | before (HEAD `67ae3e6`) | after |
+|---|---|---|
+| contract `panic_macros = false`, impl `#[fip(strict = true)]` | compiles | E0080 "weaker than contract (the contract has `panic_macros = false` ..)" |
+| contract `panic_macros = false`, impl `#[fip(strict = true, panic_macros = false)]` | compiles | compiles |
+| same contract, impl `#[fbip]` under `#[fip_impl]` | compiles | compiles; `fip-prelint`: error "the declaration is weaker than the contract (it allows frees and recursion (`fbip`) ..)" |
+| same contract, impl without attribute | compiles | compiles; `fip-prelint` checks the body against the contract (passed for `x`) |
+| `compile-fail-reasons` | 72/72 | 73/73 (+1 panic-strictness example) |
+| self-check `strict_impl` (`Peek` contract + `Ticker` impl, both `panic_macros = false`) | 15 roots, 14 passed | 17 roots, 16 passed |

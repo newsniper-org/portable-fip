@@ -109,9 +109,11 @@ Strict contracts on trait methods are declared as `#[fip(strict = true)]`
 (or `#[fip(N, strict = true)]`) under `#[fip_trait]` on the trait. `#[fip_trait]`
 emits the contract certificates `<dyn Trait>::__fip_strict_<m>` and
 `__fip_strict_<Trait>__<m>`, which strict callers use for `x.m()`, `Trait::m(x)` and
-`<dyn Trait>::m(x)`. Implementations under `#[fip_impl]` are checked against the
-contract at compile time (impl certificate bound ≤ contract bound) and by the driver
-always.
+`<dyn Trait>::m(x)`. Strict implementations under `#[fip_impl]` are checked against
+the contract at compile time (impl certificate bound ≤ contract bound, and
+`panic_macros = false` in the contract requires it in the implementation; every
+certificate is of kind `fip`) and by the driver always; a non-strict implementation
+(`#[fbip]`, plain `#[fip]`, none) has no certificate and is checked by the driver only.
 Foreign functions: `#[fip_extern]` on an `extern` block certifies foreign
 functions with `#[fip_cert(evidence = "..")]` (or `#[fip(evidence = "..")]`),
 emitting module-level certificates for strict callers and driver marks for
@@ -303,7 +305,7 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 | `prelint` | rustfmt and clippy (`-D warnings`) on the driver; `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, allocation and free sources, drops through their glue, declared preconditions, function pointers, trait objects and trait method contracts, std summaries (and a stale one ignored), bad attributes) a self-check of this workspace against `selfcheck.expected`, the same for every installed target (`targets.expected`), stack bounds of one fixture in two stated builds, and the rejected behaviour examples of `fip-macros` through the driver (mark-only mode) |
 | `prelint-repin` | not in `ci`: `just prelint-repin <version>` runs the checks of a move to another rustc (driver build, probes, entry points, std summaries, driver tests) and lists the pins and tables to re-audit |
 | `prelint-std-summaries` | not in `ci`: regenerates `tools/fip-prelint/std-summaries/<release>-<target>.txt` (`-Zbuild-std` of the seed crate, ~2 min); run after a repin or a seed change, and commit the result |
-| `compile-fail-reasons` | each of the 72 `compile_fail` examples of `fip-macros` (45 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |
+| `compile-fail-reasons` | each of the 73 `compile_fail` examples of `fip-macros` (45 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |
 
 ## Usage notes
 

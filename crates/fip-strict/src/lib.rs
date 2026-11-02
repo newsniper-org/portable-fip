@@ -67,11 +67,16 @@ use vstd::prelude::*;
 /// Certificate for one function: one call performs at most [`Cert::allocs`] heap
 /// allocations, no deallocation, and no recursion (directly or through other
 /// functions), counting everything it calls. [`Cert::name`] is the function it was
-/// made for.
+/// made for. [`Cert::no_panic_macros`] states that its body was also checked with
+/// `panic_macros = false` (no panicking macro in it).
+///
+/// Every certificate is of kind `fip` (no deallocation): `#[fbip]` has no strict
+/// mode, so there is no `fbip` certificate to compare.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cert {
     name: &'static str,
     allocs: u64,
+    no_panic_macros: bool,
 }
 
 impl Cert {
@@ -92,7 +97,31 @@ impl Cert {
     )]
     #[must_use]
     pub const unsafe fn assume(name: &'static str, allocs: u64) -> Self {
-        Self { name, allocs }
+        Self {
+            name,
+            allocs,
+            no_panic_macros: false,
+        }
+    }
+
+    /// [`Cert::assume`] for a function whose body was also checked with
+    /// `panic_macros = false` (`#[fip(strict = true, panic_macros = false)]`).
+    ///
+    /// # Safety
+    ///
+    /// As [`Cert::assume`], and the caller also asserts that the function's body uses
+    /// none of the panicking macros `panic_macros = false` rejects.
+    #[allow(
+        unsafe_code,
+        reason = "certificate constructor; `unsafe` marks a trusted claim"
+    )]
+    #[must_use]
+    pub const unsafe fn assume_no_panic_macros(name: &'static str, allocs: u64) -> Self {
+        Self {
+            name,
+            allocs,
+            no_panic_macros: true,
+        }
     }
 
     /// The certified allocation bound.
@@ -105,6 +134,27 @@ impl Cert {
     #[must_use]
     pub const fn name(self) -> &'static str {
         self.name
+    }
+
+    /// `true` if the body was also checked with `panic_macros = false`.
+    #[must_use]
+    pub const fn no_panic_macros(self) -> bool {
+        self.no_panic_macros
+    }
+
+    /// [`Cert::no_panic_macros`], after checking that the certificate was made for
+    /// `name`, as [`Cert::allocs_for`] does.
+    ///
+    /// # Panics
+    ///
+    /// As [`Cert::allocs_for`].
+    #[must_use]
+    pub const fn no_panic_macros_for(self, name: &str) -> bool {
+        assert!(
+            str_eq(self.name, name),
+            "fip_strict: the certificate names another function (a certificate re-exported under a different name)"
+        );
+        self.no_panic_macros
     }
 
     /// The certified bound, after checking that the certificate was made for `name`.
@@ -339,12 +389,14 @@ pub mod certs {
     pub const __fip_strict_swap: Cert = Cert {
         name: "swap",
         allocs: 0,
+        no_panic_macros: false,
     };
 
     /// `fip_core::replace`: same reasons as `__fip_strict_swap`.
     pub const __fip_strict_replace: Cert = Cert {
         name: "replace",
         allocs: 0,
+        no_panic_macros: false,
     };
 
     /// `fip_alloc::refill`: the body calls only `core::mem::swap` (audited `core`
@@ -353,5 +405,6 @@ pub mod certs {
     pub const __fip_strict_refill: Cert = Cert {
         name: "refill",
         allocs: 0,
+        no_panic_macros: false,
     };
 }

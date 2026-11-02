@@ -34,9 +34,14 @@ fn certificates_made_here_are_exactly_the_documented_ones() {
         .map(|f| (format!("__fip_strict_{f}"), (*f).to_string()))
         .collect();
     assert_eq!(made, expected);
-    // `Self { name, allocs }` in `Cert::assume` is the only other construction site.
+    // `Self { name, allocs, .. }` in `Cert::assume` and `Cert::assume_no_panic_macros`
+    // are the only other construction sites.
     assert_eq!(src.matches("Cert {\n        name:").count(), 3);
-    assert_eq!(src.matches("Self { name, allocs }").count(), 1);
+    assert_eq!(
+        src.matches("Self {\n            name,\n            allocs,")
+            .count(),
+        2
+    );
 }
 
 #[test]
