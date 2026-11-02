@@ -23,12 +23,16 @@ pub trait Plain {
     fn size(&self) -> u32;
 }
 
-/// A contract on a method with a default body: the default body is checked as a
-/// root, and for every implementation that keeps it.
+/// A contract on a method with a default body calling a contracted method on `Self`:
+/// the default body is checked as a root (using the contract of `scale_factor`), and
+/// for every implementation that keeps it.
 pub trait Scaled {
     #[fip_macros::fip]
+    fn scale_factor(&self) -> u32;
+
+    #[fip_macros::fip]
     fn scaled(&self) -> u32 {
-        3
+        self.scale_factor().wrapping_mul(3)
     }
 }
 
@@ -54,5 +58,10 @@ impl Plain for Square {
     }
 }
 
-/// Keeps the default body: checked for `Square`.
-impl Scaled for Square {}
+/// Meets the contract of `scale_factor`, keeps the default body of `scaled`: passes.
+impl Scaled for Square {
+    fn scale_factor(&self) -> u32 {
+        self.0
+    }
+}
+

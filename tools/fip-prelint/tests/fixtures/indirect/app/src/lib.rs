@@ -3,7 +3,7 @@
 
 //! Calls through function pointers and trait objects (limits plan L4).
 
-use shapes::{Grow, Plain, Shape, Square};
+use shapes::{Grow, Plain, Scaled, Shape, Square};
 
 pub fn add_one(x: u32) -> u32 {
     x.wrapping_add(1)
@@ -189,4 +189,40 @@ pub trait Bounded {
     #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
     #[cfg_attr(fip_prelint, fip::requires(i < xs.len()))]
     fn at(&self, xs: &[u32], i: usize) -> u32;
+}
+
+// (5) Calls on `Self` or type parameters inside generic bodies.
+
+/// Generic function bound by a contracted trait: uses the contract of `area`, passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn generic_area<S: Shape>(s: &S) -> u32 {
+    s.area()
+}
+
+/// Generic function calling a concrete instance: keeps instantiated analysis, passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn call_generic_concrete() -> u32 {
+    let sq = Square(4);
+    generic_area(&sq)
+}
+
+/// Generic function calling a default body that calls a contracted method: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn generic_scaled<S: Scaled>(s: &S) -> u32 {
+    s.scaled()
+}
+
+/// Generic function bound by an uncontracted trait: must stay a warning/term.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn generic_plain<P: Plain>(p: &P) -> u32 {
+    p.size()
+}
+
+pub struct BadScaled(pub u32);
+
+/// Breaks the contract of `scale_factor` (1 allocation, at most 0 allowed): reported at the impl.
+impl Scaled for BadScaled {
+    fn scale_factor(&self) -> u32 {
+        boxed_value(self.0)
+    }
 }

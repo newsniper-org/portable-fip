@@ -223,9 +223,10 @@
 //! `fip-prelint`, the same `fip::mark(..)` as on a function. The driver makes it a
 //! contract: every implementation is checked against it in the crate that contains
 //! it (a crate without `fip::export` cannot be checked: an error), a dynamic call
-//! (`&dyn Trait`) of the method costs the contract, and an implementation's own
-//! `#[fip(..)]` that is weaker than the contract is an error. Plain builds check
-//! no implementation: use `fip-prelint` (`docs/decisions/2026-11-01-fip-prelint.md`).
+//! (`&dyn Trait`) or generic call (`self.m()`, `<S: Trait>`) of the method costs the
+//! contract, and an implementation's own `#[fip(..)]` that is weaker than the contract
+//! is an error. Plain builds check no implementation: use `fip-prelint`
+//! (`docs/decisions/2026-11-01-fip-prelint.md`).
 //!
 //! With a **default body**, the body gets the usual checks (above), and the mark is
 //! still the contract of every implementation (a kept default body is checked for

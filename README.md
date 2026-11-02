@@ -169,9 +169,10 @@ crates are compiled by the real rustc and stay ⊤.
   on every path of the function are resolved to it. `#[fip]`, `#[fip(N)]` or
   `#[fbip]` on a trait method declaration (`fn area(&self) -> u32;`, or one with a
   default body; the emitted `fip::mark` may also be written by hand) is a contract: a
-  `dyn` call of the method costs it, and every implementation is checked against it
-  as a root in the crate that contains it (also in a dependency that declares
-  `fip::export`), without any `fip::requires(..)` (a `dyn` call checks none); an
+  `dyn` call or generic call (`self.m()`, `<S: Trait>`) of the method costs it, and
+  every implementation is checked against it as a root in the crate that contains it
+  (also in a dependency that declares `fip::export`), without any `fip::requires(..)`
+  (a `dyn` or generic call checks none); an
   implementation's own mark that is weaker than the contract is an error; an
   implementation in a crate without `fip::export` is ⊤ in every analysed crate that
   sees it. `param(..)`, `requires(..)` and `strict = true` are rejected on a

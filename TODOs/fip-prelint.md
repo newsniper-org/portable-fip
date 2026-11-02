@@ -1239,11 +1239,33 @@ a default body is a root (`Shape::twice` in `crates/fip-macros/tests/accept.rs`,
 asserted in `checker_agreement.rs`, whose `REJECTED` list gains the default-body
 example).
 
-**Open:** a call of a contracted method on `Self` or a type parameter inside a
-generic body (a default body calling `self.area()`) is a term, a warning, not the
-contract (measured on `accept.rs` before it was simplified: "`<Self as Shape>::twice`
-is #[fip] only relative to its generic parameters"); costing the contract there would
-be sound for the same reason as for a `dyn` call. A strict contract still needs the
-hand-written mark; implementations of a
+## Resolved 2026-11-02: Contracts for calls on `Self` / type parameters inside generic bodies
+
+Follow-up of the trait contracts amendment: a call of a contracted trait method on
+`Self` or a type parameter inside a generic body (e.g. a default method body calling
+`self.area()`, or `fn f<S: Shape>(s: &S) { s.area() }`) was previously reported as a
+warning ("`<Self as Shape>::twice` is #[fip] only relative to its generic parameters")
+because it was treated as an open term instead of using the contract.
+
+**Driver.**
+- In `Analysis::unresolved`, if the callee's declaration carries a contract (`contract_of`),
+  the call is analysed through the contract instead of producing `Item::Term`.
+- A leaf node (`node_contract`) is created with the contract's declared events
+  (`contract_call_events`).
+- When the concrete instance is known (monomorphised callers), `Instance::try_resolve`
+  succeeds and instantiated analysis is kept without precision loss.
+- Calls of non-contracted trait methods continue to produce the warning/term.
+- Contract violations by implementations continue to be reported at the implementation
+  (and through default bodies that keep the declaration).
+
+**Measured.**
+
+| fixture / crate | before | after |
+|---|---|---|
+| `indirect/shapes` | 4 roots, 4 passed, 0 errors | 5 roots (+ `scale_factor`), 5 passed, 0 errors |
+| `indirect/app` | 21 roots, 11 passed, 15 errors, 0 warnings | 27 roots (+ `generic_area`, `call_generic_concrete`, `generic_scaled`, `generic_plain`, `<BadScaled as Scaled>::scale_factor`, `<BadScaled as Scaled>::scaled`), 14 passed, 19 errors, 1 warning (`generic_plain::<P>`) |
+| `accept.rs` (`Shape::twice`) | calls `x + x` to avoid warning | calls `self.area() + x`, verified against contract without warning |
+
+**Open:** A strict contract still needs the hand-written mark; implementations of a
 contract are not required to carry `#[fip]` (the driver checks them either way); a
 foreign function with `#[fip]` is accepted by the macro (reported `⊤` by the driver).

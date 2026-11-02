@@ -80,11 +80,11 @@ pub trait Shape {
     fn boxed(&self) -> Box<u32>;
     #[fbip]
     fn depth(&self) -> u32;
-    /// A default body; it calls no method of `Self` (`fip-prelint` would analyse such a
-    /// call for an unknown `Self` as a term, not through the contract).
+    /// A default body; calls a contracted method of `Self` (`area`), which
+    /// `fip-prelint` analyses through the contract.
     #[fip]
     fn twice(&self, x: u32) -> u32 {
-        x + x
+        self.area() + x
     }
 }
 

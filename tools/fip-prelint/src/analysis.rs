@@ -1349,6 +1349,28 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         self.queue.push(i);
         i
     }
+    fn node_contract(&mut self, def_id: DefId, args: GenericArgsRef<'tcx>, m: &Mark) -> usize {
+        let inst = Instance::new_raw(def_id, args);
+        let key = (inst, Vec::new(), Vec::new());
+        if let Some(&i) = self.index.get(&key) {
+            return i;
+        }
+        let i = self.nodes.len();
+        let label = self.label(inst);
+        let parent = (i > 0).then_some(self.current);
+        let evs = contract_call_events(&format!("call of `{}`", def_path(self.tcx, def_id)), m);
+        self.nodes.push(Node {
+            inst,
+            ctx: Vec::new(),
+            depth: 0,
+            binds: Vec::new(),
+            parent,
+            label,
+            kind: NodeKind::Leaf(evs),
+        });
+        self.index.insert(key, i);
+        i
+    }
 
     fn subst<T: TypeFoldable<TyCtxt<'tcx>>>(&self, inst: Instance<'tcx>, v: T) -> Option<T> {
         inst.try_instantiate_mir_and_normalize_erasing_regions(
@@ -2533,6 +2555,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if self.crates.source_of(tcx, def_id).is_some() {
             return Item::Call(self.node_for(Instance::new_raw(def_id, args)));
         }
+        // A trait method declaration with a contract: an unresolved call on `Self`
+        // or a type parameter costs the contract (every implementation is checked).
+        if let Some(m) = self.crates.contract_of(tcx, def_id) {
+            return Item::Call(self.node_contract(def_id, args, m));
+        }
         if let Some(trait_id) = tcx.trait_of_assoc(def_id)
             && let Some(self_ty) = args.types().next()
             && let ty::Param(p) = self_ty.peel_refs().kind()
@@ -3367,13 +3394,12 @@ fn declared_events(what: &str, by: &str, m: &Mark, n: u64) -> Vec<Ev> {
 /// The events of a dynamic call of the trait method `path` whose declaration carries
 /// the contract `m`.
 fn contract_events(path: &str, m: &Mark) -> Vec<Ev> {
+    contract_call_events(&format!("dynamic call of `{path}`"), m)
+}
+
+fn contract_call_events(what: &str, m: &Mark) -> Vec<Ev> {
     let n = if m.kind == marks::Kind::Fip { m.n } else { 0 };
-    declared_events(
-        &format!("dynamic call of `{path}`"),
-        &format!("its contract `{}`", m.tag()),
-        m,
-        n,
-    )
+    declared_events(what, &format!("its contract `{}`", m.tag()), m, n)
 }
 
 /// Where a function pointer or a pointer to a trait object in one body comes from,

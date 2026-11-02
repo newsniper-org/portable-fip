@@ -462,6 +462,26 @@ driver 21 roots, 11 passed, 15 errors (the weaker mark, the panic path of `Index
 under the contract, `requires` in a contract). Details: `TODOs/fip-prelint.md`,
 "Resolved 2026-11-02: `#[fip]` on trait method declarations".
 
+## Amendment 2026-11-02: Contracts for calls on `Self` and type parameters inside generic bodies
+
+A call of a contracted trait method on `Self` or a type parameter inside a generic body
+(e.g. a default method body calling `self.area()`, or `fn f<S: Shape>(s: &S) { s.area() }`)
+was previously reported as a warning ("only relative to its generic parameters") because
+it was treated as a term instead of using the contract. Soundness is identical to `dyn`
+calls: every implementation is checked against the contract in its crate.
+
+The driver now uses the contract for unresolved generic calls (`self.node_contract`),
+creating a leaf node with the contract's declared events. Instantiated analysis where
+the concrete instance is known is kept (no precision lost when the callee can be
+resolved). Calls of non-contracted trait methods continue to produce the warning/term,
+and implementations violating the contract continue to be reported at the implementation.
+
+Measured:
+- `indirect/shapes`: 5 roots (was 4), all 5 passed, 0 errors, 0 warnings, 0 notes.
+- `indirect/app`: 27 roots (was 21), 14 passed (was 11), 19 errors (was 15), 1 warning
+  (was 0: the uncontracted `generic_plain`). Warnings removed on contracted generic
+  calls (`generic_area`, `generic_scaled`, default body `Shape::twice` in `accept.rs`).
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
