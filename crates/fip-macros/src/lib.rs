@@ -277,13 +277,68 @@
 //! `requires(..)` (a dynamic call does not check a precondition). A strict contract,
 //! which `fip-prelint` supports, is written by hand:
 //! `#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = true, panic_macros = false))]`.
-//! `strict = true` on a default body is rejected as well: with a receiver by the
-//! check for methods outside `#[fip_impl]`, without one because its certificate
-//! would be a trait item (rustc rejects its `pub(self)`, E0449).
+//! `strict = true` on a default body is rejected as well, with a message saying so
+//! (a certificate belongs to one body; `#[fip_impl]` cannot certify a default body
+//! its impl block does not contain). The tokens of a default body without receiver
+//! are those of a free function, so the attribute reads the enclosing block from the
+//! item's source file (`Span::local_file`/`line`/`column`; used only when the file at
+//! that position holds the item's own `fn <name>` and the block header is exactly a
+//! `trait` header). Where the file cannot be read that way (e.g. a span from another
+//! macro), the certificate is emitted with `pub(self)` as before, which rustc rejects
+//! on a trait item with its generic E0449 ("visibility qualifiers are not permitted
+//! here"); `#[fip_trait]` on the trait always gives the specific message.
 //!
-//! The macro cannot tell a trait method declaration from a foreign function
-//! (`unsafe extern "C" { fn f(); }`); on the latter the mark has no body to check,
-//! and `fip-prelint` reports it as unresolved (`⊤`).
+//! A bodiless function is also what a foreign function looks like. Inside
+//! `#[fip_extern]` the block attribute sees the items (`#[fip]` there needs
+//! `evidence = ".."`). A bare foreign item is rejected when its tokens show it is one
+//! (a visibility, the `safe` qualifier or a variadic `...` parameter, none of which
+//! rustc accepts on a trait method declaration; measured, rustc 1.99.1), or when its
+//! source file shows it inside an `extern` block (as above). A probe item that fails
+//! only in an `extern` block (a hidden function with a body: "incorrect function
+//! inside `extern` block") was measured and not used: it would add an associated
+//! function to every trait the attribute is used in. Where neither applies,
+//! `fip-prelint` rejects the mark ("foreign functions must be certified with
+//! `fip::cert` or excluded with `fip::exclude`", measured).
+//!
+//! a plain foreign function (checked by `just compile-fail-reasons` on a real file;
+//! rustdoc's doctests have no source file position to read, so there the mark compiles
+//! and the driver rejects it):
+//! ```compile_fail,ignore
+//! # // expect: #[fip] on a foreign function (it is declared in an `extern` block)
+//! unsafe extern "C" {
+//!     #[fip_macros::fip]
+//!     fn c_h();
+//! }
+//! # fn main() {}
+//! ```
+//!
+//! a public foreign function:
+//! ```compile_fail
+//! # // expect: #[fip] on a foreign function (it has a visibility, which a trait method declaration cannot have)
+//! unsafe extern "C" {
+//!     #[fip_macros::fip]
+//!     pub fn c_f(x: i32) -> i32;
+//! }
+//! # fn main() {}
+//! ```
+//! a `safe` foreign function:
+//! ```compile_fail
+//! # // expect: #[fip] on a foreign function (it has the `safe` qualifier, which a trait method declaration cannot have)
+//! unsafe extern "C" {
+//!     #[fip_macros::fip]
+//!     safe fn c_g(x: i32) -> i32;
+//! }
+//! # fn main() {}
+//! ```
+//! a variadic foreign function:
+//! ```compile_fail
+//! # // expect: #[fbip] on a foreign function (it has a variadic `...` parameter, which a trait method declaration cannot have)
+//! unsafe extern "C" {
+//!     #[fip_macros::fbip]
+//!     fn c_printf(fmt: *const u8, ...) -> i32;
+//! }
+//! # fn main() {}
+//! ```
 //!
 //! a default body that allocates:
 //! ```compile_fail
@@ -388,7 +443,7 @@
 //! ```
 //! `strict = true` on a default body with a receiver:
 //! ```compile_fail
-//! # // expect: strict mode is not available on trait method declarations
+//! # // expect: #[fip] strict: `strict = true` on a trait method's default body is not supported
 //! trait T {
 //!     #[fip_macros::fip(strict = true)]
 //!     fn f(&self) -> u8 { 1 }
@@ -397,7 +452,17 @@
 //! ```
 //! `strict = true` on a default body without a receiver:
 //! ```compile_fail
-//! # // expect: visibility qualifiers are not permitted here
+//! # // expect: #[fip] strict: `strict = true` on a trait method's default body is not supported
+//! trait T {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn f() -> u8 { 1 }
+//! }
+//! # fn main() {}
+//! ```
+//! `strict = true` on a default body under `#[fip_trait]`:
+//! ```compile_fail
+//! # // expect: #[fip_trait]: #[fip] strict: `strict = true` on a trait method's default body is not supported
+//! #[fip_macros::fip_trait]
 //! trait T {
 //!     #[fip_macros::fip(strict = true)]
 //!     fn f() -> u8 { 1 }
@@ -884,6 +949,7 @@
 
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
+mod context;
 mod strict;
 
 use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, is_heap_constructor};
@@ -1581,7 +1647,14 @@ fn expand_parts(
         base_errors(mode, &tag, &scan, &shape.name)
     };
     let strict_args = args.filter(|a| a.strict && !mark_only);
-    if strict_args.is_some() && ctx.is_none() && has_receiver(shape.params.as_ref()) {
+    let in_trait = strict_args.is_some()
+        && ctx.is_none()
+        && shape.vis.is_empty()
+        && fn_keyword_span(&toks, &shape)
+            .is_some_and(|sp| context::enclosing(sp, &shape.name) == context::Enclosing::Trait);
+    if in_trait {
+        errors.extend(compile_error(body.span(), &strict_default_body_error(&tag)));
+    } else if strict_args.is_some() && ctx.is_none() && has_receiver(shape.params.as_ref()) {
         errors.extend(compile_error(
             body.span(),
             &format!(
@@ -1674,6 +1747,14 @@ fn expand_decl(
             "FIP attributes apply only to functions with a body inside an `impl` block",
         ));
     }
+    if let Some((sp, why)) = foreign_signal(toks, shape) {
+        return Err(compile_error(
+            sp,
+            &format!(
+                "{tag} on a foreign function ({why}): a foreign function has no body to check; certify it with `#[fip_cert(evidence = \"..\")]` or exclude it with `#[fip_exclude]`, under `#[fip_macros::fip_extern]` on the `extern` block"
+            ),
+        ));
+    }
     let mut errors = TokenStream::new();
     if let Some(a) = args {
         if let Some((_, _, sp)) = a.params.first() {
@@ -1712,6 +1793,66 @@ fn expand_decl(
     f.extend(prelint_mark(mode, args));
     f.extend(toks[shape.after_attrs..].iter().cloned());
     Ok((TokenStream::new(), f))
+}
+
+/// The span of the `fn` keyword of the item.
+fn fn_keyword_span(toks: &[TokenTree], shape: &FnShape) -> Option<Span> {
+    toks[shape.after_attrs..]
+        .iter()
+        .find(|t| is_ident(t, "fn"))
+        .map(TokenTree::span)
+}
+
+/// The error for `strict = true` on a trait method's default body.
+fn strict_default_body_error(tag: &str) -> String {
+    format!(
+        "{tag} strict: `strict = true` on a trait method's default body is not supported: a certificate `__fip_strict_..` belongs to one function body, and `#[fip_impl]` cannot certify a default body its impl block does not contain. Declare the method without a body under `#[fip_macros::fip_trait]` (a strict contract; each implementation is certified by `#[fip_impl]`), or drop `strict = true` (the default body is still checked by `#[fip]`, and by `fip-prelint` against the contract)"
+    )
+}
+
+/// A token of a bodiless function that rustc accepts only on a foreign function
+/// (rejected on a trait method declaration, measured with rustc 1.99.1): a
+/// visibility (E0449 in a trait), the `safe` qualifier, or a variadic `...`
+/// parameter. A bare `fn f();` carries none of them; then its source file decides:
+/// the innermost block around it is an `extern` block ([`context::enclosing`]). If
+/// that is not determined, the driver rejects a mark on a foreign function.
+fn foreign_signal(toks: &[TokenTree], shape: &FnShape) -> Option<(Span, &'static str)> {
+    if let Some(v) = shape.vis.first() {
+        return Some((
+            v.span(),
+            "it has a visibility, which a trait method declaration cannot have",
+        ));
+    }
+    let mut i = shape.after_attrs;
+    while let Some(t) = toks.get(i) {
+        if is_ident(t, "fn") {
+            break;
+        }
+        if is_ident(t, "safe") {
+            return Some((
+                t.span(),
+                "it has the `safe` qualifier, which a trait method declaration cannot have",
+            ));
+        }
+        i += 1;
+    }
+    let params: Vec<TokenTree> = shape
+        .params
+        .as_ref()
+        .map(|g| g.stream().into_iter().collect())
+        .unwrap_or_default();
+    if let Some(w) = params
+        .windows(3)
+        .find(|w| w.iter().all(|t| is_punct(t, '.')))
+    {
+        return Some((
+            w[0].span(),
+            "it has a variadic `...` parameter, which a trait method declaration cannot have",
+        ));
+    }
+    let sp = fn_keyword_span(toks, shape)?;
+    (context::enclosing(sp, &shape.name) == context::Enclosing::Extern)
+        .then_some((sp, "it is declared in an `extern` block"))
 }
 
 /// The `# FIP` doc section of a trait method declaration (a contract).
@@ -2316,6 +2457,9 @@ fn fip_trait_inner(
             continue;
         };
         let shape = parse_fn(item_toks)?;
+        if let Some(body) = &shape.body {
+            return Err((body.span(), strict_default_body_error(&args.mode.name())));
+        }
         let certs = emit_trait_method_cert(&header.trait_name, &header.vis, &shape, &args)?;
         module_items.extend(certs);
         new_body.extend(mark_trait_method(item_toks, at));

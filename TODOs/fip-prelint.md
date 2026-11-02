@@ -1396,3 +1396,66 @@ traits that are not dyn-compatible (e.g. `Clone`). So these are checked by
 | same contract, impl without attribute | compiles | compiles; `fip-prelint` checks the body against the contract (passed for `x`) |
 | `compile-fail-reasons` | 72/72 | 73/73 (+1 panic-strictness example) |
 | self-check `strict_impl` (`Peek` contract + `Ticker` impl, both `panic_macros = false`) | 15 roots, 14 passed | 17 roots, 16 passed |
+
+## Resolved 2026-11-02: foreign functions and strict default bodies at expansion
+
+Two cases the attribute macro accepted or rejected only with rustc's generic error,
+because its tokens look like something else:
+
+- `#[fip]` on a **foreign function** (`unsafe extern "C" { #[fip] fn f(); }`) looks
+  like a trait method declaration; it compiled, and only `fip-prelint` rejected it.
+- `strict = true` on a **trait default body without receiver** looks like a free
+  function; it failed with E0449 "visibility qualifiers are not permitted here" (the
+  certificate was emitted with `pub(self)` for that purpose), and one with a receiver
+  with the "needs `#[fip_impl]`" message, which does not fit a trait.
+
+**Token signals.** Measured with rustc 1.99.1: on a trait method declaration a
+visibility is E0449, the `safe` qualifier "items outside of `unsafe extern { }` cannot
+be declared with `safe` safety qualifier", a variadic `...` "`...` is not supported for
+non-extern functions". So a bodiless function with any of them is a foreign function:
+rejected with "#[fip] on a foreign function (it has ..): .. certify it with
+`#[fip_cert(evidence = "..")]` or exclude it with `#[fip_exclude]`, under
+`#[fip_macros::fip_extern]`". `extern "abi"` and `unsafe` on a bodiless function are
+valid in a trait and are not signals.
+
+**Enclosing block from the source file** (`crates/fip-macros/src/context.rs`). For a
+plain `fn f();` and for a default body, the attribute locates the `fn` keyword with
+`Span::local_file`, `line` and `column`, checks that the file holds `fn <name>` there,
+scans the file up to that point (comments, strings, raw strings, character literals
+skipped; `;` inside `(..)`/`[..]` ignored) and classifies the header of the innermost
+open `{` after its outer attributes: `[pub ..] [unsafe] [auto] trait Name ..` or
+`[unsafe] extern ["abi"]` exactly, else unknown. Used only to reject code that is
+rejected anyway, so an unknown position (no local file, other text there, e.g. a
+doctest's line numbers, or an unrecognised header) keeps the earlier behaviour (the
+driver's rejection, E0449). Unit tests: 3 (headers recognised, others unknown, the
+position check). A probe item that fails only in an `extern` block (a hidden function
+with a body, "incorrect function inside `extern` block") was measured and not used:
+it adds an associated function to every trait. No probe exists for the default body:
+every construct measured that fails only in a trait (`struct`, `use`, `macro_rules!`,
+`mod`, `extern crate`, `static`, `const _` items) fails with a fixed rustc message, and
+anything mentioning `Self` fails in a free function instead.
+
+`#[fip_trait]` also rejects `strict = true` on a default body itself (it sees the
+trait's items), so the message does not depend on the file there.
+
+**Measured** (probe crate under `/tmp`):
+
+| item | before (HEAD `f5d130c`) | after |
+|---|---|---|
+| `#[fip] pub fn c_f(..);` in `extern "C"` | compiles (driver error only) | "on a foreign function (it has a visibility ..)" |
+| `#[fip] safe fn c_g(..);` | compiles | "(it has the `safe` qualifier ..)" |
+| `#[fbip] fn c_printf(fmt: *const u8, ...)` | compiles | "(it has a variadic `...` parameter ..)" |
+| `#[fip] fn c_plain();` | compiles | "(it is declared in an `extern` block)" |
+| trait: `#[fip] fn decl(&self) -> u8;`, `#[fip] fn assoc() -> u8;` | compile | compile |
+| trait: `#[fip(strict = true)] fn no_recv() -> u8 { 1 }` | E0449 "visibility qualifiers are not permitted here" | "#[fip] strict: `strict = true` on a trait method's default body is not supported: .. Declare the method without a body under `#[fip_macros::fip_trait]` .., or drop `strict = true` .." |
+| trait: same with `&self` | "a method needs `#[fip_macros::fip_impl]` .." | the same default-body message |
+| same under `#[fip_trait]` | E0449 | "#[fip_trait]: #[fip] strict: `strict = true` on a trait method's default body is not supported .." |
+| strict free function, strict nested function, `#[fip]` inherent associated function | compile | compile |
+| `compile-fail-reasons` | 73/73 | 78/78 (+3 foreign token signals, +1 plain foreign function, +1 default body under `#[fip_trait]`; the two default-body examples now expect the new message) |
+
+The plain-foreign-function example is fenced `compile_fail,ignore`: rustdoc compiles
+doctests without a source file position (measured: there the mark compiles), so only
+`verify/compile_fail_reasons.py`, which compiles each example as a real file, runs it
+(the script now also collects `compile_fail,ignore` blocks). The two default-body
+examples fail under rustdoc too (E0449, the fallback) and for the new message in the
+script.

@@ -10,6 +10,10 @@ rustc against the built crates and checks the errors:
   message contains <text>, and every other error must be a known follow-up of it;
 - an example without one must fail only with fip-macros' own messages.
 
+Examples fenced as `compile_fail,ignore` are checked here only: their rejection
+needs the example to be a real file (fip-macros reads an item's enclosing block from
+its source file), which rustdoc's doctests are not, so rustdoc does not run them.
+
 Usage: python verify/compile_fail_reasons.py <target dir with debug/deps>
 """
 
@@ -39,7 +43,7 @@ def main() -> int:
         "fip_strict": newest(os.path.join(deps, "libfip_strict-*.rlib")),
     }
     src = open("crates/fip-macros/src/lib.rs", encoding="utf-8").read()
-    blocks = re.findall(r"//! ```compile_fail\n((?://!.*\n)+?)//! ```", src)
+    blocks = re.findall(r"//! ```compile_fail(?:,ignore)?\n((?://!.*\n)+?)//! ```", src)
     if not blocks:
         print("no compile_fail examples found")
         return 1

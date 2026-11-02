@@ -546,6 +546,22 @@ mark). Strict callers are unchanged: the certificate `__fip_strict_<name>` is fo
 through the marked declaration's path only. Measured: `tests/fixtures/ffi`, see
 `TODOs/fip-prelint.md`, "Resolved 2026-11-02: foreign marks by link symbol".
 
+## Amendment 2026-11-02: the macro reads an item's enclosing block for two rejections
+
+Two statements of the trait-contract amendment change (no driver rule changes): "the
+macro cannot tell a trait method declaration from a foreign function" and "`strict =
+true` on a default body without receiver: E0449". `fip-macros` now rejects `#[fip]`
+on a bodiless function whose tokens show a foreign function (a visibility, `safe`, a
+variadic `...`, none valid on a trait method declaration), and reads the enclosing
+block from the item's source file (`Span::local_file`/`line`/`column`; used only when
+that position holds the item's own `fn <name>` and the header is exactly `trait ..`
+or `extern ..`) to reject a plain `fn f();` in an `extern` block and `strict = true`
+on a trait default body (with or without receiver) with specific messages. Both are
+rejections of code that is rejected anyway (by the driver, or by rustc's E0449), so
+a position that cannot be read leaves the earlier behaviour in place. `#[fip_trait]`
+gives the default-body message without the file. Details: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-02: foreign functions and strict default bodies at expansion".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
