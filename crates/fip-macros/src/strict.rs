@@ -73,6 +73,8 @@ pub(crate) struct Call {
     cert_prefix: Vec<TokenTree>,
     /// Certificate name: `f`, `Type__m` or `Type__Trait__m`.
     cert_name: String,
+    /// If this is a call through a trait contract: `(trait_name, method_name)`.
+    pub(crate) trait_target: Option<(String, String)>,
     /// The callee as written, for messages.
     shown: String,
     span: Span,
@@ -104,6 +106,8 @@ pub(crate) struct StrictScan {
     /// Path of the `fip_strict` crate in generated code (`crate = ..`); `None` is
     /// `::fip_strict`.
     pub(crate) krate: Option<TokenStream>,
+    /// Mapping of parameter name to its trait path and trait name: `(prefix, trait_name)`.
+    pub(crate) param_traits: Vec<(String, (Vec<TokenTree>, String))>,
 }
 
 fn param_index(params: &[Param], name: &str) -> Option<usize> {
@@ -225,7 +229,8 @@ impl StrictScan {
         1
     }
 
-    /// `recv.name(..)`: allowed only as `param.call(..)` on a declared `FipFn` parameter.
+    /// `recv.name(..)`: allowed as `param.call(..)` on a declared `FipFn` parameter
+    /// or on a parameter whose type implements a contracted trait.
     fn on_method_call(&mut self, toks: &[TokenTree], i: usize, id: &Ident, in_loop: bool) {
         let s = id.to_string();
         if s == "call"
@@ -240,6 +245,26 @@ impl StrictScan {
                 in_loop,
             });
             return;
+        }
+        if i >= 2
+            && let TokenTree::Ident(recv) = &toks[i - 2]
+            && !(i >= 3 && is_punct(&toks[i - 3], '.'))
+        {
+            let recv_str = recv.to_string();
+            if let Some((_, (prefix, trait_name))) =
+                self.param_traits.iter().find(|(name, _)| name == &recv_str)
+            {
+                let cert_name = format!("{trait_name}__{s}");
+                self.calls.push(Call {
+                    cert_prefix: prefix.clone(),
+                    cert_name,
+                    trait_target: Some((trait_name.clone(), s.clone())),
+                    shown: format!("{recv_str}.{s}"),
+                    span: id.span(),
+                    in_loop,
+                });
+                return;
+            }
         }
         self.err(
             id.span(),
@@ -275,6 +300,23 @@ impl StrictScan {
         in_loop: bool,
     ) {
         let s = id.to_string();
+        if ty.first().is_some_and(|t| is_ident(t, "dyn")) {
+            let after_dyn = &ty[1..];
+            let Some((TokenTree::Ident(last), module)) = after_dyn.split_last() else {
+                self.err(id.span(), "expected a trait path in `<dyn Trait>::f`");
+                return;
+            };
+            let cert_name = format!("{last}__{s}");
+            self.calls.push(Call {
+                cert_prefix: module.to_vec(),
+                cert_name,
+                trait_target: Some((last.to_string(), s.clone())),
+                shown: format!("<dyn {last}>::{s}"),
+                span: id.span(),
+                in_loop,
+            });
+            return;
+        }
         let Some((TokenTree::Ident(last), module)) = ty.split_last() else {
             self.err(id.span(), "expected a type path in `<Type as Trait>::f`");
             return;
@@ -283,6 +325,23 @@ impl StrictScan {
             Some(t) => format!("<{last} as {t}>::{s}"),
             None => format!("<{last}>::{s}"),
         };
+        if let Some(t) = tr
+            && self.param_traits.iter().any(|(name, (_, tr_name))| {
+                (name == &last.to_string() || tr_name == &last.to_string())
+                    && tr_name == &t.to_string()
+            })
+        {
+            let cert_name = format!("{t}__{s}");
+            self.calls.push(Call {
+                cert_prefix: Vec::new(),
+                cert_name,
+                trait_target: Some((t.to_string(), s.clone())),
+                shown,
+                span: id.span(),
+                in_loop,
+            });
+            return;
+        }
         let Some(ty_name) = self.type_name(last, &shown) else {
             return;
         };
@@ -293,6 +352,7 @@ impl StrictScan {
         self.calls.push(Call {
             cert_prefix: module.to_vec(),
             cert_name,
+            trait_target: None,
             shown,
             span: id.span(),
             in_loop,
@@ -370,6 +430,7 @@ impl StrictScan {
         self.calls.push(Call {
             cert_prefix,
             cert_name,
+            trait_target: None,
             shown,
             span: id.span(),
             in_loop,
@@ -595,11 +656,19 @@ fn brace(inner: TokenStream) -> TokenTree {
 /// `Cert` type, not as a method, so a constant of another type with an `allocs_for`
 /// method is not accepted as a certificate.
 fn term(c: &Call, krate: &TokenStream) -> TokenStream {
-    let mut arg: TokenStream = c.cert_prefix.iter().cloned().collect();
-    arg.extend([TokenTree::Ident(Ident::new(
-        &format!("__fip_strict_{}", c.cert_name),
-        c.span,
-    ))]);
+    let mut arg: TokenStream = if let Some((tr_path, m)) = &c.trait_target {
+        let tr_prefix: String = c.cert_prefix.iter().map(ToString::to_string).collect();
+        format!("<dyn {tr_prefix}{tr_path}>::__fip_strict_{m}")
+            .parse::<TokenStream>()
+            .unwrap()
+    } else {
+        let mut a: TokenStream = c.cert_prefix.iter().cloned().collect();
+        a.extend([TokenTree::Ident(Ident::new(
+            &format!("__fip_strict_{}", c.cert_name),
+            c.span,
+        ))]);
+        a
+    };
     arg.extend(ts(&format!(", {:?}", c.cert_name)));
     let mut out = krate_item(krate, "Cert::allocs_for");
     out.extend([paren(arg)]);

@@ -482,6 +482,31 @@ Measured:
   (was 0: the uncontracted `generic_plain`). Warnings removed on contracted generic
   calls (`generic_area`, `generic_scaled`, default body `Shape::twice` in `accept.rs`).
 
+## Amendment 2026-11-02: Strict contracts without hand-written marks (`#[fip_trait]`)
+
+Previously `strict = true` on a trait method declaration was rejected by `fip-macros`
+and required a hand-written `#[cfg_attr(fip_prelint, fip::mark(.., strict = true, ..))]`,
+and strict callers could not call contracted methods through `dyn` or generic receivers
+because no certificate was available.
+
+Measurements on compiler and macro constraints:
+- An attribute macro on a trait item can expand to multiple trait items, but putting an
+  associated const inside a trait makes the trait not dyn-compatible (E0038).
+- Functions in traits cannot be const (E0379), and generic const items are experimental (E0658).
+- An attribute on a trait item cannot emit items outside the trait at module level.
+- Inherent impls on `dyn Trait` (`impl dyn Trait { pub const __fip_strict_<m>: Cert = ...; }`)
+  keep the trait 100% dyn-compatible and are accessible across module boundaries wherever
+  the trait is in scope.
+
+Design:
+- `#[fip(strict = true)]` and `#[fip(N, strict = true)]` are supported on trait method declarations
+  under `#[fip_trait]`, emitting the driver mark and certificates `<dyn Trait>::__fip_strict_<m>` and `<vis> const __fip_strict_<Trait>__<m>`.
+- `strict = true` on a declaration without `#[fip_trait]` is rejected with a clear compile error.
+- Generic traits and generic trait methods under `#[fip_trait]` are rejected clearly at compile time.
+- Strict callers support `x.m()` (for `x: &dyn Tr` or `T: Tr`), `Tr::m(x)`, `<dyn Tr>::m(x)` and `<T as Tr>::m(x)`.
+- Implementations under `#[fip_impl]` are checked against the contract at compile time via a typed const assertion
+  (`Cert::allocs_for(__fip_strict_Self__Tr__m, ..) <= Cert::allocs_for(<dyn Tr>::__fip_strict_m, ..)`, failing with E0080 if weaker, impossible to forge without `unsafe`).
+- Hand-written mark case (`Grow::grow` in `indirect/shapes`) kept as equivalence check.
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

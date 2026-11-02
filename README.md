@@ -20,7 +20,7 @@ a kernel.
 | `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
 | `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
 | `fip-strict` | yes | no | 3 declarations | `Cert` (named), `FipBound`, `FipFn` (with Verus `pre`/`post` specs), `Certified`: allocation certificates for strict mode; Verus-verified |
-| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints (on a trait method declaration: a contract of every implementation, checked by `fip-prelint`); `strict = true` mode; `#[fip_impl]`; `fip_fn!` |
+| `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints (on a trait method declaration: a contract of every implementation, checked by `fip-prelint`); `strict = true` mode; `#[fip_trait]`; `#[fip_impl]`; `fip_fn!` |
 | `fip-lint-rules` | yes | no | forbidden | the rule tables shared by `fip-macros` and `fip-testkit` (allocation sites, ghost macros, audited `core` table) |
 | `fip-testkit` | no (tests) | — | 1 `impl` | counting allocator (`assert_fip!`, `assert_fbip!`, `assert_fip_n!`, `assert_fip_all_threads!`); `callgraph` (recursion across crates); `summaries` (interprocedural `fip`/`fip(N)` allocation bounds); `surface`, `certs` (source gates) |
 
@@ -105,13 +105,13 @@ on the facade only; details in the `fip-macros` crate documentation.
 Methods: `#[fip_impl]` on an `impl` block certifies its strict methods, including
 generic impls and trait impls (`__fip_strict_<Type>__<m>`); callers use `Type::m`,
 `Self::m` or `<Type as Tr>::m`. `panic_macros = false` additionally rejects the
-panicking macros. Strict mode is not available on trait method declarations (a
-certificate belongs to one body; a declaration has none, and nothing could make every
-implementation carry one): `strict = true` there, and on a default body, does not
-compile. A non-strict `#[fip]` on the declaration is a contract for `fip-prelint`
-(below); a strict contract is written by hand as
-`#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = true, panic_macros = false))]`.
-
+Strict contracts on trait methods are declared as `#[fip(strict = true)]`
+(or `#[fip(N, strict = true)]`) under `#[fip_trait]` on the trait. `#[fip_trait]`
+emits the contract certificates `<dyn Trait>::__fip_strict_<m>` and
+`__fip_strict_<Trait>__<m>`, which strict callers use for `x.m()`, `Trait::m(x)` and
+`<dyn Trait>::m(x)`. Implementations under `#[fip_impl]` are checked against the
+contract at compile time (impl certificate bound ≤ contract bound) and by the driver
+always.
 The `core` table is **audited** (at rustc 1.97.1 and 1.99.1; a test fails on any
 other compiler) rather than machine-proved, except that "no allocation" follows from
 `core` having no allocator; the installed `vstd` specifies 7 of its 11 entries.
@@ -175,9 +175,9 @@ crates are compiled by the real rustc and stay ⊤.
   (a `dyn` or generic call checks none); an
   implementation's own mark that is weaker than the contract is an error; an
   implementation in a crate without `fip::export` is ⊤ in every analysed crate that
-  sees it. `param(..)`, `requires(..)` and `strict = true` are rejected on a
-  declaration by `fip-macros` (a strict contract is written by hand), and the first two
-  by the driver.
+  sees it. `param(..)` and `requires(..)` are rejected on a
+  declaration by `fip-macros` and the driver; `strict = true` on a declaration is
+  supported under `#[fip_trait]`.
 - `#[fip(.., requires(i < j, j < xs.len()))]` (emitted as
   `#[cfg_attr(fip_prelint, fip::requires(..))]`, also written directly) declares a
   precondition: the function is checked under it as a root, and every analysed call
@@ -291,7 +291,7 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 | `prelint` | rustfmt and clippy (`-D warnings`) on the driver; `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, allocation and free sources, drops through their glue, declared preconditions, function pointers, trait objects and trait method contracts, std summaries (and a stale one ignored), bad attributes) a self-check of this workspace against `selfcheck.expected`, the same for every installed target (`targets.expected`), stack bounds of one fixture in two stated builds, and the rejected behaviour examples of `fip-macros` through the driver (mark-only mode) |
 | `prelint-repin` | not in `ci`: `just prelint-repin <version>` runs the checks of a move to another rustc (driver build, probes, entry points, std summaries, driver tests) and lists the pins and tables to re-audit |
 | `prelint-std-summaries` | not in `ci`: regenerates `tools/fip-prelint/std-summaries/<release>-<target>.txt` (`-Zbuild-std` of the seed crate, ~2 min); run after a repin or a seed change, and commit the result |
-| `compile-fail-reasons` | each of the 62 `compile_fail` examples of `fip-macros` (37 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |
+| `compile-fail-reasons` | each of the 66 `compile_fail` examples of `fip-macros` (39 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |
 
 ## Usage notes
 

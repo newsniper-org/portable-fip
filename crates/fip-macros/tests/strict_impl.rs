@@ -13,7 +13,7 @@ use fip_testkit::{assert_fip, assert_fip_n};
 fip_testkit::install!();
 
 mod shapes {
-    use fip_macros::{fip, fip_impl};
+    use fip_macros::{fip, fip_impl, fip_trait};
 
     /// A generic slot.
     pub struct Slot<T> {
@@ -48,8 +48,10 @@ mod shapes {
     }
 
     /// A trait with an in-place step.
+    #[fip_trait]
     pub trait Step {
         /// Advances in place, returns the previous state.
+        #[fip(strict = true)]
         fn step(&mut self) -> u32;
     }
 
@@ -126,6 +128,18 @@ fn slot_step(s: &mut Slot<u8>) -> u32 {
     <shapes::Slot<u8> as Step>::step(s)
 }
 
+/// Strict caller through `dyn Step`.
+#[fip(strict = true)]
+fn step_dyn(s: &mut dyn Step) -> u32 {
+    s.step()
+}
+
+/// Strict caller through generic `S: Step`.
+#[fip(strict = true)]
+fn step_gen<S: Step>(s: &mut S) -> u32 {
+    s.step()
+}
+
 #[test]
 fn generic_and_trait_methods_are_callable_from_strict_code() {
     let mut s = Slot { v: 1_u8 };
@@ -137,6 +151,8 @@ fn generic_and_trait_methods_are_callable_from_strict_code() {
     assert_eq!(assert_fip!(both_steps(&mut t)), (5, 16));
     assert_eq!(assert_fip!(t.trait_step()), 16);
     assert_eq!(Step::step(&mut t), 17);
+    assert_eq!(assert_fip!(step_dyn(&mut t)), 18);
+    assert_eq!(assert_fip!(step_gen(&mut t)), 19);
     assert_eq!(assert_fip!(slot_step(&mut s)), 7);
 }
 
@@ -151,4 +167,6 @@ fn certificates_are_named_after_type_trait_and_method() {
     assert_eq!(shapes::__fip_strict_Ticker__step.name(), "Ticker__step");
     assert_eq!(shapes::__fip_strict_Slot__Step__step.allocs(), 0);
     assert_eq!(__fip_strict_box_it.allocs_for("box_it"), 1);
+    assert_eq!(shapes::__fip_strict_Step__step.name(), "Step__step");
+    assert_eq!(<dyn Step>::__fip_strict_step.allocs(), 0);
 }

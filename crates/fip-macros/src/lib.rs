@@ -227,6 +227,12 @@
 //! contract, and an implementation's own `#[fip(..)]` that is weaker than the contract
 //! is an error. Plain builds check no implementation: use `fip-prelint`
 //! (`docs/decisions/2026-11-01-fip-prelint.md`).
+//! Strict contracts on trait methods are declared as `#[fip(strict = true)]`
+//! (or `#[fip(N, strict = true)]`) under `#[fip_trait]` on the trait. `#[fip_trait]`
+//! emits `<dyn Trait>::__fip_strict_<m>` and `__fip_strict_<Trait>__<m>`, which
+//! strict callers use for `x.m()`, `Trait::m(x)` and `<dyn Trait>::m(x)`. Implementations
+//! under `#[fip_impl]` are checked against the contract at compile time (impl
+//! certificate bound ≤ contract bound).
 //!
 //! With a **default body**, the body gets the usual checks (above), and the mark is
 //! still the contract of every implementation (a kept default body is checked for
@@ -289,18 +295,49 @@
 //! }
 //! # fn main() {}
 //! ```
-//! `strict = true` on a declaration:
+//! Implementation with a certificate weaker than the trait's contract:
 //! ```compile_fail
-//! # // expect: `strict = true` is not supported on a trait method declaration
+//! # // expect: #[fip_impl]: impl certificate is weaker than contract
+//! use fip_macros::{fip, fip_impl, fip_trait};
+//! #[fip_trait]
+//! pub trait Shape {
+//!     #[fip(strict = true)]
+//!     fn area(&self) -> u32;
+//! }
+//! pub struct Square(pub u32);
+//! #[fip_impl]
+//! impl Shape for Square {
+//!     #[fip(1, strict = true)]
+//!     fn area(&self) -> u32 { *Box::new(self.0) }
+//! }
+//! # fn main() {}
+//! ```
+//! `strict = true` on a declaration without `#[fip_trait]`:
+//! ```compile_fail
+//! # // expect: `strict = true` on a trait method declaration requires `#[fip_macros::fip_trait]` on the trait
 //! trait T {
 //!     #[fip_macros::fip(strict = true)]
 //!     fn f(&self) -> u8;
 //! }
 //! # fn main() {}
 //! ```
+//! Strict caller of an uncontracted trait method:
+//! ```compile_fail
+//! # // expect: no associated function or constant named `__fip_strict_size` found for trait `dyn Plain`
+//! use fip_macros::fip;
+//! pub trait Plain {
+//!     fn size(&self) -> u32;
+//! }
+//! #[fip(strict = true)]
+//! pub fn call_plain(p: &dyn Plain) -> u32 {
+//!     p.size()
+//! }
+//! # fn main() {}
+//! ```
 //! `param(..)` on a declaration:
 //! ```compile_fail
 //! # // expect: `param(..)` is not supported in the contract of a trait method declaration
+//! #[fip_macros::fip_trait]
 //! trait T {
 //!     #[fip_macros::fip(strict = true, param(g = 0))]
 //!     fn f(&self, g: fn(u8) -> u8) -> u8;
@@ -660,7 +697,8 @@
 //! a trait method called as `Type::m` (could be an inherent method of that name):
 //! ```compile_fail
 //! # // expect: cannot find value `__fip_strict_S__m`
-//! trait Tr { fn m(&self) -> u8; }
+//! #[fip_macros::fip_trait]
+//! trait Tr { #[fip_macros::fip(strict = true)] fn m(&self) -> u8; }
 //! struct S;
 //! #[fip_macros::fip_impl]
 //! impl Tr for S {
@@ -714,6 +752,26 @@
 //! impl Tr<u8> for S {
 //!     #[fip_macros::fip(strict = true)]
 //!     fn m(&self) -> u8 { 1 }
+//! }
+//! # fn main() {}
+//! ```
+//! a generic trait under `#[fip_trait]`:
+//! ```compile_fail
+//! # // expect: generic traits (`trait Tr<..>`) are not supported for `#[fip_trait]`
+//! #[fip_macros::fip_trait]
+//! trait Tr<X> {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn m(&self) -> u8;
+//! }
+//! # fn main() {}
+//! ```
+//! a generic trait method under `#[fip_trait]`:
+//! ```compile_fail
+//! # // expect: generic trait methods (`fn m<..>(..)`) are not supported for strict contracts under `#[fip_trait]`
+//! #[fip_macros::fip_trait]
+//! trait Tr {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn m<T>(&self, x: T) -> u8;
 //! }
 //! # fn main() {}
 //! ```
@@ -784,6 +842,7 @@ pub fn fip(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct FipArgs {
     mode: Mode,
     strict: bool,
+    trait_checked: bool,
     params: Vec<(String, u64, Span)>,
     /// `panic_macros = false`: strict bodies may not use the panicking macros.
     panic_macros: bool,
@@ -879,6 +938,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
     let mut args = FipArgs {
         mode: Mode::Fip,
         strict: false,
+        trait_checked: false,
         params: Vec::new(),
         panic_macros: true,
         krate: None,
@@ -900,6 +960,9 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
                     _ => return Err((v.span(), "`strict` takes `true` or `false`".to_string())),
                 };
                 seen_strict = true;
+            }
+            [TokenTree::Ident(m)] if m.to_string() == "__fip_trait_checked" => {
+                args.trait_checked = true;
             }
             [TokenTree::Ident(key), eq, TokenTree::Ident(v)]
                 if key.to_string() == "panic_macros" && is_punct(eq, '=') =>
@@ -1037,6 +1100,7 @@ struct FnShape {
     /// Visibility tokens (`pub`, `pub(crate)`, or none).
     vis: Vec<TokenTree>,
     name: String,
+    generics: Vec<TokenTree>,
     /// Parameter list `( .. )`.
     params: Option<Group>,
     /// `{ body }`; `None` for a declaration ending in `;` (a trait method declaration:
@@ -1116,11 +1180,12 @@ fn parse_fn(toks: &[TokenTree]) -> Result<FnShape, (Span, String)> {
         Some(t) if is_punct(t, ';') => None,
         _ => return Err(not_fn()),
     };
-    let params = param_list(&toks[i + 2..]);
+    let (generics, params) = param_list_and_generics(&toks[i + 2..]);
     Ok(FnShape {
         after_attrs,
         vis,
         name: name.to_string(),
+        generics,
         params,
         body,
     })
@@ -1128,8 +1193,9 @@ fn parse_fn(toks: &[TokenTree]) -> Result<FnShape, (Span, String)> {
 
 /// The parameter list `( .. )` of a signature starting right after the function
 /// name: skips generic parameters `<..>` (whose bounds may contain `Fn(..) -> R`).
-fn param_list(sig: &[TokenTree]) -> Option<Group> {
+fn param_list_and_generics(sig: &[TokenTree]) -> (Vec<TokenTree>, Option<Group>) {
     let mut j = 0;
+    let mut generics = Vec::new();
     if sig.first().is_some_and(|t| is_punct(t, '<')) {
         let mut depth = 0_i32;
         while j < sig.len() {
@@ -1146,11 +1212,13 @@ fn param_list(sig: &[TokenTree]) -> Option<Group> {
             }
             j += 1;
         }
+        generics = sig[..j].to_vec();
     }
-    match sig.get(j) {
+    let params = match sig.get(j) {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => Some(g.clone()),
         _ => None,
-    }
+    };
+    (generics, params)
 }
 
 struct Site {
@@ -1282,6 +1350,83 @@ fn expand(mode: Mode, args: Option<&FipArgs>, item: TokenStream) -> TokenStream 
 struct ImplCtx {
     self_ty: String,
     trait_name: Option<String>,
+    trait_toks: Vec<TokenTree>,
+}
+
+fn extract_param_traits(
+    params: Option<&Group>,
+    generics: &[TokenTree],
+    ctx: Option<&ImplCtx>,
+) -> Vec<(String, (Vec<TokenTree>, String))> {
+    let mut out = Vec::new();
+    let mut type_bounds: Vec<(String, (Vec<TokenTree>, String))> = Vec::new();
+
+    if generics.first().is_some_and(|t| is_punct(t, '<')) && generics.len() >= 2 {
+        let inner: TokenStream = generics[1..generics.len() - 1].iter().cloned().collect();
+        for part in split_commas(inner) {
+            if let Some(colon_pos) = part.iter().position(|t| is_punct(t, ':'))
+                && let Some(TokenTree::Ident(type_param)) = part.first()
+            {
+                let bounds_toks = &part[colon_pos + 1..];
+                let trait_toks: Vec<TokenTree> = bounds_toks
+                    .iter()
+                    .take_while(|t| !is_punct(t, '+'))
+                    .cloned()
+                    .collect();
+                if let Some((TokenTree::Ident(trait_name), prefix)) = trait_toks.split_last() {
+                    type_bounds.push((
+                        type_param.to_string(),
+                        (prefix.to_vec(), trait_name.to_string()),
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(g) = params {
+        for part in split_commas(g.stream()) {
+            let toks: Vec<TokenTree> = part.into_iter().filter(|t| !is_ident(t, "mut")).collect();
+            if toks.first().is_some_and(|t| is_ident(t, "self"))
+                || (toks.first().is_some_and(|t| is_punct(t, '&'))
+                    && toks.get(1).is_some_and(|t| is_ident(t, "self")))
+            {
+                if let Some(c) = ctx
+                    && let Some(ref t) = c.trait_name
+                {
+                    out.push(("self".to_string(), (Vec::new(), t.clone())));
+                }
+                continue;
+            }
+            if let Some(colon_pos) = toks.iter().position(|t| is_punct(t, ':'))
+                && let Some(TokenTree::Ident(param_name)) = toks.first()
+            {
+                let type_toks = &toks[colon_pos + 1..];
+                if let Some(dyn_pos) = type_toks.iter().position(|t| is_ident(t, "dyn")) {
+                    let after_dyn: Vec<TokenTree> = type_toks[dyn_pos + 1..]
+                        .iter()
+                        .take_while(|t| !is_punct(t, '+') && !is_punct(t, '>'))
+                        .cloned()
+                        .collect();
+                    if let Some((TokenTree::Ident(trait_name), prefix)) = after_dyn.split_last() {
+                        out.push((
+                            param_name.to_string(),
+                            (prefix.to_vec(), trait_name.to_string()),
+                        ));
+                    }
+                } else if let Some(TokenTree::Ident(last_ty)) =
+                    type_toks.iter().rfind(|t| !is_punct(t, '&'))
+                {
+                    let ty_str = last_ty.to_string();
+                    if let Some((_, (prefix, trait_name))) =
+                        type_bounds.iter().find(|(t, _)| t == &ty_str)
+                    {
+                        out.push((param_name.to_string(), (prefix.clone(), trait_name.clone())));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Certificate name of a strict function: `f`, `Type__m` or `Type__Trait__m`.
@@ -1292,10 +1437,12 @@ fn cert_name(fn_name: &str, ctx: Option<&ImplCtx>) -> String {
         Some(ImplCtx {
             self_ty,
             trait_name: None,
+            ..
         }) => format!("{self_ty}__{f}"),
         Some(ImplCtx {
             self_ty,
             trait_name: Some(t),
+            ..
         }) => format!("{self_ty}__{t}__{f}"),
     }
 }
@@ -1442,13 +1589,6 @@ fn expand_decl(
                     "{tag}: `param(..)` is not supported in the contract of a trait method declaration: its dynamic calls cannot check the arguments' bounds"
                 ),
             ));
-        } else if a.strict {
-            errors.extend(compile_error(
-                span,
-                &format!(
-                    "{tag}: `strict = true` is not supported on a trait method declaration: a certificate (`__fip_strict_..`) belongs to one function body and a declaration has none; declare the contract without `strict` (`fip-prelint` checks every implementation) and certify implementations with `#[fip_impl]`, or write a strict contract by hand (`#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", n = 0, strict = true, panic_macros = false))]`)"
-                ),
-            ));
         }
         if let Some((_, sp)) = &a.requires {
             errors.extend(compile_error(
@@ -1459,26 +1599,35 @@ fn expand_decl(
                 ),
             ));
         }
+        if a.strict && !a.trait_checked {
+            errors.extend(compile_error(
+                span,
+                &format!(
+                    "{tag}: `strict = true` on a trait method declaration requires `#[fip_macros::fip_trait]` on the trait: a certificate (`<dyn Trait>::__fip_strict_..`) must be generated outside the trait"
+                ),
+            ));
+        }
     }
     if !errors.is_empty() {
         return Err(errors);
     }
     let mut f = TokenStream::new();
     f.extend(toks[..shape.after_attrs].iter().cloned());
-    f.extend(decl_doc(mode));
+    let strict = args.is_some_and(|a| a.strict);
+    f.extend(decl_doc(mode, strict));
     f.extend(prelint_mark(mode, args));
     f.extend(toks[shape.after_attrs..].iter().cloned());
     Ok((TokenStream::new(), f))
 }
 
 /// The `# FIP` doc section of a trait method declaration (a contract).
-fn decl_doc(mode: Mode) -> TokenStream {
+fn decl_doc(mode: Mode, strict: bool) -> TokenStream {
     let what = match mode {
         Mode::Fip => "no allocation, no free and no recursion".to_string(),
         Mode::FipN(n) => format!("at most {n} allocations per call, no free and no recursion"),
         Mode::Fbip => "no allocation (frees and recursion allowed)".to_string(),
     };
-    let doc = format!(
+    let mut doc = format!(
         "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = {:?}] #[doc = \"\"] \
          #[doc = \"Not checked by `fip-macros`, which sees only this declaration. The MIR checker `fip-prelint` checks every implementation (and a default body) against the contract; a dynamic call of the method costs it.\"]",
         format!(
@@ -1486,6 +1635,9 @@ fn decl_doc(mode: Mode) -> TokenStream {
             mode.name()
         )
     );
+    if strict {
+        doc.push_str(" #[doc = \"\"] #[doc = \"Strict contract: verified against implementations by `fip-prelint`, certified for strict callers through `#[fip_trait]`.\"]");
+    }
     doc.parse().unwrap_or_default()
 }
 
@@ -1730,6 +1882,7 @@ fn run_strict_scan(
         self_ty: ctx.map(|c| c.self_ty.clone()),
         no_panic_macros: !args.panic_macros,
         krate: args.krate.clone(),
+        param_traits: extract_param_traits(shape.params.as_ref(), &shape.generics, ctx),
         ..strict::StrictScan::default()
     };
     let types = param_types(shape.params.as_ref());
@@ -1845,6 +1998,237 @@ pub fn fip_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             out
         }
     }
+}
+/// Certificates for the strict contracts of a trait.
+///
+/// Inside `#[fip_trait]`, every method declaration marked `#[fip(strict = true)]`
+/// (or `#[fip(N, strict = true)]`) declares a strict contract, and its certificate
+/// is emitted as `<dyn Trait>::__fip_strict_<m>` and `__fip_strict_<Trait>__<m>`:
+///
+/// | item | certificate | strict callers write |
+/// |---|---|---|
+/// | `trait Trait { fn m }` | `__fip_strict_Trait__m` | `x.m()`, `Trait::m(x)`, `<dyn Trait>::m(x)` |
+///
+/// `#[fip_trait(crate = path::to::fip_strict)]` sets the path of the `fip_strict` crate.
+#[proc_macro_attribute]
+pub fn fip_trait(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let krate = match split_commas(attr).as_slice() {
+        [] => Ok(None),
+        [part] => match part.as_slice() {
+            [TokenTree::Ident(key), eq, rest @ ..]
+                if key.to_string() == "crate" && is_punct(eq, '=') =>
+            {
+                parse_krate(key.span(), rest).map(Some)
+            }
+            _ => Err((
+                part.first().map_or_else(Span::call_site, TokenTree::span),
+                FIP_IMPL_ARGS.to_string(),
+            )),
+        },
+        [_, second, ..] => Err((
+            second.first().map_or_else(Span::call_site, TokenTree::span),
+            FIP_IMPL_ARGS.to_string(),
+        )),
+    };
+    let krate = match krate {
+        Ok(k) => k,
+        Err((span, msg)) => {
+            return compile_error(span, &format!("#[fip_trait]: {msg}"));
+        }
+    };
+    match fip_trait_inner(&item, krate.as_ref()) {
+        Ok(out) => out,
+        Err((span, msg)) => compile_error(span, &format!("#[fip_trait]: {msg}")),
+    }
+}
+
+struct TraitHeader {
+    vis: Vec<TokenTree>,
+    trait_name: Ident,
+}
+
+fn parse_trait_header(toks: &[TokenTree]) -> Result<TraitHeader, (Span, String)> {
+    let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
+    let not_trait = || (first, "expected a `trait` declaration".to_string());
+    let mut pos = 0;
+    while pos + 1 < toks.len()
+        && is_punct(&toks[pos], '#')
+        && is_group(&toks[pos + 1], Delimiter::Bracket)
+    {
+        pos += 2;
+    }
+    let after_attrs = pos;
+    if pos < toks.len() && is_ident(&toks[pos], "pub") {
+        pos += 1;
+        if pos < toks.len() && is_group(&toks[pos], Delimiter::Parenthesis) {
+            pos += 1;
+        }
+    }
+    let vis = toks[after_attrs..pos].to_vec();
+    if toks.get(pos).is_some_and(|t| is_ident(t, "unsafe")) {
+        pos += 1;
+    }
+    if !toks.get(pos).is_some_and(|t| is_ident(t, "trait")) {
+        return Err(not_trait());
+    }
+    pos += 1;
+    let Some(TokenTree::Ident(trait_name)) = toks.get(pos) else {
+        return Err(not_trait());
+    };
+    if toks.get(pos + 1).is_some_and(|t| is_punct(t, '<')) {
+        let sp = toks[pos + 1].span();
+        return Err((
+            sp,
+            "generic traits (`trait Tr<..>`) are not supported for `#[fip_trait]`".to_string(),
+        ));
+    }
+    Ok(TraitHeader {
+        vis,
+        trait_name: trait_name.clone(),
+    })
+}
+
+fn emit_trait_method_cert(
+    trait_name: &Ident,
+    vis: &[TokenTree],
+    shape: &FnShape,
+    args: &FipArgs,
+) -> Result<TokenStream, (Span, String)> {
+    if !shape.generics.is_empty() {
+        let sp = shape
+            .generics
+            .first()
+            .map_or_else(Span::call_site, TokenTree::span);
+        return Err((
+            sp,
+            "generic trait methods (`fn m<..>(..)`) are not supported for strict contracts under `#[fip_trait]`".to_string(),
+        ));
+    }
+    let m = &shape.name;
+    let n = match args.mode {
+        Mode::FipN(n) => n,
+        Mode::Fip | Mode::Fbip => 0,
+    };
+    let krate_path = args.krate.clone().unwrap_or_else(strict::default_krate);
+    let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
+    let cert_ty = format!("{krate_str}::Cert");
+    let assume_fn = format!("{krate_str}::Cert::assume");
+    let vis_str: String = vis.iter().map(ToString::to_string).collect();
+    let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] ";
+
+    let impl_dyn_str = format!(
+        "{attrs} impl dyn {trait_name} {{ pub const __fip_strict_{m}: {cert_ty} = unsafe {{ {assume_fn}({:?}, {n}u64) }}; }}",
+        format!("{trait_name}__{m}")
+    );
+    let const_str = format!(
+        "{attrs} {vis_str} const __fip_strict_{trait_name}__{m}: {cert_ty} = <dyn {trait_name}>::__fip_strict_{m};"
+    );
+    let mut out = TokenStream::new();
+    if let Ok(ts) = impl_dyn_str.parse::<TokenStream>() {
+        out.extend(ts);
+    }
+    if let Ok(ts) = const_str.parse::<TokenStream>() {
+        out.extend(ts);
+    }
+    Ok(out)
+}
+
+fn mark_trait_method(item_toks: &[TokenTree], at: usize) -> Vec<TokenTree> {
+    let mut out = item_toks.to_vec();
+    if at + 1 < out.len()
+        && let TokenTree::Group(attr_group) = &out[at + 1]
+    {
+        let inner: Vec<TokenTree> = attr_group.stream().into_iter().collect();
+        if let Some((TokenTree::Group(arg_group), path)) = inner.split_last()
+            && arg_group.delimiter() == Delimiter::Parenthesis
+        {
+            let mut new_args = arg_group.stream();
+            if let Ok(marker) = ", __fip_trait_checked".parse::<TokenStream>() {
+                new_args.extend(marker);
+            }
+            let mut new_arg_group = Group::new(Delimiter::Parenthesis, new_args);
+            new_arg_group.set_span(arg_group.span());
+            let mut new_inner: TokenStream = path.iter().cloned().collect();
+            new_inner.extend([TokenTree::Group(new_arg_group)]);
+            let mut new_attr = Group::new(Delimiter::Bracket, new_inner);
+            new_attr.set_span(attr_group.span());
+            out[at + 1] = TokenTree::Group(new_attr);
+        }
+    }
+    out
+}
+
+fn fip_trait_inner(
+    item: &TokenStream,
+    krate: Option<&TokenStream>,
+) -> Result<TokenStream, (Span, String)> {
+    let toks: Vec<TokenTree> = item.clone().into_iter().collect();
+    let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
+    let not_trait = || (first, "expected a `trait` declaration".to_string());
+    let header = parse_trait_header(&toks)?;
+    let Some(TokenTree::Group(body)) = toks.last() else {
+        return Err(not_trait());
+    };
+    if body.delimiter() != Delimiter::Brace {
+        return Err(not_trait());
+    }
+    let mut module_items = TokenStream::new();
+    let mut new_body = TokenStream::new();
+    let body_toks: Vec<TokenTree> = body.stream().into_iter().collect();
+    let mut next = 0;
+    while next < body_toks.len() {
+        let start = next;
+        let mut end = next;
+        while end < body_toks.len() {
+            let t = &body_toks[end];
+            if is_punct(t, '#')
+                && body_toks
+                    .get(end + 1)
+                    .is_some_and(|n| is_group(n, Delimiter::Bracket))
+            {
+                end += 2;
+                continue;
+            }
+            end += 1;
+            if is_punct(t, ';') || is_group(t, Delimiter::Brace) {
+                break;
+            }
+        }
+        next = end;
+        let item_toks = &body_toks[start..end];
+        let mut strict_attr = None;
+        let mut at = 0;
+        while at + 1 < item_toks.len() && is_punct(&item_toks[at], '#') {
+            if let TokenTree::Group(g) = &item_toks[at + 1]
+                && let Some(args) = fip_attr_args(g)
+            {
+                let mut parsed = parse_fip_args(args)?;
+                if parsed.krate.is_none() {
+                    parsed.krate = krate.cloned();
+                }
+                if parsed.strict {
+                    strict_attr = Some((at, parsed));
+                    break;
+                }
+            }
+            at += 2;
+        }
+        let Some((at, args)) = strict_attr else {
+            new_body.extend(item_toks.iter().cloned());
+            continue;
+        };
+        let shape = parse_fn(item_toks)?;
+        let certs = emit_trait_method_cert(&header.trait_name, &header.vis, &shape, &args)?;
+        module_items.extend(certs);
+        new_body.extend(mark_trait_method(item_toks, at));
+    }
+    let mut new_trait_toks = toks[..toks.len() - 1].to_vec();
+    let mut g = Group::new(Delimiter::Brace, new_body);
+    g.set_span(body.span());
+    new_trait_toks.push(TokenTree::Group(g));
+    let mut out = module_items;
+    out.extend(new_trait_toks);
+    Ok(out)
 }
 
 const FIP_IMPL_ARGS: &str = "the only argument is `crate = path::to::fip_strict`";
@@ -2084,12 +2468,13 @@ fn impl_ctx(
             }
         }
     };
+    let trait_toks = trait_toks.map_or_else(Vec::new, <[TokenTree]>::to_vec);
     Ok(ImplCtx {
         self_ty,
         trait_name,
+        trait_toks,
     })
 }
-
 /// Expands the strict methods of an impl body: `(module-level items, new body)`.
 /// `krate` (from `#[fip_impl(crate = ..)]`) applies to methods without their own.
 fn rewrite_impl_body(
@@ -2152,6 +2537,27 @@ fn rewrite_impl_body(
         match expand_parts(args.mode, Some(&args), &rest, Some(ctx)) {
             Ok((items, f)) => {
                 module_items.extend(items);
+                if let Some(t) = &ctx.trait_name
+                    && let Ok(shape) = parse_fn(&rest.clone().into_iter().collect::<Vec<_>>())
+                {
+                    let m = &shape.name;
+                    let self_ty = &ctx.self_ty;
+                    let tr_path: String = ctx.trait_toks.iter().map(ToString::to_string).collect();
+                    let krate_path = args.krate.clone().unwrap_or_else(strict::default_krate);
+                    let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
+                    let check_str = format!(
+                        "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] \
+                         const _: () = {{ let impl_allocs = {krate_str}::Cert::allocs_for(__fip_strict_{self_ty}__{t}__{m}, {:?}); \
+                         let contract_allocs = {krate_str}::Cert::allocs_for(<dyn {tr_path}>::__fip_strict_{m}, {:?}); \
+                         ::core::assert!(impl_allocs <= contract_allocs, {:?}); }};",
+                        format!("{self_ty}__{t}__{m}"),
+                        format!("{t}__{m}"),
+                        "#[fip_impl]: impl certificate is weaker than contract"
+                    );
+                    if let Ok(ts) = check_str.parse::<TokenStream>() {
+                        module_items.extend(ts);
+                    }
+                }
                 new_body.extend(checked_marker(&item_toks[at], &item_toks[at + 1]));
                 new_body.extend(f);
             }

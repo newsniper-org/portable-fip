@@ -1266,6 +1266,26 @@ because it was treated as an open term instead of using the contract.
 | `indirect/app` | 21 roots, 11 passed, 15 errors, 0 warnings | 27 roots (+ `generic_area`, `call_generic_concrete`, `generic_scaled`, `generic_plain`, `<BadScaled as Scaled>::scale_factor`, `<BadScaled as Scaled>::scaled`), 14 passed, 19 errors, 1 warning (`generic_plain::<P>`) |
 | `accept.rs` (`Shape::twice`) | calls `x + x` to avoid warning | calls `self.area() + x`, verified against contract without warning |
 
-**Open:** A strict contract still needs the hand-written mark; implementations of a
-contract are not required to carry `#[fip]` (the driver checks them either way); a
-foreign function with `#[fip]` is accepted by the macro (reported `⊤` by the driver).
+## Resolved 2026-11-02: Strict contracts without hand-written marks (`#[fip_trait]`)
+
+Follow-up of the trait contracts work: `strict = true` on a trait method declaration
+was rejected, needing hand-written `#[cfg_attr(fip_prelint, fip::mark(.., strict = true, ..))]`,
+and strict callers could not call contracted methods through `dyn`/generic with a certificate.
+
+**Macro.**
+- `#[fip(strict = true)]` and `#[fip(N, strict = true)]` are supported on trait method declarations
+  under `#[fip_trait]`, emitting the driver mark and certificates `<dyn Trait>::__fip_strict_<m>` and `<vis> const __fip_strict_<Trait>__<m>`.
+- `strict = true` on a declaration without `#[fip_trait]` is rejected with a clear compile error.
+- Generic traits and generic trait methods under `#[fip_trait]` are rejected clearly at compile time.
+- Strict callers support `x.m()` (for `x: &dyn Tr` or `T: Tr`), `Tr::m(x)`, `<dyn Tr>::m(x)` and `<T as Tr>::m(x)`.
+- Implementations under `#[fip_impl]` are checked against the contract at compile time via a typed const assertion
+  (`Cert::allocs_for(__fip_strict_Self__Tr__m, ..) <= Cert::allocs_for(<dyn Tr>::__fip_strict_m, ..)`, failing with E0080 if weaker, impossible to forge without `unsafe`).
+- Compile_fail doctests: `impl certificate is weaker than contract`, `strict caller of an uncontracted trait method`, `strict = true on declaration without #[fip_trait]`, `generic trait under #[fip_trait]`, and `generic trait method under #[fip_trait]`.
+
+**Measured.**
+
+| fixture / crate | before | after |
+|---|---|---|
+| `crates/fip-macros/tests/strict_impl.rs` | 11 roots, 10 passed | 15 roots (+ `Step::step`, `step_dyn`, `step_gen`, checked against contract), 14 passed |
+| `compile-fail-reasons` | 62/62 | 66/66 (+1 weaker impl, +1 uncontracted caller, +1 decl without `#[fip_trait]`, +1 generic trait, +1 generic method) |
+**Open:** FFI foreign functions: exactly one of certified, excluded, or compile/lint error (user-specified XOR).
