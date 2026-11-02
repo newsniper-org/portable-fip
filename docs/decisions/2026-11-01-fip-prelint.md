@@ -562,6 +562,21 @@ a position that cannot be read leaves the earlier behaviour in place. `#[fip_tra
 gives the default-body message without the file. Details: `TODOs/fip-prelint.md`,
 "Resolved 2026-11-02: foreign functions and strict default bodies at expansion".
 
+## Amendment 2026-11-02: constructor spellings normalised for the token checkers
+
+No driver rule changes; the token-level checkers that run before it change.
+`#[fip]`, strict mode and `fip_testkit::srcmodel` read every callee path through
+`fip_lint_rules::callee` (turbofish, qualified self `<T>`/`<T as Tr>`, leading `::`
+reduced to type, trait and function). Allocating spellings are allocation sites in all
+three; audited non-allocating constructors are accepted in every spelling (strict mode
+before rejected the turbofish and qualified ones); an allocating method called by path
+on a heap type, slice, `str` or std trait (`Vec::clone(&v)`, `Clone::clone(&v)`) is an
+allocation site like the method-call form; a constructor-like trait function without a
+type (`Default::default()`) is rejected in strict mode and left to the driver in
+non-strict mode (fixture `ctor_spellings`: the driver rejects the allocating ones).
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: one normaliser for constructor
+spellings (token rule)".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

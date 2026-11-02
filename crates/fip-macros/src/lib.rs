@@ -140,6 +140,27 @@
 //! ```
 //! ```compile_fail
 //! # // prelint: may allocate 1 time(s), at most 0 allowed
+//! # // expect: #[fip]: allocation site `Vec::with_capacity` in the body
+//! #[fip_macros::fip]
+//! fn f() -> Vec<u8> { Vec::<u8>::with_capacity(4) }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
+//! # // expect: #[fip]: allocation site `Box::new` in the body
+//! #[fip_macros::fip]
+//! fn f(x: u8) -> Box<u8> { <Box<u8>>::new(x) }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
+//! # // expect: #[fip]: allocation site `Vec::clone` in the body
+//! #[fip_macros::fip]
+//! fn f(v: &Vec<u8>) -> Vec<u8> { <Vec<u8> as Clone>::clone(v) }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // prelint: may allocate 1 time(s), at most 0 allowed
 //! #[fip_macros::fip]
 //! fn f(x: &[u8]) -> usize { let v = vec![0u8; 4]; v.len() + x.len() }
 //! # fn main() {}
@@ -508,6 +529,15 @@
 //! blocks, so under Verus's driver (executable `rust_verify`) the statement carries
 //! `#[cfg(not(verus_keep_ghost))]`; in every other build it carries no cfg, so
 //! consumers need no `check-cfg` entry and get no `unexpected_cfgs` warning.
+//!
+//! A constructor-like trait function whose type is inferred is rejected in strict mode
+//! (the tokens cannot tell what it builds):
+//! ```compile_fail
+//! # // expect: #[fip] strict: `Default::default`: the type it builds is inferred
+//! #[fip_macros::fip(strict = true)]
+//! fn f() -> Box<u8> { Default::default() }
+//! # fn main() {}
+//! ```
 //!
 //! ### The `fip_strict` path: `crate = ..`
 //!

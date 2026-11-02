@@ -22,6 +22,9 @@ const REJECTED: &[&str] = &[
     "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Vec::with_capacity` in the body\n#[fip_macros::fip]\nfn f() -> Vec<u8> { Vec::with_capacity(0) }",
     "# // prelint: cannot check `f` (#[fip]): unresolved\n# // expect: #[fip]: allocation site `HashMap::new` in the body\n#[fip_macros::fip]\nfn f() -> std::collections::HashMap<u8, u8> { std::collections::HashMap::new() }",
     "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Box::default` in the body\n#[fip_macros::fip]\nfn f() -> Box<u8> { Box::default() }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Vec::with_capacity` in the body\n#[fip_macros::fip]\nfn f() -> Vec<u8> { Vec::<u8>::with_capacity(4) }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Box::new` in the body\n#[fip_macros::fip]\nfn f(x: u8) -> Box<u8> { <Box<u8>>::new(x) }",
+    "# // prelint: may allocate 1 time(s), at most 0 allowed\n# // expect: #[fip]: allocation site `Vec::clone` in the body\n#[fip_macros::fip]\nfn f(v: &Vec<u8>) -> Vec<u8> { <Vec<u8> as Clone>::clone(v) }",
     "# // prelint: may allocate 1 time(s), at most 0 allowed\n#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let v = vec![0u8; 4]; v.len() + x.len() }",
     "# // prelint: may allocate 1 time(s), at most 0 allowed\n#[fip_macros::fip]\nfn f(x: &[u8]) -> usize { let y = x.to_vec(); y.len() }",
     "# // prelint: `f` is #[fip] but recurses\n#[fip_macros::fip]\nfn f(n: u32) -> u32 { if n == 0 { 0 } else { f(n - 1) } }",
@@ -116,4 +119,39 @@ fn tests_and_called_crates_have_no_violation() {
         );
     }
     assert!(Path::new(&core).is_dir());
+}
+
+/// The spelling table both checkers are tested on (`fip_lint_rules::callee::SPELLINGS`):
+/// `fip_testkit` reports a violation for every allocating spelling and none for an
+/// audited non-allocating one, as `#[fip]` does (`verify/ctor_spellings.py` compiles
+/// the same table through the macro, plain and strict, in `just compile-fail-reasons`;
+/// this test pins that the gate reads this table).
+#[test]
+fn checkers_agree_on_the_spelling_table() {
+    use fip_lint_rules::callee::SPELLINGS;
+    let gate = std::fs::read_to_string(manifest().join("../../verify/ctor_spellings.py"))
+        .expect("read verify/ctor_spellings.py");
+    assert!(gate.contains("crates/fip-lint-rules/src/callee.rs") && gate.contains("SPELLINGS"));
+    for (expr, ty, want) in SPELLINGS {
+        let ann = if ty.is_empty() {
+            String::new()
+        } else {
+            format!(": {ty}")
+        };
+        let src = format!(
+            "#[fip_macros::fip]\nfn f(v: Vec<u8>, mut a: u8, b: u8) {{ let _x{ann} = {expr}; }}\n"
+        );
+        let r = check("spelling.rs", &src);
+        if want.starts_with("alloc ") {
+            assert!(
+                !r.violations.is_empty(),
+                "checker accepts allocating `{expr}`"
+            );
+        } else if *want == "ok" {
+            assert!(
+                r.violations.is_empty(),
+                "checker rejects audited `{expr}`: {r}"
+            );
+        }
+    }
 }

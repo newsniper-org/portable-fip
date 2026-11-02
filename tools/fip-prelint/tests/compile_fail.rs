@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Examples with a `# // prelint:` line (see the module documentation).
-const EXAMPLES: usize = 16;
+const EXAMPLES: usize = 19;
 
 struct Example {
     index: usize,

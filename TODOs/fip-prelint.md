@@ -1490,5 +1490,21 @@ compile-fail-reasons`).
 | `fip_testkit` on the same table | 13/25 allocating as sites, `<Box<u8>>::new` and `<std::boxed::Box<u8>>::new` silent passes, 4 audited spellings `⊤` | all 25 sites with the normalised label, all 18 audited spellings pass |
 | driver, fixture `ctor_spellings` (inferred `Box`/`Vec` via `Default`/`From`/`FromIterator`, a `Vec` alias) | — | 9 roots, 4 passed, 6 errors: every allocating inferred/alias case rejected, `Default::default()` as `Vec` and the spelled audited forms (also strict) pass |
 
-Open: no new `compile_fail` doc examples were added for the spellings (the gate
-compiles every spelling instead); `checker_agreement` is unchanged.
+Per spelling class (52 spellings: 25 allocating, 18 audited non-allocating,
+5 inferred, 4 other), before (HEAD `e982e86` macros and testkit) → after:
+
+| class | `#[fip]` | `#[fip(strict = true)]` | `fip_testkit` |
+|---|---|---|---|
+| allocating (25) | 5 rejected, **20 accepted** → 25 rejected, "allocation site `Ty::f`" | 25 rejected, 20 of them with unrelated errors (missing `__fip_strict_..`, "generic arguments in a callee path", "generic trait") → 25 with "allocation site `Ty::f`" | 13 sites, 10 `⊤`, **2 silent passes** (`<Box<u8>>::new`, `<std::boxed::Box<u8>>::new`) → 25 sites with the normalised label |
+| audited non-allocating (18) | 18 accepted → 18 | 5 accepted, **13 falsely rejected** (turbofish, qualified) → 18 accepted | 14 pass, 4 `⊤` (`<Vec<u8> as Default>::default`, ..) → 18 pass |
+| inferred (5) | accepted → accepted (left to the driver; fixture `ctor_spellings`: all allocating ones rejected by `fip-prelint`) | rejected with "cannot find `__fip_strict_Default__default`" → "the type it builds is inferred .. name the type" | unresolved call `⊤` → unchanged |
+| other (4) | accepted → accepted | unchanged | unchanged |
+
+`compile_fail` examples (all in `just compile-fail-reasons`, the three non-strict ones
+also through the driver, `tools/fip-prelint/tests/compile_fail.rs` 16 → 19 examples,
+and in `checker_agreement`'s `REJECTED`): `Vec::<u8>::with_capacity(4)`,
+`<Box<u8>>::new(x)`, `<Vec<u8> as Clone>::clone(v)`, and strict `Default::default()`;
+`compile-fail-reasons` 78/78 → 82/82. `checker_agreement` gains
+`checkers_agree_on_the_spelling_table`: `fip_testkit` reports a violation for every
+allocating spelling and none for an audited one, the verdicts `#[fip]` gives in
+`verify/ctor_spellings.py` (which the test pins to read the same table).
