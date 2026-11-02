@@ -6,9 +6,14 @@ version = 4
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "cdep",
  "fip-macros",
  "fip-strict",
 ]
+
+[[package]]
+name = "cdep"
+version = "0.1.0"
 
 [[package]]
 name = "fip-lint-rules"

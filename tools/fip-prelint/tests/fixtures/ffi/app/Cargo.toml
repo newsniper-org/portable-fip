@@ -10,3 +10,4 @@ publish = false
 [dependencies]
 fip-macros = { path = "../../../../../../crates/fip-macros" }
 fip-strict = { path = "../../../../../../crates/fip-strict" }
+cdep = { path = "../cdep" }

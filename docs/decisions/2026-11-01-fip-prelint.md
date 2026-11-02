@@ -521,6 +521,31 @@ Measured:
 - `tools/fip-prelint/tests/fixtures/ffi`: 7 roots, 4 passed, 4 errors, 3 certified foreign functions, 1 excluded foreign functions.
 - `tools/fip-prelint/tests/fixtures/alloc_sources`: `mystery` updated from generic ⊤ to specific error `foreign function mystery is neither certified nor excluded`.
 - `compile-fail-reasons`: 72/72 passed (+6 FFI compile_fail examples).
+
+## Amendment 2026-11-02: foreign marks match by link symbol and ABI
+
+The previous amendment keyed `fip::cert`/`fip::exclude` by the declaration's
+`DefId`: a call through a declaration in `std`, `libc` or another dependency could be
+neither certified nor excluded (the user cannot mark another crate's items), and a
+declaration of the same symbol in the user's crate did **not** cover it (a call
+reaches the dependency's `DefId`). Marks are now keyed by the **link symbol**
+(`tcx.symbol_name` of the foreign item: its `#[link_name]`, else its name; foreign
+items are not mangled), from the local crate and from crates declaring `fip::export`,
+and apply to every foreign declaration of that symbol a root reaches. Rules: (1)
+certified on one declaration and excluded on another (or the same) is an error at the
+later local declaration and at every call; (2) two certificates of one symbol whose
+counted properties differ (`kind`, `n`, `frees`; the evidence is not compared) are an
+error likewise; (3) a marked declaration whose ABI (as rustc prints it, e.g. `"C"` vs
+`"C-unwind"`) differs from the called declaration's is an error at the call, not a
+match: the same symbol under another calling convention is another contract, and an
+error keeps it visible. Every match through another declaration is a note line
+`foreign function <callee> (symbol .., extern ..) certified (or excluded) by symbol:
+<declaration> (<where>)` and a count in the crate summary. `#[fip_extern]` puts
+`#[allow(dead_code)]` on marked items (a declaration may exist only to carry the
+mark). Strict callers are unchanged: the certificate `__fip_strict_<name>` is found
+through the marked declaration's path only. Measured: `tests/fixtures/ffi`, see
+`TODOs/fip-prelint.md`, "Resolved 2026-11-02: foreign marks by link symbol".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

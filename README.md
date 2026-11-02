@@ -117,7 +117,13 @@ functions with `#[fip_cert(evidence = "..")]` (or `#[fip(evidence = "..")]`),
 emitting module-level certificates for strict callers and driver marks for
 `fip-prelint`, or excludes them with `#[fip_exclude]` (user assumption, contributing
 no events). Every foreign function reachable from a FIP root must be certified or
-excluded; unannotated calls are rejected with a specific error.
+excluded; unannotated calls are rejected with a specific error. `fip-prelint` matches
+these marks by **link symbol** (`#[link_name]`, else the name) and ABI, so a
+declaration in your crate also covers the same symbol declared in `std`, `libc` or
+any other dependency (each such match is listed in the crate summary); marks on one
+symbol must agree everywhere (certified and excluded, or two certificates with
+different properties, are errors), and a declaration with another ABI is not
+covered (an error). Strict callers still need the certificate's own path.
 The `core` table is **audited** (at rustc 1.97.1 and 1.99.1; a test fails on any
 other compiler) rather than machine-proved, except that "no allocation" follows from
 `core` having no allocator; the installed `vstd` specifies 7 of its 11 entries.

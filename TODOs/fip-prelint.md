@@ -1304,3 +1304,56 @@ Both (a) and (b) on one function is an error. Direct `#[fip]` on a foreign funct
 | `compile-fail-reasons` | 66/66 | 72/72 (+6 FFI compile_fail examples) |
 | `fixtures` | 18 passed | 19 passed (+ fixture `ffi` covering all 6 outcomes) |
 | `alloc_sources` (`mystery`) | generic ⊤ (`unresolved: ...`) | specific error: `foreign function mystery is neither certified nor excluded` |
+
+## Resolved 2026-11-02: foreign marks by link symbol
+
+The FFI rule above keyed certificates and exclusions by the declaration's `DefId`
+(`Crates::certified_ffi`/`excluded_ffi`). A foreign function declared in `std`, `libc`
+or any other dependency could therefore be neither certified nor excluded: the user
+cannot mark another crate's items, and a declaration of the same symbol in the user's
+crate did not cover the dependency's declaration (the call reaches the dependency's
+`DefId`).
+
+**Driver.** Marks from the local crate and from crates declaring `fip::export` are
+indexed by link symbol (`tcx.symbol_name(Instance::mono(..))`: the `#[link_name]`,
+else the item name) together with the declaration's ABI. A call of any foreign
+declaration looks up its symbol:
+
+| marks of the symbol | call |
+|---|---|
+| none | error "foreign function `<x>` (symbol `s`) is neither certified nor excluded" (the symbol is named for a non-local declaration) |
+| certified and excluded (one declaration or two) | error at every call, and at the later local declaration (`is excluded here but certified on ..`) |
+| two certificates with different `kind`/`n`/`frees` | error at every call and at the later local declaration (evidence is not compared) |
+| a marked declaration with another ABI than the callee's | error at the call (`marks do not apply across ABIs`); decided: an error, not a silent non-match, so the reason is visible |
+| agreeing certificates / exclusions | the certificate's events / none; when the mark is on another declaration than the callee, a note "foreign function `<callee>` (symbol .., extern ..) certified (or excluded) by symbol: `<declaration>` (file:line)" and `, N foreign functions certified or excluded by symbol` in the crate summary |
+
+`#[fip_extern]` adds `#[allow(dead_code)]` to marked items (measured: without it,
+every declaration made only to carry a mark warned `function .. is never used`). A
+dependency compiled by the driver (`check_dependency`) now indexes its own foreign
+marks too. Strict callers are unchanged (the certificate is reached through the
+marked declaration's path).
+
+The `std` foreign function used: `std::sys::io::error::unix::errno_location`
+(`#[link_name = "__errno_location"]`), reached from `std::io::Error::last_os_error`
+(found by measurement; `std::process::id`, `thread::yield_now`, `Instant::now` stop at
+a std function without MIR before any foreign call, `process::abort`/`exit` diverge,
+`<[u8]>::eq`/`cmp` reach no foreign call in the analysed MIR).
+
+**Measured** (fixture `ffi`, extended with a member `cdep`: unmarked `labs`, `abs`,
+`atoi` under `extern "C"` and `toupper` under `extern "C-unwind"`; module
+`by_symbol` in `app` certifying `labs` and `toupper` (as `"C"`), excluding `abs` and
+`__errno_location`, and two symbols marked twice inconsistently):
+
+| case | old driver (HEAD `e982e86`) | new |
+|---|---|---|
+| `cdep::labs` certified by symbol | error: neither certified nor excluded | passed, note `certified by symbol` |
+| `cdep::abs` excluded by symbol | error: neither | passed, note `excluded by symbol` |
+| `cdep::atoi`, unmarked | error: neither | error: neither, naming symbol `atoi` |
+| `cdep::toupper` (`"C-unwind"`), marked as `"C"` | error: neither | error: another ABI |
+| `std::sys::io::error::unix::errno_location` from `last_os_error` | error: neither (+ ⊤ `set_functions_inner`) | excluded by symbol, note; the ⊤ remains |
+| `c_split` certified in one block, excluded in another | **passed** (silent: the call reached the certified `DefId`) | error at the declaration and at the call |
+| `c_twice` certified `n = 0` and `n = 1` | error: 1 allocation (one certificate used) | error at the declaration and at the call: different properties |
+| `c_both` (both on one declaration), call | error: *neither* certified nor excluded | error: *both* certified and excluded |
+| summary | 14 roots, 5 passed, 11 errors | 14 roots, 6 passed, 11 errors, 3 by symbol |
+
+The original seven cases of the fixture are unchanged except the `c_both` call's wording.

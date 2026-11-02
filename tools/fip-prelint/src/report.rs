@@ -36,7 +36,7 @@ use rustc_public::CrateDef;
 use rustc_span::Span;
 
 use crate::analysis::{
-    Analysis, ArgViolation, Crates, Requires, RootResult, Witness, requires_facts,
+    Analysis, ArgViolation, Crates, FfiMark, Requires, RootResult, Witness, requires_facts,
 };
 use crate::marks::{self, Kind, Mark, Source};
 
@@ -333,15 +333,20 @@ fn local_sources(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> Vec<(DefId, Source)> {
     sources.sort_by_key(|(d, _)| tcx.def_span(*d));
     sources
 }
-type LocalFfi = (
-    Vec<(DefId, marks::FfiCert)>,
-    Vec<(DefId, marks::FfiExclude)>,
-);
+/// Local foreign declarations carrying `fip::cert` or `fip::exclude`.
+#[derive(Default)]
+struct LocalFfi {
+    certs: Vec<(DefId, marks::FfiCert)>,
+    excls: Vec<(DefId, marks::FfiExclude)>,
+    /// Declarations carrying both (an error at the declaration): not counted in the
+    /// summary, but indexed as both, so every call of their symbol is an error too.
+    both: Vec<(DefId, marks::FfiCert, marks::FfiExclude)>,
+}
 
-/// Local foreign functions carrying `fip::cert` or `fip::exclude`, through `rustc_public`.
-fn local_ffi(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> LocalFfi {
-    let mut certs = Vec::new();
-    let mut excls = Vec::new();
+/// Local foreign functions carrying `fip::cert` or `fip::exclude`, through
+/// `rustc_public`; with `out`, malformed and doubly marked declarations are errors.
+fn local_ffi(tcx: TyCtxt<'_>, mut out: Option<&mut Out<'_>>) -> LocalFfi {
+    let mut found = LocalFfi::default();
     for f in rustc_public::local_crate().fn_defs() {
         let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
         if !tcx.is_foreign_item(def_id) {
@@ -355,29 +360,128 @@ fn local_ffi(tcx: TyCtxt<'_>, out: &mut Out<'_>) -> LocalFfi {
         let cert = marks::cert_of_printed(attrs.iter().map(String::as_str));
         let excl = marks::exclude_of_printed(attrs.iter().map(String::as_str));
         match (cert, excl) {
-            (Ok(Some(_c)), Ok(Some(_))) => {
-                out.error(
-                    tcx.def_span(def_id),
-                    &format!(
-                        "foreign function `{}` is both certified and excluded: choose exactly one",
-                        tcx.def_path_str(def_id)
-                    ),
-                );
+            (Ok(Some(c)), Ok(Some(e))) => {
+                if let Some(out) = out.as_deref_mut() {
+                    out.error(
+                        tcx.def_span(def_id),
+                        &format!(
+                            "foreign function `{}` is both certified and excluded: choose exactly one",
+                            tcx.def_path_str(def_id)
+                        ),
+                    );
+                }
+                found.both.push((def_id, c, e));
             }
-            (Ok(Some(c)), Ok(None)) => certs.push((def_id, c)),
-            (Ok(None), Ok(Some(e))) => excls.push((def_id, e)),
+            (Ok(Some(c)), Ok(None)) => found.certs.push((def_id, c)),
+            (Ok(None), Ok(Some(e))) => found.excls.push((def_id, e)),
             (Err(e), _) | (_, Err(e)) => {
-                out.error(
-                    tcx.def_span(def_id),
-                    &format!("malformed FFI attribute: {e}"),
-                );
+                if let Some(out) = out.as_deref_mut() {
+                    out.error(
+                        tcx.def_span(def_id),
+                        &format!("malformed FFI attribute: {e}"),
+                    );
+                }
             }
             (Ok(None), Ok(None)) => {}
         }
     }
-    certs.sort_by_key(|(d, _)| tcx.def_span(*d));
-    excls.sort_by_key(|(d, _)| tcx.def_span(*d));
-    (certs, excls)
+    found.certs.sort_by_key(|(d, _)| tcx.def_span(*d));
+    found.excls.sort_by_key(|(d, _)| tcx.def_span(*d));
+    found.both.sort_by_key(|(d, _, _)| tcx.def_span(*d));
+    found
+}
+
+/// Adds the local foreign marks to the symbol index of `crates`.
+fn index_local_ffi(tcx: TyCtxt<'_>, crates: &mut Crates, local: &LocalFfi) {
+    let mut certs = local.certs.clone();
+    let mut excls = local.excls.clone();
+    for (d, c, e) in &local.both {
+        certs.push((*d, c.clone()));
+        excls.push((*d, e.clone()));
+    }
+    crates.add_local_ffi(tcx, &certs, &excls);
+}
+
+/// Marks on one link symbol must agree wherever they are declared (this crate and
+/// exported crates): certified on one declaration and excluded on another, two
+/// certificates with different properties, or two marked declarations with
+/// different ABIs are errors, reported at the later local declaration.
+fn check_ffi_symbols(out: &mut Out<'_>, crates: &Crates, local: &LocalFfi) {
+    let tcx = out.tcx;
+    let mut decls: Vec<DefId> = local
+        .certs
+        .iter()
+        .map(|(d, _)| *d)
+        .chain(local.excls.iter().map(|(d, _)| *d))
+        .collect();
+    decls.sort_by_key(|d| tcx.def_span(*d));
+    for d in decls {
+        let symbol = crate::analysis::ffi_symbol(tcx, d);
+        let all = crates.ffi_decls(&symbol);
+        let Some(mine) = all.iter().find(|x| x.def_id == d) else {
+            continue;
+        };
+        let earlier = |p: DefId| !p.is_local() || tcx.def_span(p) < tcx.def_span(d);
+        for p in all.iter().filter(|p| p.def_id != d && earlier(p.def_id)) {
+            let what = match (&mine.mark, &p.mark) {
+                (FfiMark::Cert(_), FfiMark::Exclude(_)) => "certified here but excluded on",
+                (FfiMark::Exclude(_), FfiMark::Cert(_)) => "excluded here but certified on",
+                (FfiMark::Cert(a), FfiMark::Cert(b))
+                    if (a.kind, a.alloc, a.free) != (b.kind, b.alloc, b.free) =>
+                {
+                    "certified here with other properties than on"
+                }
+                _ if mine.abi != p.abi => "marked here with another ABI than on",
+                _ => continue,
+            };
+            out.error(
+                tcx.def_span(d),
+                &format!(
+                    "foreign function `{}` (symbol `{symbol}`, `extern {}`) is {what} `{}` (`extern {}`): marks apply to every declaration of a symbol and must agree",
+                    tcx.def_path_str(d),
+                    mine.abi,
+                    tcx.def_path_str(p.def_id),
+                    p.abi
+                ),
+            );
+            break;
+        }
+    }
+}
+
+/// One note per foreign callee matched by symbol to a mark on another declaration.
+fn report_ffi_matches(tcx: TyCtxt<'_>, crates: &Crates) -> usize {
+    let mut lines: Vec<String> = crates
+        .ffi_matches()
+        .into_iter()
+        .map(|(callee, decl)| {
+            let symbol = crate::analysis::ffi_symbol(tcx, callee);
+            let how = match crates
+                .ffi_decls(&symbol)
+                .iter()
+                .find(|x| x.def_id == decl)
+                .map(|x| &x.mark)
+            {
+                Some(FfiMark::Cert(_)) => "certified",
+                _ => "excluded",
+            };
+            let at = user_location(tcx, tcx.def_span(decl)).unwrap_or_else(|| {
+                format!("crate `{}`", tcx.crate_name(decl.krate))
+            });
+            format!(
+                "fip-prelint: foreign function `{}` (symbol `{symbol}`, `extern {}`) {how} by symbol: `{}` ({at})",
+                tcx.def_path_str(callee),
+                crate::analysis::ffi_abi(tcx, callee),
+                tcx.def_path_str(decl)
+            )
+        })
+        .collect();
+    lines.sort();
+    lines.dedup();
+    for l in &lines {
+        tcx.dcx().note(l.clone());
+    }
+    lines.len()
 }
 
 /// Local functions carrying `fip::requires(..)`, through `rustc_public`; a malformed
@@ -478,21 +582,10 @@ fn verdict(
         }
     }
     for w in &s.unknown {
-        if let Some(target) = w.what.strip_prefix("neither_ffi:") {
+        if let Some(msg) = w.what.strip_prefix("ffi:") {
             out.error(
                 primary(w, fspan),
-                &format!(
-                    "foreign function `{target}` is neither certified nor excluded: {}",
-                    render_chain(tcx, label, w)
-                ),
-            );
-        } else if let Some(target) = w.what.strip_prefix("both_ffi:") {
-            out.error(
-                primary(w, fspan),
-                &format!(
-                    "foreign function `{target}` is both certified and excluded: {}",
-                    render_chain(tcx, label, w)
-                ),
+                &format!("{msg}: {}", render_chain(tcx, label, w)),
             );
         } else {
             out.error(
@@ -696,8 +789,10 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     crates.add_local_sources(&sources);
     let requires = local_requires(tcx, &mut out);
     crates.add_local_requires(&requires);
-    let (local_certs, local_excls) = local_ffi(tcx, &mut out);
-    crates.add_local_ffi(&local_certs, &local_excls);
+    let local = local_ffi(tcx, Some(&mut out));
+    index_local_ffi(tcx, &mut crates, &local);
+    check_ffi_symbols(&mut out, &crates, &local);
+    let (local_certs, local_excls) = (&local.certs, &local.excls);
     // A mark on a trait method declaration is a contract of every implementation, not
     // a root; a declaration with a default body is also checked as a root (the
     // default body, for any `Self`).
@@ -813,12 +908,14 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             }
         }
     }
+    let by_symbol = report_ffi_matches(tcx, &crates);
     if marked.is_empty()
         && checked == 0
         && outside_roots == 0
         && sources.is_empty()
         && local_certs.is_empty()
         && local_excls.is_empty()
+        && local.both.is_empty()
     {
         return;
     }
@@ -839,9 +936,14 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     } else {
         format!(", {} excluded foreign functions", local_excls.len())
     };
+    let matched = if by_symbol == 0 {
+        String::new()
+    } else {
+        format!(", {by_symbol} foreign functions certified or excluded by symbol")
+    };
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
-        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}{certified}{excluded}",
+        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}{certified}{excluded}{matched}",
         checked,
         out.errors,
         out.warnings,
@@ -924,6 +1026,9 @@ pub fn check_dependency(tcx: TyCtxt<'_>) {
         })
         .collect();
     crates.add_local_sources(&sources);
+    // Malformed or doubly marked foreign declarations are not reported here either.
+    let local = local_ffi(tcx, None);
+    index_local_ffi(tcx, &mut crates, &local);
     let mut seen = HashSet::new();
     let (checked, passed) = check_local_implementations(&mut out, &crates, &mut seen);
     if checked > 0 && out.errors + out.warnings > 0 {

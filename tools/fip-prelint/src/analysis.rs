@@ -525,10 +525,14 @@ pub struct Crates {
     sources: HashMap<DefId, Source>,
     /// `fip::requires(..)` of functions in the local crate and in exported crates.
     requires: HashMap<DefId, Requires>,
-    /// Certified foreign functions in the local crate and in exported crates.
-    certified_ffi: HashMap<DefId, crate::marks::FfiCert>,
-    /// Excluded foreign functions in the local crate and in exported crates.
-    excluded_ffi: HashMap<DefId, crate::marks::FfiExclude>,
+    /// Certificates (`fip::cert`) and exclusions (`fip::exclude`) of foreign functions
+    /// declared in the local crate and in exported crates, keyed by **link symbol**: a
+    /// mark applies to every foreign declaration of that symbol, wherever it is
+    /// declared (`std`, `libc`, any dependency).
+    ffi: HashMap<String, Vec<FfiDecl>>,
+    /// Calls whose foreign callee was matched by symbol to a mark on another
+    /// declaration: `(callee, marked declaration)`, reported in the crate summary.
+    ffi_matches: std::cell::RefCell<Vec<(DefId, DefId)>>,
     /// Generated summaries of standard-library functions without MIR, or why they
     /// are not used ([`crate::stdsum`]).
     pub std_summaries: Result<crate::stdsum::Sidecar, String>,
@@ -603,6 +607,58 @@ fn trait_method(tcx: TyCtxt<'_>, def_id: DefId) -> Option<DefId> {
     }
 }
 
+/// A certificate or an exclusion of one foreign declaration.
+#[derive(Clone, Debug)]
+pub enum FfiMark {
+    Cert(marks::FfiCert),
+    Exclude(marks::FfiExclude),
+}
+
+/// A foreign declaration carrying `fip::cert` or `fip::exclude`.
+#[derive(Clone, Debug)]
+pub struct FfiDecl {
+    pub def_id: DefId,
+    /// The declaration's ABI as rustc prints it (`"C"`, `"C-unwind"`, `"system"`, ..).
+    pub abi: String,
+    pub mark: FfiMark,
+}
+
+/// What the marks of a foreign function's link symbol say about a call of it.
+#[derive(Clone, Debug)]
+pub enum FfiVerdict<'a> {
+    /// No declaration of the symbol is certified or excluded.
+    Neither,
+    /// The symbol is certified on one declaration and excluded on another (or the same).
+    Both,
+    /// Two certificates of the symbol state different properties.
+    Conflict,
+    /// A marked declaration of the symbol has another ABI than the callee's.
+    Abi {
+        marked: DefId,
+        marked_abi: String,
+    },
+    Cert(&'a marks::FfiCert),
+    Excluded,
+}
+
+/// The link symbol of a foreign function: its `#[link_name]`, else its name (foreign
+/// items are not mangled).
+pub fn ffi_symbol(tcx: TyCtxt<'_>, def_id: DefId) -> String {
+    tcx.symbol_name(Instance::mono(tcx, def_id))
+        .name
+        .to_string()
+}
+
+/// The ABI of a foreign function as rustc prints it.
+pub fn ffi_abi(tcx: TyCtxt<'_>, def_id: DefId) -> String {
+    tcx.fn_sig(def_id).skip_binder().abi().to_string()
+}
+
+/// The certified properties a call counts (the evidence is not compared).
+fn cert_key(c: &marks::FfiCert) -> (marks::Kind, u64, bool) {
+    (c.kind, c.alloc, c.free)
+}
+
 impl Crates {
     pub fn new(tcx: TyCtxt<'_>) -> Crates {
         let mut exported = HashMap::new();
@@ -627,8 +683,7 @@ impl Crates {
         let mut marks = HashMap::new();
         let mut sources = HashMap::new();
         let mut requires = HashMap::new();
-        let mut certified_ffi = HashMap::new();
-        let mut excluded_ffi = HashMap::new();
+        let mut ffi: HashMap<String, Vec<FfiDecl>> = HashMap::new();
         for krate in rustc_public::external_crates() {
             let Some(&cnum) = tcx
                 .crates(())
@@ -656,14 +711,23 @@ impl Crates {
                     sources.insert(def_id, s);
                 }
                 if tcx.is_foreign_item(def_id) {
+                    let decl = |mark| FfiDecl {
+                        def_id,
+                        abi: ffi_abi(tcx, def_id),
+                        mark,
+                    };
                     if let Ok(Some(cert)) = marks::cert_of_printed(attrs.iter().map(String::as_str))
                     {
-                        certified_ffi.insert(def_id, cert);
+                        ffi.entry(ffi_symbol(tcx, def_id))
+                            .or_default()
+                            .push(decl(FfiMark::Cert(cert)));
                     }
                     if let Ok(Some(excl)) =
                         marks::exclude_of_printed(attrs.iter().map(String::as_str))
                     {
-                        excluded_ffi.insert(def_id, excl);
+                        ffi.entry(ffi_symbol(tcx, def_id))
+                            .or_default()
+                            .push(decl(FfiMark::Exclude(excl)));
                     }
                 }
                 if let Ok(Some(cs)) = marks::requires_of_printed(attrs.iter().map(String::as_str))
@@ -702,8 +766,8 @@ impl Crates {
             marks,
             sources,
             requires,
-            certified_ffi,
-            excluded_ffi,
+            ffi,
+            ffi_matches: std::cell::RefCell::new(Vec::new()),
             std_summaries,
         }
     }
@@ -729,26 +793,81 @@ impl Crates {
             self.sources.insert(*d, *s);
         }
     }
-    /// Adds the certified foreign functions and exclusions of the local crate.
+    /// Adds the certified foreign functions and exclusions of the local crate (a
+    /// declaration carrying both is passed in both lists: every call of its symbol is
+    /// then an error).
     pub fn add_local_ffi(
         &mut self,
+        tcx: TyCtxt<'_>,
         certs: &[(DefId, crate::marks::FfiCert)],
         excls: &[(DefId, crate::marks::FfiExclude)],
     ) {
-        for (d, c) in certs {
-            self.certified_ffi.insert(*d, c.clone());
-        }
-        for (d, e) in excls {
-            self.excluded_ffi.insert(*d, e.clone());
+        let marks = certs
+            .iter()
+            .map(|(d, c)| (*d, FfiMark::Cert(c.clone())))
+            .chain(excls.iter().map(|(d, e)| (*d, FfiMark::Exclude(e.clone()))));
+        for (def_id, mark) in marks {
+            self.ffi
+                .entry(ffi_symbol(tcx, def_id))
+                .or_default()
+                .push(FfiDecl {
+                    def_id,
+                    abi: ffi_abi(tcx, def_id),
+                    mark,
+                });
         }
     }
-    /// Returns the certified properties of `def_id` if it is a certified foreign function.
-    pub fn certified_ffi(&self, def_id: DefId) -> Option<&crate::marks::FfiCert> {
-        self.certified_ffi.get(&def_id)
+    /// Every marked declaration of `symbol` (local and exported crates).
+    pub fn ffi_decls(&self, symbol: &str) -> &[FfiDecl] {
+        self.ffi.get(symbol).map_or(&[], Vec::as_slice)
     }
-    /// Returns the exclusion of `def_id` if it is an excluded foreign function.
-    pub fn excluded_ffi(&self, def_id: DefId) -> Option<&crate::marks::FfiExclude> {
-        self.excluded_ffi.get(&def_id)
+    /// The verdict for a call of the foreign function `def_id`, from the marks on any
+    /// declaration of its link symbol. A match through another declaration than
+    /// `def_id` is recorded for the crate summary.
+    pub fn ffi_verdict(&self, tcx: TyCtxt<'_>, def_id: DefId) -> FfiVerdict<'_> {
+        let decls = self.ffi_decls(&ffi_symbol(tcx, def_id));
+        if decls.is_empty() {
+            return FfiVerdict::Neither;
+        }
+        let certs: Vec<&marks::FfiCert> = decls
+            .iter()
+            .filter_map(|d| match &d.mark {
+                FfiMark::Cert(c) => Some(c),
+                FfiMark::Exclude(_) => None,
+            })
+            .collect();
+        if certs.len() < decls.len() && !certs.is_empty() {
+            return FfiVerdict::Both;
+        }
+        if certs.iter().any(|c| cert_key(c) != cert_key(certs[0])) {
+            return FfiVerdict::Conflict;
+        }
+        let abi = ffi_abi(tcx, def_id);
+        if let Some(d) = decls.iter().find(|d| d.abi != abi) {
+            return FfiVerdict::Abi {
+                marked: d.def_id,
+                marked_abi: d.abi.clone(),
+            };
+        }
+        if !decls.iter().any(|d| d.def_id == def_id) {
+            // The declaration reported: a local one first, then the first in source order.
+            let shown = decls
+                .iter()
+                .min_by_key(|d| (!d.def_id.is_local(), tcx.def_span(d.def_id)))
+                .map_or(decls[0].def_id, |d| d.def_id);
+            let mut m = self.ffi_matches.borrow_mut();
+            if !m.contains(&(def_id, shown)) {
+                m.push((def_id, shown));
+            }
+        }
+        match certs.first() {
+            Some(c) => FfiVerdict::Cert(c),
+            None => FfiVerdict::Excluded,
+        }
+    }
+    /// Calls matched by symbol so far: `(callee, marked declaration)`.
+    pub fn ffi_matches(&self) -> Vec<(DefId, DefId)> {
+        self.ffi_matches.borrow().clone()
     }
     /// What a call of `def_id` does if it is an allocation or free source, and why:
     /// declared on the function or on the trait method it implements, a method of an
@@ -1609,34 +1728,51 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             if rules::is_alloc_free_symbol(name) {
                 return NodeKind::Leaf(Vec::new());
             }
-            let cert = self.crates.certified_ffi(def_id);
-            let excl = self.crates.excluded_ffi(def_id);
-            if cert.is_some() && excl.is_some() {
-                return NodeKind::Leaf(vec![Ev::Unknown(format!("both_ffi:{path}"))]);
-            }
-            if let Some(c) = cert {
-                let mut evs = Vec::new();
-                let count = if c.alloc > 1 {
-                    format!(" (n = {})", c.alloc)
-                } else {
-                    String::new()
-                };
-                for _ in 0..c.alloc {
-                    evs.push(Ev::Alloc(format!(
-                        "allocation: certified foreign function `{path}`{count}"
-                    )));
+            // Marks apply by link symbol, so a declaration in `std`, `libc` or any
+            // dependency is covered by a mark on a declaration in the user's crate.
+            let symbol = ffi_symbol(tcx, def_id);
+            let sym_note = if def_id.is_local() {
+                String::new()
+            } else {
+                format!(" (symbol `{symbol}`)")
+            };
+            let msg = match self.crates.ffi_verdict(tcx, def_id) {
+                FfiVerdict::Cert(c) => {
+                    let mut evs = Vec::new();
+                    let count = if c.alloc > 1 {
+                        format!(" (n = {})", c.alloc)
+                    } else {
+                        String::new()
+                    };
+                    for _ in 0..c.alloc {
+                        evs.push(Ev::Alloc(format!(
+                            "allocation: certified foreign function `{path}`{count}"
+                        )));
+                    }
+                    if c.free {
+                        evs.push(Ev::Free(format!(
+                            "free: certified foreign function `{path}`"
+                        )));
+                    }
+                    return NodeKind::Leaf(evs);
                 }
-                if c.free {
-                    evs.push(Ev::Free(format!(
-                        "free: certified foreign function `{path}`"
-                    )));
+                FfiVerdict::Excluded => return NodeKind::Leaf(Vec::new()),
+                FfiVerdict::Neither => {
+                    format!("foreign function `{path}`{sym_note} is neither certified nor excluded")
                 }
-                return NodeKind::Leaf(evs);
-            }
-            if excl.is_some() {
-                return NodeKind::Leaf(Vec::new());
-            }
-            return NodeKind::Leaf(vec![Ev::Unknown(format!("neither_ffi:{path}"))]);
+                FfiVerdict::Both => {
+                    format!("foreign function `{path}`{sym_note} is both certified and excluded")
+                }
+                FfiVerdict::Conflict => format!(
+                    "foreign function `{path}`: its symbol `{symbol}` has certificates with different properties"
+                ),
+                FfiVerdict::Abi { marked, marked_abi } => format!(
+                    "foreign function `{path}` is declared `extern {}`, but its symbol `{symbol}` is marked on `{}`, declared `extern {marked_abi}`: marks do not apply across ABIs",
+                    ffi_abi(tcx, def_id),
+                    tcx.def_path_str(marked)
+                ),
+            };
+            return NodeKind::Leaf(vec![Ev::Unknown(format!("ffi:{msg}"))]);
         }
         let crate_name = tcx.crate_name(def_id.krate);
         let crate_name = crate_name.as_str();
@@ -3285,33 +3421,33 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     s.free
                 );
             }
-            if let NodeKind::Leaf(_) = node.kind {
-                if let Some(cert) = self.crates.certified_ffi(def_id) {
+            if let NodeKind::Leaf(_) = node.kind
+                && self.tcx.is_foreign_item(def_id)
+            {
+                let symbol = ffi_symbol(self.tcx, def_id);
+                for d in self.crates.ffi_decls(&symbol) {
                     let at = self
                         .tcx
                         .sess
                         .source_map()
-                        .span_to_diagnostic_string(self.tcx.def_span(def_id));
-                    eprintln!(
-                        "fip-prelint dump: certified foreign function: `{}` ({} allocation(s), free: {}, evidence: {:?}) at {at}",
-                        node.label, cert.alloc, cert.free, cert.evidence
-                    );
-                }
-                if let Some(excl) = self.crates.excluded_ffi(def_id) {
-                    let at = self
-                        .tcx
-                        .sess
-                        .source_map()
-                        .span_to_diagnostic_string(self.tcx.def_span(def_id));
-                    let reason = excl
-                        .reason
-                        .as_deref()
-                        .map(|r| format!(": {r}"))
-                        .unwrap_or_default();
-                    eprintln!(
-                        "fip-prelint dump: excluded foreign function: `{}` (user assumption{reason}) at {at}",
-                        node.label
-                    );
+                        .span_to_diagnostic_string(self.tcx.def_span(d.def_id));
+                    match &d.mark {
+                        FfiMark::Cert(cert) => eprintln!(
+                            "fip-prelint dump: certified foreign function: `{}` (symbol `{symbol}`, {} allocation(s), free: {}, evidence: {:?}) at {at}",
+                            node.label, cert.alloc, cert.free, cert.evidence
+                        ),
+                        FfiMark::Exclude(excl) => {
+                            let reason = excl
+                                .reason
+                                .as_deref()
+                                .map(|r| format!(": {r}"))
+                                .unwrap_or_default();
+                            eprintln!(
+                                "fip-prelint dump: excluded foreign function: `{}` (symbol `{symbol}`, user assumption{reason}) at {at}",
+                                node.label
+                            );
+                        }
+                    }
                 }
             }
         }

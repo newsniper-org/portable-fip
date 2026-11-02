@@ -1,7 +1,17 @@
 # Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
 exit: failure
+app/src/lib.rs:110:13: error: fip-prelint: foreign function `by_symbol::other::c_split` (symbol `c_split`, `extern "C"`) is excluded here but certified on `by_symbol::c_split` (`extern "C"`): marks apply to every declaration of a symbol and must agree
+app/src/lib.rs:113:13: error: fip-prelint: foreign function `by_symbol::other::c_twice` (symbol `c_twice`, `extern "C"`) is certified here with other properties than on `by_symbol::c_twice` (`extern "C"`): marks apply to every declaration of a symbol and must agree
+app/src/lib.rs:133:14: error: fip-prelint: foreign function `cdep::atoi` (symbol `atoi`) is neither certified nor excluded: `call_dep_neither` -> `cdep::atoi` (app/src/lib.rs:133)
+app/src/lib.rs:139:14: error: fip-prelint: foreign function `cdep::toupper` is declared `extern "C-unwind"`, but its symbol `toupper` is marked on `by_symbol::toupper`, declared `extern "C"`: marks do not apply across ABIs: `call_dep_other_abi` -> `cdep::toupper` (app/src/lib.rs:139)
+app/src/lib.rs:146:5: error: fip-prelint: cannot check `call_std_errno` (#[fip]): unresolved: `call_std_errno` -> `std::io::error::<impl core::io::error::Error>::last_os_error` (app/src/lib.rs:146) -> … -> `core::io::error::os_functions::set_functions::set_functions_inner`: `core::io::error::os_functions::set_functions::set_functions_inner` (no MIR: not generic and not #[inline]; not in the std summaries)
+app/src/lib.rs:152:14: error: fip-prelint: foreign function `by_symbol::c_split` is both certified and excluded: `call_split` -> `by_symbol::c_split` (app/src/lib.rs:152)
+app/src/lib.rs:158:14: error: fip-prelint: foreign function `by_symbol::other::c_twice`: its symbol `c_twice` has certificates with different properties: `call_twice` -> `by_symbol::other::c_twice` (app/src/lib.rs:158)
 app/src/lib.rs:32:5: error: fip-prelint: foreign function `c_both` is both certified and excluded: choose exactly one
 app/src/lib.rs:50:14: error: fip-prelint: `call_weaker` is #[fip(1)] but may allocate 2 time(s), at most 1 allowed: `call_weaker` -> `c_alloc_two` (app/src/lib.rs:50): allocation: certified foreign function `c_alloc_two` (n = 2)
 app/src/lib.rs:62:14: error: fip-prelint: foreign function `c_mystery` is neither certified nor excluded: `call_neither` -> `c_mystery` (app/src/lib.rs:62)
-app/src/lib.rs:68:14: error: fip-prelint: foreign function `c_both` is neither certified nor excluded: `call_both` -> `c_both` (app/src/lib.rs:68)
-note: fip-prelint: crate `app`: 7 roots, 4 passed, 4 errors, 0 warnings, 0 notes, 3 certified foreign functions, 1 excluded foreign functions
+app/src/lib.rs:68:14: error: fip-prelint: foreign function `c_both` is both certified and excluded: `call_both` -> `c_both` (app/src/lib.rs:68)
+note: fip-prelint: crate `app`: 14 roots, 6 passed, 11 errors, 0 warnings, 0 notes, 8 certified foreign functions, 4 excluded foreign functions, 3 foreign functions certified or excluded by symbol
+note: fip-prelint: foreign function `cdep::abs` (symbol `abs`, `extern "C"`) excluded by symbol: `by_symbol::abs` (app/src/lib.rs:87)
+note: fip-prelint: foreign function `cdep::labs` (symbol `labs`, `extern "C"`) certified by symbol: `by_symbol::labs` (app/src/lib.rs:85)
+note: fip-prelint: foreign function `std::sys::io::error::unix::errno_location` (symbol `__errno_location`, `extern "C"`) excluded by symbol: `by_symbol::errno_location` (app/src/lib.rs:91)

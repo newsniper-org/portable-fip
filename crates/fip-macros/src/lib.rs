@@ -2317,7 +2317,7 @@ pub fn fip_exclude(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         "#[cfg_attr(fip_prelint, fip::exclude)]".to_string()
     };
-    let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"]";
+    let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"] #[allow(dead_code)]";
     let mut out = doc.parse::<TokenStream>().unwrap_or_default();
     if let Ok(m) = mark.parse::<TokenStream>() {
         out.extend(m);
@@ -2354,6 +2354,29 @@ pub fn fip_cert(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - allocator sources: `#[fip::alloc_source]` / `#[fip::free_source]` (or in the foreign
 ///   allocation table);
 /// - unannotated: reachable calls will produce a specific error in `fip-prelint`.
+///
+/// `fip-prelint` matches certificates and exclusions by **link symbol**
+/// (`#[link_name = ".."]`, else the item's name) and ABI, not by declaration: a mark
+/// here covers every declaration of the same symbol with the same ABI reachable from
+/// the analysed crates, including those in `std`, `libc` or any other dependency
+/// (each such match is listed in the crate summary). Certified and excluded for one
+/// symbol anywhere, two certificates of one symbol with different properties, and a
+/// marked declaration whose ABI differs from the called one are errors. Marked items
+/// get `#[allow(dead_code)]`: a declaration may exist only to carry the mark. The
+/// emitted `__fip_strict_<name>` certificate is still found only through this
+/// declaration's path, so a strict caller calls this declaration, not the
+/// dependency's.
+///
+/// ```
+/// // A dependency (here `std`, as `std::sys::..::errno_location`) declares
+/// // `__errno_location` without FIP marks; this declaration excludes the symbol.
+/// #[fip_macros::fip_extern]
+/// unsafe extern "C" {
+///     #[fip_exclude(reason = "returns the address of the thread's errno")]
+///     #[link_name = "__errno_location"]
+///     fn errno_location() -> *mut core::ffi::c_int;
+/// }
+/// ```
 ///
 /// `#[fip_extern(crate = path::to::fip_strict)]` sets the path of the `fip_strict` crate.
 #[proc_macro_attribute]
@@ -2627,7 +2650,7 @@ fn process_extern_item(
         } else {
             "#[cfg_attr(fip_prelint, fip::exclude)]".to_string()
         };
-        let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"]";
+        let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"] #[allow(dead_code)]";
         let mut mark_ts = doc.parse::<TokenStream>().unwrap_or_default();
         mark_ts.extend(mark.parse::<TokenStream>().unwrap_or_default());
         let mut final_item = TokenStream::new();
@@ -2695,7 +2718,12 @@ fn emit_ffi_cert_item(
         ),
         format!("Evidence: {}", cert.evidence)
     );
-    let mut mark_ts = doc.parse::<TokenStream>().unwrap_or_default();
+    // The mark applies to every declaration of the symbol (`fip-prelint` matches by
+    // link symbol), so a declaration made only to carry it is not dead code.
+    let mut mark_ts = "#[allow(dead_code)]"
+        .parse::<TokenStream>()
+        .unwrap_or_default();
+    mark_ts.extend(doc.parse::<TokenStream>().unwrap_or_default());
     mark_ts.extend(mark.parse::<TokenStream>().unwrap_or_default());
 
     let mut final_item = TokenStream::new();
