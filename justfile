@@ -240,6 +240,7 @@ compile-fail-reasons:
     rm -rf target/compile-fail
     cargo build -q -p fip-macros -p fip-strict --target-dir target/compile-fail
     uv run --no-project python verify/compile_fail_reasons.py target/compile-fail
+    uv run --no-project python verify/ctor_spellings.py target/compile-fail
 
 # MIR-level checker `fip-prelint` (tools/fip-prelint, a rustc driver on the Verus toolchain
 # with `rustc-dev`): rustfmt and clippy (`-D warnings`) on the driver, builds it, runs the fixture workspaces and the workspace

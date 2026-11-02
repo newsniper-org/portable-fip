@@ -383,3 +383,10 @@ fn clean() {
 fn ffi() {
     check("ffi");
 }
+
+/// Constructor spellings the token rule cannot resolve (inferred type, type alias)
+/// are decided by the driver; the audited non-allocating spellings pass.
+#[test]
+fn ctor_spellings() {
+    check("ctor_spellings");
+}

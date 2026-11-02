@@ -514,3 +514,46 @@ fn trait_method_declarations_are_not_roots() {
     );
     assert_eq!(r.roots.len(), 1);
 }
+
+/// Every spelling of `fip_lint_rules::callee::SPELLINGS`: an allocating one is an
+/// allocation site with the normalised label, an audited non-allocating constructor
+/// is no event and no violation, the others are no allocation site (an inferred
+/// `Default::default()` stays an unresolved call, `⊤`, for this checker).
+#[test]
+fn every_constructor_spelling_is_classified_like_the_shared_table() {
+    use fip_lint_rules::callee::SPELLINGS;
+    for (expr, ty, want) in SPELLINGS {
+        let ann = if ty.is_empty() {
+            String::new()
+        } else {
+            format!(": {ty}")
+        };
+        let src =
+            format!("#[fip]\nfn f(v: Vec<u8>, mut a: u8, b: u8) {{ let _x{ann} = {expr}; }}\n");
+        let prog = srcmodel::build(
+            &[(String::new(), vec![(PathBuf::from("x.rs"), src.clone())])],
+            false,
+        );
+        let sites: Vec<String> = prog
+            .fns
+            .iter()
+            .filter(|f| f.name == "f")
+            .flat_map(|f| f.events.iter())
+            .filter_map(|e| match &e.ev {
+                srcmodel::Ev::Site(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        let r = report(&src);
+        match want.strip_prefix("alloc ") {
+            Some(label) => {
+                assert_eq!(sites, vec![format!("`{label}`")], "{expr}");
+                assert!(!r.violations.is_empty(), "{expr}: {r}");
+            }
+            None => assert!(sites.is_empty(), "{expr}: {sites:?}"),
+        }
+        if *want == "ok" {
+            assert!(r.violations.is_empty(), "{expr}: {r}");
+        }
+    }
+}

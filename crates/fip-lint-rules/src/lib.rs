@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod callee;
 pub mod requires;
 
 /// Standard heap-owning types; `Type::ctor(..)` with a ctor below is an allocation site

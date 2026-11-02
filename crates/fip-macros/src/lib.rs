@@ -30,6 +30,17 @@
 //! `0`), `from` and every `Box`/`Rc`/`Arc` constructor stay allocation sites. Strict
 //! mode accepts the listed constructors without a certificate, with bound 0.
 //!
+//! Every spelling of a constructor path is normalised by `fip_lint_rules::callee`
+//! (shared with `fip_testkit`): `Box::<u8>::new`, `<Box<u8>>::new`,
+//! `::std::boxed::Box::new`, `<Box<u8> as Default>::default`, and allocating methods
+//! called by path on a heap type, slice, `str` or std trait (`Vec::clone(&v)`,
+//! `<[u8]>::to_vec(x)`, `Clone::clone(&v)`) are allocation sites; the audited
+//! constructors are accepted in every spelling. A constructor-like trait function
+//! whose type is inferred (`Default::default()`, `From::from(x)`) cannot be decided by
+//! tokens: strict mode rejects it, non-strict mode leaves it to `fip-prelint`, which
+//! sees the resolved callee (fixture `ctor_spellings`), as for type aliases and `use`
+//! renames. All spellings: `verify/ctor_spellings.py` (in `just compile-fail-reasons`).
+//!
 //! Not seen: allocation inside called functions, trait methods with other names,
 //! user macros, recursion through other functions. For those, use `fip-testkit`:
 //! its allocation-count assertions check what the code does, and
@@ -958,7 +969,7 @@ use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenSt
 mod context;
 mod strict;
 
-use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, is_heap_constructor};
+use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, callee};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -1402,6 +1413,8 @@ struct Scan<'a> {
 impl Scan<'_> {
     fn stream(&mut self, ts: TokenStream, in_loop: bool) {
         let toks: Vec<TokenTree> = ts.into_iter().collect();
+        let texts = path_texts(&toks);
+        let ptoks = path_toks(&toks, &texts);
         let mut loop_body_pending = false;
         let mut i = 0;
         while i < toks.len() {
@@ -1427,14 +1440,20 @@ impl Scan<'_> {
                 if bang_next && ALLOC_MACROS.contains(&s.as_str()) {
                     self.site(id.span(), format!("`{s}!`"), in_loop);
                 }
-                if toks.get(i + 1).is_some_and(|n| is_punct(n, ':'))
-                    && toks.get(i + 2).is_some_and(|n| is_punct(n, ':'))
-                    && let Some(TokenTree::Ident(f)) = toks.get(i + 3)
-                    && is_heap_constructor(&s, &f.to_string())
-                {
-                    self.site(id.span(), format!("`{s}::{f}`"), in_loop);
-                }
                 let prev_dot = i > 0 && is_punct(&toks[i - 1], '.');
+                // The last segment of a path (any spelling: `Box::new`,
+                // `Box::<u8>::new`, `<Box<u8>>::new`, `<Box<u8> as Default>::default`,
+                // `::alloc::boxed::Box::new`, ..), called or passed as a value.
+                let sep_next = toks.get(i + 1).is_some_and(|n| is_punct(n, ':'))
+                    && toks.get(i + 2).is_some_and(|n| is_punct(n, ':'));
+                let path_end = !prev_dot && !bang_next && !sep_next;
+                if path_end {
+                    let start = callee::path_start(&ptoks, i);
+                    let c = callee::classify(&ptoks[start..=i]);
+                    if let callee::Callee::Alloc { .. } = c {
+                        self.site(toks[start].span(), c.shown(), in_loop);
+                    }
+                }
                 let call_next = toks
                     .get(i + 1)
                     .is_some_and(|n| is_group(n, Delimiter::Parenthesis))
@@ -1481,6 +1500,29 @@ impl Scan<'_> {
             in_loop,
         });
     }
+}
+
+/// The identifier text of each token (empty for the others), for [`path_toks`].
+pub(crate) fn path_texts(toks: &[TokenTree]) -> Vec<String> {
+    toks.iter()
+        .map(|t| match t {
+            TokenTree::Ident(id) => id.to_string(),
+            _ => String::new(),
+        })
+        .collect()
+}
+
+/// `toks` as `fip_lint_rules::callee` reads a path (`texts` from [`path_texts`]).
+pub(crate) fn path_toks<'a>(toks: &[TokenTree], texts: &'a [String]) -> Vec<callee::Tok<'a>> {
+    toks.iter()
+        .zip(texts)
+        .map(|(t, text)| match t {
+            TokenTree::Ident(_) => callee::Tok::Ident(text),
+            TokenTree::Punct(p) => callee::Tok::Punct(p.as_char()),
+            TokenTree::Group(g) if g.delimiter() == Delimiter::Bracket => callee::Tok::Slice,
+            _ => callee::Tok::Other,
+        })
+        .collect()
 }
 
 /// Generic type of each simple `name: T` parameter in a parameter list.

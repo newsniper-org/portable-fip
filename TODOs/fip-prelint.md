@@ -1459,3 +1459,36 @@ doctests without a source file position (measured: there the mark compiles), so 
 (the script now also collects `compile_fail,ignore` blocks). The two default-body
 examples fail under rustdoc too (E0449, the fallback) and for the new message in the
 script.
+
+## Resolved 2026-11-02: one normaliser for constructor spellings (token rule)
+
+The token rule matched `Type::ctor` only: in `#[fip]`, `Box::<u8>::new`, `<Box<u8>>::new`,
+`<Box<u8> as Default>::default`, `Vec::clone(&v)`, `<[u8]>::to_vec(x)` and 15 more
+allocating spellings compiled; strict mode rejected allowlisted turbofish/qualified
+forms (`Vec::<u8>::new()`, `<Vec<u8>>::new()`) with unrelated errors and inferred
+forms (`Default::default()`) with "cannot find `__fip_strict_Default__default`".
+`fip_testkit::srcmodel` missed `<Box<u8>>::new` (silent pass) and reported `⊤` for
+other qualified forms.
+
+**Mechanism.** `fip_lint_rules::callee` (`path_start`, `classify`): walks a callee
+path back over `::`, turbofish arguments, a qualified self and a leading `::`, reduces
+it to (type's last segment, trait, function) and decides with the existing tables:
+`Alloc` (heap constructor, or `ALLOC_METHODS` by path on a heap type / slice / `str`
+/ std trait), `NonAllocating` (audited), `Inferred` (a `CTOR_TRAITS` function without
+a type), `Other`. Used by the `#[fip]` base scan, strict mode (`on_std_callee`:
+allocating methods by path and inferred callees rejected with specific messages) and
+`fip_testkit` (`path_expr`, `qualified`). Table `callee::SPELLINGS` (52 spellings)
+drives unit tests in `fip-lint-rules` and `fip_testkit` and the macro gate
+`verify/ctor_spellings.py` (rustc per spelling, plain and strict, in `just
+compile-fail-reasons`).
+
+**Measured.**
+
+| check | before (HEAD `e982e86` macros) | after |
+|---|---|---|
+| `verify/ctor_spellings.py` | 42/100 (plain: 5/25 allocating spellings detected; strict: 5/18 audited spellings accepted, 0/5 inferred with a clear message) | 100/100 |
+| `fip_testkit` on the same table | 13/25 allocating as sites, `<Box<u8>>::new` and `<std::boxed::Box<u8>>::new` silent passes, 4 audited spellings `⊤` | all 25 sites with the normalised label, all 18 audited spellings pass |
+| driver, fixture `ctor_spellings` (inferred `Box`/`Vec` via `Default`/`From`/`FromIterator`, a `Vec` alias) | — | 9 roots, 4 passed, 6 errors: every allocating inferred/alias case rejected, `Default::default()` as `Vec` and the spelled audited forms (also strict) pass |
+
+Open: no new `compile_fail` doc examples were added for the spellings (the gate
+compiles every spelling instead); `checker_agreement` is unchanged.

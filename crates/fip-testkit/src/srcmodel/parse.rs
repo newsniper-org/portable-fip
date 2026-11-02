@@ -7,9 +7,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use fip_lint_rules::callee::{self, Callee};
 use fip_lint_rules::{
     ALLOC_FREE_MACROS, ALLOC_MACROS, ALLOC_METHODS, FN_TRAITS, GHOST_MACROS, PANIC_MACROS,
-    is_heap_constructor, is_non_allocating_constructor,
 };
 
 use super::lex::{
@@ -352,6 +352,39 @@ fn closure_start(t: &[Tok], i: usize, start: usize) -> bool {
         Kind::Ident(s) => matches!(s.as_str(), "move" | "return" | "in" | "else"),
         _ => false,
     }
+}
+
+/// The callee path `t` as `fip_lint_rules::callee` reads it (a `[..]` is one slice
+/// token), classified.
+fn classify_callee(t: &[Tok]) -> Callee {
+    let mut out = Vec::with_capacity(t.len());
+    let mut k = 0;
+    while k < t.len() {
+        match &t[k].kind {
+            Kind::Ident(s) => out.push(callee::Tok::Ident(s)),
+            Kind::Punct('[') => {
+                let mut depth = 0usize;
+                while k < t.len() {
+                    match t[k].kind {
+                        Kind::Punct('[') => depth += 1,
+                        Kind::Punct(']') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                out.push(callee::Tok::Slice);
+            }
+            Kind::Punct(c) => out.push(callee::Tok::Punct(*c)),
+            Kind::Lit(_) => out.push(callee::Tok::Other),
+        }
+        k += 1;
+    }
+    callee::classify(&out)
 }
 
 /// `t[i]` is `<` opening a qualified path `<T as Tr>::f` / `<[T]>::f` in expression
@@ -997,6 +1030,16 @@ impl<'a> Builder<'a> {
         if sep(t, j) && is_p(t, j + 2, '<') {
             j = angle_end(t, j + 2, t.len());
         }
+        // A std heap constructor or allocating method in qualified form, e.g.
+        // `<Box<u8>>::new`, `<Vec<u8> as Default>::default`, `<[T]>::to_vec`.
+        match classify_callee(&t[i..e + 3]) {
+            callee @ Callee::Alloc { .. } => {
+                self.push(cx, Ev::Site(callee.shown()), &t[i], lp);
+                return j;
+            }
+            Callee::NonAllocating { .. } => return j,
+            Callee::Inferred { .. } | Callee::Other => {}
+        }
         if !is_p(t, j, '(') {
             return j;
         }
@@ -1073,16 +1116,16 @@ impl<'a> Builder<'a> {
         if is_p(t, j, '!') && !is_p(t, j + 1, '=') && is_open(t, j + 1) {
             return self.macro_call(t, i, &name, j + 1, lp, cx);
         }
-        if let Some(ty) = segs.last() {
-            if is_heap_constructor(ty, &name) {
-                let ty = ty.clone();
-                self.push(cx, Ev::Site(format!("`{ty}::{name}`")), &t[i], lp);
+        // Every spelling of a std heap constructor (`fip_lint_rules::callee`); an
+        // audited non-allocating one does not allocate, free or call user code.
+        let start = if i >= 2 && sep(t, i - 2) { i - 2 } else { i };
+        match classify_callee(&t[start..j]) {
+            c @ Callee::Alloc { .. } => {
+                self.push(cx, Ev::Site(c.shown()), &t[i], lp);
                 return j;
             }
-            // Audited not to allocate, free or call user code.
-            if is_non_allocating_constructor(ty, &name) {
-                return j;
-            }
+            Callee::NonAllocating { .. } => return j,
+            Callee::Inferred { .. } | Callee::Other => {}
         }
         if is_p(t, j, '(') {
             return self.call(t, i, (segs, name), j, lp, cx);

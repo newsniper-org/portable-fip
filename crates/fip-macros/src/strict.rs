@@ -37,6 +37,7 @@ use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, Tok
 
 use crate::{GHOST_MACROS, is_group, is_ident, is_punct};
 use fip_lint_rules::CORE_TABLE;
+use fip_lint_rules::callee::{self, Callee as Callee2};
 
 /// Macros a strict body may invoke: the panicking macros of the shared rule set
 /// (`fip_lint_rules::PANIC_MACROS`). Their arguments are still checked; what they
@@ -208,6 +209,8 @@ impl StrictScan {
         };
         if i > 0 && is_punct(&toks[i - 1], '.') {
             self.on_method_call(toks, i, id, in_loop);
+        } else if self.on_std_callee(toks, i, in_loop) {
+            // A std heap constructor or trait function, in any spelling.
         } else if KEYWORDS.contains(&s.as_str()) || upper_initial(&s) {
             // Control flow, or a tuple-struct / enum-variant constructor.
         } else if slice_qualified(toks, i) {
@@ -227,6 +230,48 @@ impl StrictScan {
             }
         }
         1
+    }
+
+    /// A call whose callee path (any spelling, normalised by
+    /// `fip_lint_rules::callee`) is a std heap constructor or a constructor-like std
+    /// trait function. Returns `true` if it was decided here:
+    /// - a heap constructor needs no certificate: an allocating one is an allocation
+    ///   site of this body (counted by the base scan), an audited non-allocating one
+    ///   counts 0 (like the `core` table);
+    /// - an allocating method called by path (`Vec::clone(&v)`, `<[T]>::to_vec(x)`)
+    ///   is rejected: it may call user code (the element's `Clone`);
+    /// - a trait function whose type is inferred (`Default::default()`) is rejected:
+    ///   the tokens cannot tell what it builds.
+    fn on_std_callee(&mut self, toks: &[TokenTree], i: usize, _in_loop: bool) -> bool {
+        let texts = crate::path_texts(toks);
+        let ptoks = crate::path_toks(toks, &texts);
+        let start = callee::path_start(&ptoks, i);
+        let c = callee::classify(&ptoks[start..=i]);
+        let span = toks[start].span();
+        match &c {
+            Callee2::Alloc { method: false, .. } | Callee2::NonAllocating { .. } => true,
+            Callee2::Alloc { method: true, .. } => {
+                self.err(
+                    span,
+                    &format!(
+                        "{}: an allocating method called by path may call user code (e.g. the element type's `Clone`), which strict mode cannot check",
+                        c.shown()
+                    ),
+                );
+                true
+            }
+            Callee2::Inferred { tr, f } => {
+                self.err(
+                    span,
+                    &format!(
+                        "{}: the type it builds is inferred, so the token-level check cannot tell whether it allocates; name the type, e.g. `Vec::<T>::{f}(..)` or `<Vec<T> as {tr}>::{f}(..)`",
+                        c.shown()
+                    ),
+                );
+                true
+            }
+            Callee2::Other => false,
+        }
     }
 
     /// `recv.name(..)`: allowed as `param.call(..)` on a declared `FipFn` parameter
@@ -395,14 +440,8 @@ impl StrictScan {
                 _ => None,
             })
             .collect();
-        // A std heap constructor needs no certificate: an allocating one is an
-        // allocation site of this body (counted by the base scan), a
-        // `NON_ALLOCATING_CONSTRUCTORS` pair counts 0 (audited like the `core` table).
-        let heap_ctor = segs.last().is_some_and(|l| {
-            fip_lint_rules::is_heap_constructor(l, &s)
-                || fip_lint_rules::is_non_allocating_constructor(l, &s)
-        });
-        if heap_ctor || in_core_table(&segs, &s) {
+        // Std heap constructors were decided before (`on_std_callee`).
+        if in_core_table(&segs, &s) {
             return;
         }
         let shown: String = prefix
