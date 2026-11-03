@@ -127,3 +127,105 @@ pub fn write_radix_signed(b: &mut Buf, h: i8, i: i16, j: i32, k: i64, l: isize) 
 pub fn format_floats(x: f64, y: f32, z: u128) -> String {
     format!("{x}{y}{x:.2}{x:e}{x:?}{z}")
 }
+
+// Top plan T7a/b: derived `Debug` (the `debug_struct_fieldN_finish` /
+// `debug_tuple_fieldN_finish` helpers, 1 to 5 fields), slices, arrays, `Option`,
+// `Result`, tuples, and the `DebugList`/`DebugSet`/`DebugMap` builders, each with
+// `{:?}` and `{:#?}` (the `PadAdapter` path).
+#[derive(Debug)]
+pub struct S1 {
+    pub a: u8,
+}
+#[derive(Debug)]
+pub struct S2 {
+    pub a: u8,
+    pub b: u16,
+}
+#[derive(Debug)]
+pub struct S3 {
+    pub a: u8,
+    pub b: u16,
+    pub c: u32,
+}
+#[derive(Debug)]
+pub struct S4 {
+    pub a: u8,
+    pub b: u16,
+    pub c: u32,
+    pub d: u64,
+}
+#[derive(Debug)]
+pub struct S5 {
+    pub a: u8,
+    pub b: u16,
+    pub c: u32,
+    pub d: u64,
+    pub e: i8,
+}
+#[derive(Debug)]
+pub struct T1(pub u8);
+#[derive(Debug)]
+pub struct T2(pub u8, pub u16);
+#[derive(Debug)]
+pub struct T3(pub u8, pub u16, pub u32);
+#[derive(Debug)]
+pub struct T4(pub u8, pub u16, pub u32, pub u64);
+#[derive(Debug)]
+pub struct T5(pub u8, pub u16, pub u32, pub u64, pub i8);
+#[derive(Debug)]
+pub struct Unit;
+#[derive(Debug)]
+pub enum E {
+    A,
+    B(u8),
+    C { x: u8, y: u16 },
+}
+
+/// A user `Debug` through the list, set and map builders.
+pub struct Coll(pub [u8; 2]);
+
+impl fmt::Debug for Coll {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entry(&self.0[0]).entries(self.0.iter()).finish()?;
+        f.debug_set().entry(&self.0[0]).entries(self.0.iter()).finish()?;
+        f.debug_map()
+            .entry(&self.0[0], &self.0[1])
+            .key(&self.0[0])
+            .value(&self.0[1])
+            .entries(self.0.iter().map(|x| (x, x)))
+            .finish()?;
+        f.debug_struct("C").field("a", &self.0[0]).finish_non_exhaustive()?;
+        f.debug_tuple("C").field(&self.0[0]).finish()
+    }
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_derived(b: &mut Buf, s1: &S1, s2: &S2, s3: &S3, s4: &S4, s5: &S5) -> fmt::Result {
+    write!(b, "{s1:?}{s2:?}{s3:?}{s4:?}{s5:?}")?;
+    write!(b, "{s1:#?}{s2:#?}{s3:#?}{s4:#?}{s5:#?}")
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_derived_tuple(b: &mut Buf, t1: &T1, t2: &T2, t3: &T3, t4: &T4, t5: &T5) -> fmt::Result {
+    write!(b, "{t1:?}{t2:?}{t3:?}{t4:?}{t5:?}")?;
+    write!(b, "{t1:#?}{t2:#?}{t3:#?}{t4:#?}{t5:#?}")
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_derived_other(b: &mut Buf, u: &Unit, e: &E, c: &Coll) -> fmt::Result {
+    write!(b, "{u:?}{e:?}{c:?}{u:#?}{e:#?}{c:#?}")
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_std_debug(
+    b: &mut Buf,
+    s: &[u8],
+    a: &[u16; 3],
+    o: Option<u8>,
+    r: Result<u8, i8>,
+    t: (u8, u16),
+    st: &str,
+) -> fmt::Result {
+    write!(b, "{s:?}{a:?}{o:?}{r:?}{t:?}{st:?}")?;
+    write!(b, "{s:#?}{a:#?}{o:#?}{r:#?}{t:#?}")
+}

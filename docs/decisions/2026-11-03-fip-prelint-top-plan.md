@@ -482,6 +482,21 @@ too (measured, not planned). Generation takes 224.9 s cold (162.7 s of analysis)
 above the plan's 94–131 s (98.3 s, 33.3 s of analysis, for the previous seed, same
 conditions).
 
+**Implemented** (item 7, a/b). Path bindings (`Bind::At`) below parameters, with a
+stability rule for the place (`OriginCx::stable_below`; `core` fields audited never
+to be reassigned), `Bind::Obj` for `&dyn Debug`/`&dyn Display` (the concrete type at
+the call site), `Out::Pad` for the `PadAdapter` of `{:#?}`, and the summary term
+`§dyn <i> <method> fmt <out>`. Seed: derived `Debug` with 1–5 fields, tuple structs,
+enums, slices, arrays, `Option`, `Result`, tuples and the list/set/map builders,
+`{:?}` and `{:#?}`. Sidecar: 198 functions, 0 `top` lines (3 before). Fixture
+`std_summaries`: 16 roots, 6 → 10 passed. N4: `dbg_derive`, `dbg_alt`, `dbg_slice`,
+`dbg_option` pass. **Deviations:** `PadAdapter` is not modelled as `Out::Ty(PadAdapter)`
+but as `Out::Pad(out)` (the inner output must be carried to its `write_str`); besides
+the plan's "known unsize", four readings of the `core` sources are trusted (builder
+constructors, builder methods returning `self`, `PadAdapter::wrap`, the audited
+fields); `entries(iter)` needed the "returns `self`" model, not only per-instance
+resolution; the format number stays 1 (keys only added).
+
 ### T8. Stack mode gaps
 
 **Current.** See N5 and limits plan L9 "Implemented".

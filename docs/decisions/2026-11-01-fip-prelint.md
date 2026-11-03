@@ -656,6 +656,21 @@ integer/bitwise SIMD lane intrinsics. The crates the standard library depends on
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: floats, 128-bit integers, float math and
 `std`'s dependencies".
 
+## Amendment 2026-11-03: derived `Debug`, the debug builders and `PadAdapter` (top plan T7a/b)
+
+Bindings now also describe places below a parameter (a closure's captures, a
+`core::fmt` builder's formatter, a `PadAdapter`'s buffer) and `&dyn Debug`/`&dyn
+Display` values (the concrete type at the call site). A path is a must-origin only if
+it cannot change between entry and read: fields of the parameter's own value, of
+`Freeze` memory behind a shared reference, or `core` fields audited never to be
+reassigned. Four readings of the 1.99.1 `core` sources are trusted (builder
+constructors, builder methods returning `self`, `PadAdapter::wrap`, the audited
+fields); a repin reopens them. Std summaries gain the term `§dyn` and the output
+`pad`. Derived `Debug` (1–5 fields), slices, `Option`, `Result`, tuples and the
+list/set/map builders, with `{:?}` and `{:#?}`, are checked into a buffer. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: derived `Debug`, the debug builders and
+`PadAdapter`".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

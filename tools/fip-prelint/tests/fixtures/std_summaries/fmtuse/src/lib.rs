@@ -60,8 +60,8 @@ pub fn format_value(x: u32) -> String {
     format!("{x}")
 }
 
-/// `{:?}` of a derived `Debug`: `core` calls the fields through `&dyn Debug`
-/// (`⊤`, reported).
+/// `{:?}` of a derived `Debug`: `core` calls the fields through `&dyn Debug`, each
+/// resolved to the field's type at this call (top plan T7a): passes.
 #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
 pub fn write_debug(b: &mut Buf, p: &Point) -> fmt::Result {
     write!(b, "{p:?}")
@@ -129,4 +129,73 @@ pub fn empty_map_len() -> usize {
 pub fn empty_map_fip() -> usize {
     let m: FnvMap = FnvMap::default();
     m.len()
+}
+
+/// `{:#?}` of a derived `Debug`: the fields are written through a `PadAdapter` over
+/// the buffer (top plan T7b): passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn write_debug_alt(b: &mut Buf, p: &Point) -> fmt::Result {
+    write!(b, "{p:#?}")
+}
+
+#[derive(Debug)]
+pub enum Shape {
+    Dot,
+    Line(u8),
+    Rect { w: u8, h: u8 },
+}
+
+/// Slices, arrays, `Option`, `Result`, tuples and a derived enum: pass.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn write_debug_std(
+    b: &mut Buf,
+    s: &[u8],
+    o: Option<u16>,
+    r: Result<u8, i8>,
+    t: (u8, u32),
+    e: &Shape,
+) -> fmt::Result {
+    write!(b, "{s:?} {o:?} {r:?} {t:?} {e:?} {s:#?} {e:#?}")
+}
+
+/// A user `Debug` through `Formatter::debug_list`/`debug_map` and their builders:
+/// passes.
+pub struct Pairs(pub [u8; 2]);
+
+impl fmt::Debug for Pairs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.iter()).finish()?;
+        f.debug_map().entry(&self.0[0], &self.0[1]).finish()
+    }
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn write_debug_builders(b: &mut Buf, p: &Pairs) -> fmt::Result {
+    write!(b, "{p:?} {p:#?}")
+}
+
+/// A `&dyn Debug` read from data: its concrete type is not known (`⊤`, a control).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn write_debug_dyn(b: &mut Buf, v: &[&dyn fmt::Debug]) -> fmt::Result {
+    match v.first() {
+        Some(d) => write!(b, "{d:?}"),
+        None => Ok(()),
+    }
+}
+
+/// More than five fields: `debug_struct_fields_finish` takes a slice of `&dyn
+/// Debug` (not seeded; `⊤`, a control).
+#[derive(Debug)]
+pub struct Six {
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub f: u8,
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn write_debug_six(b: &mut Buf, s: &Six) -> fmt::Result {
+    write!(b, "{s:?}")
 }

@@ -1417,11 +1417,26 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     Some(Bind::Formatter(Out::Param(i)))
                 } else if mentions_fmt_args(tcx, *t, 2) {
                     Some(Bind::Fmt(Vec::new(), vec![i]))
+                } else if is_obj_ref(tcx, *t) {
+                    Some(Bind::Obj(Obj::Param(i)))
                 } else {
                     None
                 };
                 if let Some(b) = b {
                     binds.push((local, b));
+                }
+                // The formatter, output or `dyn Debug` held below the parameter (a
+                // builder's formatter, a `PadAdapter`'s buffer; top plan T7a/b).
+                for (path, leaf) in bindable_paths(tcx, *t) {
+                    let Some(key) = place_path(&path) else {
+                        continue;
+                    };
+                    let b = match leaf {
+                        Leaf::Formatter => Bind::Formatter(Out::Param(i)),
+                        Leaf::Dyn => Bind::Dyn(Out::Param(i)),
+                        Leaf::Obj => Bind::Obj(Obj::Param(i)),
+                    };
+                    binds.push((local, Bind::At(key, Box::new(b))));
                 }
             }
         }
@@ -2039,25 +2054,21 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 let Some(l) = param_local(i) else {
                     return unknown("malformed term".to_string());
                 };
-                let out = match self.bind_of(l) {
-                    Some(Bind::Dyn(o) | Bind::Formatter(o)) => o,
-                    _ => return unknown("the output it writes to is not known here".to_string()),
+                let Some(out) = self.out_param(l) else {
+                    return unknown("the output it writes to is not known here".to_string());
                 };
                 let Some(m) = self.trait_method_by_path(method) else {
                     return unknown(format!("trait method `{method}` not found"));
                 };
-                let Out::Ty(t) = out else {
-                    return unknown("the output it writes to is not known here".to_string());
-                };
-                let args = self.tcx.mk_args(&[t.into()]);
-                match Instance::try_resolve(self.tcx, self.env, m, args) {
-                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
-                        vec![Item::Call(self.node_for(c))]
-                    }
-                    _ => unknown(format!("`{method}` for `{t}` does not resolve")),
+                match self.out_method(m, &out) {
+                    Some(item) => vec![item],
+                    None => unknown(format!(
+                        "`{method}` for `{}` does not resolve",
+                        out_desc(&out)
+                    )),
                 }
             }
-            ["§fmt", i, "out", how, what @ ..] => {
+            ["§fmt", i, "out", what @ ..] => {
                 let Some(l) = param_local(i) else {
                     return unknown("malformed term".to_string());
                 };
@@ -2074,31 +2085,95 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         "the formatting functions it calls are not known here".to_string(),
                     );
                 }
-                let what = what.join(" ");
-                let out = match *how {
-                    "param" => match param_local(&what).and_then(|l| self.bind_of(l)) {
-                        Some(Bind::Dyn(o) | Bind::Formatter(o)) => o,
-                        _ => {
-                            return unknown(
-                                "the output it writes to is not known here".to_string(),
-                            );
-                        }
-                    },
-                    "ty" if what == "alloc::string::String" => {
-                        match self.tcx.lang_items().string() {
-                            Some(d) => {
-                                Out::Ty(self.tcx.type_of(d).instantiate_identity().skip_norm_wip())
-                            }
-                            None => return unknown("`String` not found".to_string()),
-                        }
-                    }
-                    _ => return unknown("the output type is not supported".to_string()),
+                let out = match self.parse_out(what) {
+                    Ok(o) => o,
+                    Err(why) => return unknown(why),
                 };
                 fns.into_iter()
                     .map(|f| self.formatter_item(f, &out))
                     .collect()
             }
+            // A dynamic call on the `&dyn Debug`/`&dyn Display` parameter `i` with a
+            // `Formatter` writing to `out` (top plan T7a): the method of the concrete
+            // type the parameter is bound to here.
+            ["§dyn", i, method, "fmt", what @ ..] => {
+                let Some(l) = param_local(i) else {
+                    return unknown("malformed term".to_string());
+                };
+                let t = match self.bind_of(l) {
+                    Some(Bind::Obj(Obj::Ty(t))) => t,
+                    _ => {
+                        return unknown(
+                            "the value it formats is not known here (a `dyn` value of unknown origin)"
+                                .to_string(),
+                        );
+                    }
+                };
+                let out = match self.parse_out(what) {
+                    Ok(o) => o,
+                    Err(why) => return unknown(why),
+                };
+                let Some(m) = self.trait_method_by_path(method) else {
+                    return unknown(format!("trait method `{method}` not found"));
+                };
+                let args = self.tcx.mk_args(&[t.into()]);
+                match Instance::try_resolve(self.tcx, self.env, m, args) {
+                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                        // `fn fmt(&self, f: &mut Formatter)`: the formatter is local 2.
+                        let binds = vec![(2, Bind::Formatter(out))];
+                        vec![Item::Call(self.node_bound(c, Vec::new(), 0, binds))]
+                    }
+                    _ => unknown(format!("`{method}` for `{t}` does not resolve")),
+                }
+            }
             _ => unknown("unknown term".to_string()),
+        }
+    }
+
+    /// The output a summary term names ([`out_desc`]): `param <j>` (what this node's
+    /// parameter `j` writes to), `pad <out>` (a `PadAdapter` over `out`), or `ty
+    /// alloc::string::String`.
+    fn parse_out(&self, what: &[&str]) -> Result<Out<'tcx>, String> {
+        let not_known = || "the output it writes to is not known here".to_string();
+        match what {
+            ["param", j] => {
+                let l = j
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(|j| j.checked_add(1))
+                    .map(mir::Local::from_u32)
+                    .ok_or_else(|| "malformed term".to_string())?;
+                self.out_param(l).ok_or_else(not_known)
+            }
+            ["pad", rest @ ..] => Ok(Out::Pad(Box::new(self.parse_out(rest)?))),
+            ["ty", rest @ ..] if rest.join(" ") == "alloc::string::String" => {
+                match self.tcx.lang_items().string() {
+                    Some(d) => Ok(Out::Ty(
+                        self.tcx.type_of(d).instantiate_identity().skip_norm_wip(),
+                    )),
+                    None => Err("`String` not found".to_string()),
+                }
+            }
+            _ => Err("the output type is not supported".to_string()),
+        }
+    }
+
+    /// The `fmt::Write` method `m` (without generic parameters of its own) of the
+    /// output `out`: of its type, or of the `PadAdapter` over an output. `None` for a
+    /// parameter's output or a method that does not resolve.
+    fn out_method(&mut self, m: DefId, out: &Out<'tcx>) -> Option<Item> {
+        match out {
+            Out::Ty(t) => {
+                let args = self.tcx.mk_args(&[(*t).into()]);
+                match Instance::try_resolve(self.tcx, self.env, m, args) {
+                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                        Some(Item::Call(self.node_for(c)))
+                    }
+                    _ => None,
+                }
+            }
+            Out::Pad(inner) => self.pad_call(m, std::iter::empty(), inner),
+            Out::Param(_) => None,
         }
     }
 
@@ -2422,14 +2497,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                             Item::Call(self.node_bound(callee, Vec::new(), 0, binds))
                         }
                     }
-                    Ok(Some(callee)) if matches!(callee.def, InstanceKind::Virtual(..)) => {
-                        match args.first() {
-                            Some(recv) => self
-                                .devirtualize(inst, body, callee, &recv.node)
-                                .unwrap_or_else(|| Item::Call(self.node_for(callee))),
-                            None => Item::Call(self.node_for(callee)),
-                        }
-                    }
+                    Ok(Some(callee)) if matches!(callee.def, InstanceKind::Virtual(..)) => self
+                        .devirtualize(inst, body, callee, args)
+                        .unwrap_or_else(|| Item::Call(self.node_for(callee))),
                     _ => self.resolve(def_id, fargs),
                 },
                 None => Item::Ev(Ev::Unknown(format!("callee `{fty}` with bound variables"))),
@@ -2471,7 +2541,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Some(Bind::Callable(c)) => self.callable_item(&c, None),
                 _ => None,
             },
-            Origin::Pointee(_) | Origin::BufOf(_) | Origin::Ref(_) | Origin::BoxPtr(_) => None,
+            Origin::Pointee(_)
+            | Origin::BufOf(_)
+            | Origin::Ref(_)
+            | Origin::BoxPtr(_)
+            | Origin::ArgAt(..) => None,
         }
     }
 
@@ -2676,35 +2750,32 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
     }
 
-    /// A dynamic call (`callee` is `Virtual`) whose receiver `recv` is, on every path
-    /// in `inst`'s body, a pointer unsized from one concrete type: the method of that
-    /// type. A receiver that is a parameter declared `param(g = K)` of a callable
-    /// trait object (`&dyn Fn*`, `&dyn FipFn`): the declared bound.
+    /// A dynamic call (`callee` is `Virtual`, `args[0]` its receiver) whose receiver
+    /// is, on every path in `inst`'s body, a pointer unsized from one concrete type:
+    /// the method of that type, with the other arguments' bindings. A receiver that
+    /// is a parameter (or a place below one) bound at the node's call sites: the
+    /// output's method, the callable, or the `dyn Debug`/`dyn Display` value's
+    /// method (top plan T7a). A receiver that is a parameter declared `param(g = K)`
+    /// of a callable trait object (`&dyn Fn*`, `&dyn FipFn`): the declared bound.
     fn devirtualize(
         &mut self,
         inst: Instance<'tcx>,
         body: &'tcx Body<'tcx>,
         callee: Instance<'tcx>,
-        recv: &Operand<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
     ) -> Option<Item> {
         let tcx = self.tcx;
         let InstanceKind::Virtual(def_id, _) = callee.def else {
             return None;
         };
+        let recv = &args.first()?.node;
         match origin_of(tcx, body, recv)? {
             Origin::Pointee(t) => {
                 let t = self.subst(inst, t)?;
                 if !t.is_sized(tcx, self.env) {
                     return None;
                 }
-                let args = tcx
-                    .mk_args_from_iter(std::iter::once(t.into()).chain(callee.args.iter().skip(1)));
-                match Instance::try_resolve(tcx, self.env, def_id, args) {
-                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
-                        Some(Item::Call(self.node_for(c)))
-                    }
-                    _ => None,
-                }
+                self.obj_call(inst, body, callee, &Obj::Ty(t), args)
             }
             Origin::Arg(l) => {
                 match self.bind_of(l) {
@@ -2716,6 +2787,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                             return Some(item);
                         }
                     }
+                    Some(Bind::Obj(o)) => return self.obj_call(inst, body, callee, &o, args),
                     _ => {}
                 }
                 let trait_id = tcx.trait_of_assoc(def_id)?;
@@ -2724,6 +2796,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
                 self.declared_param_call(inst, body, l)
             }
+            Origin::ArgAt(l, p) => match self.bind_at(l, &place_path(p)?)? {
+                Bind::Dyn(out) | Bind::Formatter(out) => self.output_call(def_id, callee, &out),
+                Bind::Obj(o) => self.obj_call(inst, body, callee, &o, args),
+                _ => None,
+            },
             Origin::BufOf(l) => match self.bind_of(l) {
                 Some(Bind::Formatter(out)) => self.output_call(def_id, callee, &out),
                 _ => None,
@@ -2742,7 +2819,65 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
     }
 
-    /// The binding of parameter local `l` of the node being classified.
+    /// A dynamic call (`callee`, `args` with the receiver first) on a trait object
+    /// known to hold `obj`: the method of its concrete type, called with the other
+    /// arguments' bindings; or (generating std summaries, `obj` a parameter) the term
+    /// `§dyn <i> <method> fmt <out>` when the method's only other argument is a
+    /// `&mut Formatter` whose output is known (top plan T7a).
+    fn obj_call(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        callee: Instance<'tcx>,
+        obj: &Obj<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
+    ) -> Option<Item> {
+        let tcx = self.tcx;
+        let InstanceKind::Virtual(def_id, _) = callee.def else {
+            return None;
+        };
+        match obj {
+            Obj::Ty(t) => {
+                let margs = tcx.mk_args_from_iter(
+                    std::iter::once((*t).into()).chain(callee.args.iter().skip(1)),
+                );
+                match Instance::try_resolve(tcx, self.env, def_id, margs) {
+                    Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                        // The receiver is now `&T`: its trait-object binding is dropped.
+                        let binds: Binds<'tcx> = self
+                            .call_binds(inst, body, c, args)
+                            .into_iter()
+                            .filter(|(k, _)| *k != 1)
+                            .collect();
+                        Some(Item::Call(if binds.is_empty() {
+                            self.node_for(c)
+                        } else {
+                            self.node_bound(c, Vec::new(), 0, binds)
+                        }))
+                    }
+                    _ => None,
+                }
+            }
+            Obj::Param(i) => {
+                let [_, f] = args else {
+                    return None;
+                };
+                let fty = self.subst(inst, f.node.ty(&body.local_decls, tcx))?;
+                if !is_formatter_ref(tcx, fty) {
+                    return None;
+                }
+                let out = self.formatter_out(inst, body, &f.node)?;
+                Some(Item::Term(format!(
+                    "§dyn {i} {} fmt {}",
+                    def_path(tcx, def_id),
+                    out_desc(&out)
+                )))
+            }
+        }
+    }
+
+    /// The binding of parameter local `l` of the node being classified (as a whole;
+    /// [`Analysis::bind_at`] for places below it).
     fn bind_of(&self, l: mir::Local) -> Option<Bind<'tcx>> {
         let l = u32::try_from(l.as_usize()).ok()?;
         // No node: a body checked on its own (`arguments_in`), without bindings.
@@ -2750,13 +2885,62 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             .get(self.current)?
             .binds
             .iter()
-            .find(|(k, _)| *k == l)
+            .find(|(k, b)| *k == l && !matches!(b, Bind::At(..)))
             .map(|(_, b)| b.clone())
     }
 
+    /// The binding of the place at `path` below parameter local `l` of the node
+    /// being classified ([`Bind::At`]). The output `buf` of a formatter bound at a
+    /// path is that formatter's output.
+    fn bind_at(&self, l: mir::Local, path: &[u32]) -> Option<Bind<'tcx>> {
+        let k = u32::try_from(l.as_usize()).ok()?;
+        let binds = &self.nodes.get(self.current)?.binds;
+        let find = |p: &[u32]| {
+            binds.iter().find_map(|(j, b)| match b {
+                Bind::At(q, inner) if *j == k && q.as_slice() == p => Some((**inner).clone()),
+                _ => None,
+            })
+        };
+        if let Some(b) = find(path) {
+            return Some(b);
+        }
+        // `(*f).buf` of a formatter `f` at a path: its output.
+        if let [prefix @ .., PATH_DEREF, _] = path
+            && let Some(Bind::Formatter(o)) = find(prefix)
+        {
+            return Some(Bind::Dyn(o));
+        }
+        None
+    }
+
+    /// The output reached through parameter local `l` of the node being classified:
+    /// its own binding as an output or formatter, or the only such binding at a path
+    /// below it (a builder's formatter, a `PadAdapter`'s buffer).
+    fn out_param(&self, l: mir::Local) -> Option<Out<'tcx>> {
+        if let Some(Bind::Dyn(o) | Bind::Formatter(o)) = self.bind_of(l) {
+            return Some(o);
+        }
+        let k = u32::try_from(l.as_usize()).ok()?;
+        let mut outs = self
+            .nodes
+            .get(self.current)?
+            .binds
+            .iter()
+            .filter_map(|(j, b)| match b {
+                Bind::At(_, inner) if *j == k => match &**inner {
+                    Bind::Dyn(o) | Bind::Formatter(o) => Some(o.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+        let first = outs.next()?;
+        outs.all(|o| o == first).then_some(first)
+    }
+
     /// A dynamic call of `def_id` (`callee` is `Virtual`) on the output `out` of a
-    /// formatting: the method of its type, or (generating std summaries) the term
-    /// `§out <i> <method>` over the summarised function's parameter `i`.
+    /// formatting: the method of its type, of the `PadAdapter` over an output, or
+    /// (generating std summaries) the term `§out <i> <method>` over the summarised
+    /// function's parameter `i`.
     fn output_call(
         &mut self,
         def_id: DefId,
@@ -2777,13 +2961,71 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
             }
             Out::Param(i) => Some(Item::Term(format!("§out {i} {}", def_path(tcx, def_id)))),
+            Out::Pad(inner) => self.pad_call(def_id, callee.args.iter().skip(1), inner),
         }
     }
 
+    /// The method `def_id` of `fmt::Write` for `core::fmt::builders::PadAdapter`, its
+    /// `buf` bound to the output `inner` (top plan T7b).
+    fn pad_call(
+        &mut self,
+        def_id: DefId,
+        rest: impl Iterator<Item = ty::GenericArg<'tcx>>,
+        inner: &Out<'tcx>,
+    ) -> Option<Item> {
+        let tcx = self.tcx;
+        let (pad, buf) = self.pad_adapter(def_id)?;
+        let args = tcx.mk_args_from_iter(std::iter::once(pad.into()).chain(rest));
+        match Instance::try_resolve(tcx, self.env, def_id, args) {
+            Ok(Some(c)) if !matches!(c.def, InstanceKind::Virtual(..)) => {
+                let binds = vec![(
+                    1,
+                    Bind::At(vec![PATH_DEREF, buf], Box::new(Bind::Dyn(inner.clone()))),
+                )];
+                Some(Item::Call(self.node_bound(c, Vec::new(), 0, binds)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The type `core::fmt::builders::PadAdapter<'_, '_>` (from the implementations
+    /// of the trait of the `fmt::Write` method `method`) and the index of its `buf`
+    /// field.
+    fn pad_adapter(&self, method: DefId) -> Option<(Ty<'tcx>, u32)> {
+        let tcx = self.tcx;
+        let write = tcx.trait_of_assoc(method)?;
+        tcx.all_impls(write).find_map(|i| {
+            let ty = tcx.type_of(i).instantiate_identity().skip_norm_wip();
+            let ty::Adt(def, _) = ty.kind() else {
+                return None;
+            };
+            if def_path(tcx, def.did()) != "core::fmt::builders::PadAdapter" {
+                return None;
+            }
+            let buf = def
+                .non_enum_variant()
+                .fields
+                .iter_enumerated()
+                .find(|(_, f)| f.name.as_str() == "buf")
+                .map(|(i, _)| i.as_usize())?;
+            let erased = tcx.lifetimes.re_erased;
+            let args = tcx.mk_args_from_iter(
+                tcx.generics_of(def.did())
+                    .own_params
+                    .iter()
+                    .map(|_| ty::GenericArg::from(erased)),
+            );
+            Some((ty::Ty::new_adt(tcx, *def, args), u32::try_from(buf).ok()?))
+        })
+    }
+
     /// The parameter bindings of a call of `callee` in `inst`'s body: for each
-    /// argument that is a `&mut dyn fmt::Write`, a `&mut fmt::Formatter` or a value
-    /// containing `fmt::Arguments`, what it is known to hold here (its output, its
-    /// formatting functions). Arguments that are not known are not bound.
+    /// argument that is a `&mut dyn fmt::Write`, a `&mut fmt::Formatter`, a value
+    /// containing `fmt::Arguments`, a callable or a `&dyn Debug`/`&dyn Display`, what
+    /// it is known to hold here (its output, its formatting functions, its function
+    /// or concrete type); and for the places below an argument that hold such values
+    /// (closure captures, `core::fmt` builders: [`bindable_paths`]), what they hold.
+    /// Arguments that are not known are not bound.
     fn call_binds(
         &mut self,
         inst: Instance<'tcx>,
@@ -2817,14 +3059,64 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             } else if self.is_callable_value(ty) && self.callable_depth() < MAX_CALLABLE_DEPTH {
                 self.callable_of(inst, body, &a.node, ty)
                     .map(Bind::Callable)
+            } else if is_obj_ref(tcx, ty) {
+                self.obj_of(inst, body, &a.node).map(Bind::Obj)
             } else {
                 None
             };
             if let Some(b) = bind {
                 binds.push((local, b));
             }
+            let (Operand::Copy(q) | Operand::Move(q)) = &a.node else {
+                continue;
+            };
+            for (path, leaf) in bindable_paths(tcx, ty) {
+                let Some(key) = place_path(&path) else {
+                    continue;
+                };
+                let mut proj = q.projection.to_vec();
+                proj.extend(path);
+                let op = Operand::Copy(mir::Place {
+                    local: q.local,
+                    projection: tcx.mk_place_elems(&proj),
+                });
+                let b = match leaf {
+                    Leaf::Formatter => self.formatter_out(inst, body, &op).map(Bind::Formatter),
+                    Leaf::Dyn => self.out_of(inst, body, &op).map(Bind::Dyn),
+                    Leaf::Obj => self.obj_of(inst, body, &op).map(Bind::Obj),
+                };
+                if let Some(b) = b {
+                    binds.push((local, Bind::At(key, Box::new(b))));
+                }
+            }
         }
         binds
+    }
+
+    /// What a `&dyn Debug`/`&dyn Display` operand of `inst`'s body holds: the
+    /// concrete type it is unsized from, or the binding of the parameter (or place
+    /// below one) it comes from.
+    fn obj_of(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> Option<Obj<'tcx>> {
+        match origin_of(self.tcx, body, op)? {
+            Origin::Pointee(t) => {
+                let t = self.subst(inst, t)?;
+                t.is_sized(self.tcx, self.env).then_some(Obj::Ty(t))
+            }
+            Origin::Arg(l) => match self.bind_of(l)? {
+                Bind::Obj(o) => Some(o),
+                _ => None,
+            },
+            Origin::ArgAt(l, p) => match self.bind_at(l, &place_path(p)?)? {
+                Bind::Obj(o) => Some(o),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Nodes with a callable binding from the node being classified up its first
@@ -2966,7 +3258,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             Origin::Pointee(t) => Some(Out::Ty(self.subst(inst, t)?)),
             Origin::Arg(l) => match self.bind_of(l)? {
                 Bind::Dyn(o) | Bind::Formatter(o) => Some(o),
-                Bind::Fmt(..) | Bind::Callable(_) => None,
+                Bind::Fmt(..) | Bind::Callable(_) | Bind::Obj(_) | Bind::At(..) => None,
+            },
+            Origin::ArgAt(l, p) => match self.bind_at(l, &place_path(p)?)? {
+                Bind::Dyn(o) | Bind::Formatter(o) => Some(o),
+                _ => None,
             },
             Origin::BufOf(l) => match self.bind_of(l)? {
                 Bind::Formatter(o) => Some(o),
@@ -2982,7 +3278,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     }
 
     /// The output of a `&mut fmt::Formatter` operand of `inst`'s body: a parameter
-    /// bound to a formatter, or a `Formatter::new(out, ..)` made in the body.
+    /// (or a place below one) bound to a formatter, a `Formatter::new(out, ..)` made
+    /// in the body, or a `PadAdapter::wrap(f, ..)` over the formatter `f` (top plan
+    /// T7b).
     fn formatter_out(
         &self,
         inst: Instance<'tcx>,
@@ -2995,7 +3293,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Bind::Formatter(o) => Some(o),
                 _ => None,
             },
+            FmtrSrc::At(l, p) => match self.bind_at(l, &place_path(p)?)? {
+                Bind::Formatter(o) => Some(o),
+                _ => None,
+            },
             FmtrSrc::New(out) => self.out_of(inst, body, out),
+            FmtrSrc::Pad(f) => self
+                .formatter_out(inst, body, f)
+                .map(|o| Out::Pad(Box::new(o))),
         }
     }
 
@@ -3111,14 +3416,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let out = self.formatter_out(inst, body, &args[1].node)?;
         let mut items = Vec::new();
         for i in params {
-            let desc = match &out {
-                Out::Param(j) => format!("param {j}"),
-                Out::Ty(t) => format!(
-                    "ty {}",
-                    with_no_visible_paths!(with_no_trimmed_paths!(t.to_string()))
-                ),
-            };
-            items.push(Item::Term(format!("§fmt {i} out {desc}")));
+            items.push(Item::Term(format!("§fmt {i} out {}", out_desc(&out))));
         }
         for f in fns {
             items.push(self.formatter_item(f, &out));
@@ -4334,15 +4632,41 @@ enum Origin<'tcx> {
     /// (`(*_1).0`, cast to `*const F`, reborrowed: the receiver in `<Box<F, A> as
     /// Fn<Args>>::call`).
     BoxPtr(mir::Local),
+    /// The value at these projections (fields, and dereferences of references)
+    /// below the parameter in this local, never reassigned, where every read of the
+    /// place yields the value it held on entry ([`OriginCx::stable_below`]): fields of
+    /// the parameter's own value, of memory behind a shared reference to a `Freeze`
+    /// type, or audited fields of `core::fmt` that are never reassigned
+    /// ([`AUDITED_FIELDS`]); top plan T7a/b.
+    ArgAt(mir::Local, &'tcx ty::List<mir::PlaceElem<'tcx>>),
 }
 
 /// The output of a formatting: a concrete type implementing `fmt::Write`, or
-/// (generating std summaries) a parameter of the summarised function.
+/// (generating std summaries) a parameter of the summarised function, or a
+/// `core::fmt::builders::PadAdapter` writing to an output (the `{:#?}` path, top plan
+/// T7b).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Out<'tcx> {
     Ty(Ty<'tcx>),
     Param(u32),
+    Pad(Box<Out<'tcx>>),
 }
+
+/// What a `&dyn fmt::Debug`/`&dyn fmt::Display` parameter holds (top plan T7a): a
+/// trait object unsized from a pointer to this concrete type, or (generating std
+/// summaries) the summarised function's parameter.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Obj<'tcx> {
+    Ty(Ty<'tcx>),
+    Param(u32),
+}
+
+/// A path below a parameter in a [`Bind::At`]: field indices, and
+/// [`PATH_DEREF`] for a dereference.
+type Path = Vec<u32>;
+
+/// A dereference in a [`Path`].
+const PATH_DEREF: u32 = u32::MAX;
 
 /// What a parameter of an analysed body holds, known at the call sites of its node.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -4358,6 +4682,13 @@ enum Bind<'tcx> {
     /// A callable value (a function pointer, a `&dyn Fn*`) known at the call sites
     /// (top plan B).
     Callable(Callable<'tcx>),
+    /// A `&dyn fmt::Debug`/`&dyn fmt::Display` known at the call sites (top plan
+    /// T7a).
+    Obj(Obj<'tcx>),
+    /// What the place at this path below the parameter holds (a formatter, an
+    /// output or a `dyn Debug` inside a closure's captures or a `core::fmt` builder;
+    /// top plan T7a/b). A parameter may have several.
+    At(Path, Box<Bind<'tcx>>),
 }
 
 /// What a callable parameter holds, known at the call sites of a node: a must-fact
@@ -4397,6 +4728,234 @@ fn is_dyn_write_ref(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
     };
     matches!(inner.kind(), ty::Dynamic(preds, ..)
         if preds.principal_def_id().is_some_and(|d| def_path(tcx, d) == "core::fmt::Write"))
+}
+
+/// `&dyn fmt::Debug` or `&dyn fmt::Display` (a value formatted through `core`'s debug
+/// builders, top plan T7a).
+fn is_obj_ref(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
+    let ty::Ref(_, inner, _) = *ty.kind() else {
+        return false;
+    };
+    matches!(inner.kind(), ty::Dynamic(preds, ..)
+    if preds.principal_def_id().is_some_and(|d| {
+        matches!(def_path(tcx, d).as_str(), "core::fmt::Debug" | "core::fmt::Display")
+    }))
+}
+
+/// What a place found by [`bindable_paths`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leaf {
+    /// `&(mut) fmt::Formatter`.
+    Formatter,
+    /// `&(mut) dyn fmt::Write`.
+    Dyn,
+    /// `&dyn fmt::Debug`/`&dyn fmt::Display`.
+    Obj,
+}
+
+fn leaf_of(tcx: TyCtxt<'_>, ty: Ty<'_>) -> Option<Leaf> {
+    let ty::Ref(_, inner, _) = *ty.kind() else {
+        return None;
+    };
+    if adt_is(tcx, inner, "core::fmt::Formatter") {
+        Some(Leaf::Formatter)
+    } else if is_dyn_write_ref(tcx, ty) {
+        Some(Leaf::Dyn)
+    } else if is_obj_ref(tcx, ty) {
+        Some(Leaf::Obj)
+    } else {
+        None
+    }
+}
+
+/// The places below a value of type `ty` (fields of closures' captures, of tuples and
+/// of `core::fmt::builders` types, through references) that hold a formatter, an
+/// output or a `dyn Debug`/`dyn Display` (top plan T7a/b), as projections from the
+/// value. Bounded in depth and number.
+fn bindable_paths<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Vec<(Vec<mir::PlaceElem<'tcx>>, Leaf)> {
+    const MAX_DEPTH: usize = 6;
+    const MAX_PATHS: usize = 8;
+    fn walk<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        ty: Ty<'tcx>,
+        prefix: &mut Vec<mir::PlaceElem<'tcx>>,
+        out: &mut Vec<(Vec<mir::PlaceElem<'tcx>>, Leaf)>,
+    ) {
+        if prefix.len() >= MAX_DEPTH || out.len() >= MAX_PATHS {
+            return;
+        }
+        let fields: Vec<Ty<'tcx>> = match *ty.kind() {
+            ty::Ref(_, inner, _) => {
+                if container(tcx, inner) {
+                    prefix.push(mir::ProjectionElem::Deref);
+                    walk(tcx, inner, prefix, out);
+                    prefix.pop();
+                }
+                return;
+            }
+            ty::Closure(_, args) => args.as_closure().upvar_tys().iter().collect(),
+            ty::Tuple(ts) => ts.iter().collect(),
+            ty::Adt(def, args) if container(tcx, ty) => def
+                .non_enum_variant()
+                .fields
+                .iter()
+                .map(|f| f.ty(tcx, args).skip_norm_wip())
+                .collect(),
+            _ => return,
+        };
+        for (i, ft) in fields.into_iter().enumerate() {
+            prefix.push(mir::ProjectionElem::Field(
+                rustc_abi::FieldIdx::from_usize(i),
+                ft,
+            ));
+            match leaf_of(tcx, ft) {
+                Some(leaf) => {
+                    if out.len() < MAX_PATHS {
+                        out.push((prefix.clone(), leaf));
+                    }
+                }
+                None => walk(tcx, ft, prefix, out),
+            }
+            prefix.pop();
+        }
+    }
+    /// Types whose fields are looked into: closures, tuples, and the structs of
+    /// `core::fmt::builders`.
+    fn container<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+        match ty.kind() {
+            ty::Closure(..) | ty::Tuple(..) => true,
+            ty::Adt(def, _) => {
+                def.is_struct() && def_path(tcx, def.did()).starts_with("core::fmt::builders::")
+            }
+            _ => false,
+        }
+    }
+    let mut out = Vec::new();
+    if container(tcx, ty.peel_refs()) {
+        walk(tcx, ty, &mut Vec::new(), &mut out);
+    }
+    out
+}
+
+/// The [`Path`] of a projection of fields and dereferences.
+fn place_path(proj: &[mir::PlaceElem<'_>]) -> Option<Path> {
+    proj.iter()
+        .map(|e| match e {
+            mir::ProjectionElem::Deref => Some(PATH_DEREF),
+            mir::ProjectionElem::Field(f, _) => u32::try_from(f.as_usize()).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Fields of `core::fmt` that are private to `core` and assigned only where their
+/// struct is built, never afterwards (audited in the sources of rustc 1.99.1, which
+/// the std summaries' stamp pins; reopen on a repin): reading one through a `&mut`
+/// always yields the value it was built with (top plan T7a/b).
+const AUDITED_FIELDS: &[(&str, &str)] = &[
+    ("core::fmt::Formatter", "buf"),
+    ("core::fmt::builders::PadAdapter", "buf"),
+    ("core::fmt::builders::DebugStruct", "fmt"),
+    ("core::fmt::builders::DebugTuple", "fmt"),
+    ("core::fmt::builders::DebugInner", "fmt"),
+    ("core::fmt::builders::DebugList", "inner"),
+    ("core::fmt::builders::DebugSet", "inner"),
+    ("core::fmt::builders::DebugMap", "fmt"),
+];
+
+/// `true` if field `f` of the struct type `ty` is in [`AUDITED_FIELDS`].
+fn audited_field(tcx: TyCtxt<'_>, ty: Ty<'_>, f: rustc_abi::FieldIdx) -> bool {
+    let ty::Adt(def, _) = ty.kind() else {
+        return false;
+    };
+    if !def.is_struct() {
+        return false;
+    }
+    let path = def_path(tcx, def.did());
+    let Some(field) = def.non_enum_variant().fields.get(f) else {
+        return false;
+    };
+    AUDITED_FIELDS
+        .iter()
+        .any(|(p, n)| *p == path && field.name.as_str() == *n)
+}
+
+/// The field names, from the result, at which the builder that the `core::fmt`
+/// function `d` returns holds its first argument (the formatter): `debug_struct_new`
+/// and `Formatter::debug_struct` build `DebugStruct { fmt, .. }`, `debug_list_new`
+/// `DebugList { inner: DebugInner { fmt, .. } }`, and so on (audited in the sources of
+/// rustc 1.99.1; top plan T7a).
+fn builder_ctor_fields(tcx: TyCtxt<'_>, d: DefId) -> Option<&'static [&'static str]> {
+    let name = tcx.item_name(d);
+    let formatter_method = tcx.impl_of_assoc(d).is_some_and(|i| {
+        matches!(tcx.def_kind(i), DefKind::Impl { of_trait: false })
+            && adt_is(
+                tcx,
+                tcx.type_of(i).instantiate_identity().skip_norm_wip(),
+                "core::fmt::Formatter",
+            )
+    });
+    let builders = def_path(tcx, d).starts_with("core::fmt::builders::");
+    match name.as_str() {
+        "debug_struct" | "debug_tuple" | "debug_map" if formatter_method => Some(&["fmt"]),
+        "debug_list" | "debug_set" if formatter_method => Some(&["inner", "fmt"]),
+        "debug_struct_new" | "debug_tuple_new" | "debug_map_new" if builders => Some(&["fmt"]),
+        "debug_list_new" | "debug_set_new" if builders => Some(&["inner", "fmt"]),
+        _ => None,
+    }
+}
+
+/// `true` for a method of a `core::fmt::builders` struct returning `&mut Self`
+/// (`DebugStruct::field`, `DebugList::entries`, `DebugMap::key`, ..): every one
+/// returns its receiver `self` (audited in the sources of rustc 1.99.1; top plan T7a).
+fn returns_receiver(tcx: TyCtxt<'_>, d: DefId) -> bool {
+    let Some(i) = tcx.impl_of_assoc(d) else {
+        return false;
+    };
+    if !matches!(tcx.def_kind(i), DefKind::Impl { of_trait: false }) {
+        return false;
+    }
+    let self_ty = tcx.type_of(i).instantiate_identity().skip_norm_wip();
+    let ty::Adt(def, _) = self_ty.kind() else {
+        return false;
+    };
+    if !def_path(tcx, def.did()).starts_with("core::fmt::builders::") {
+        return false;
+    }
+    let sig = tcx.fn_sig(d).skip_binder().skip_binder();
+    let recv_is_mut_self = sig.inputs().first().is_some_and(|t| {
+        matches!(*t.kind(), ty::Ref(_, inner, m) if m.is_mut() && matches!(inner.kind(), ty::Adt(a, _) if a.did() == def.did()))
+    });
+    let out_is_mut_self = matches!(*sig.output().kind(),
+        ty::Ref(_, inner, m) if m.is_mut() && matches!(inner.kind(), ty::Adt(a, _) if a.did() == def.did()));
+    recv_is_mut_self && out_is_mut_self
+}
+
+/// `true` for `core::fmt::builders::PadAdapter::wrap(fmt, slot, state)`: it returns a
+/// `Formatter` writing to a `PadAdapter` (in `slot`) over `fmt`'s output (audited in
+/// the sources of rustc 1.99.1: `fmt.wrap_buf(move |buf| slot.insert(PadAdapter {
+/// buf, state }))`; top plan T7b).
+fn is_pad_wrap(tcx: TyCtxt<'_>, d: DefId) -> bool {
+    tcx.item_name(d).as_str() == "wrap"
+        && tcx.impl_of_assoc(d).is_some_and(|i| {
+            adt_is(
+                tcx,
+                tcx.type_of(i).instantiate_identity().skip_norm_wip(),
+                "core::fmt::builders::PadAdapter",
+            )
+        })
+}
+
+/// The text of an output in a summary term (`param <j>`, `pad <out>`, `ty <type>`).
+fn out_desc(out: &Out<'_>) -> String {
+    match out {
+        Out::Param(j) => format!("param {j}"),
+        Out::Pad(inner) => format!("pad {}", out_desc(inner)),
+        Out::Ty(t) => format!(
+            "ty {}",
+            with_no_visible_paths!(with_no_trimmed_paths!(t.to_string()))
+        ),
+    }
 }
 
 /// `true` if a value of `ty` may contain `fmt::Arguments` or `fmt::rt::Argument`
@@ -4451,6 +5010,11 @@ enum FmtrSrc<'b, 'tcx> {
     Param(mir::Local),
     /// `Formatter::new(out, ..)` in the body: `out`.
     New(&'b Operand<'tcx>),
+    /// A formatter at this path below a parameter ([`Origin::ArgAt`]).
+    At(mir::Local, &'tcx ty::List<mir::PlaceElem<'tcx>>),
+    /// `PadAdapter::wrap(fmt, ..)` in the body ([`is_pad_wrap`]): a `PadAdapter` over
+    /// the output of the formatter `fmt`.
+    Pad(&'b Operand<'tcx>),
 }
 
 /// One assignment of a whole local.
@@ -4682,9 +5246,24 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             return None;
         };
         if !p.projection.is_empty() {
-            return None;
+            return self.formatter_at(p.local, p.projection, depth);
         }
         self.formatter_local(p.local, depth)
+    }
+
+    /// A formatter read at a place with projections: a parameter's, or one at a path
+    /// below a parameter ([`OriginCx::at`]).
+    fn formatter_at(
+        &self,
+        l: mir::Local,
+        proj: &[mir::PlaceElem<'tcx>],
+        depth: usize,
+    ) -> Option<FmtrSrc<'b, 'tcx>> {
+        match self.at(l, proj, depth)? {
+            Origin::Arg(l) => Some(FmtrSrc::Param(l)),
+            Origin::ArgAt(l, p) => Some(FmtrSrc::At(l, p)),
+            _ => None,
+        }
     }
 
     fn formatter_local(&self, l: mir::Local, depth: usize) -> Option<FmtrSrc<'b, 'tcx>> {
@@ -4704,6 +5283,10 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             {
                 self.formatter_local(p.local, depth + 1)
             }
+            Def::Rv(mir::Rvalue::Use(Operand::Copy(p) | Operand::Move(p), ..))
+            | Def::Rv(mir::Rvalue::CopyForDeref(p)) => {
+                self.formatter_at(p.local, p.projection, depth + 1)
+            }
             // `&mut f` of a `Formatter` value, or `&mut *f` of a reference to one.
             Def::Rv(mir::Rvalue::Ref(_, _, p)) if p.projection.is_empty() => {
                 self.formatter_value(p.local, depth + 1)
@@ -4712,6 +5295,13 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
                 if p.projection.as_slice() == [mir::ProjectionElem::Deref] =>
             {
                 self.formatter_local(p.local, depth + 1)
+            }
+            // `&mut *x` of a reference at a path: the same formatter as `x`.
+            Def::Rv(mir::Rvalue::Ref(_, _, p))
+                if p.projection.last() == Some(&mir::ProjectionElem::Deref) =>
+            {
+                let n = p.projection.len() - 1;
+                self.formatter_at(p.local, &p.projection[..n], depth + 1)
             }
             _ => None,
         }
@@ -4753,6 +5343,9 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
                     "core::fmt::Formatter",
                 )
             });
+        if is_pad_wrap(tcx, d) {
+            return args.first().map(|a| FmtrSrc::Pad(&a.node));
+        }
         if !is_new {
             return None;
         }
@@ -4772,9 +5365,170 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
 
     /// The value at a place with projections: the output of a formatter parameter
     /// ([`OriginCx::buf_of`]), a load below a reference constant (`(*_3)[_4]` with
-    /// `_3 = const {TABLE: &[fn(u8) -> u8; 2]}`), or a field of a local aggregate
-    /// ([`OriginCx::field`]).
+    /// `_3 = const {TABLE: &[fn(u8) -> u8; 2]}`), a field of a local aggregate
+    /// ([`OriginCx::field`]), or else a path below a parameter ([`OriginCx::at`]).
     fn place(&self, p: mir::Place<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
+        self.place_known(p, depth)
+            .or_else(|| self.at(p.local, p.projection, depth))
+    }
+
+    /// The value at `l.proj` (fields and dereferences) on every read of that place
+    /// (top plan T7a/b): below a parameter, [`Origin::ArgAt`] if
+    /// [`OriginCx::stable_below`] holds; through a local assigned once from a copy,
+    /// a reborrow (`&mut q` read through `*`), a struct, tuple or closure aggregate (a
+    /// field: its operand), or a `core::fmt` builder constructor
+    /// ([`builder_ctor_fields`]: the formatter it was given). A local that may change
+    /// otherwise is followed only through [`AUDITED_FIELDS`].
+    fn at(
+        &self,
+        l: mir::Local,
+        proj: &[mir::PlaceElem<'tcx>],
+        depth: usize,
+    ) -> Option<Origin<'tcx>> {
+        if depth > Self::MAX_DEPTH {
+            return None;
+        }
+        if proj.is_empty() {
+            return self.local(l, depth);
+        }
+        let tcx = self.tcx;
+        let li = l.as_usize();
+        if self.is_arg(l) {
+            if self.unstable[li] || !self.writes[li].is_empty() {
+                return None;
+            }
+            return self
+                .stable_below(self.body.local_decls[l].ty, proj)
+                .then(|| Origin::ArgAt(l, tcx.mk_place_elems(proj)));
+        }
+        let [w] = self.writes[li].as_slice() else {
+            return None;
+        };
+        let ty = self.body.local_decls[l].ty;
+        let concat = |q: &mir::Place<'tcx>, rest: &[mir::PlaceElem<'tcx>]| {
+            let mut v: Vec<mir::PlaceElem<'tcx>> = q.projection.to_vec();
+            v.extend_from_slice(rest);
+            v
+        };
+        match w {
+            Def::Rv(mir::Rvalue::Aggregate(kind, ops)) => {
+                let mir::ProjectionElem::Field(f, _) = proj[0] else {
+                    return None;
+                };
+                let is_struct = match **kind {
+                    mir::AggregateKind::Tuple | mir::AggregateKind::Closure(..) => true,
+                    mir::AggregateKind::Adt(d, _, _, _, None) => tcx.adt_def(d).is_struct(),
+                    _ => false,
+                };
+                if !is_struct {
+                    return None;
+                }
+                let env = TypingEnv::post_analysis(tcx, self.body.source.def_id());
+                let stable = !self.unstable[li] && ty.is_freeze(tcx, env);
+                if !stable && !audited_field(tcx, ty, f) {
+                    return None;
+                }
+                match ops.get(f)? {
+                    Operand::Copy(q) | Operand::Move(q) => {
+                        self.at(q.local, &concat(q, &proj[1..]), depth + 1)
+                    }
+                    Operand::Constant(c) if proj.len() == 1 => Some(Origin::Const(c.const_)),
+                    _ => None,
+                }
+            }
+            Def::Rv(
+                mir::Rvalue::Use(Operand::Copy(q) | Operand::Move(q), ..)
+                | mir::Rvalue::CopyForDeref(q),
+            ) if !self.unstable[li] => self.at(q.local, &concat(q, proj), depth + 1),
+            // `l = &q` (or `&mut q`) read through `*l`: `q`.
+            Def::Rv(mir::Rvalue::Ref(_, _, q))
+                if !self.unstable[li] && proj[0] == mir::ProjectionElem::Deref =>
+            {
+                self.at(q.local, &concat(q, &proj[1..]), depth + 1)
+            }
+            Def::Call(func, args) => {
+                let ty::FnDef(d, _) = *func.ty(&self.body.local_decls, tcx).kind() else {
+                    return None;
+                };
+                // A builder method returning its receiver (`&mut Self`): the place
+                // below the result is the place below the receiver.
+                if returns_receiver(tcx, d) && proj[0] == mir::ProjectionElem::Deref {
+                    return match &args.first()?.node {
+                        Operand::Copy(q) | Operand::Move(q) => {
+                            self.at(q.local, &concat(q, proj), depth + 1)
+                        }
+                        _ => None,
+                    };
+                }
+                let names = builder_ctor_fields(tcx, d)?;
+                // Follow the named (audited) fields of the builder value.
+                let mut cur = ty;
+                for (i, name) in names.iter().enumerate() {
+                    let mir::ProjectionElem::Field(f, fty) = *proj.get(i)? else {
+                        return None;
+                    };
+                    let ty::Adt(def, _) = cur.kind() else {
+                        return None;
+                    };
+                    if def.non_enum_variant().fields.get(f)?.name.as_str() != *name
+                        || !audited_field(tcx, cur, f)
+                    {
+                        return None;
+                    }
+                    cur = fty;
+                }
+                match &args.first()?.node {
+                    Operand::Copy(q) | Operand::Move(q) => {
+                        self.at(q.local, &concat(q, &proj[names.len()..]), depth + 1)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// `true` if every read of the place `proj` below a parameter of type `ty` (never
+    /// reassigned) yields its value on entry: each field is of the parameter's own
+    /// value, or of memory behind a shared reference to a `Freeze` type, or in
+    /// [`AUDITED_FIELDS`] (behind a `&mut`, or below a field that may change); a
+    /// dereference is of a reference whose value is itself stable. Anything else
+    /// (a dereference of a `Box` or raw pointer, an index, a downcast) is not.
+    fn stable_below(&self, ty: Ty<'tcx>, proj: &[mir::PlaceElem<'tcx>]) -> bool {
+        let tcx = self.tcx;
+        let env = TypingEnv::post_analysis(tcx, self.body.source.def_id());
+        let mut cur = ty;
+        let mut mutable = false;
+        for e in proj {
+            match *e {
+                mir::ProjectionElem::Deref => {
+                    if mutable {
+                        return false;
+                    }
+                    let ty::Ref(_, inner, m) = *cur.kind() else {
+                        return false;
+                    };
+                    mutable = m.is_mut() || !inner.is_freeze(tcx, env);
+                    cur = inner;
+                }
+                mir::ProjectionElem::Field(f, fty) => {
+                    if mutable {
+                        if !audited_field(tcx, cur, f) {
+                            return false;
+                        }
+                        // A never-reassigned reference is a stable value; a struct
+                        // field may still change in its other fields.
+                        mutable = !fty.is_ref();
+                    }
+                    cur = fty;
+                }
+                _ => return false,
+            }
+        }
+        !mutable
+    }
+
+    fn place_known(&self, p: mir::Place<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
         if let Some(o) = self.buf_of(p, depth) {
             return Some(o);
         }
@@ -4948,6 +5702,13 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
                 if p.projection.as_slice() == [mir::ProjectionElem::Deref] =>
             {
                 self.local(p.local, depth)
+            }
+            // `&*x` of a reference at a path: the same pointee as `x` (top plan T7a/b).
+            mir::Rvalue::Ref(_, _, p) | mir::Rvalue::RawPtr(_, p)
+                if p.projection.last() == Some(&mir::ProjectionElem::Deref) =>
+            {
+                let n = p.projection.len() - 1;
+                self.at(p.local, &p.projection[..n], depth)
             }
             // `&l`: a shared borrow keeps `l` unchanged while it lives.
             mir::Rvalue::Ref(_, mir::BorrowKind::Shared, p) if p.projection.is_empty() => {

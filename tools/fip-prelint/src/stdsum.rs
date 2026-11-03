@@ -34,11 +34,17 @@
 //!
 //! Term keys are calls the summarised function makes through its parameters, left
 //! open and resolved at each call site: `§out <i> <trait method>` (a dynamic call on
-//! the output reached through parameter `i`: a `&mut dyn fmt::Write` or a
-//! `&mut fmt::Formatter`) and `§fmt <i> out param <j>` / `§fmt <i> out ty <type>`
-//! (the formatting functions carried by the `fmt::Arguments` in parameter `i`,
-//! called with a `Formatter` writing to parameter `j`'s output or to a value of the
-//! named type).
+//! the output reached through parameter `i`: a `&mut dyn fmt::Write`, a
+//! `&mut fmt::Formatter`, or one held below it, such as a `core::fmt` builder's
+//! formatter or a `PadAdapter`'s buffer), `§fmt <i> out <out>` (the formatting
+//! functions carried by the `fmt::Arguments` in parameter `i`, called with a
+//! `Formatter` writing to `<out>`) and `§dyn <i> <trait method> fmt <out>` (top plan
+//! T7a: the method of the `&dyn fmt::Debug`/`&dyn fmt::Display` in parameter `i`,
+//! called with a `Formatter` writing to `<out>`). An output `<out>` is `param <j>`
+//! (parameter `j`'s output), `pad <out>` (a `core::fmt::builders::PadAdapter` over
+//! `<out>`, the `{:#?}` path) or `ty <type>`. The `§dyn` and `pad` forms were added
+//! without a format change: they only add keys, and a driver that does not know a
+//! key reports it as `⊤`.
 
 use std::collections::BTreeMap;
 

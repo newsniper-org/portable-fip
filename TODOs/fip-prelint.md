@@ -1821,3 +1821,73 @@ rustc release (`library/Cargo.lock`), which the stamp's rustc version covers.
 (foreign `cmath` declarations in `std`: the FFI rule; a user mark by symbol covers
 them). The float formatting summaries carry `core`'s bounds-check panic paths (notes,
 or errors under `panic_macros = false`), as the integer ones do.
+
+## Resolved 2026-11-03: derived `Debug`, the debug builders and `PadAdapter` (top plan T7a/b)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T7 rows a and b (item 7 of
+its order).
+
+**Before.** `{:?}` of a derived `Debug` reached `debug_struct_field2_finish`,
+`debug_tuple_field1_finish`, `debug_list` and the builder methods, none summarised
+(`⊤`). Their field values arrive as `&dyn Debug`, and inside `core` the builders hold
+the formatter in a field (`DebugStruct { fmt, .. }`) that a closure reads through its
+captures, so even the summarised `DebugStruct::field`/`finish` kept 3 `top` lines
+(the `dyn Write` behind the builder's formatter, the `dyn Debug` value, and the
+`PadAdapter` of `{:#?}`).
+
+**Mechanism.**
+
+- Bindings at paths: `Bind::At(path, b)` binds the place at a path of fields and
+  dereferences below a parameter (a closure's captures, a `core::fmt::builders`
+  struct; `bindable_paths`) to a formatter's output, an output, or a `dyn Debug`
+  value. `call_binds` computes them from the caller's origins, and the generator
+  binds them to the summarised function's parameter.
+- `Origin::ArgAt(l, proj)` (`OriginCx::at`): the value at a path below a parameter is
+  a must-origin only if every read yields the value on entry
+  (`OriginCx::stable_below`): fields of the parameter's own value, of memory behind a
+  shared reference to a `Freeze` type, or audited fields (`AUDITED_FIELDS`:
+  `Formatter.buf`, `PadAdapter.buf`, the `fmt`/`inner` fields of the debug
+  builders: private to `core`, assigned only where built; audited in the 1.99.1
+  sources). Locals are followed through one copy, a reborrow read through `*`, a
+  struct/tuple/closure aggregate (stable and `Freeze`, or an audited field), a builder
+  constructor (`debug_struct_new`, `Formatter::debug_list`, ..: the formatter it was
+  given, `builder_ctor_fields`), and a builder method returning `&mut Self` (its
+  receiver, `returns_receiver`: every such method returns `self`, audited).
+- `Bind::Obj` (`&dyn Debug`/`&dyn Display` only): the concrete type a value is unsized
+  from at the call site (`Origin::Pointee`). A dynamic call on such a parameter calls
+  that type's method with the other arguments' bindings (so the `Formatter` stays
+  bound); devirtualised `Pointee` calls now also carry them.
+- `Out::Pad(out)`: `PadAdapter::wrap(fmt, ..)` returns a `Formatter` over a
+  `PadAdapter` writing to `fmt`'s output (audited model, `is_pad_wrap`); its
+  `write_str`/`write_char` are analysed (or summarised) with `buf` bound to `out`.
+- Summary terms: `§dyn <i> <method> fmt <out>` (the method of the `dyn Debug` in
+  parameter `i`, resolved at the call site from the binding), outputs `pad <out>`;
+  `§out <i>` also finds an output bound below parameter `i`. The format number stays
+  1 (keys are only added; an older driver reports an unknown key as `⊤`).
+- Seed: derived structs and tuple structs with 1–5 fields, a unit struct, an enum,
+  slices, arrays, `Option`, `Result`, tuples, `str`, and a user `Debug` through
+  `debug_list`/`debug_set`/`debug_map` (`entry`, `entries`, `key`, `value`,
+  `finish`, `finish_non_exhaustive`), each with `{:?}` and `{:#?}`.
+
+**Soundness.** A binding is a must-fact at the call site (as B); a path binding is
+used only where the place cannot change between entry and read (the stability rule
+above, or a `core` field audited never to be reassigned, pinned by the sidecar's
+rustc/std-src stamp). The four `core` models (builder constructors, builder methods
+returning `self`, `PadAdapter::wrap`, the audited fields) are trusted readings of the
+1.99.1 sources; a repin reopens them. Anything else stays `⊤`: a `&dyn Debug` from
+data, `debug_struct_fields_finish`/`debug_tuple_fields_finish` (slices of `&dyn
+Debug`), a `Formatter` built by user code over a `dyn Write` from data.
+
+**Measured** (before = `3ef5ace`, its driver and sidecar):
+
+| case | before | after |
+|---|---|---|
+| fixture `std_summaries` (5 new roots: `write_debug_alt`, `write_debug_std`, `write_debug_builders`, controls `write_debug_dyn`, `write_debug_six`) | 16 roots, 6 passed, 28 errors (all six `Debug` roots `⊤`) | 16 roots, 10 passed, 12 errors: `write_debug`, `write_debug_alt`, `write_debug_std`, `write_debug_builders` pass; the two controls stay `⊤` |
+| N4 `top` | 44 roots, 29 passed, 21 errors | 44 roots, 33 passed, 15 errors: `dbg_derive`, `dbg_alt`, `dbg_slice`, `dbg_option` pass |
+| sidecar | 165 functions, 1 696 lines, 363 954 bytes, 3 `top` lines | 198 functions, 2 099 lines, 461 674 bytes, 0 `top` lines; generation 227.9 s (std rebuilt by the new driver) |
+| self-check dev / `--release`, other fixtures | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
+
+**Kept.** `&dyn Debug` of unknown origin, `debug_*_fields_finish`, user code building a
+`Formatter` over a `dyn Write` from data, and `<PadAdapter as Write>::write_fmt` reached
+through a `dyn Write` (its default body unsizes `self` to `dyn Write` without the
+binding; by construction, not measured): `⊤`, as the plan's "stays".
