@@ -3,9 +3,11 @@
 
 # Decision: driver-checked `fip_fn!` mode (`fip_fn!(prelint, N, ..)`)
 
-**Status:** REVIEW, 2026-11-03. Conclusion: implementable as opt-in, default-off and
-never silently trusted without the driver (section "Conclusion"); implemented in a
-separate commit (section "Implementation").
+**Status:** ACCEPTED and IMPLEMENTED, 2026-11-03, in the commit "fip-macros:
+driver-checked fip_fn!(prelint, N, ..) (fip-fn ergonomics 5)" following the review
+commit `4e64b70` (section "Implementation"). Review conclusion: implementable as
+opt-in, default-off and never silently trusted without the driver (section
+"Conclusion").
 **Source:** `docs/notes/fip-fn-ergonomics-brainstorm.md`, idea 11 (shortlist item 5).
 **Measured with:** rustc 1.99.1, `fip-prelint` built from this branch (`da394d5`),
 probe crates `/tmp/tp-m3/drv` and `/tmp/tp-m3/drv_ok`.
@@ -188,24 +190,66 @@ driver.
 
 ## Implementation
 
-`fip_fn!(prelint, N, closure)` (optionally after `crate = ..`), in the separate commit
+`fip_fn!(prelint, N, closure)` (optionally after `crate = ..`), in the commit
 "fip-macros: driver-checked fip_fn!(prelint, N, ..) (fip-fn ergonomics 5)":
 
-- the closure's parameter types must be written (they form the `&dyn Fn(..)` of the
-  check function); outer attributes on the closure are kept;
-- `fip-prelint` sets `FIP_PRELINT_CHECKS=1` in its process for a primary package in
-  check mode only; `fip-macros` requires it together with `FIP_PRELINT_DRIVER`;
-- otherwise: a compile error naming `cargo fip-prelint`;
-- under a checking driver run: the expansion above;
-- tests: a `compile_fail` example (plain build), an integration test building a
-  generated crate plainly, with the driver's environment variable only, and with the
-  cfg forged as well (all three fail), and the `fip-prelint` fixture
-  `driver_checked` (passes and the four errors above).
+- `fip-macros` (`fip_fn_prelint`): the closure's parameter types must be written
+  (they form the `&dyn ::core::ops::Fn(..) -> R` of the check function; otherwise
+  "write the type of every closure parameter"); outer attributes on the closure are
+  kept; `N` is an integer literal; `bound <= K` and a function path are rejected
+  with their own messages. The mark is emitted with every key:
+  `fip::mark(kind = "fip", n = 0, strict = false, panic_macros = true, param(g = N))`.
+- `fip-prelint` (`src/main.rs`, `checks_crate`) sets `FIP_PRELINT_CHECKS=1` in its
+  process for `Role::Primary` outside stack mode and generation mode (exactly the runs
+  that call `report::check_crate`), and removes it otherwise, also when inherited.
+  `fip-macros` requires it together with `FIP_PRELINT_DRIVER`; otherwise the compile
+  error "fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`: ..".
+- `fip_testkit`'s source model skips the `prelint, N,` prefix (the closure is
+  modelled as in the default mode).
+- Tests: `compile_fail` examples in `fip-macros` with `# // expect:` (plain build,
+  also with `crate = ..`; missing parameter type; `bound <= K`; a non-literal `N`),
+  checked by `just compile-fail-reasons`; `crates/fip-macros/tests/driver_mode.rs`
+  (a generated crate built plainly, with the driver's environment variables forged,
+  and with `--cfg fip_prelint` forged as well: all three fail); fixture
+  `tools/fip-prelint/tests/fixtures/driver_checked`.
+
+Measured (rustc 1.99.1, the driver of this commit):
+
+| run | result |
+|---|---|
+| plain `cargo build` of the generated crate (2 constructions, honest bounds) | 2× "fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`" |
+| `FIP_PRELINT_DRIVER=1 FIP_PRELINT_CHECKS=1 cargo build` | 2× "fip_fn!(prelint, ..): `cfg(fip_prelint)` is not set, .." (the guard in the output) |
+| the same with `RUSTFLAGS="--cfg fip_prelint"` | `fip-strict` fails: E0433 "cannot find module or crate `fip` in this scope" |
+| `cargo fip-prelint`, crate `checked` | method call, inferred local, two parameters, `\|x: u32\| Box::new(x)` with `N = 1`: pass; `*Box::new(x)` with `N = 0`: "may allocate 1 time(s) per call, but .. declares `param(g = 0)`"; `countdown(x)`: "recurses"; `\|b: Box<u32>\| *b`: "may free"; `*Box::new(x)` with `N = 1`: "may free"; summary "10 roots, 10 passed, 7 errors" |
+| `cargo fip-prelint`, non-member `drvdep` with `fip::export` (`Role::ExportedDependency`) | the `fip-macros` error |
+| `cargo fip-prelint --stack` | the `fip-macros` error at every construction, exit 1 |
+| `cargo fip-prelint --stack` with `FIP_PRELINT_CHECKS=1` inherited | the same (the driver removes it); with the removal disabled (mutation) the crate with the lies built, exit 0 |
+| generation mode (`FIP_PRELINT_STD_SUMMARIES_OUT` set; fixture variant, and once `cargo fip-prelint --std-summaries --manifest-path ..checked/Cargo.toml` with `-Zbuild-std`, 3 min 44 s) | the `fip-macros` error at every construction |
+| mutation: `fip-macros` requiring only `FIP_PRELINT_DRIVER` | `drvdep` compiled (no error), `--stack` built the crate with the lies (exit 0): the hole the review found, closed by `FIP_PRELINT_CHECKS` |
+
+Generation mode of a crate depending on `fip-strict` ICEs in the driver
+(`rustc_metadata` decoder, `Option::unwrap` on `None`), with or without driver-mode
+constructions and also for the default `fip_fn!`; generation is meant for the seed
+crate only, and with this change a driver-mode construction fails earlier, at
+expansion.
+
+Generic enclosing functions (soundness argument, point 4): the driver-mode check
+runs on the generic body (`generic_lie::<T>`: "may allocate 1 time(s)"); both
+constructions in a generic function also get the existing `Certified::assume` check's
+`⊤` ("`Certified::assume` with the generic callable type `{closure..}`"), as the
+default `fip_fn!` does in a generic function (measured on a probe with both). So a
+driver-mode construction in a generic function does not pass today; never silently.
 
 Open points:
 
-- stack mode (`cargo fip-prelint --stack`) reports the check functions as roots
-  without a symbol (`⊤`) when they are inlined;
+- the `Certified::assume` check reports a closure type of a generic function as a
+  generic callable type (`⊤`); a closure type is never a function pointer, so the
+  driver could resolve it (a separate driver change, affecting the default mode too);
+- parameter types naming type parameters of an enclosing generic function fail with
+  E0401 (the check function is a nested item), and a closure returning a borrow of a
+  parameter fails with "lifetime may not live long enough" (`R` is not higher-ranked);
+  both measured, both compile errors, not silent passes;
 - no count of driver-mode constructions in the crate summary yet (they appear as
   roots named `..::__fip_prelint_checked`);
+- `--warn-only` reports a wrong `N` as a warning (threat model: out of scope);
 - Verus is not the driver, so driver mode does not compile in verified crates.

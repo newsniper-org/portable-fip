@@ -3,8 +3,9 @@
 
 # Brainstorm: `fip_fn!` and strict higher-order ergonomics
 
-**Status:** BRAINSTORM, 2026-11-03; shortlist being implemented (each idea's
-**Status** line says what landed and where).
+**Status:** BRAINSTORM, 2026-11-03; shortlist implemented, item 5 (idea 11, the
+driver-checked `fip_fn!`) last (each idea's **Status** line says what landed and
+where).
 **Measured with:**
 
 - rustc 1.99.1;
@@ -430,7 +431,11 @@ type mismatch if `N ≠ 0`).
 
 ### 11. Driver-checked `fip_fn!` (defer the bound to `fip-prelint`)
 
-**Status:** REVIEWED in `docs/decisions/2026-11-03-fip-fn-driver-mode.md`: opt-in
+**Status:** IMPLEMENTED (2026-11-03) as `fip_fn!(prelint, N, |x: T| body)`, commit
+"fip-macros: driver-checked fip_fn!(prelint, N, ..) (fip-fn ergonomics 5)"; the driver
+sets `FIP_PRELINT_CHECKS` only for a checked primary package, fixture
+`driver_checked`, `fip-macros/tests/driver_mode.rs`. Earlier REVIEWED in
+`docs/decisions/2026-11-03-fip-fn-driver-mode.md`: opt-in
 per use, default-off, and unusable outside a checking driver run (plain builds,
 a forged environment variable, dependency/stack/generation runs all fail to
 compile; measured). The driver checks the full claim at the construction through a
@@ -571,7 +576,9 @@ documentation is needed. **Cost** S (docs and an example).
 4. Then a **Verus probe for idea 8's adapters** (generic `F` `pre`/`post` in `verus!`
    impls on both builds) before deciding on 8, 12 and 13.
 5. Keep **idea 11** as an explicit opt-in proposal for a user decision (trust moves to
-   the driver). Do **idea 5** only together with the top plan's T1.4.
+   the driver). **Done:** reviewed, accepted and implemented as an opt-in, default-off
+   mode that does not compile outside a checking driver run. Do **idea 5** only
+   together with the top plan's T1.4.
 
 ## What would change this
 

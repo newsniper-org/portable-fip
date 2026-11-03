@@ -67,9 +67,15 @@ functions with a certificate from `fip_fn!(f)` (also `a::f`, `f::<T>`,
 no `unsafe` is written, and strict bodies may use it. With an expected type
 `Certified<N, fn(..) -> ..>` the value is a certified function pointer.
 `fip_fn!(bound <= K, ..)` fails to compile (also under `cargo check`) when the
-computed bound exceeds `K`. `fip_strict::Stateless(f)` lifts a one-argument callable
-to a state-passing step for the `_st` combinators, `fip_strict::Compose(f, g)` calls
-`g(f(x))` with the summed bound; both are also specified under Verus.
+computed bound exceeds `K`. Opt-in per use, `fip_fn!(prelint, N, |x: T| ..)` skips
+the token scan of the closure (method calls, `use` aliases and inferred types
+allowed) and leaves the declared `N` to `fip-prelint`, which checks it at the
+construction (allocations, frees, recursion); it compiles only in a checking
+`cargo fip-prelint` run, never in a plain build
+(`docs/decisions/2026-11-03-fip-fn-driver-mode.md`). `fip_strict::Stateless(f)` lifts
+a one-argument callable to a state-passing step for the `_st` combinators,
+`fip_strict::Compose(f, g)` calls `g(f(x))` with the summed bound; both are also
+specified under Verus.
 
 ```rust
 #[fip(strict = true, param(keep = 0))]

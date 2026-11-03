@@ -592,3 +592,68 @@ fn ffi() {
 fn ctor_spellings() {
     check("ctor_spellings");
 }
+
+/// The error of `fip_fn!(prelint, ..)` outside a checking driver run (`fip-macros`).
+const PRELINT_UNCHECKED: &str = "fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`";
+
+/// The driver-checked `fip_fn!(prelint, N, ..)`
+/// (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`). Check run: in crate `checked`
+/// a method call, an inferred local, two parameters and an honest bound pass; a lie
+/// about the allocations, a recursion, a freed argument and a box dropped inside the
+/// closure are reported at the construction; in a generic function the allocating
+/// closure is reported by the same check, and both constructions there also get the
+/// existing `Certified::assume` check's `⊤` for a generic callable type (as the
+/// default `fip_fn!` does in a generic function). The three driver runs that
+/// compile without checking must not accept the mode (`FIP_PRELINT_CHECKS` unset by
+/// the driver): the non-member dependency `drvdep` declaring `fip::export`
+/// (`Role::ExportedDependency`, in the check run), stack mode (`-stack`) and
+/// std-summary generation (`-generate`, `FIP_PRELINT_STD_SUMMARIES_OUT` set) all fail
+/// with the `fip-macros` error; stack mode with `FIP_PRELINT_CHECKS=1` inherited from
+/// the environment fails the same way (the driver removes it).
+#[test]
+fn driver_checked() {
+    let unchecked_at = |got: &[String], file: &str| {
+        got.iter()
+            .any(|l| l.contains(file) && l.contains(PRELINT_UNCHECKED))
+    };
+    let check_run = run("driver_checked", "", &[]);
+    compare("driver_checked", "", &check_run);
+    assert!(
+        unchecked_at(&check_run, "drvdep/src/lib.rs"),
+        "an exported dependency accepted fip_fn!(prelint, ..): {check_run:#?}"
+    );
+    assert!(
+        !unchecked_at(&check_run, "checked/src/lib.rs")
+            && check_run
+                .iter()
+                .any(|l| l.contains("note: fip-prelint: crate `checked`:")),
+        "the checked primary package rejected fip_fn!(prelint, ..) or was not analysed: {check_run:#?}"
+    );
+
+    let stack = run_args("driver_checked", "-stack", &[], &["--stack"]);
+    compare("driver_checked", "-stack", &stack);
+    assert!(
+        stack[0] == "exit: failure" && stack.iter().any(|l| l.contains(PRELINT_UNCHECKED)),
+        "stack mode accepted fip_fn!(prelint, ..): {stack:#?}"
+    );
+    // An inherited `FIP_PRELINT_CHECKS=1` is removed by the driver: the same result.
+    let forged = run_args(
+        "driver_checked",
+        "-stack-forged",
+        &[("FIP_PRELINT_CHECKS", "1".into())],
+        &["--stack"],
+    );
+    compare("driver_checked", "-stack", &forged);
+
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("driver_checked-summaries.txt");
+    let generate = run(
+        "driver_checked",
+        "-generate",
+        &[("FIP_PRELINT_STD_SUMMARIES_OUT", out.into_os_string())],
+    );
+    compare("driver_checked", "-generate", &generate);
+    assert!(
+        generate[0] == "exit: failure" && generate.iter().any(|l| l.contains(PRELINT_UNCHECKED)),
+        "std-summary generation accepted fip_fn!(prelint, ..): {generate:#?}"
+    );
+}

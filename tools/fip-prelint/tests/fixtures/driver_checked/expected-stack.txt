@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+cargo-fip-prelint: the build failed
+error: fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`: this compilation is not a checking driver run (a plain build, a dependency, `cargo fip-prelint --stack` or std-summary generation), so the declared bound would be trusted unchecked; build this crate with `cargo fip-prelint`, or write `fip_fn!(|..| ..)`
+note: fip-prelint: stack: built with `-Zemit-stack-sizes -Zshare-generics=no -Zcross-crate-inline-threshold=never` (x86_64 objects; the bounds hold for this build)

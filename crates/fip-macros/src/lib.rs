@@ -69,6 +69,10 @@
 //! the mark, so the driver alone decides (used to run the rejected examples below
 //! through it; each carries a hidden `# // prelint: ..` line with the driver's reason).
 //!
+//! `fip_fn!(prelint, N, ..)` (driver-checked mode, see [`fip_fn!`]) expands only when
+//! the driver also sets `FIP_PRELINT_CHECKS=1`, which it does for a primary package in
+//! check mode only; everywhere else it is a compile error.
+//!
 //! `#[fip(.., requires(i < j, j < xs.len()))]` declares a precondition (a conjunction
 //! of comparisons between integer parameters, `p.len()` of slice parameters, access
 //! paths below a reference parameter such as `w.n`, `xs[0]`, `w.b.len()`, and
@@ -851,6 +855,33 @@
 //! ```compile_fail
 //! # // expect: a method of a value (`x.m`) cannot be named
 //! fn main() { let v = 3_u8; let _w = fip_macros::fip_fn!(v.count_ones); }
+//! ```
+//! `fip_fn!(prelint, N, ..)` (driver-checked mode) in a plain build: never trusted
+//! without the driver:
+//! ```compile_fail
+//! # // expect: fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`
+//! fn main() { let _w = fip_macros::fip_fn!(prelint, 0, |x: u32| x.wrapping_add(1).count_ones()); }
+//! ```
+//! the same with a `crate = ..` path and an honest bound:
+//! ```compile_fail
+//! # // expect: fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`
+//! fn main() { let _w = fip_macros::fip_fn!(crate = ::fip_strict, prelint, 1, |x: u32| Box::new(x)); }
+//! ```
+//! driver-checked mode without a parameter type:
+//! ```compile_fail
+//! # // expect: write the type of every closure parameter
+//! fn main() { let _w = fip_macros::fip_fn!(prelint, 0, |x| x + 1_u8); }
+//! ```
+//! driver-checked mode with `bound <= K`:
+//! ```compile_fail
+//! # // expect: `bound <= K` is not an argument here
+//! fn main() { let _w = fip_macros::fip_fn!(prelint, 0, bound <= 0, |x: u8| x); }
+//! ```
+//! driver-checked mode without an integer literal bound:
+//! ```compile_fail
+//! # // expect: fip_fn!: expected `prelint, N, |x: T, ..| body` with an integer literal `N`
+//! const N: u64 = 0;
+//! fn main() { let _w = fip_macros::fip_fn!(prelint, N, |x: u8| x); }
 //! ```
 //! `fip_strict::Compose` whose summed bound overflows (a compile error, not a wrapped
 //! bound):
@@ -3732,6 +3763,26 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// # let _ = f;
 /// ```
 ///
+/// **Driver-checked mode (opt-in per use).** `fip_fn!(prelint, N, |x: T, ..| body)`
+/// (an integer literal `N`, after `crate = ..` if any) certifies the closure with the
+/// declared bound `N` without the strict token scan of `body`, so method calls, `use`
+/// aliases and inferred types are allowed in it. Nothing in this macro checks `N`: the
+/// MIR checker `fip-prelint` checks the construction (at most `N` allocations per
+/// call, no free, no recursion, for the body and everything it reaches) and is the
+/// trusted party for it. The mode therefore compiles only in a checking driver run
+/// (`cargo fip-prelint` on the crate as a primary package); a plain build, a
+/// dependency build, `cargo fip-prelint --stack` and std-summary generation fail with
+/// a compile error naming `cargo fip-prelint`. Every parameter type
+/// must be written (they form the `&dyn Fn(..)` parameter of the check function), the
+/// return type must not borrow from a parameter, the parameter types must not name
+/// type parameters of an enclosing generic function (the check function is a nested
+/// item), and `bound <= K` is not accepted (`N` is the bound). See
+/// `docs/decisions/2026-11-03-fip-fn-driver-mode.md`.
+///
+/// ```text
+/// let f = fip_macros::fip_fn!(prelint, 0, |x: u32| x.wrapping_add(1).count_ones());
+/// ```
+///
 /// `fip_fn!(crate = path::to::fip_strict, ..)` sets the path of the `fip_strict`
 /// crate in the generated code (see `crate = ..` in the crate documentation).
 #[proc_macro]
@@ -3750,6 +3801,11 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
             }
         }
         _ => (None, all),
+    };
+    let toks = match prelint_prefix(toks) {
+        PrelintPrefix::Absent(toks) => toks,
+        PrelintPrefix::Present { at, n, rest } => return fip_fn_prelint(krate, at, n, &rest),
+        PrelintPrefix::Malformed(e) => return e,
     };
     let (limit, toks) = match bound_limit(toks) {
         Ok(v) => v,
@@ -3890,6 +3946,235 @@ fn limited(bound: TokenStream, limit: Option<u64>) -> TokenStream {
         .unwrap_or_default(),
     );
     out
+}
+
+/// Set by the `fip-prelint` driver in its own process, next to [`PRELINT_ENV`], only
+/// when it compiles a primary package in check mode (not an exported dependency, not
+/// stack mode, not std-summary generation). `fip_fn!(prelint, N, ..)` expands only when
+/// both are set (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`).
+const CHECKS_ENV: &str = "FIP_PRELINT_CHECKS";
+
+/// The error of `fip_fn!(prelint, N, ..)` outside a checking driver run.
+const PRELINT_UNCHECKED: &str = "fip_fn!(prelint, ..) is checked only by `cargo fip-prelint`: this compilation is not a checking driver run (a plain build, a dependency, `cargo fip-prelint --stack` or std-summary generation), so the declared bound would be trusted unchecked; build this crate with `cargo fip-prelint`, or write `fip_fn!(|..| ..)`";
+
+/// `true` when the expanding compiler is the `fip-prelint` driver checking this crate.
+fn checked_by_driver() -> bool {
+    std::env::var_os(PRELINT_ENV).is_some()
+        && std::env::var_os(CHECKS_ENV).is_some_and(|v| v == "1")
+}
+
+/// A leading `prelint, N,` of `fip_fn!`.
+enum PrelintPrefix {
+    /// No `prelint` argument: the default (token-checked) `fip_fn!`.
+    Absent(Vec<TokenTree>),
+    /// `prelint, N, rest`: `at` is the span of `prelint`.
+    Present {
+        at: Span,
+        n: u64,
+        rest: Vec<TokenTree>,
+    },
+    /// `prelint` not followed by `, N,` with an integer literal `N`.
+    Malformed(TokenStream),
+}
+
+fn prelint_prefix(toks: Vec<TokenTree>) -> PrelintPrefix {
+    let Some(TokenTree::Ident(key)) = toks.first() else {
+        return PrelintPrefix::Absent(toks);
+    };
+    if key.to_string() != "prelint" {
+        return PrelintPrefix::Absent(toks);
+    }
+    let at = key.span();
+    let bad = |sp: Span| {
+        PrelintPrefix::Malformed(compile_error(
+            sp,
+            "fip_fn!: expected `prelint, N, |x: T, ..| body` with an integer literal `N` (the declared allocation bound, checked by `fip-prelint`)",
+        ))
+    };
+    let (Some(c1), Some(TokenTree::Literal(lit)), Some(c2)) =
+        (toks.get(1), toks.get(2), toks.get(3))
+    else {
+        return bad(at);
+    };
+    if !is_punct(c1, ',') {
+        return bad(c1.span());
+    }
+    if !is_punct(c2, ',') {
+        return bad(c2.span());
+    }
+    let text = lit.to_string().replace('_', "");
+    let digits = text.strip_suffix("u64").unwrap_or(&text);
+    let Ok(n) = digits.parse::<u64>() else {
+        return bad(lit.span());
+    };
+    PrelintPrefix::Present {
+        at,
+        n,
+        rest: toks[4..].to_vec(),
+    }
+}
+
+/// Index of the closure's opening `|`: after leading outer attributes and `move`.
+fn closure_open(toks: &[TokenTree]) -> usize {
+    let mut i = 0;
+    while toks.get(i).is_some_and(|t| is_punct(t, '#'))
+        && toks
+            .get(i + 1)
+            .is_some_and(|t| is_group(t, Delimiter::Bracket))
+    {
+        i += 2;
+    }
+    i + usize::from(toks.get(i).is_some_and(|t| is_ident(t, "move")))
+}
+
+/// The written type of each closure parameter in `params` (the tokens between the
+/// closure's `|`s), or the span of a parameter without one.
+fn closure_param_types(params: &[TokenTree]) -> Result<Vec<TokenStream>, Span> {
+    let mut out = Vec::new();
+    let mut parts: Vec<&[TokenTree]> = Vec::new();
+    let mut depth = 0_i32;
+    let mut start = 0;
+    for (k, t) in params.iter().enumerate() {
+        if is_punct(t, '<') {
+            depth += 1;
+        } else if is_punct(t, '>') && !(k > 0 && is_punct(&params[k - 1], '-')) {
+            depth -= 1;
+        } else if depth == 0 && is_punct(t, ',') {
+            parts.push(&params[start..k]);
+            start = k + 1;
+        }
+    }
+    if start < params.len() {
+        parts.push(&params[start..]);
+    }
+    for part in parts {
+        let first = part.first().map_or_else(Span::call_site, TokenTree::span);
+        let mut colon = None;
+        let mut k = 0;
+        while k < part.len() {
+            if is_punct(&part[k], ':') {
+                let joint =
+                    matches!(&part[k], TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
+                if joint && part.get(k + 1).is_some_and(|t| is_punct(t, ':')) {
+                    k += 2;
+                    continue;
+                }
+                colon = Some(k);
+                break;
+            }
+            k += 1;
+        }
+        match colon {
+            Some(c) if c > 0 && c + 1 < part.len() => {
+                out.push(part[c + 1..].iter().cloned().collect());
+            }
+            _ => return Err(first),
+        }
+    }
+    Ok(out)
+}
+
+/// `fip_fn!(prelint, N, closure)`: the closure certified with the declared bound `N`,
+/// checked by `fip-prelint` at the construction instead of by this macro (no token
+/// scan of the body). Outside a checking driver run (see [`checked_by_driver`]) a
+/// compile error. Under it:
+///
+/// ```text
+/// {
+///     #[cfg(not(fip_prelint))] ::core::compile_error!("..");
+///     #[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = false,
+///         panic_macros = true, param(g = N)))]
+///     fn __fip_prelint_checked<R>(g: &dyn ::core::ops::Fn(T0, ..) -> R) { let _ = g; }
+///     let __fip_prelint_closure = closure;
+///     __fip_prelint_checked(&__fip_prelint_closure);
+///     unsafe { <krate>::Certified::<N, _>::assume(__fip_prelint_closure) }
+/// }
+/// ```
+///
+/// The driver checks every analysed call of a function declaring `param(g = N)`: for
+/// the `&dyn Fn` parameter it resolves the closure unsized there and requires at most
+/// `N` allocations per call, no free and no recursion (the `fip` mark). The checked
+/// value is the certified one.
+fn fip_fn_prelint(krate: Option<TokenStream>, at: Span, n: u64, toks: &[TokenTree]) -> TokenStream {
+    if toks.first().is_some_and(|t| is_ident(t, "bound"))
+        && toks.get(1).is_some_and(|t| is_punct(t, '<'))
+    {
+        return compile_error(
+            toks[0].span(),
+            "fip_fn!(prelint, N, ..): `bound <= K` is not an argument here; `N` is the declared bound, checked by `fip-prelint`",
+        );
+    }
+    let (arity, body_start) = match closure_shape(toks) {
+        Ok(v) => v,
+        Err(sp) => {
+            let msg = if fn_path_shape(toks) {
+                "fip_fn!(prelint, N, ..) takes a closure; a named function's bound is its certificate's: write `fip_fn!(path)`"
+            } else {
+                "fip_fn!(prelint, N, ..): expected a closure `|x: T, ..| body` after `prelint, N,`"
+            };
+            return compile_error(sp, msg);
+        }
+    };
+    if arity > MAX_FIP_FN_ARITY {
+        return compile_error(
+            toks.first().map_or_else(Span::call_site, TokenTree::span),
+            &format!(
+                "fip_fn!: at most {MAX_FIP_FN_ARITY} closure parameters (`fip_strict::MAX_ARITY`)"
+            ),
+        );
+    }
+    let open = closure_open(toks);
+    let types = match closure_param_types(&toks[open + 1..body_start - 1]) {
+        Ok(t) => t,
+        Err(sp) => {
+            return compile_error(
+                sp,
+                "fip_fn!(prelint, N, ..): write the type of every closure parameter (`|x: T| ..`); they form the `&dyn Fn(..)` parameter that `fip-prelint` checks",
+            );
+        }
+    };
+    if !checked_by_driver() {
+        return compile_error(at, PRELINT_UNCHECKED);
+    }
+    let parse = |src: &str| src.parse::<TokenStream>().unwrap_or_default();
+    let mut fn_args = TokenStream::new();
+    for (k, ty) in types.into_iter().enumerate() {
+        if k > 0 {
+            fn_args.extend(parse(","));
+        }
+        fn_args.extend(ty);
+    }
+    let mut out = TokenStream::new();
+    out.extend(compile_error_cfg_guard());
+    out.extend(parse(&format!(
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", n = 0, strict = false, panic_macros = true, param(g = {n})))] fn __fip_prelint_checked<R>"
+    )));
+    let mut param = parse("g: &dyn ::core::ops::Fn");
+    param.extend([TokenTree::Group(Group::new(
+        Delimiter::Parenthesis,
+        fn_args,
+    ))]);
+    param.extend(parse("-> R"));
+    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, param))]);
+    out.extend(parse("{ let _ = g; } let __fip_prelint_closure ="));
+    out.extend(toks.iter().cloned());
+    out.extend(parse("; __fip_prelint_checked(&__fip_prelint_closure);"));
+    let mut inner = strict::krate_item(&krate.unwrap_or_else(strict::default_krate), "Certified");
+    inner.extend(parse(&format!("::<{n}, _>::assume(__fip_prelint_closure)")));
+    out.extend(parse("unsafe"));
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
+    TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, out)))
+}
+
+/// `#[cfg(not(fip_prelint))] ::core::compile_error!(..);`: a driver-mode expansion
+/// compiled without the driver's cfg (only the environment variables forged) fails.
+fn compile_error_cfg_guard() -> TokenStream {
+    format!(
+        "#[cfg(not(fip_prelint))] ::core::compile_error!({:?});",
+        "fip_fn!(prelint, ..): `cfg(fip_prelint)` is not set, so this is not the `fip-prelint` driver; build with `cargo fip-prelint`"
+    )
+    .parse()
+    .unwrap_or_default()
 }
 
 /// `true` if `toks` looks like the path of a function: identifiers, `::`, `<..>`

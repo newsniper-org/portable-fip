@@ -74,6 +74,20 @@ use rustc_span::Symbol;
 /// it (plain builds stay free of the attribute and of `unexpected_cfgs` warnings).
 const MARK_ENV: &str = "FIP_PRELINT_DRIVER";
 
+/// Set in the driver's own process only when it checks the crate it compiles (a
+/// primary package, not in stack mode, not generating std summaries), and removed
+/// otherwise (also when inherited). `fip-macros` expands the driver-checked
+/// `fip_fn!(prelint, N, ..)` only when it sees it together with [`MARK_ENV`]: in the
+/// other runs a construction would be compiled with its claim and never checked
+/// (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`).
+const CHECKS_ENV: &str = "FIP_PRELINT_CHECKS";
+
+/// `true` when the driver runs its checks on the crate (`report::check_crate`, see
+/// `Prelint::after_analysis`).
+fn checks_crate(role: Role) -> bool {
+    role == Role::Primary && !stack::enabled() && std::env::var_os(GENERATE_ENV).is_none()
+}
+
 /// Flags added to every crate the driver compiles (decision record, item 4).
 const CRATE_FLAGS: &[&str] = &[
     "-Zalways-encode-mir",
@@ -448,6 +462,13 @@ fn main() -> std::process::ExitCode {
     }
     // SAFETY: single-threaded here, before the compiler starts any thread.
     unsafe { std::env::set_var(MARK_ENV, "1") };
+    if checks_crate(role) {
+        // SAFETY: as above.
+        unsafe { std::env::set_var(CHECKS_ENV, "1") };
+    } else {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(CHECKS_ENV) };
+    }
     rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&args, &mut Prelint { role });
     })
