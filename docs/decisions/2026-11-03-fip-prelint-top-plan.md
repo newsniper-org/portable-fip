@@ -666,6 +666,17 @@ errors by mark). Reified functions with `requires` keep their note.
 - the relational control stays reported;
 - for 4, a sidecar for one verified function, and a stale-hash control.
 
+**Implemented** (item 10, candidates 1 and 2). Access paths step into array and slice
+elements at a constant index (`ConstantIndex`, or an index local assigned one constant
+in the body); `fip::requires` takes `Term::Path`/`Term::PathLen` (`w.n`, `xs[0]`,
+`w.b.len()`) below a `&T` parameter with `T: Freeze`, assumed in the root and put into
+the call-site contexts. Fixture `preconditions`: `pre` 15 roots, 7 passed → 25 roots,
+13 passed (`idx_heap`, `idx_array`, the access-path precondition and its callers
+pass; `Cell`, relational, variable-index and short-guard controls stay reported).
+N4 `idx_heap` passes. Sidecar unchanged when regenerated. **Deviation:** none in
+verdicts; a variable index (`xs[k]` read twice) is not covered (only constant
+indices are paths), recorded as a fixture case.
+
 ### T14. The remaining self-check notes, and the profile the driver analyses
 
 **Current.** N1: 15 overflow, 8 `handle_alloc_error`, 2 contract-allows-panic,

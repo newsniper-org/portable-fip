@@ -1989,3 +1989,52 @@ is `⊤` at the call site, as for any `param`). An implementation in a crate wit
 | N4 `top` (probe `Visit` with a generic `G`, plus a `VisitDyn` contract on `&dyn Fn`, its implementation and a `dyn` caller) | 45 roots, 34 passed, 21 errors: both contracts "not supported", `visit_dyn` `⊤` | 46 roots, 36 passed, 19 errors: the `dyn` contract, its implementation and `visit_dyn` pass; the generic one is rejected with the new message |
 | self-check dev / `--release`, other fixtures, sidecar | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
 
+## Resolved 2026-11-03: element paths and access-path preconditions (top plan T13.1, T13.2)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T13 candidates 1 and 2
+(item 10 of its order).
+
+**Before.** Access paths of the value analysis were `(*p).f1.f2…` (fields only) below
+a shared reference `p` to a `Freeze` type. `if xs[0] < ys.len() { ys[xs[0]] }` read
+`(*xs)[_7]` twice (`_7 = const 0`), which was no path: the bounds check of `ys[..]`
+stayed (N4 `idx_heap`). `fip::requires` took integer parameters, `p.len()` and
+literals only.
+
+**Mechanism.**
+
+- `value::Fields` steps are field indices or `ELEM | c`, the element at the constant
+  index `c` of an array or slice: `ProjectionElem::ConstantIndex` from the start, or
+  `Index(i)` of a local `i` that holds one `usize` constant for the whole body
+  (`const_locals`: assigned exactly once by `i = const c`, never otherwise written or
+  borrowed). `path_ty` steps through `[T; N]` and `[T]`. Everything else about paths
+  is unchanged (tracked while `p` is unchanged; `p: &T`, `T: Freeze`; at most 4
+  steps).
+- The grammar of `fip::requires` (`fip_lint_rules::requires`) has `Term::Path` and
+  `Term::PathLen` with `Step::Field` (named or positional) and `Step::Index` (literal):
+  `w.n`, `w.0`, `xs[0]`, `w.b[2].k`, `w.b.len()`. The driver (`requires_facts`)
+  accepts them only below a parameter of type `&T` (shared) with `T: Freeze`, through
+  struct and tuple fields and array or slice elements (not through a further
+  reference), ending in an integer (`ArgPath`) or a slice reference (`ArgPathLen`);
+  anything else is a "malformed `fip::requires`" error naming the reason.
+  `fip-macros` checks the base name is a parameter.
+- Use: a root's precondition paths become tracked values of its body (also when the
+  body never reads them); a callee's precondition paths are tracked at its call sites
+  (`CallInfo::req_paths`) and put into the call's context (`project`), so a call site
+  can establish them.
+
+**Soundness.** As the field paths (limits plan L2): the memory behind a shared
+reference to a `Freeze` type does not change while the reference does not; an element
+at an index fixed for the whole body is one place. A precondition over a path is
+assumed in the function and checked at every analysed call site; a fact about an
+element the slice does not have can only be established by type bounds (vacuous) or
+by the caller's own precondition, which is checked in turn.
+
+**Measured** (before = `48dd165`, after = this commit):
+
+| case | before | after |
+|---|---|---|
+| fixture `preconditions` (`pre`: 10 new roots; `bad_pre`: 4 new malformed preconditions) | `pre`: 15 roots, 7 passed, 12 errors | `pre`: 25 roots, 13 passed, 17 errors: `idx_heap` (`xs[0]` guard), `idx_array` (`xs[2]` of `&[usize; 4]`), `window_at` (`requires(i < w.n, w.n <= w.b.len())`), `window_caller`, `first_index` (`requires(0 < xs.len(), xs[0] < ys.len())`) and `first_index_caller` pass; `idx_variable` (variable index, not a path), `idx_cell` (`Cell` element), `nonlinear` (relational product) and `window_caller_short` (precondition not established) stay reported; `bad_pre`: 4 new errors (a `&mut` base, a non-`Freeze` base, no such field, an index through a further reference) |
+| N4 `top` | 46 roots, 36 passed, 19 errors | 46 roots, 37 passed, 18 errors: `idx_heap` passes; `nonlinear2` and `heap_cell` stay reported |
+| self-check dev / `--release`, other fixtures | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
+| std sidecar regenerated with this driver | — | identical to the committed file (198 functions; 211.9 s of analysis, 274 s wall) |
+

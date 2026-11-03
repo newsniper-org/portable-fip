@@ -8,9 +8,12 @@
 //! A precondition is a comma-separated list of chained comparisons, each a
 //! conjunction: `i < j < xs.len()` is `i < j` and `j < xs.len()`. A side is a term
 //! plus or minus integer literals; a term is an integer parameter `i`, the length
-//! `xs.len()` of a slice parameter `xs`, or an integer literal (suffixes such as
-//! `usize` are accepted). Relations: `<`, `<=`, `>`, `>=`, `==`. Anything else is a
-//! parse error: a precondition is never silently weakened by the parser.
+//! `xs.len()` of a slice parameter `xs`, an integer literal (suffixes such as `usize`
+//! are accepted), or an access path below a reference parameter (top plan T13.2):
+//! fields and elements at a literal index, `w.n`, `w.0`, `xs[0]`, `w.b[2].k`, or the
+//! length of a slice there, `w.b.len()` (the driver accepts them only behind a shared
+//! reference to a `Freeze` type). Relations: `<`, `<=`, `>`, `>=`, `==`. Anything
+//! else is a parse error: a precondition is never silently weakened by the parser.
 //!
 //! [`from_verus`] translates the fitting subset of a Verus `requires` clause
 //! (`old(xs)@.len()` and `xs@.len()` become `xs.len()`, chains are split); clauses that
@@ -29,6 +32,21 @@ pub enum Term {
     Len(String),
     /// The constant 0 (a literal is `Zero` plus an offset).
     Zero,
+    /// The integer at an access path below a parameter, `w.n`, `xs[0]` (at least
+    /// one step).
+    Path(String, Vec<Step>),
+    /// The length of the slice at an access path below a parameter, `w.b.len()`
+    /// (at least one step).
+    PathLen(String, Vec<Step>),
+}
+
+/// One step of an access path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Step {
+    /// A named or positional field, `.n`, `.0`.
+    Field(String),
+    /// The element at a literal index, `[c]`.
+    Index(u64),
 }
 
 /// `term + offset`.
@@ -156,22 +174,55 @@ fn side(t: &[Tok], i: &mut usize) -> Result<Side, String> {
         }
         Some(Tok::Ident(name)) => {
             *i += 1;
-            let is_len = matches!(
-                t.get(*i..*i + 4),
-                Some([Tok::Punct("."), Tok::Ident(l), Tok::Punct("("), Tok::Punct(")")]) if l == "len"
-            );
-            if is_len {
-                *i += 4;
-                Side {
-                    term: Term::Len(name.clone()),
-                    offset: 0,
+            let mut steps = Vec::new();
+            let mut len = false;
+            loop {
+                let is_len = matches!(
+                    t.get(*i..*i + 4),
+                    Some([Tok::Punct("."), Tok::Ident(l), Tok::Punct("("), Tok::Punct(")")]) if l == "len"
+                );
+                if is_len {
+                    *i += 4;
+                    len = true;
+                    break;
                 }
-            } else {
-                Side {
-                    term: Term::Param(name.clone()),
-                    offset: 0,
+                match (t.get(*i), t.get(*i + 1), t.get(*i + 2)) {
+                    (Some(Tok::Punct(".")), Some(Tok::Ident(f)), _) => {
+                        steps.push(Step::Field(f.clone()));
+                        *i += 2;
+                    }
+                    (Some(Tok::Punct(".")), Some(Tok::Int(k)), _) if *k >= 0 => {
+                        steps.push(Step::Field(k.to_string()));
+                        *i += 2;
+                    }
+                    (Some(Tok::Punct("[")), Some(Tok::Int(k)), Some(Tok::Punct("]"))) => {
+                        let k =
+                            u64::try_from(*k).map_err(|_| format!("index `{k}` out of range"))?;
+                        steps.push(Step::Index(k));
+                        *i += 3;
+                    }
+                    (Some(Tok::Punct(".")), other, _) => {
+                        return Err(format!(
+                            "expected a field name or `len()` after `.`, found {}",
+                            describe(other)
+                        ));
+                    }
+                    (Some(Tok::Punct("[")), other, _) => {
+                        return Err(format!(
+                            "only an integer literal index `[c]` is accepted, found {}",
+                            describe(other)
+                        ));
+                    }
+                    _ => break,
                 }
             }
+            let term = match (steps.is_empty(), len) {
+                (true, false) => Term::Param(name.clone()),
+                (true, true) => Term::Len(name.clone()),
+                (false, false) => Term::Path(name.clone(), steps),
+                (false, true) => Term::PathLen(name.clone(), steps),
+            };
+            Side { term, offset: 0 }
         }
         other => {
             return Err(format!(
@@ -296,10 +347,33 @@ pub fn parse(text: &str) -> Result<Vec<Conjunct>, String> {
     Ok(out)
 }
 
-fn show_side(s: &Side) -> String {
+/// `p.f[c]..` as written.
+fn show_path(p: &str, steps: &[Step]) -> String {
+    let mut out = p.to_string();
+    for st in steps {
+        match st {
+            Step::Field(f) => {
+                out.push('.');
+                out.push_str(f);
+            }
+            Step::Index(k) => {
+                out.push('[');
+                out.push_str(&k.to_string());
+                out.push(']');
+            }
+        }
+    }
+    out
+}
+
+/// One side as written in `fip::requires(..)`.
+#[must_use]
+pub fn display_side(s: &Side) -> String {
     let base = match &s.term {
         Term::Param(p) => p.clone(),
         Term::Len(p) => format!("{p}.len()"),
+        Term::Path(p, steps) => show_path(p, steps),
+        Term::PathLen(p, steps) => format!("{}.len()", show_path(p, steps)),
         Term::Zero => return format!("{}", s.offset),
     };
     match s.offset {
@@ -317,7 +391,7 @@ pub fn display(c: &Conjunct) -> String {
         Rel::Le => "<=",
         Rel::Eq => "==",
     };
-    format!("{} {r} {}", show_side(&c.a), show_side(&c.b))
+    format!("{} {r} {}", display_side(&c.a), display_side(&c.b))
 }
 
 /// The conjuncts as one `fip::requires(..)` argument list.

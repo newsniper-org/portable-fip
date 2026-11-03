@@ -693,12 +693,28 @@ mod tests {
             "i < j * 2",
             "f(i) < j",
             "i < j + k",
-            "xs[0] < 1",
+            "xs[i] < 1",
+            "w.f() < 1",
+            "w. < 1",
             "i < j,, k < l",
             "i < 3q",
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }
+        // Access paths (top plan T13.2).
+        let cs = parse("xs[0] < ys.len(), i < w.n <= w.b.len(), w.0 + 1 <= w.b[2].k").unwrap();
+        assert_eq!(
+            display_all(&cs),
+            "xs[0] < ys.len(), i < w.n, w.n <= w.b.len(), w.0 + 1 <= w.b[2].k"
+        );
+        assert_eq!(
+            cs[0].a.term,
+            Term::Path("xs".into(), alloc::vec![requires::Step::Index(0)])
+        );
+        assert_eq!(
+            cs[2].b.term,
+            Term::PathLen("w".into(), alloc::vec![requires::Step::Field("b".into())])
+        );
         // The Verus subset: `old(xs)@.len()`, chains; the rest is left out.
         let spec = "r => requires i < j < old(xs)@.len(), forall|k: int| 0 <= k < 3 ==> #[trigger] f(k), n != 0, ensures r == 1";
         let v = from_verus(spec);

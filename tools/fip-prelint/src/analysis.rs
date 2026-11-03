@@ -473,18 +473,24 @@ pub struct Requires {
 }
 
 /// The facts of the conjuncts of `fip::requires(..)` on `def_id`: `i` is an integer
-/// parameter, `xs.len()` the length of a slice parameter.
+/// parameter, `xs.len()` the length of a slice parameter, `w.n` / `xs[0]` the
+/// integer and `w.b.len()` the slice length at an access path below a parameter of
+/// type `&T` with `T: Freeze` (fields and elements of arrays or slices at a literal
+/// index, not through a further reference; top plan T13.2).
 pub fn requires_facts(
     tcx: TyCtxt<'_>,
     def_id: DefId,
     cs: &[fip_lint_rules::requires::Conjunct],
 ) -> Result<Vec<Fact>, String> {
-    use fip_lint_rules::requires::{Rel, Side, Term};
+    use fip_lint_rules::requires::{Rel, Side, Step, Term};
     if !matches!(tcx.def_kind(def_id), DefKind::Fn | DefKind::AssocFn) {
         return Err("`fip::requires` applies to functions".to_string());
     }
+    let env = TypingEnv::non_body_analysis(tcx, def_id);
     let idents = tcx.fn_arg_idents(def_id);
-    let inputs = tcx.fn_sig(def_id).skip_binder().skip_binder().inputs();
+    // Late-bound regions erased: `Freeze` is asked of a type with no escaping vars.
+    let sig = tcx.instantiate_bound_regions_with_erased(tcx.fn_sig(def_id).skip_binder());
+    let inputs = sig.inputs();
     let find = |name: &str| {
         idents
             .iter()
@@ -511,6 +517,79 @@ pub fn requires_facts(
                     return Err(format!("`{p}.len()`: `{p}` is not a slice reference"));
                 }
                 Ok((SVar::ArgLen(at(k)?), s.offset))
+            }
+            Term::Path(p, steps) | Term::PathLen(p, steps) => {
+                let len = matches!(s.term, Term::PathLen(..));
+                let shown = fip_lint_rules::requires::display_side(s);
+                let k = find(p)?;
+                let ty::Ref(_, mut t, ty::Mutability::Not) = *inputs[k].kind() else {
+                    return Err(format!(
+                        "`{shown}`: `{p}` is not a shared reference (an access path is read behind `&T`)"
+                    ));
+                };
+                if !t.is_freeze(tcx, env) {
+                    return Err(format!(
+                        "`{shown}`: the type behind `{p}` has interior mutability (not `Freeze`): the value may change"
+                    ));
+                }
+                let mut fs: Vec<u32> = Vec::new();
+                for st in steps {
+                    match st {
+                        Step::Field(f) => {
+                            let idx = match t.kind() {
+                                ty::Adt(def, args) if def.is_struct() => def
+                                    .non_enum_variant()
+                                    .fields
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, fd)| fd.name.as_str() == f)
+                                    .map(|(i, fd)| (i, fd.ty(tcx, args).skip_normalization())),
+                                ty::Tuple(ts) => f
+                                    .parse::<usize>()
+                                    .ok()
+                                    .and_then(|i| ts.get(i).map(|t| (i, *t))),
+                                _ => None,
+                            };
+                            let Some((i, ft)) = idx else {
+                                return Err(format!(
+                                    "`{shown}`: no field `{f}` in `{t}` (structs and tuples only)"
+                                ));
+                            };
+                            fs.push(u32::try_from(i).map_err(|_| "field index".to_string())?);
+                            t = ft;
+                        }
+                        Step::Index(c) => {
+                            let (ty::Array(e, _) | ty::Slice(e)) = *t.kind() else {
+                                return Err(format!(
+                                    "`{shown}`: `[{c}]` on `{t}`, which is not an array or slice (an access path does not go through a further reference)"
+                                ));
+                            };
+                            let c = u32::try_from(*c)
+                                .ok()
+                                .filter(|c| *c < crate::value::ELEM)
+                                .ok_or_else(|| format!("`{shown}`: index `{c}` out of range"))?;
+                            fs.push(crate::value::ELEM | c);
+                            t = e;
+                        }
+                    }
+                }
+                let fields = crate::value::Fields::new(&fs)
+                    .ok_or_else(|| format!("`{shown}`: an access path has at most 4 steps"))?;
+                if len {
+                    if !crate::value::is_slice_ptr(t) {
+                        return Err(format!(
+                            "`{shown}`: the value at the path is not a slice reference"
+                        ));
+                    }
+                    Ok((SVar::ArgPathLen(at(k)?, fields), s.offset))
+                } else {
+                    if !t.is_integral() {
+                        return Err(format!(
+                            "`{shown}`: the value at the path is not an integer"
+                        ));
+                    }
+                    Ok((SVar::ArgPath(at(k)?, fields), s.offset))
+                }
             }
         }
     };

@@ -70,7 +70,8 @@
 //! through it; each carries a hidden `# // prelint: ..` line with the driver's reason).
 //!
 //! `#[fip(.., requires(i < j, j < xs.len()))]` declares a precondition (a conjunction
-//! of comparisons between integer parameters, `p.len()` of slice parameters and
+//! of comparisons between integer parameters, `p.len()` of slice parameters, access
+//! paths below a reference parameter such as `w.n`, `xs[0]`, `w.b.len()`, and
 //! integer literals; grammar `fip_lint_rules::requires`). It is emitted for the
 //! driver as `#[cfg_attr(fip_prelint, fip::requires(..))]`: the driver checks the
 //! function under it and checks it at every analysed call site. A Verus `requires`
@@ -2141,7 +2142,8 @@ fn check_requires(
     let names = param_names(shape.params.as_ref());
     for c in cs {
         for side in [&c.a, &c.b] {
-            if let Term::Param(n) | Term::Len(n) = &side.term
+            if let Term::Param(n) | Term::Len(n) | Term::Path(n, _) | Term::PathLen(n, _) =
+                &side.term
                 && !names.contains(n)
             {
                 errors.extend(compile_error(

@@ -11,8 +11,10 @@
 //! slice pointer local `p` (its metadata), the result `t.0` of a checked operation
 //! `t = AddWithOverflow(a, b)`, `start`/`end` of a `Range<integer>` local, the
 //! payload of an `Option<integer>` local, the metadata of the slice pointer fields of
-//! a tuple local, access paths `(*p).f1.f2…` (an integer, or a slice pointer's
-//! metadata) through a local `p: &T` with `T: Freeze`, and the constant 0. Only
+//! a tuple local, access paths `(*p).f1[c]…` (fields, and elements at a constant
+//! index `c`: a `ConstantIndex`, or an index local assigned one constant in the whole
+//! body; an integer, or a slice pointer's metadata) through a local `p: &T` with
+//! `T: Freeze`, and the constant 0. Only
 //! locals connected to some `Assert` condition, to the discriminant of a `SwitchInt`
 //! on a comparison, or (for a summary) to the return place, through assignments and
 //! summarised calls are tracked. Every tracked value carries the bounds of its type
@@ -105,7 +107,9 @@ fn add(a: i128, b: i128) -> i128 {
     }
 }
 
-/// Up to [`MAX_PATH`] field indices: the fields of an access path `(*p).f1.f2…`.
+/// Up to [`MAX_PATH`] steps of an access path `(*p).f1[c]…` after the dereference: a
+/// field index, or [`ELEM`]` | c` for the element at the constant index `c` of an
+/// array or slice (top plan T13.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Fields {
     n: u8,
@@ -115,12 +119,16 @@ pub struct Fields {
 /// Longest access path tracked (fields after the dereference).
 const MAX_PATH: usize = 4;
 
+/// The flag of an element step `[c]` in [`Fields`] (`c < ELEM`; a field index is far
+/// below it).
+pub const ELEM: u32 = 1 << 31;
+
 impl Fields {
     const EMPTY: Fields = Fields {
         n: 0,
         f: [0; MAX_PATH],
     };
-    fn new(fs: &[u32]) -> Option<Fields> {
+    pub(crate) fn new(fs: &[u32]) -> Option<Fields> {
         if fs.len() > MAX_PATH {
             return None;
         }
@@ -163,7 +171,7 @@ enum Var {
     /// The integer in field `k` of the tuple in an `Option<(..)>` local (read only
     /// where it is `Some`): the index yielded by `Enumerate`.
     SomeFieldInt(Local, u32),
-    /// The integer at `(*p).f1.f2…` for a local `p: &T` with `T: Freeze`: nothing
+    /// The integer at `(*p).f1[c]…` for a local `p: &T` with `T: Freeze`: nothing
     /// can change it while `p` holds the same reference.
     Path(Local, Fields),
     /// The metadata of the slice pointer stored at such a path.
@@ -252,6 +260,25 @@ impl<'a, 'tcx> Summaries<'a, 'tcx> {
     fn usable(&self, tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
         (is_std_like(tcx, def_id.krate) || self.crates.exported(def_id.krate))
             && self.crates.source_of(tcx, def_id).is_none()
+    }
+
+    /// The access paths that the declared precondition of `callee` mentions.
+    fn requires_paths(&self, callee: Instance<'tcx>) -> Vec<SVar> {
+        let InstanceKind::Item(def_id) = callee.def else {
+            return Vec::new();
+        };
+        let Some(req) = self.crates.requires_of(def_id) else {
+            return Vec::new();
+        };
+        let mut v: Vec<SVar> = req
+            .facts
+            .iter()
+            .flat_map(|f| [f.a, f.b])
+            .filter(|sv| matches!(sv, SVar::ArgPath(..) | SVar::ArgPathLen(..)))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     /// `true` if a call of `callee` should be given the caller's state on its
@@ -677,6 +704,8 @@ struct Ctx<'a, 'tcx> {
     entry_facts: Vec<Fact>,
     /// Shared reference locals to a `Freeze` type.
     shared: HashSet<Local>,
+    /// Locals holding one constant index for the whole body ([`const_locals`]).
+    consts: HashMap<Local, u32>,
 }
 
 /// Bounds of an integer type, `None` for other types.
@@ -698,7 +727,7 @@ fn int_range<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<(i128, i128)> {
 }
 
 /// `true` for a pointer or reference to a slice or `str` (metadata = length).
-fn is_slice_ptr(ty: Ty<'_>) -> bool {
+pub(crate) fn is_slice_ptr(ty: Ty<'_>) -> bool {
     ty.builtin_deref(true)
         .is_some_and(|t| matches!(t.kind(), ty::Slice(_) | ty::Str))
 }
@@ -1249,6 +1278,10 @@ struct CallInfo<'tcx> {
     sums: Vec<(Vec<Fact>, Rc<RetSummary>)>,
     summarisable: bool,
     wants: bool,
+    /// The access paths of arguments (`ArgPath`, `ArgPathLen`) that the callee's
+    /// declared precondition mentions: tracked here and put into the call's context,
+    /// so that the call site can establish it (top plan T13.2).
+    req_paths: Vec<SVar>,
 }
 
 type Calls<'tcx> = HashMap<BasicBlock, CallInfo<'tcx>>;
@@ -1292,6 +1325,7 @@ fn call_infos<'tcx>(
                 sums: base.map(|s| (Vec::new(), s)).into_iter().collect(),
                 summarisable,
                 wants: sums.wants_context(tcx, callee),
+                req_paths: sums.requires_paths(callee),
             },
         );
     }
@@ -1324,24 +1358,91 @@ fn inst_ty<'tcx>(
         .unwrap_or(ty)
 }
 
-/// `p` is `(*b).f1.f2…` (a dereference, then fields only).
-fn path_of(p: &Place<'_>) -> Option<(Local, Fields)> {
+/// `p` is `(*b).f1[c]…` (a dereference, then fields and elements at a constant
+/// index: `ConstantIndex` from the start, or `Index(i)` of a local `i` in `consts`,
+/// which holds one constant for the whole body).
+fn path_of(p: &Place<'_>, consts: &HashMap<Local, u32>) -> Option<(Local, Fields)> {
     let [ProjectionElem::Deref, rest @ ..] = p.projection.as_slice() else {
         return None;
     };
     let mut fs = Vec::new();
     for e in rest {
-        let ProjectionElem::Field(f, _) = e else {
-            return None;
+        let step = match e {
+            ProjectionElem::Field(f, _) => f.as_u32(),
+            ProjectionElem::ConstantIndex {
+                offset,
+                from_end: false,
+                ..
+            } => ELEM | u32::try_from(*offset).ok().filter(|c| *c < ELEM)?,
+            ProjectionElem::Index(i) => ELEM | *consts.get(i)?,
+            _ => return None,
         };
-        fs.push(f.as_u32());
+        fs.push(step);
     }
     Some((p.local, Fields::new(&fs)?))
 }
 
+/// Locals that hold one `usize` constant for the whole body: assigned exactly once,
+/// by `l = const c` (`c < ELEM`), and never otherwise written, borrowed mutably or
+/// by address (the index local of `xs[0]`).
+fn const_locals<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    body: &Body<'tcx>,
+) -> HashMap<Local, u32> {
+    struct Writes(HashMap<Local, usize>);
+    impl<'tcx> Visitor<'tcx> for Writes {
+        fn visit_local(&mut self, l: Local, cx: PlaceContext, _: mir::Location) {
+            let write = matches!(cx, PlaceContext::MutatingUse(_))
+                || matches!(
+                    cx,
+                    PlaceContext::NonMutatingUse(
+                        mir::visit::NonMutatingUseContext::RawBorrow
+                            | mir::visit::NonMutatingUseContext::SharedBorrow
+                            | mir::visit::NonMutatingUseContext::FakeBorrow
+                    )
+                );
+            if write {
+                *self.0.entry(l).or_default() += 1;
+            }
+        }
+    }
+    let mut w = Writes(HashMap::new());
+    w.visit_body(body);
+    let mut out = HashMap::new();
+    for data in body.basic_blocks.iter() {
+        for st in &data.statements {
+            let StatementKind::Assign(assign) = &st.kind else {
+                continue;
+            };
+            let (place, rv) = &**assign;
+            let (Some(l), Rvalue::Use(Operand::Constant(c), ..)) = (place.as_local(), rv) else {
+                continue;
+            };
+            if l.as_usize() <= body.arg_count
+                || w.0.get(&l) != Some(&1)
+                || c.const_.ty() != tcx.types.usize
+            {
+                continue;
+            }
+            if let Some(v) = c.const_.try_eval_target_usize(tcx, env)
+                && let Ok(v) = u32::try_from(v)
+                && v < ELEM
+            {
+                out.insert(l, v);
+            }
+        }
+    }
+    out
+}
+
 /// Static definitions of shared reference locals: `q = &(*b).f…` and `q = copy b`
 /// for `b` in `shared` (several if `q` is assigned several times).
-fn ref_defs(body: &Body<'_>, shared: &HashSet<Local>) -> HashMap<Local, Vec<(Local, Fields)>> {
+fn ref_defs(
+    body: &Body<'_>,
+    shared: &HashSet<Local>,
+    consts: &HashMap<Local, u32>,
+) -> HashMap<Local, Vec<(Local, Fields)>> {
     let mut out: HashMap<Local, Vec<(Local, Fields)>> = HashMap::new();
     for data in body.basic_blocks.iter() {
         for st in &data.statements {
@@ -1353,7 +1454,7 @@ fn ref_defs(body: &Body<'_>, shared: &HashSet<Local>) -> HashMap<Local, Vec<(Loc
                 continue;
             };
             let def = match rv {
-                Rvalue::Ref(_, mir::BorrowKind::Shared, p) => path_of(p),
+                Rvalue::Ref(_, mir::BorrowKind::Shared, p) => path_of(p, consts),
                 Rvalue::Use(Operand::Copy(p) | Operand::Move(p), ..) => {
                     p.as_local().map(|b| (b, Fields::EMPTY))
                 }
@@ -1388,25 +1489,29 @@ fn expand_path(
     }
 }
 
-/// Access paths worth tracking: those read in the body, and those that the summary
-/// of a callee mentions for an argument; each with the paths it stands for through
-/// shared references copied or reborrowed in the body. `(base, fields, len)`: `len`
-/// for the metadata of a slice pointer at the path.
+/// Access paths worth tracking: those read in the body, those that the summary or
+/// the declared precondition of a callee mentions for an argument, and those of the
+/// entry facts (the body's own precondition); each with the paths it stands for
+/// through shared references copied or reborrowed in the body. `(base, fields,
+/// len)`: `len` for the metadata of a slice pointer at the path.
 fn path_candidates<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     shared: &HashSet<Local>,
     calls: &Calls<'_>,
+    consts: &HashMap<Local, u32>,
+    entry: &[Fact],
 ) -> BTreeSet<Var> {
     struct Reads<'b, 'tcx> {
         tcx: TyCtxt<'tcx>,
         body: &'b Body<'tcx>,
         shared: &'b HashSet<Local>,
+        consts: &'b HashMap<Local, u32>,
         found: Vec<(Local, Fields, bool)>,
     }
     impl<'tcx> Visitor<'tcx> for Reads<'_, 'tcx> {
         fn visit_place(&mut self, p: &Place<'tcx>, _: PlaceContext, _: mir::Location) {
-            if let Some((b, fs)) = path_of(p)
+            if let Some((b, fs)) = path_of(p, self.consts)
                 && self.shared.contains(&b)
             {
                 let ty = p.ty(&self.body.local_decls, self.tcx).ty;
@@ -1422,15 +1527,31 @@ fn path_candidates<'tcx>(
         tcx,
         body,
         shared,
+        consts,
         found: Vec::new(),
     };
     reads.visit_body(body);
     let mut found = reads.found;
+    for f in entry {
+        for sv in [f.a, f.b] {
+            let (i, fs, len) = match sv {
+                SVar::ArgPath(i, fs) => (i, fs, false),
+                SVar::ArgPathLen(i, fs) => (i, fs, true),
+                _ => continue,
+            };
+            if let Ok(i) = usize::try_from(i)
+                && i < body.arg_count
+            {
+                found.push((Local::from_usize(i + 1), fs, len));
+            }
+        }
+    }
     for (bb, ci) in calls {
         let TerminatorKind::Call { args, .. } = &body.basic_blocks[*bb].terminator().kind else {
             continue;
         };
-        for sv in ci.sums.iter().flat_map(|(_, s)| s.svars()) {
+        let svars = ci.sums.iter().flat_map(|(_, s)| s.svars());
+        for sv in svars.chain(ci.req_paths.iter().copied()) {
             let (i, fs, len) = match sv {
                 SVar::ArgPath(i, fs) => (i, fs, false),
                 SVar::ArgPathLen(i, fs) => (i, fs, true),
@@ -1444,7 +1565,7 @@ fn path_candidates<'tcx>(
             }
         }
     }
-    let defs = ref_defs(body, shared);
+    let defs = ref_defs(body, shared, consts);
     let mut out = BTreeSet::new();
     for (q, g, len) in found {
         let mut paths = BTreeSet::new();
@@ -1476,7 +1597,19 @@ fn analyse_with<'a, 'tcx>(
 ) -> Option<(Ctx<'a, 'tcx>, Outcome)> {
     let n_blocks = body.basic_blocks.len();
     let taken = address_taken(tcx, env, body);
-    let relevant = relevant_locals(tcx, body, mode, calls);
+    let mut relevant = relevant_locals(tcx, body, mode, calls);
+    // The references an entry fact reads through (an access-path precondition).
+    for f in entry {
+        for sv in [f.a, f.b] {
+            if let SVar::ArgPath(i, _) | SVar::ArgPathLen(i, _) = sv
+                && let Ok(i) = usize::try_from(i)
+                && i < body.arg_count
+            {
+                relevant.insert(Local::from_usize(i + 1));
+            }
+        }
+    }
+    let consts = const_locals(tcx, env, body);
     let shared: HashSet<Local> = body
         .local_decls
         .iter_enumerated()
@@ -1577,7 +1710,7 @@ fn analyse_with<'a, 'tcx>(
             }
         }
     }
-    for v in path_candidates(tcx, body, &shared, calls) {
+    for v in path_candidates(tcx, body, &shared, calls, &consts, entry) {
         let (b, fs, len) = match v {
             Var::Path(b, fs) => (b, fs, false),
             Var::PathLen(b, fs) => (b, fs, true),
@@ -1609,18 +1742,26 @@ fn analyse_with<'a, 'tcx>(
         calls: calls.clone(),
         entry_facts: entry.to_vec(),
         shared,
+        consts,
     };
     let out = cx.run(n_blocks);
     Some((cx, out))
 }
 
-/// The type at `(*b).f1.f2…` for `b: base` (a reference), through struct and tuple
-/// fields only.
-fn path_ty<'tcx>(tcx: TyCtxt<'tcx>, base: Ty<'tcx>, fs: Fields) -> Option<Ty<'tcx>> {
+/// The type at `(*b).f1[c]…` for `b: base` (a reference), through struct and tuple
+/// fields and array or slice elements only.
+pub(crate) fn path_ty<'tcx>(tcx: TyCtxt<'tcx>, base: Ty<'tcx>, fs: Fields) -> Option<Ty<'tcx>> {
     let ty::Ref(_, mut t, _) = *base.kind() else {
         return None;
     };
     for &f in fs.as_slice() {
+        if f & ELEM != 0 {
+            t = match t.kind() {
+                ty::Array(e, _) | ty::Slice(e) => *e,
+                _ => return None,
+            };
+            continue;
+        }
         t = match t.kind() {
             ty::Adt(def, args) if def.is_struct() => def
                 .non_enum_variant()
@@ -1823,9 +1964,15 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
     }
 
     /// The context of a call: the difference bounds in `st` between its argument
-    /// values, their slice lengths and 0 (`st` is closed, so this lists every bound
-    /// implied between them).
-    fn project(&self, st: &State, args: &[rustc_span::Spanned<Operand<'tcx>>]) -> Vec<Fact> {
+    /// values, their slice lengths, the access paths of its arguments that the
+    /// callee's precondition mentions (`paths`) and 0 (`st` is closed, so this lists
+    /// every bound implied between them).
+    fn project(
+        &self,
+        st: &State,
+        args: &[rustc_span::Spanned<Operand<'tcx>>],
+        paths: &[SVar],
+    ) -> Vec<Fact> {
         let mut iface: Vec<(SVar, Lin)> = vec![(SVar::Zero, Lin { v: 0, c: 0 })];
         for (i, a) in args.iter().enumerate() {
             let Ok(i) = u32::try_from(i) else {
@@ -1836,6 +1983,11 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
             }
             if let Some(v) = self.len_of(st, &a.node) {
                 iface.push((SVar::ArgLen(i), Lin { v, c: 0 }));
+            }
+        }
+        for sv in paths {
+            if let Some(x) = self.arg_value(st, *sv, args) {
+                iface.push((*sv, x));
             }
         }
         if iface.len() < 2 {
@@ -1958,7 +2110,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         if let Some(l) = p.as_local() {
             return self.var(Var::Local(l)).map(|v| Lin { v, c: 0 });
         }
-        if let Some((b, fs)) = path_of(p) {
+        if let Some((b, fs)) = path_of(p, &self.consts) {
             return self.path_var(st, b, fs, false).map(|v| Lin { v, c: 0 });
         }
         match p.projection.as_slice() {
@@ -2015,7 +2167,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let (Operand::Copy(p) | Operand::Move(p)) = op else {
             return None;
         };
-        if let Some((b, fs)) = path_of(p) {
+        if let Some((b, fs)) = path_of(p, &self.consts) {
             return self.path_var(st, b, fs, true);
         }
         match p.projection.as_slice() {
@@ -2521,7 +2673,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     && self.range_vars(p.local).is_some())
                 .then_some(p.local);
                 // `q = &(*p).f…` of a shared reference `p` to a `Freeze` type.
-                let refd = match (kind, path_of(p)) {
+                let refd = match (kind, path_of(p, &self.consts)) {
                     (mir::BorrowKind::Shared, Some((b, fs))) => match st.refs.get(&b) {
                         Some((b0, f0)) => f0.concat(&fs).map(|f| (*b0, f)),
                         None => self.shared.contains(&b).then_some((b, fs)),
@@ -3361,7 +3513,12 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 }
                 TerminatorKind::Return => returns.push(st),
                 TerminatorKind::Call { args, .. } => {
-                    let ctx = self.project(&st, args);
+                    let paths = self
+                        .calls
+                        .get(bb)
+                        .map(|c| c.req_paths.as_slice())
+                        .unwrap_or_default();
+                    let ctx = self.project(&st, args, paths);
                     if !ctx.is_empty() {
                         contexts.insert(b, ctx);
                     }

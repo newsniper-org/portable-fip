@@ -697,6 +697,18 @@ supersedes "`param(..)` (the driver rejects it in a contract too)" of the amendm
 "`#[fip]` on trait method declarations". Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-03: contracts with `param(..)`".
 
+## Amendment 2026-11-03: element paths and access-path preconditions (top plan T13.1, T13.2)
+
+The value analysis's access paths below a shared reference to a `Freeze` type also
+step into array and slice elements at a constant index (`xs[0]`: a `ConstantIndex`, or
+an index local holding one constant in the whole body), so a guard on `xs[0]` decides
+a later use of it. `fip::requires(..)` accepts access paths below a `&T` parameter
+with `T: Freeze` (`w.n`, `w.0`, `xs[0]`, `w.b.len()`; fields and literal indices, not
+through a further reference); a root assumes them and every analysed call site must
+establish them, as for the other terms. Relational nonlinear guards, variable indices
+and interior mutability stay reported. Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-03: element paths and access-path preconditions".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

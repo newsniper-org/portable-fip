@@ -180,3 +180,111 @@ pub fn context_short(xs: &[u8], k: usize) -> u8 {
 pub fn get_next(xs: &[u8], i: usize) -> u8 {
     xs[i + 1]
 }
+
+// Element paths and access-path preconditions (top plan T13.1, T13.2).
+
+/// `xs[0]` behind a shared reference to a `Freeze` slice is one value while `xs` is
+/// unchanged: the guard `xs[0] < ys.len()` decides `ys[xs[0]]`, passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn idx_heap(xs: &[usize], ys: &[u8]) -> u8 {
+    if !xs.is_empty() && xs[0] < ys.len() { ys[xs[0]] } else { 0 }
+}
+
+/// The same with an array element at a constant index: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn idx_array(xs: &[usize; 4], ys: &[u8]) -> u8 {
+    if xs[2] < ys.len() { ys[xs[2]] } else { 0 }
+}
+
+/// Not covered: only elements at a constant index are tracked paths, so the guard on
+/// `xs[k]` is not related to the second read (a precision limit; sound): reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn idx_variable(xs: &[usize], ys: &[u8], k: usize) -> u8 {
+    if k < xs.len() && xs[k] < ys.len() { ys[xs[k]] } else { 0 }
+}
+
+/// Control: a `Cell` element can change between the guard and the use (interior
+/// mutability): reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn idx_cell(xs: &[core::cell::Cell<usize>], ys: &[u8]) -> u8 {
+    if !xs.is_empty() && xs[0].get() < ys.len() { ys[xs[0].get()] } else { 0 }
+}
+
+/// Control: a relational nonlinear guard (`a * m + b < n * m`) is outside the
+/// domain: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn nonlinear(xs: &[u8], n: usize, m: usize, a: usize, b: usize) -> u8 {
+    if a < n && b < m && n.checked_mul(m).is_some_and(|nm| nm <= xs.len()) {
+        xs[a.wrapping_mul(m).wrapping_add(b)]
+    } else {
+        0
+    }
+}
+
+pub struct Window<'a> {
+    pub n: usize,
+    pub b: &'a [u8],
+}
+
+/// A precondition over access paths of a `&Window` (a `Freeze` type): the root is
+/// checked under it, passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+#[cfg_attr(fip_prelint, fip::requires(i < w.n, w.n <= w.b.len()))]
+pub fn window_at(w: &Window<'_>, i: usize) -> u8 {
+    w.b[i]
+}
+
+/// The callers establish it from their guards: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn window_caller(w: &Window<'_>, i: usize) -> u8 {
+    if i < w.n && w.n <= w.b.len() { window_at(w, i) } else { 0 }
+}
+
+/// Control: `w.n <= w.b.len()` is not established: reported at the call.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn window_caller_short(w: &Window<'_>, i: usize) -> u8 {
+    if i < w.n { window_at(w, i) } else { 0 }
+}
+
+/// An element path in a precondition: `ys[xs[0]]` under `0 < xs.len()` and
+/// `xs[0] < ys.len()`, passes; its caller establishes both, passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+#[cfg_attr(fip_prelint, fip::requires(0 < xs.len(), xs[0] < ys.len()))]
+pub fn first_index(xs: &[usize], ys: &[u8]) -> u8 {
+    ys[xs[0]]
+}
+
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn first_index_caller(xs: &[usize], ys: &[u8]) -> u8 {
+    if !xs.is_empty() && xs[0] < ys.len() { first_index(xs, ys) } else { 0 }
+}
