@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! Seed roots of the std summaries: the formatting paths that analysed code uses
-//! (`format!`, `write!` into a buffer, `Display`/`Debug` of the primitive types,
-//! formatting options, user `Display` impls that write through the `Formatter`).
-//! Every standard-library function without shipped MIR reached from here, and from
-//! those, is summarised. Add a root here to cover a new path.
+//! (`format!`, `write!` into a buffer, `Display`/`Debug` of the primitive types
+//! including floats and 128-bit integers, the radix and exponent formats of every
+//! integer type, formatting options, user `Display` impls that write through the
+//! `Formatter`). Every standard-library function without shipped MIR reached from
+//! here, and from those, is summarised. Add a root here to cover a new path.
 
 use core::fmt::{self, Write};
 
@@ -93,4 +94,36 @@ pub fn format_literal() -> String {
 #[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
 pub fn to_string_int(a: u32) -> String {
     a.to_string()
+}
+
+// Top plan T7c: floating-point `Display`, precision, exponent and `Debug` formats.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_floats(b: &mut Buf, x: f64, y: f32) -> fmt::Result {
+    write!(b, "{x}{y}{x:.3}{y:.3}{x:e}{y:e}{x:E}{y:E}{x:?}{y:?}{x:#?}{x:>10.2}{x:+}{x:08.1}")
+}
+
+// Top plan T7e: 128-bit integers and the radix, exponent and `Debug` formats of every
+// integer type.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_wide(b: &mut Buf, x: u128, y: i128) -> fmt::Result {
+    write!(b, "{x}{y}{x:x}{x:X}{x:o}{x:b}{y:x}{y:X}{y:o}{y:b}{x:?}{y:?}{x:e}{x:E}{y:e}{x:#x}{x:08}")
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_radix_unsigned(b: &mut Buf, a: u8, c: u16, d: u32, e: u64, g: usize) -> fmt::Result {
+    write!(b, "{a:x}{a:X}{a:o}{a:b}{c:x}{c:X}{c:o}{c:b}{d:x}{d:X}{d:o}{d:b}")?;
+    write!(b, "{e:x}{e:X}{e:o}{e:b}{g:x}{g:X}{g:o}{g:b}")?;
+    write!(b, "{a:?}{c:?}{d:?}{e:?}{g:?}{a:e}{c:e}{d:e}{e:e}{g:e}{d:E}{e:E}")
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn write_radix_signed(b: &mut Buf, h: i8, i: i16, j: i32, k: i64, l: isize) -> fmt::Result {
+    write!(b, "{h:x}{h:X}{h:o}{h:b}{i:x}{i:X}{i:o}{i:b}{j:x}{j:X}{j:o}{j:b}")?;
+    write!(b, "{k:x}{k:X}{k:o}{k:b}{l:x}{l:X}{l:o}{l:b}")?;
+    write!(b, "{h:?}{i:?}{j:?}{k:?}{l:?}{h:e}{i:e}{j:e}{k:e}{l:e}{j:E}{k:E}")
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn format_floats(x: f64, y: f32, z: u128) -> String {
+    format!("{x}{y}{x:.2}{x:e}{x:?}{z}")
 }

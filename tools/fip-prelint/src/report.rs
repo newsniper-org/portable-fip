@@ -877,7 +877,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             let krate = impl_def.krate;
             if impl_def.is_local()
                 || crates.exported(krate)
-                || crate::analysis::is_std_crate(tcx.crate_name(krate).as_str())
+                || crate::analysis::is_std_like(tcx, krate)
             {
                 continue;
             }

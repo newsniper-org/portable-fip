@@ -1757,3 +1757,67 @@ functions keep the standalone report.
 site with an unknown argument reports the `⊤` itself. The `⊤` text still names the
 private function's parameter (`the parameter q of the caller`), not the caller that
 passed the unknown pointer.
+
+## Resolved 2026-11-03: floats, 128-bit integers, float math and `std`'s dependencies (top plan T7c/d/e/h)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T7 rows c, d, e and h (item
+6 of its order).
+
+**Before.** `write!(b, "{x}")` for `f64`/`f32` and for `u128`/`i128`, and the radix and
+exponent formats of most integer types, reached `core` functions without shipped MIR
+that the seed did not reach (`⊤`, "not in the std summaries"). `x.sqrt()`, `x.sin()`,
+`x.floor()`, `x.abs()`, `x.powi(n)` reached intrinsics outside
+`ALLOC_FREE_INTRINSICS` (`⊤`). Dropping a `HashMap` reached
+`<hashbrown::raw::RawTable<..> as Drop>::drop`: `⊤`, "crate `hashbrown` does not
+declare `fip::export`" (it is `std`'s own dependency, built from the same release).
+
+**Mechanism.**
+
+- Seed (`std-summaries/seed/src/lib.rs`): five new roots, `f32`/`f64` with `{}`,
+  `{:.N}`, `{:e}`, `{:E}`, `{:?}`, `{:#?}`, width/sign/zero padding; `u128`/`i128` with
+  every format; `{:x}`, `{:X}`, `{:o}`, `{:b}`, `{:?}`, `{:e}`, `{:E}` of every other
+  integer type; `format!` of floats and `u128`.
+- `fip_lint_rules::mir::ALLOC_FREE_INTRINSICS`: the `f32`/`f64` math intrinsics
+  (`sqrt`, `powi`, `sin`, `cos`, `pow`, `exp`, `exp2`, `log`, `log10`, `log2`, `fma`,
+  `fmuladd`, `floor`, `ceil`, `trunc`, `round`, `round_ties_even`, `minimum`,
+  `maximum`, `minimum_number_nsz`, `maximum_number_nsz`), `fabs`, `copysign`. Reason
+  `FLOAT_MATH`: LLVM lowers them to instructions or to a call of the C math library's
+  function of that name (on x86_64 always for `sin`, `pow`, `exp`, `log`); that call is
+  not analysed, its allocation freedom is the C standard's (7.12), a trusted claim like
+  the other table entries. `powi`: inline or `compiler_builtins`' `__powidf2`. Also the
+  integer/bitwise SIMD lane intrinsics (`simd_lt`, `simd_bitmask`, `simd_eq`, `simd_and`,
+  ..; reason `SIMD_LANES`), measured as the next `⊤` on `hashbrown`'s SSE2 group scan
+  once `hashbrown` is analysed. `f16`/`f128` variants and the SIMD float, gather,
+  scatter and masked intrinsics stay unlisted (`⊤`).
+- `analysis::is_std_like(tcx, krate)`: `core`/`alloc`/`std`, or a crate whose
+  `ExternCrate::dependency_of` chain (the path through which rustc loaded it) reaches
+  one of them without passing through the local crate or a direct dependency
+  (`hashbrown`, `std_detect`, `libc`, ..). Used where `is_std_crate` decided "analysed
+  like `std`": `classify_item`, the generator's `std_defs`, return summaries
+  (`value.rs`), and the implementation check of contracts (`report.rs`). Stack mode
+  keeps the name test. Foreign functions inside such crates still go through the FFI
+  rule (measured: `f64::tan` reaches `std::sys::cmath::tan`, "neither certified nor
+  excluded"). A crate the user depends on directly (also a crates.io `hashbrown`) is
+  not std-like.
+
+**Soundness.** Seeds: generated summaries, as every other. Table: a trusted claim per
+entry, with its reason. `hashbrown` and the other dependencies of `std` are the shipped
+standard library's code; their MIR (generic and inlinable functions) is analysed, and a
+function without MIR is summarised or `⊤`, as for `core`. The std-src stamp hashes
+`core`/`alloc`/`std`; the versions of `std`'s crates.io dependencies are fixed by the
+rustc release (`library/Cargo.lock`), which the stamp's rustc version covers.
+
+**Measured** (before = `1661caf`, its driver and sidecar; after = this commit):
+
+| case | before | after |
+|---|---|---|
+| fixture `std_summaries` (6 new roots: `write_float`, `write_wide`, `float_math`, `float_tan`, `empty_map_len`, `empty_map_fip`) | 11 roots, 2 passed, 27 errors (`⊤`: floats 4, 128-bit 5, intrinsics 6, `hashbrown` 2) | 11 roots, 6 passed, 11 errors: the four std-only cases pass; `float_tan` FFI error (unchanged, a control); `empty_map_fip` "may free" (not `⊤`); `write_debug` stays `⊤` (item 7) |
+| fixture `std_summaries`, stale sidecar | 11 roots, 0 passed, 18 errors | 11 roots, 2 passed, 11 errors (float/128-bit stay `⊤`, "std summaries not used"; `float_math` and `empty_map_len` pass without summaries) |
+| N4 `top` | 44 roots, 26 passed, 26 errors | 44 roots, 29 passed, 21 errors: `float_disp`, `int_u128`, `float_math` pass; `hashmap_new` keeps one `⊤` (`RandomState::new`'s thread local, item 8), its `hashbrown` drop `⊤` is gone |
+| sidecar | 60 functions, 560 lines, 105 751 bytes, 3 `top` lines; generation 98.3 s cold (33.3 s of analysis; output identical to the committed file) | 165 functions, 1 696 lines, 363 954 bytes, 3 `top` lines (unchanged, item 7); generation 224.9 s cold (162.7 s of analysis) |
+| self-check dev / `--release`, other fixtures | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
+
+**Kept.** `f16`/`f128` math, SIMD float intrinsics, `f64::tan`/`cbrt`/`hypot`/..
+(foreign `cmath` declarations in `std`: the FFI rule; a user mark by symbol covers
+them). The float formatting summaries carry `core`'s bounds-check panic paths (notes,
+or errors under `panic_macros = false`), as the integer ones do.

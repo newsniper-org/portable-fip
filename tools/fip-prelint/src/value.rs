@@ -86,7 +86,7 @@ use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
-use crate::analysis::{Crates, is_std_crate};
+use crate::analysis::{Crates, is_std_like};
 
 /// "No bound". Far above every bound of a 64-bit type, far below `i128::MAX`, so
 /// sums of a few bounds cannot overflow.
@@ -218,9 +218,9 @@ pub struct RetSummary {
 
 /// Return summaries of the callees met while analysing the bodies of one root,
 /// memoized per instance. A callee is summarised only if it has MIR, is not a
-/// source (whose body is out of scope), and lies in `core`/`alloc`/`std` or a crate
-/// the driver analyses; recursion and nesting deeper than [`MAX_SUMMARY_DEPTH`] give
-/// no summary (the destination is forgotten).
+/// source (whose body is out of scope), and lies in a std-like crate
+/// ([`is_std_like`]) or a crate the driver analyses; recursion and nesting deeper
+/// than [`MAX_SUMMARY_DEPTH`] give no summary (the destination is forgotten).
 /// Summaries memoized per callee and context.
 type SummaryMap<'tcx> = HashMap<(Instance<'tcx>, Vec<Fact>), Option<Rc<RetSummary>>>;
 
@@ -250,8 +250,7 @@ impl<'a, 'tcx> Summaries<'a, 'tcx> {
 
     /// `true` if the body of `def_id` may be used for a summary.
     fn usable(&self, tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
-        let name = tcx.crate_name(def_id.krate);
-        (is_std_crate(name.as_str()) || self.crates.exported(def_id.krate))
+        (is_std_like(tcx, def_id.krate) || self.crates.exported(def_id.krate))
             && self.crates.source_of(tcx, def_id).is_none()
     }
 

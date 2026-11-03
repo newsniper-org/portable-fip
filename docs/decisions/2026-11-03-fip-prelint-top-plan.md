@@ -467,6 +467,21 @@ and the messages already name them.
 
 **Dependencies.** g needs B and T1.2.
 
+**Implemented** (item 6, c/d/e/h). Seed roots for `f32`/`f64` (`{}`, `{:.N}`, `{:e}`,
+`{:E}`, `{:?}`, `{:#?}`, padding), `u128`/`i128`, and the radix/exponent/`Debug` formats
+of every integer type; the sidecar grows from 60 to 165 functions (560 → 1 696 lines,
+105 751 → 363 954 bytes), with the same 3 `top` lines. The `f32`/`f64` math
+intrinsics, `fabs` and `copysign` are table entries (reason: instructions or the C math
+library's function of that name, a trusted claim). `analysis::is_std_like`: crates
+loaded only through `core`/`alloc`/`std` (`ExternCrate::dependency_of`) are analysed
+like `std`. Fixture `std_summaries`: 11 roots, 2 → 6 passed. N4: `float_disp`,
+`int_u128`, `float_math` pass; `hashmap_new`'s `hashbrown` drop `⊤` is gone.
+**Deviations:** `hashbrown`'s SSE2 group scan reaches SIMD intrinsics (`simd_lt`,
+`simd_bitmask`), so the integer/bitwise SIMD lane intrinsics were added to the table
+too (measured, not planned). Generation takes 224.9 s cold (162.7 s of analysis),
+above the plan's 94–131 s (98.3 s, 33.3 s of analysis, for the previous seed, same
+conditions).
+
 ### T8. Stack mode gaps
 
 **Current.** See N5 and limits plan L9 "Implemented".

@@ -341,6 +341,24 @@ pub mod mir {
     pub const UB_CHECK_MARKERS: &[&str] =
         &["::precondition_check", "core::hint::unreachable_unchecked"];
 
+    /// Reason of the `f32`/`f64` math intrinsics in [`ALLOC_FREE_INTRINSICS`] (top
+    /// plan T7d). LLVM lowers them to instructions or, depending on the target and
+    /// its features (`sin`, `pow`, `exp`, `log` always on `x86_64`; `floor`, `fma`
+    /// without SSE4.1/FMA), to a call of the C math library's function of the same
+    /// name. That call is not analysed: its allocation freedom is the C library's
+    /// specification (C standard 7.12; no math function allocates), a trusted claim.
+    pub const FLOAT_MATH: &str = "float math: instructions or a call of the C math library's function of the same name (allocation-free by the C standard 7.12; a claim about the linked C library, not analysed)";
+
+    /// Reason of the `powi` intrinsics in [`ALLOC_FREE_INTRINSICS`]: lowered inline or
+    /// to `compiler_builtins`' `__powisf2`/`__powidf2` (a loop of multiplications).
+    pub const FLOAT_POWI: &str = "float power by an integer: inline multiplications or `compiler_builtins`' `__powisf2`/`__powidf2`";
+
+    /// Reason of the integer/bitwise SIMD intrinsics in [`ALLOC_FREE_INTRINSICS`]
+    /// (reached by `hashbrown`'s SSE2 group scan, top plan T7h): lane-wise operations
+    /// on values in registers; no memory access, no call.
+    pub const SIMD_LANES: &str =
+        "SIMD lane-wise operation on values (registers; no memory access, no call)";
+
     /// Intrinsics without allocation, free, panic or call into user code, with the
     /// reason. An intrinsic not listed here (and not in [`PANIC_INTRINSICS`]) is
     /// unknown (`⊤`).
@@ -451,6 +469,90 @@ pub mod mir {
         ("fmul_algebraic", "float arithmetic"),
         ("fdiv_algebraic", "float arithmetic"),
         ("frem_algebraic", "float arithmetic"),
+        ("fabs", "float sign-bit operation"),
+        ("copysignf32", "float sign-bit operation"),
+        ("copysignf64", "float sign-bit operation"),
+        ("sqrtf32", FLOAT_MATH),
+        ("sqrtf64", FLOAT_MATH),
+        ("powif32", FLOAT_POWI),
+        ("powif64", FLOAT_POWI),
+        ("sinf32", FLOAT_MATH),
+        ("sinf64", FLOAT_MATH),
+        ("cosf32", FLOAT_MATH),
+        ("cosf64", FLOAT_MATH),
+        ("powf32", FLOAT_MATH),
+        ("powf64", FLOAT_MATH),
+        ("expf32", FLOAT_MATH),
+        ("expf64", FLOAT_MATH),
+        ("exp2f32", FLOAT_MATH),
+        ("exp2f64", FLOAT_MATH),
+        ("logf32", FLOAT_MATH),
+        ("logf64", FLOAT_MATH),
+        ("log10f32", FLOAT_MATH),
+        ("log10f64", FLOAT_MATH),
+        ("log2f32", FLOAT_MATH),
+        ("log2f64", FLOAT_MATH),
+        ("fmaf32", FLOAT_MATH),
+        ("fmaf64", FLOAT_MATH),
+        ("fmuladdf32", FLOAT_MATH),
+        ("fmuladdf64", FLOAT_MATH),
+        ("floorf32", FLOAT_MATH),
+        ("floorf64", FLOAT_MATH),
+        ("ceilf32", FLOAT_MATH),
+        ("ceilf64", FLOAT_MATH),
+        ("truncf32", FLOAT_MATH),
+        ("truncf64", FLOAT_MATH),
+        ("roundf32", FLOAT_MATH),
+        ("roundf64", FLOAT_MATH),
+        ("round_ties_even_f32", FLOAT_MATH),
+        ("round_ties_even_f64", FLOAT_MATH),
+        ("minimumf32", FLOAT_MATH),
+        ("minimumf64", FLOAT_MATH),
+        ("maximumf32", FLOAT_MATH),
+        ("maximumf64", FLOAT_MATH),
+        ("minimum_number_nsz_f32", FLOAT_MATH),
+        ("minimum_number_nsz_f64", FLOAT_MATH),
+        ("maximum_number_nsz_f32", FLOAT_MATH),
+        ("maximum_number_nsz_f64", FLOAT_MATH),
+        ("simd_add", SIMD_LANES),
+        ("simd_sub", SIMD_LANES),
+        ("simd_mul", SIMD_LANES),
+        ("simd_neg", SIMD_LANES),
+        ("simd_and", SIMD_LANES),
+        ("simd_or", SIMD_LANES),
+        ("simd_xor", SIMD_LANES),
+        ("simd_shl", SIMD_LANES),
+        ("simd_shr", SIMD_LANES),
+        ("simd_saturating_add", SIMD_LANES),
+        ("simd_saturating_sub", SIMD_LANES),
+        ("simd_eq", SIMD_LANES),
+        ("simd_ne", SIMD_LANES),
+        ("simd_lt", SIMD_LANES),
+        ("simd_le", SIMD_LANES),
+        ("simd_gt", SIMD_LANES),
+        ("simd_ge", SIMD_LANES),
+        ("simd_ctpop", SIMD_LANES),
+        ("simd_ctlz", SIMD_LANES),
+        ("simd_cttz", SIMD_LANES),
+        ("simd_bswap", SIMD_LANES),
+        ("simd_bitreverse", SIMD_LANES),
+        ("simd_bitmask", SIMD_LANES),
+        ("simd_select", SIMD_LANES),
+        ("simd_select_bitmask", SIMD_LANES),
+        ("simd_shuffle", SIMD_LANES),
+        ("simd_splat", SIMD_LANES),
+        ("simd_extract", SIMD_LANES),
+        ("simd_insert", SIMD_LANES),
+        ("simd_cast", SIMD_LANES),
+        ("simd_as", SIMD_LANES),
+        ("simd_reduce_and", SIMD_LANES),
+        ("simd_reduce_or", SIMD_LANES),
+        ("simd_reduce_xor", SIMD_LANES),
+        ("simd_reduce_all", SIMD_LANES),
+        ("simd_reduce_any", SIMD_LANES),
+        ("simd_reduce_max", SIMD_LANES),
+        ("simd_reduce_min", SIMD_LANES),
+        ("simd_reduce_add_unordered", SIMD_LANES),
         ("atomic_load", "single atomic memory access"),
         ("atomic_store", "single atomic memory access"),
         ("atomic_xchg", "single atomic memory access"),

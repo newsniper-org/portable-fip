@@ -643,6 +643,19 @@ at each of its call sites in the crate, with what that call passes (callable
 bindings); an unknown argument reports the `⊤` there. Details: `TODOs/fip-prelint.md`,
 "Resolved 2026-11-03: private functions checked at their call sites".
 
+## Amendment 2026-11-03: floats, 128-bit integers, float math and `std`'s dependencies (top plan T7c/d/e/h)
+
+The std summaries' seed covers float and 128-bit integer formatting and the radix and
+exponent formats of every integer type (165 summarised functions). The audited
+intrinsic table lists the `f32`/`f64` math intrinsics: they lower to instructions or
+to the C math library's function of the same name, whose allocation freedom is a
+trusted claim about the C library (C standard 7.12), stated with each entry; and the
+integer/bitwise SIMD lane intrinsics. The crates the standard library depends on
+(`hashbrown`, ..: loaded only through a standard-library crate) are analysed like
+`core`/`alloc`/`std`; foreign functions in them still follow the FFI rule. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: floats, 128-bit integers, float math and
+`std`'s dependencies".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

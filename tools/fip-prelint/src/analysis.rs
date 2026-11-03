@@ -530,8 +530,8 @@ pub fn requires_facts(
     Ok(facts)
 }
 
-/// Crates whose MIR may be used: the local crate, `core`/`alloc`/`std`, and crates
-/// whose root declares `fip::export`.
+/// Crates whose MIR may be used: the local crate, `core`/`alloc`/`std` and their
+/// dependencies ([`is_std_like`]), and crates whose root declares `fip::export`.
 pub struct Crates {
     exported: HashMap<CrateNum, bool>,
     /// Crates that declare `fip::export` but contain a function with a body in source
@@ -1094,6 +1094,31 @@ pub(crate) fn is_std_crate(name: &str) -> bool {
     matches!(name, "core" | "alloc" | "std")
 }
 
+/// `true` for `core`, `alloc`, `std` and the crates the standard library depends on
+/// (`hashbrown`, `std_detect`, `libc`, ..; top plan T7h): crates loaded only as
+/// dependencies of a standard-library crate, by the chain `ExternCrate::dependency_of`
+/// that rustc records (the shortest path through which a crate was loaded). They are
+/// the shipped standard library's code: analysed where they have MIR, summarised
+/// where not. Foreign functions in them still go through the FFI rule. A crate the
+/// local crate depends on directly (even one of the same name) is not std-like.
+pub(crate) fn is_std_like(tcx: TyCtxt<'_>, krate: CrateNum) -> bool {
+    let mut k = krate;
+    // Bounded walk: the chain ends at the local crate or a direct dependency.
+    for _ in 0..32 {
+        if is_std_crate(tcx.crate_name(k).as_str()) {
+            return true;
+        }
+        if k == LOCAL_CRATE {
+            return false;
+        }
+        match tcx.extern_crate(k) {
+            Some(e) if !e.is_direct() && e.dependency_of != k => k = e.dependency_of,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Strongly connected components (Tarjan, iterative), in reverse topological order
 /// (every component after all components it reaches).
 fn tarjan(n: usize, succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -1421,7 +1446,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 _ => None,
             })
             .filter(|&d| {
-                is_std_crate(tcx.crate_name(d.krate).as_str())
+                is_std_like(tcx, d.krate)
                     && matches!(
                         tcx.def_kind(d),
                         DefKind::Fn | DefKind::AssocFn | DefKind::Closure
@@ -1916,7 +1941,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
         let crate_name = tcx.crate_name(def_id.krate);
         let crate_name = crate_name.as_str();
-        let std_like = is_std_crate(crate_name);
+        let std_like = is_std_like(tcx, def_id.krate);
         if !std_like && !self.crates.exported(def_id.krate) {
             return NodeKind::Leaf(vec![Ev::Unknown(format!(
                 "`{path}` (crate `{crate_name}` does not declare `fip::export`)"
