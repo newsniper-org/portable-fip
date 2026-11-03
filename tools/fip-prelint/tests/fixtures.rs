@@ -429,27 +429,64 @@ fn profiles() {
     }
 }
 
-/// Stack bounds (limits plan L9): `cargo fip-prelint --stack` in the dev profile
-/// (opt-level 0) and with `--release` (opt-level 3), target x86_64-unknown-linux-gnu,
-/// rustc 1.99.1; the expected bounds hold for these builds only. A three-level chain
-/// with arrays, an index (its panic path excluded) and a slice iterator (through the
-/// `precondition_check` functions codegen calls) are bounded; recursion, a dynamic
-/// call, a function pointer, a foreign function, a precompiled std function, `memcpy`,
-/// an allocation and a generic root are `⊤` with the reason, where the build has them
-/// (at opt-level 3 the recursion became a loop and `labs` an instruction). If the
-/// system `llvm-readobj` exists, each bound of `chain_top` is checked to be at least
-/// the sum of its chain's frame sizes as `llvm-readobj --stack-sizes` reads them.
+/// Stack bounds (limits plan L9, top plan T8): `cargo fip-prelint --stack` in the dev
+/// profile (opt-level 0) and with `--release` (opt-level 3), target
+/// x86_64-unknown-linux-gnu, rustc 1.99.1; the expected bounds hold for these builds
+/// only. A three-level chain with arrays, an index (its panic path excluded) and a
+/// slice iterator (through the `precondition_check` functions codegen calls) are
+/// bounded; recursion, a dynamic call, a function pointer, a foreign function, a
+/// precompiled std function, `memcpy`, an allocation and a generic root without an
+/// instance are `⊤` with the reason, where the build has them (at opt-level 3 the
+/// recursion became a loop and `labs` an instruction; with
+/// `-Zcross-crate-inline-threshold=never` every root has a symbol, T8d). Crate `leafy`
+/// declares `memcpy` a stack leaf (T8b) and instantiates `chain::generic::<u32>`
+/// (bounded per instance, T8e). Variants: `-tests` (`--lib --tests`: the test target's
+/// objects add `chain::generic::<u8>`, T8f), `-aarch64` (`--target
+/// aarch64-unknown-linux-gnu`, AArch64 ELF, return address 0, T8a; skipped if not
+/// installed), `-buildstd` (`--build-std`: the std functions are built and bounded,
+/// down to the foreign `getpid`/`memcpy`, T8c). If the system `llvm-readobj` exists,
+/// each bound of `chain_top` (dev, release, aarch64) is checked to be at least the sum
+/// of its chain's frame sizes as `llvm-readobj --stack-sizes` reads them.
 #[test]
 fn stack() {
     if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
         eprintln!("stack fixture: x86_64 Linux only (the expected bounds are for that build)");
         return;
     }
-    for (variant, extra) in [("-dev", &[][..]), ("-release", &["--release"][..])] {
+    let out = Command::new("rustc")
+        .env(
+            "RUSTUP_TOOLCHAIN",
+            std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".to_string()),
+        )
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("rustc --print sysroot");
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let aarch64 = "aarch64-unknown-linux-gnu";
+    let has_aarch64 = sysroot.join("lib").join("rustlib").join(aarch64).is_dir();
+    let variants: [(&str, &[&str], Option<&str>); 5] = [
+        ("-dev", &[], Some("debug")),
+        ("-release", &["--release"], Some("release")),
+        ("-tests", &["--lib", "--tests"], None),
+        (
+            "-aarch64",
+            &["--target", aarch64],
+            Some("aarch64-unknown-linux-gnu/debug"),
+        ),
+        ("-buildstd", &["--build-std"], None),
+    ];
+    for (variant, extra, cross_check) in variants {
+        if variant == "-aarch64" && !has_aarch64 {
+            eprintln!("stack fixture{variant}: `{aarch64}` not installed, skipped");
+            continue;
+        }
         let mut args = vec!["--stack"];
         args.extend_from_slice(extra);
         let got = run_args("stack", variant, &[], &args);
         compare("stack", variant, &got);
+        let Some(profile) = cross_check else {
+            continue;
+        };
         let bound: u64 = got
             .iter()
             .find_map(|l| {
@@ -461,7 +498,6 @@ fn stack() {
                     .ok()
             })
             .expect("a bound for chain_top");
-        let profile = if extra.is_empty() { "debug" } else { "release" };
         let rlib = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("fixtures")
             .join(format!("stack{variant}"))
@@ -503,7 +539,6 @@ fn stack() {
     }
 }
 
-/// Negative control: marks from `fip-macros`, every root passes, exit status 0.
 #[test]
 fn clean() {
     check("clean");

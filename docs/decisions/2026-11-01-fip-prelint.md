@@ -736,6 +736,17 @@ host's for formatting and differ where `std::sys` differs. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: std summaries for every installed `std`
 target".
 
+## Amendment 2026-11-03: stack mode gaps (top plan T8)
+
+Stack mode adds `-Zcross-crate-inline-threshold=never`, reads AArch64 ELF objects
+(return address 0) besides x86_64, bounds a generic root per instance the build
+codegens, reads the objects of bins and tests when they are selected (`-Csave-temps`),
+and with `--build-std` builds and bounds the standard library with the profile's
+settings. The crate attribute `fip::stack_leaf(sym = B, evidence = "..")` declares the
+stack use of a symbol the build has no frame for (a trusted declaration, listed in the
+summary, used only for that crate's roots). Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-03: stack mode gaps".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

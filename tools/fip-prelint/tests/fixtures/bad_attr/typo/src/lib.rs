@@ -3,6 +3,8 @@
 
 //! Unknown names under `fip::` are rejected (rustc itself accepts them).
 #![cfg_attr(fip_prelint, fip::exprot)]
+// A stack leaf without evidence (top plan T8b).
+#![cfg_attr(fip_prelint, fip::stack_leaf(memcpy = 64))]
 
 /// Typo in the function attribute.
 #[cfg_attr(fip_prelint, fip::mrak(kind = "fip"))]
@@ -19,5 +21,11 @@ pub fn g(x: u32) -> u32 {
 /// Valid mark: passes.
 #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
 pub fn h(x: u32) -> u32 {
+    x
+}
+
+/// A stack leaf on a function: it belongs at the crate root.
+#[cfg_attr(fip_prelint, fip::stack_leaf(memset = 32, evidence = "misplaced"))]
+pub fn k(x: u32) -> u32 {
     x
 }

@@ -2153,3 +2153,61 @@ are gone), the `unsupported` random source boxes a value for its address
 **Deviation.** "wasm32 `std_summaries` equals host" holds only for the formatting
 roots; the `std::sys` differences are real target differences, recorded in their own
 expectation.
+
+## Resolved 2026-11-03: stack mode gaps (top plan T8d, T8b, T8a, T8e/f, T8c)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, item 12.
+
+**Before** (N5). x86_64 ELF only; libraries only (`--lib`); generic roots `⊤`; roots
+kept only for cross-crate inlining had no symbol at opt-level 3; every runtime function
+(`memcpy`) and every precompiled `std` function `⊤`.
+
+**Changes.**
+
+- **d** `-Zcross-crate-inline-threshold=never` joins `-Zemit-stack-sizes
+  -Zshare-generics=no`; one note per run states the flags (and `--build-std`) and the
+  objects' machine.
+- **b** `fip::stack_leaf(sym = B, .., evidence = "..")` at the crate root (validated
+  in every run: placement, symbol names, duplicates, required evidence). In the stack
+  bound a symbol **not defined** in the build's objects that the root's crate declares
+  costs `B` bytes, return address included. Each declaration is listed in a note
+  ("trusted, not measured; evidence: ..") and counted in the crate summary. A defined
+  symbol keeps its measured frame.
+- **a** AArch64 ELF objects (machine 183): `CALL26`/`JUMP26`/`ADR*` addends are the
+  target offset (no PC adjustment), return address 0 (`bl` writes the link register; a
+  callee saving it has the frame record in its `.stack_sizes` value). Mixed machines in
+  one build: every bound `⊤`.
+- **e** Every crate's record lists the instances it codegens of generic functions
+  carrying `fip::mark` (in any crate), keyed by `DefPathHash`. A generic root is
+  reported per instance (`chain::generic::<u32>`), bounded if every instance is; without
+  an instance it stays `⊤`.
+- **f** A target selection replaces `--lib` (`--lib --tests`, `--bins`). A primary bin
+  or test is compiled with `-Csave-temps` (measured: `--emit=obj` with several codegen
+  units drops the objects under `--out-dir`), its record names the `.rcgu.o` objects
+  (`objs`); an uplifted bin is matched to its `deps/` copy by content. Executables add
+  functions and instances, not roots (their roots are the library's) and no stack leaves.
+- **c** `--build-std` adds `-Zbuild-std=core,alloc,std,panic_abort,panic_unwind`
+  (`--target` defaults to the host). The std crates (`-Zforce-unstable-if-unmarked`)
+  are compiled with the profile's settings plus the stack flags and recorded like an
+  exported dependency, so the bound reads the frames of the artefact built; the note
+  says it is not the shipped `std`. `.fip-stack` format 1 → 2.
+
+**Measured** (fixture `stack`, rustc 1.99.1, x86_64 Linux host):
+
+| variant | before | after |
+|---|---|---|
+| dev | 11 roots, 3 bounded | `chain` 11 roots, 4 bounded (`chain::generic::<u32>` 8 bytes, instantiated by `leafy`); `leafy` 1 root, 1 bounded (`copy_declared` 96 = 24 + 8 + declared `memcpy` 64) |
+| release | 4 bounded (`indexed`, `copy_big` without symbol) | `chain` 5 bounded (`indexed` 16 bytes; `copy_big` reaches `memcpy` `⊤`; `generic::<u32>` inlined, `⊤`); `leafy` 1 bounded (80) |
+| `--lib --tests` (new) | — | `chain` 4 bounded, both instances `generic::<u32>` and `generic::<u8>` (from the test target's objects) 8 bytes |
+| `--target aarch64-unknown-linux-gnu` (new) | all `⊤` ("only x86_64") | `chain` 4 bounded (`chain_top` 544 ≥ `llvm-readobj` frame sum 528), `leafy` 1 |
+| `--build-std` (new) | — | `chain` 4 bounded; `precompiled` `⊤` at `libc::getpid` (was `std::process::id`), `copy_big` at `libc::memcpy`, `summed` 520 (std frames of this build, 288 against the shipped std) |
+
+`llvm-readobj` cross-check: dev 504 ≥ 472, release 256 ≥ 232, aarch64 544 ≥ 528.
+`bad_attr`: a crate-level stack leaf without evidence and one on a function are
+errors. FIP verdicts, self-check and the other fixtures are unchanged (stack mode only).
+
+**Stays / deviations.** i686 and ARMv7 objects (ELF32, REL) are not read; Mach-O,
+COFF and WASM have no frame sizes. A generic instance inlined into every caller has no
+symbol (release `generic::<u32>`). In `--tests` the executable's allocator shim defines
+`__rust_alloc`, so `boxed` is `⊤` as "defined in the build but not codegened from MIR".
+Undeclared runtime functions and foreign functions stay `⊤`.

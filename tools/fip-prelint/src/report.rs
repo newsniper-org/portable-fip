@@ -266,6 +266,10 @@ fn validate_tool_attrs(out: &mut Out<'_>) {
                     "cert" => Some("`fip::cert` applies to foreign functions".to_string()),
                     "exclude" if on_fn && is_foreign => None,
                     "exclude" => Some("`fip::exclude` applies to foreign functions".to_string()),
+                    "stack_leaf" if on_root => crate::stack::stack_leaf_of(tcx, item.span)
+                        .err()
+                        .map(|e| format!("malformed `fip::stack_leaf`: {e}")),
+                    "stack_leaf" => Some("`fip::stack_leaf` belongs at the crate root: `#![cfg_attr(fip_prelint, fip::stack_leaf(memcpy = 64, evidence = \"..\"))]`".to_string()),
                     other => {
                         let names: Vec<String> =
                             marks::KNOWN.iter().map(|k| format!("`fip::{k}`")).collect();

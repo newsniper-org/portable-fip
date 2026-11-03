@@ -27,6 +27,12 @@
 //!   function when it is a root and checked at every analysed call site; a function
 //!   with a precondition used as a function value is reported there.
 //!
+//! - `#![cfg_attr(fip_prelint, fip::stack_leaf(memcpy = B, .., evidence = ".."))]`
+//!   (crate root; top plan T8b): in stack mode (`cargo fip-prelint --stack`), a call of
+//!   one of these symbols that has no frame size in the build counts `B` bytes, the
+//!   return address included, for the roots of this crate. A trusted declaration,
+//!   listed in the stack summary; never used by the allocation analysis.
+//!
 //! Any other name under `fip::` is rejected: rustc accepts unknown names under a
 //! registered tool silently.
 
@@ -39,6 +45,7 @@ pub const KNOWN: &[&str] = &[
     "requires",
     "cert",
     "exclude",
+    "stack_leaf",
 ];
 
 /// The conjuncts of the printed `fip::requires(..)` attributes of one function
@@ -253,6 +260,53 @@ pub fn parse_ffi_exclude(args: Option<&str>) -> Result<FfiExclude, String> {
     Ok(FfiExclude { reason })
 }
 
+/// A crate's declared stack leaves: `(symbol, bytes)` and the evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackLeaves {
+    pub leaves: Vec<(String, u64)>,
+    pub evidence: String,
+}
+
+/// Parses the argument list of `fip::stack_leaf(sym = B, .., evidence = "..")`.
+pub fn parse_stack_leaf(args: Option<&str>) -> Result<StackLeaves, String> {
+    let mut leaves: Vec<(String, u64)> = Vec::new();
+    let mut evidence = None;
+    for part in split_top(args.unwrap_or("")) {
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            format!("expected `symbol = bytes` in `fip::stack_leaf(..)`, found `{part}`")
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key == "evidence" {
+            let ev = value.trim_matches('"');
+            if ev.is_empty() {
+                return Err("`evidence` in `fip::stack_leaf(..)` must not be empty".to_string());
+            }
+            evidence = Some(ev.to_string());
+            continue;
+        }
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+        {
+            return Err(format!(
+                "`{key}` is not a symbol name in `fip::stack_leaf(..)`"
+            ));
+        }
+        if leaves.iter().any(|(k, _)| k == key) {
+            return Err(format!("duplicate symbol `{key}` in `fip::stack_leaf(..)`"));
+        }
+        leaves.push((key.to_string(), parse_u64(key, value)?));
+    }
+    if leaves.is_empty() {
+        return Err("`fip::stack_leaf(..)` declares no symbol".to_string());
+    }
+    let evidence = evidence
+        .ok_or_else(|| "`evidence = \"..\"` is required in `fip::stack_leaf(..)`".to_string())?;
+    Ok(StackLeaves { leaves, evidence })
+}
+
 /// The exclusion of one foreign function from its printed tool attributes.
 pub fn exclude_of_printed<'a>(
     attrs: impl IntoIterator<Item = &'a str>,
@@ -455,6 +509,20 @@ pub fn mark_args_of_printed(attr: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_leaf() {
+        let l = parse_stack_leaf(Some("memcpy = 64, memset = 48, evidence = \"audit\"")).unwrap();
+        assert_eq!(
+            l.leaves,
+            vec![("memcpy".to_string(), 64), ("memset".to_string(), 48)]
+        );
+        assert_eq!(l.evidence, "audit");
+        assert!(parse_stack_leaf(Some("memcpy = 64")).is_err());
+        assert!(parse_stack_leaf(Some("evidence = \"x\"")).is_err());
+        assert!(parse_stack_leaf(Some("memcpy = 1, memcpy = 2, evidence = \"x\"")).is_err());
+        assert!(parse_stack_leaf(Some("memcpy = big, evidence = \"x\"")).is_err());
+    }
 
     #[test]
     fn full_mark() {

@@ -1,6 +1,8 @@
 # Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
 exit: failure
-note: fip-prelint: crate `typo`: 1 roots, 1 passed, 3 errors, 0 warnings, 0 notes
-typo/src/lib.rs:15:1: error: fip-prelint: malformed `fip::mark`: `kind` is "fip" or "fbip", found `fop`
-typo/src/lib.rs:5:26: error: fip-prelint: unknown attribute `fip::exprot`; the tool `fip` has only `fip::export`, `fip::mark`, `fip::alloc_source`, `fip::free_source`, `fip::requires`, `fip::cert` and `fip::exclude`
-typo/src/lib.rs:8:25: error: fip-prelint: unknown attribute `fip::mrak`; the tool `fip` has only `fip::export`, `fip::mark`, `fip::alloc_source`, `fip::free_source`, `fip::requires`, `fip::cert` and `fip::exclude`
+note: fip-prelint: crate `typo`: 1 roots, 1 passed, 5 errors, 0 warnings, 0 notes
+typo/src/lib.rs:10:25: error: fip-prelint: unknown attribute `fip::mrak`; the tool `fip` has only `fip::export`, `fip::mark`, `fip::alloc_source`, `fip::free_source`, `fip::requires`, `fip::cert`, `fip::exclude` and `fip::stack_leaf`
+typo/src/lib.rs:17:1: error: fip-prelint: malformed `fip::mark`: `kind` is "fip" or "fbip", found `fop`
+typo/src/lib.rs:28:25: error: fip-prelint: `fip::stack_leaf` belongs at the crate root: `#![cfg_attr(fip_prelint, fip::stack_leaf(memcpy = 64, evidence = ".."))]`
+typo/src/lib.rs:5:26: error: fip-prelint: unknown attribute `fip::exprot`; the tool `fip` has only `fip::export`, `fip::mark`, `fip::alloc_source`, `fip::free_source`, `fip::requires`, `fip::cert`, `fip::exclude` and `fip::stack_leaf`
+typo/src/lib.rs:7:26: error: fip-prelint: malformed `fip::stack_leaf`: `evidence = ".."` is required in `fip::stack_leaf(..)`

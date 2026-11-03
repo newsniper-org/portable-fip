@@ -21,13 +21,20 @@
 //! directory, never the repository's `target/`), writing
 //! `std-summaries/<release>-<target>.txt` (or `--out`).
 //!
-//! `cargo fip-prelint --stack [cargo build args..]` (limits plan L9) runs `cargo build
-//! --workspace --lib` with the driver in stack mode (`FIP_PRELINT_STACK=1`) into
+//! `cargo fip-prelint --stack [--build-std] [cargo build args..]` (limits plan L9) runs
+//! `cargo build --workspace --lib` (a target selection such as `--lib --tests`
+//! replaces `--lib`; bins and tests contribute their functions and instances, top plan
+//! T8f) with the driver in stack mode (`FIP_PRELINT_STACK=1`) into
 //! `<workspace>/target/fip-prelint-stack` (or `FIP_PRELINT_TARGET_DIR`), with the
 //! profile cargo selects (`--release`, `--profile ..`), and reports per root a byte
 //! bound for that build, read from the objects' `.stack_sizes`, or `⊤` with the reason
-//! (`src/stackbound.rs`). The exit status is 1 if the build fails or a root is `⊤`.
+//! (`src/stackbound.rs`); a generic root is bounded per instance the build codegens
+//! (top plan T8e). `--build-std` (top plan T8c) builds against a `-Zbuild-std`
+//! standard library with the profile's settings (`--target` defaults to the host), so
+//! its frames are those of the artefact built. The exit status is 1 if the build fails
+//! or a root is `⊤`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -274,9 +281,59 @@ fn artifact_files(json: &str) -> Vec<PathBuf> {
     out
 }
 
+/// The file in `<dir>/deps/` that the uplifted executable `p` is a copy of (same
+/// content; cargo hard-links it), whose `.fip-stack` record the driver wrote.
+fn deps_copy_of(p: &Path) -> Option<PathBuf> {
+    let name = p.file_stem()?.to_string_lossy().replace('-', "_");
+    let deps = p.parent()?.join("deps");
+    let bytes = std::fs::read(p).ok()?;
+    let prefix = format!("{name}-");
+    std::fs::read_dir(&deps)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|c| {
+            c.extension().is_none()
+                && c.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .find(|c| {
+            std::fs::metadata(c).is_ok_and(|m| m.len() == bytes.len() as u64)
+                && std::fs::read(c).is_ok_and(|b| b == bytes)
+        })
+}
+
 /// `--stack`: builds and reports stack bounds (see the module documentation).
 fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: &Path) -> ExitCode {
     let driver = driver_path();
+    let mut args = args.to_vec();
+    let build_std = {
+        let before = args.len();
+        args.retain(|a| a != "--build-std");
+        args.len() != before
+    };
+    if build_std
+        && !args
+            .iter()
+            .any(|a| a == "--target" || a.starts_with("--target="))
+    {
+        match rustc_vv(toolchain) {
+            Ok((_, host)) => {
+                args.push("--target".to_string());
+                args.push(host);
+            }
+            Err(e) => {
+                eprintln!("cargo-fip-prelint: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let selects_targets = args.iter().any(|a| {
+        matches!(
+            a.split('=').next().unwrap_or(""),
+            "--lib" | "--bins" | "--bin" | "--tests" | "--test" | "--all-targets"
+        )
+    });
     let selects_packages = args
         .iter()
         .any(|a| a == "-p" || a.starts_with("--package") || a == "--workspace");
@@ -296,15 +353,20 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
     if !selects_packages {
         cmd.arg("--workspace");
     }
+    if !selects_targets {
+        cmd.arg("--lib");
+    }
+    if build_std {
+        cmd.arg("-Zbuild-std=core,alloc,std,panic_abort,panic_unwind");
+    }
     cmd.args([
-        "--lib",
         "--keep-going",
         "--message-format",
         "json-render-diagnostics",
         "--target-dir",
     ])
     .arg(target_dir)
-    .args(args)
+    .args(&args)
     .stdout(Stdio::piped())
     .stderr(Stdio::inherit());
     let out = match cmd.output() {
@@ -317,19 +379,23 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
     let built = out.status.success();
     let json = String::from_utf8_lossy(&out.stdout);
     // The rlib in `deps/` (next to its `.rmeta`; cargo also lists an uplifted copy
-    // of a member's rlib, without the side file).
+    // of a member's rlib, without the side file); an executable in `deps/` (a test),
+    // or the `deps/` file an uplifted executable (a bin) is a copy of.
+    let has_side = |p: &Path| {
+        let mut side = p.to_path_buf().into_os_string();
+        side.push(".fip-stack");
+        Path::new(&side).is_file()
+    };
     let mut rlibs: Vec<PathBuf> = artifact_files(&json)
         .into_iter()
         .filter_map(|p| match p.extension().and_then(|e| e.to_str()) {
             Some("rmeta") => Some(p.with_extension("rlib")),
             Some("rlib") => Some(p),
-            _ => None,
+            Some("d" | "rcgu" | "o" | "so" | "dylib" | "dll" | "pdb" | "wasm") => None,
+            _ if has_side(&p) => Some(p),
+            _ => deps_copy_of(&p),
         })
-        .filter(|p| {
-            let mut side = p.clone().into_os_string();
-            side.push(".fip-stack");
-            Path::new(&side).is_file()
-        })
+        .filter(|p| has_side(p))
         .collect();
     rlibs.sort();
     rlibs.dedup();
@@ -346,7 +412,10 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
         };
         match stackbound::parse_record(&text) {
             Ok(r) => {
-                build.add_rlib(rlib);
+                match &r.objs {
+                    Some((dir, stem)) => build.add_objects(Path::new(dir), stem),
+                    None => build.add_rlib(rlib),
+                }
                 build.add_record(&r);
                 records.push(r);
             }
@@ -359,32 +428,86 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
             }
         }
     }
+    // Instances of generic roots, from every crate of the build (a test or another
+    // library instantiates them): key → (label, symbol).
+    let mut insts: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = Default::default();
+    for r in &records {
+        for (key, label, sym) in &r.insts {
+            insts.entry(key).or_default().push((label, sym));
+        }
+    }
+    for v in insts.values_mut() {
+        v.sort();
+        v.dedup();
+    }
+    if !records.is_empty() {
+        eprintln!(
+            "note: fip-prelint: stack: built with `-Zemit-stack-sizes -Zshare-generics=no -Zcross-crate-inline-threshold=never`{} ({} objects; the bounds hold for this build)",
+            if build_std {
+                ", against a `-Zbuild-std` standard library built with the profile's settings (not the shipped one)"
+            } else {
+                ""
+            },
+            build.machine()
+        );
+    }
+    let ra = build.return_address();
     let mut tops = 0usize;
     for r in &records {
+        let leaves: HashMap<String, u64> =
+            r.leaves.iter().map(|(s, b, _)| (s.clone(), *b)).collect();
         let mut bounded = 0usize;
+        let report = |label: &str, found: Result<(u64, Vec<(String, u64)>), String>| match found {
+            Ok((b, path)) => {
+                let chain: Vec<String> = path.iter().map(|(l, f)| format!("`{l}` {f}")).collect();
+                eprintln!(
+                    "note: fip-prelint: stack: `{label}` uses at most {b} bytes in this build (target {}, opt-level {}; frames from `.stack_sizes` plus {ra} bytes of return address each, longest path: {}; panic paths, unwinding, signal and interrupt contexts excluded)",
+                    r.target,
+                    r.opt_level,
+                    chain.join(" -> ")
+                );
+                true
+            }
+            Err(why) => {
+                eprintln!("error: fip-prelint: stack: `{label}` has no bound (⊤): {why}");
+                false
+            }
+        };
         for (label, sym) in &r.roots {
-            match sym.clone().and_then(|s| build.bound(&s)) {
-                Ok((b, path)) => {
-                    bounded += 1;
-                    let chain: Vec<String> =
-                        path.iter().map(|(l, f)| format!("`{l}` {f}")).collect();
-                    eprintln!(
-                        "note: fip-prelint: stack: `{label}` uses at most {b} bytes in this build (target {}, opt-level {}; frames from `.stack_sizes` plus {} bytes of return address each, longest path: {}; panic paths, unwinding, signal and interrupt contexts excluded)",
-                        r.target,
-                        r.opt_level,
-                        stackbound::RETURN_ADDRESS,
-                        chain.join(" -> ")
-                    );
+            let generic = r.generics.iter().find(|(l, _)| l == label);
+            let found = match (sym, generic.and_then(|(_, k)| insts.get(k.as_str()))) {
+                (Err(_), Some(list)) if !list.is_empty() => {
+                    let mut all = true;
+                    for (ilabel, isym) in list {
+                        all &= report(ilabel, build.bound_with(isym, &leaves));
+                    }
+                    all
                 }
-                Err(why) => {
-                    tops += 1;
-                    eprintln!("error: fip-prelint: stack: `{label}` has no bound (⊤): {why}");
-                }
+                _ => report(
+                    label,
+                    sym.clone().and_then(|s| build.bound_with(&s, &leaves)),
+                ),
+            };
+            if found {
+                bounded += 1;
+            } else {
+                tops += 1;
             }
         }
-        if !r.roots.is_empty() {
+        for (sym, bytes, evidence) in &r.leaves {
             eprintln!(
-                "note: fip-prelint: stack: crate `{}`: {} roots, {bounded} bounded, {} ⊤",
+                "note: fip-prelint: stack: crate `{}` declares `{sym}` a stack leaf of at most {bytes} bytes (return address included; trusted, not measured; evidence: {evidence})",
+                r.krate
+            );
+        }
+        if !r.roots.is_empty() {
+            let leaves_note = if r.leaves.is_empty() {
+                String::new()
+            } else {
+                format!(", {} declared stack leaves", r.leaves.len())
+            };
+            eprintln!(
+                "note: fip-prelint: stack: crate `{}`: {} roots, {bounded} bounded, {} ⊤{leaves_note}",
                 r.krate,
                 r.roots.len(),
                 r.roots.len() - bounded

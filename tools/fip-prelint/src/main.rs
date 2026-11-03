@@ -112,8 +112,15 @@ const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_STACK",
 ];
 
-/// Added in stack mode (`cargo fip-prelint --stack`, [`stack`]).
-const STACK_FLAGS: &[&str] = &["-Zemit-stack-sizes", "-Zshare-generics=no"];
+/// Added in stack mode (`cargo fip-prelint --stack`, [`stack`]):
+/// frame sizes, every generic instance codegened in the crate that uses it, and every
+/// function with a symbol of its own (no function kept only for cross-crate inlining,
+/// top plan T8d). The report states them.
+const STACK_FLAGS: &[&str] = &[
+    "-Zemit-stack-sizes",
+    "-Zshare-generics=no",
+    "-Zcross-crate-inline-threshold=never",
+];
 
 /// Generation mode of the std summaries (see the module documentation).
 pub const GENERATE_ENV: &str = "FIP_PRELINT_STD_SUMMARIES_OUT";
@@ -153,7 +160,9 @@ impl Callbacks for Prelint {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let check = match self.role {
             Role::Primary if stack::enabled() => report::stack_record,
-            Role::ExportedDependency if stack::enabled() => report::stack_record_dependency,
+            Role::ExportedDependency | Role::StdBuild if stack::enabled() => {
+                report::stack_record_dependency
+            }
             Role::Primary if std::env::var_os(GENERATE_ENV).is_some() => report::generate,
             Role::Primary => report::check_crate,
             // An exported dependency's implementations of trait methods with a
@@ -209,9 +218,11 @@ enum Role {
     ExportedDependency,
     /// Any other crate (other dependencies, version probes): the real rustc, unchanged.
     PassThrough,
-    /// Generation mode only: a standard library crate of a `-Zbuild-std` build
-    /// (`-Z force-unstable-if-unmarked`), compiled with its MIR encoded and the release
-    /// settings of the shipped `std`; no analysis.
+    /// A standard library crate of a `-Zbuild-std` build (`-Z
+    /// force-unstable-if-unmarked`). Generation mode: compiled with its MIR encoded
+    /// and the release settings of the shipped `std`; no analysis. Stack mode
+    /// (`--stack --build-std`, top plan T8c): compiled with the profile's settings and
+    /// the stack flags, its codegened functions recorded.
     StdBuild,
 }
 
@@ -266,7 +277,7 @@ fn role(args: &[String]) -> Role {
     if !args.iter().any(|a| a == "--crate-name") {
         return Role::PassThrough;
     }
-    if std::env::var_os(GENERATE_ENV).is_some()
+    if (std::env::var_os(GENERATE_ENV).is_some() || stack::enabled())
         && args
             .iter()
             .any(|a| a.ends_with("force-unstable-if-unmarked"))
@@ -369,17 +380,31 @@ fn main() -> std::process::ExitCode {
         args.push("--sysroot".to_string());
         args.push(sysroot(real_rustc.as_deref()));
     }
-    if role == Role::StdBuild {
+    let stack = stack::enabled();
+    if role == Role::StdBuild && !stack {
         args.extend(STD_RELEASE_FLAGS.iter().map(|f| (*f).to_string()));
     }
-    let stack = stack::enabled();
-    if stack && matches!(role, Role::Primary | Role::ExportedDependency) {
+    if stack
+        && matches!(
+            role,
+            Role::Primary | Role::ExportedDependency | Role::StdBuild
+        )
+    {
         // Frame sizes of the build as profiled (no `-Copt-level=0` below), every
         // generic instance codegened in the crate that uses it.
         for f in STACK_FLAGS {
             if !args.iter().any(|a| a == f) {
                 args.push((*f).to_string());
             }
+        }
+        // An executable (a bin, a test): keep its objects, whose relocations the
+        // call graph is read from (top plan T8f).
+        let exe = args.iter().any(|a| a == "--test")
+            || args
+                .windows(2)
+                .any(|w| w[0] == "--crate-type" && w[1] == "bin");
+        if role == Role::Primary && exe && !args.iter().any(|a| a == "-Csave-temps") {
+            args.push("-Csave-temps".to_string());
         }
     }
     let compiles = matches!(role, Role::Primary | Role::ExportedDependency);

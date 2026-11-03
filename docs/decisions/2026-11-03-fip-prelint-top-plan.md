@@ -568,6 +568,32 @@ self-check (`tests/targets.rs`) is unchanged.
 **Effort.** a: M; b: S; c: M; d: S; e: M; f: M. **Dependencies.** e benefits from f.
 c reuses L6's build-std driver path.
 
+**Implemented** (item 12; a: AArch64 only, b, c, d, e, f). d: the stack flags add
+`-Zcross-crate-inline-threshold=never`, and one note states the flags. b:
+`#![cfg_attr(fip_prelint, fip::stack_leaf(sym = B, .., evidence = ".."))]` (crate root,
+validated in every run); a declared symbol without a frame size counts `B` (return
+address included) for the declaring crate's roots, each declaration listed in a note
+and counted in the crate summary. a: AArch64 ELF (machine 183; addends are offsets;
+return address 0), the machine named in the note, objects of two machines `⊤`. e:
+records list every codegened instance of a marked generic function (any crate, by
+`DefPathHash`); a generic root is reported per instance and counts as bounded if every
+instance is. f: a target selection (`--lib --tests`) replaces `--lib`; a primary bin or
+test gets `-Csave-temps`, its record (`objs`) points at its `.rcgu.o` objects (an
+uplifted bin is matched to its `deps/` copy by content); executables add functions and
+instances, not roots. c: `--build-std` builds `-Zbuild-std` (target defaults to the
+host); the std crates are compiled with the profile and the stack flags and recorded
+(the role of generation mode's std build), so std functions are bounded down to their
+foreign calls. Fixture `stack` (crate `leafy` added: a declared `memcpy` leaf and an
+instance `chain::generic::<u32>`; a test target instantiating `generic::<u8>`): dev
+11 → 12 roots, 3 → 5 bounded; release 4 → 6 bounded (`indexed` 16 bytes);
+new variants `-tests` (5 bounded, both instances), `-aarch64` (5 bounded; `chain_top`
+544 ≥ `llvm-readobj` sum 528), `-buildstd` (5 bounded; `precompiled` now `⊤` at
+`libc::getpid`, `copy_big` at `libc::memcpy`). **Deviations:** i686 and ARMv7 (ELF32,
+REL relocations) are not read (`⊤`, "only x86_64 and AArch64"); the release build
+inlines `generic::<u32>` into `leafy`, so that root stays `⊤` there (no instance); in
+`--tests` the executable's allocator shim defines `__rust_alloc`, so `boxed` is `⊤` as
+"defined but not codegened from MIR" (mangled name) instead of "no frame size".
+
 ### T9. Macro-generated crate attributes in export detection
 
 **Current.** Not detectable before expansion: such a crate is passed through, so `⊤`

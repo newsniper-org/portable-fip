@@ -3,8 +3,8 @@
 
 //! Stack bounds from a build (limits plan L9; `cargo fip-prelint --stack`), without
 //! dependencies: an `ar` reader for rlibs, an ELF64 little-endian reader for their
-//! objects (`.stack_sizes` from `-Zemit-stack-sizes`, symbols, relocations), and the
-//! longest path over the call graph.
+//! objects (`.stack_sizes` from `-Zemit-stack-sizes`, symbols, relocations; x86_64 and
+//! AArch64, top plan T8a), and the longest path over the call graph.
 //!
 //! **Graph.** Nodes are the functions defined in the objects of the build's rlibs
 //! (one `.text.<symbol>` section per function). Edges are the direct calls of the
@@ -22,7 +22,11 @@
 //!
 //! **Bound.** `Σ (frame + return address)` over the longest path from the root's
 //! symbol, frames from `.stack_sizes` (a symbol in several objects: its maximum), the
-//! return address 8 bytes (x86_64; other machines are `⊤`). `⊤` with the reason
+//! return address 8 bytes on x86_64 (pushed by `call`) and 0 on AArch64 (`bl` puts
+//! it in the link register; a callee that saves it pushes a frame record, which its
+//! `.stack_sizes` value includes); other machines and formats are `⊤`. A symbol
+//! without a frame size that the root's crate declares with `fip::stack_leaf` counts
+//! the declared bytes (trusted, top plan T8b). `⊤` with the reason
 //! for: recursion (a cycle), a call of a symbol not defined in the build's objects
 //! (precompiled `std`, foreign or runtime functions), a function without a frame size
 //! or without a MIR instance, an indirect call (above), a generic root. Calls of
@@ -35,9 +39,27 @@ use std::path::Path;
 /// A bound and its longest path (labels with frames), or why there is none.
 type Found = Result<(u64, Vec<(String, u64)>), String>;
 
-/// Return address pushed by a call (x86_64).
-pub const RETURN_ADDRESS: u64 = 8;
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+
+/// Bytes a call adds besides the callee's frame: the return address `call` pushes on
+/// x86_64; none on AArch64 (the link register).
+pub fn return_address(machine: u16) -> Option<u64> {
+    match machine {
+        EM_X86_64 => Some(8),
+        EM_AARCH64 => Some(0),
+        _ => None,
+    }
+}
+
+/// The machine's name in messages.
+pub fn machine_name(machine: u16) -> &'static str {
+    match machine {
+        EM_X86_64 => "x86_64",
+        EM_AARCH64 => "AArch64",
+        _ => "unknown",
+    }
+}
 
 fn u16_at(b: &[u8], o: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?))
@@ -119,6 +141,7 @@ const STT_SECTION: u8 = 3;
 /// the functions its code refers to (by symbol name).
 #[derive(Default, Debug)]
 pub struct Object {
+    pub machine: u16,
     pub frames: HashMap<String, u64>,
     pub calls: HashMap<String, BTreeSet<String>>,
     pub defined: HashSet<String>,
@@ -147,15 +170,15 @@ fn uleb(b: &[u8], mut o: usize) -> Option<(u64, usize)> {
     }
 }
 
-/// Reads a relocatable ELF64 little-endian x86_64 object.
+/// Reads a relocatable ELF64 little-endian x86_64 or AArch64 object.
 pub fn read_object(b: &[u8]) -> Result<Object, String> {
     if !b.starts_with(b"\x7fELF") || b.get(4) != Some(&2) || b.get(5) != Some(&1) {
         return Err("not an ELF64 little-endian object".to_string());
     }
     let machine = u16_at(b, 18).ok_or("truncated ELF header")?;
-    if machine != EM_X86_64 {
+    if return_address(machine).is_none() {
         return Err(format!(
-            "ELF machine {machine}: only x86_64 objects are supported"
+            "ELF machine {machine}: only x86_64 and AArch64 objects are supported"
         ));
     }
     let shoff = usize::try_from(u64_at(b, 0x28).ok_or("truncated")?).map_err(|e| e.to_string())?;
@@ -214,7 +237,10 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
     };
     // Functions per executable section.
     let mut funcs_in: HashMap<u16, Vec<&Sym>> = HashMap::new();
-    let mut obj = Object::default();
+    let mut obj = Object {
+        machine,
+        ..Object::default()
+    };
     for s in &syms {
         if s.kind == STT_FUNC && s.shndx != 0 && exec(s.shndx) {
             funcs_in.entry(s.shndx).or_default().push(s);
@@ -285,8 +311,9 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
         for (off, si, rtype, addend) in &relocs {
             let Some(sym) = syms.get(*si) else { continue };
             let callers = func_at(u16::try_from(target).unwrap_or(0), *off);
-            // PC-relative relocations address `S + A - P` with `A` = offset - 4.
-            let pc_rel = matches!(rtype, 2 | 4 | 9 | 41 | 42);
+            // x86_64: PC-relative relocations address `S + A - P` with `A` = offset
+            // - 4. AArch64: the addend is the offset (`CALL26`, `JUMP26`, `ADR*`).
+            let pc_rel = machine == EM_X86_64 && matches!(rtype, 2 | 4 | 9 | 41 | 42);
             let callees: Vec<String> = if sym.shndx == 0 {
                 if sym.name.is_empty() {
                     Vec::new()
@@ -338,12 +365,20 @@ pub struct Record {
     pub div: Vec<String>,
     /// symbol → label of a function called but not codegened in the crate.
     pub ext: Vec<(String, String)>,
+    /// Declared stack leaves: (symbol, bytes, evidence).
+    pub leaves: Vec<(String, u64, String)>,
+    /// Generic roots: (label, key).
+    pub generics: Vec<(String, String)>,
+    /// Instances of generic roots codegened here: (key, label, symbol).
+    pub insts: Vec<(String, String, String)>,
+    /// An executable's objects: (directory, file stem).
+    pub objs: Option<(String, String)>,
 }
 
 pub fn parse_record(text: &str) -> Result<Record, String> {
     let mut r = Record::default();
     let mut lines = text.lines();
-    if lines.next() != Some("fip-prelint stack 1") {
+    if lines.next() != Some("fip-prelint stack 2") {
         return Err("unknown .fip-stack format".to_string());
     }
     for l in lines {
@@ -365,6 +400,19 @@ pub fn parse_record(text: &str) -> Result<Record, String> {
             )),
             ["div", sym] => r.div.push((*sym).to_string()),
             ["ext", sym, label] => r.ext.push(((*sym).to_string(), (*label).to_string())),
+            ["leaf", sym, bytes, evidence] => r.leaves.push((
+                (*sym).to_string(),
+                bytes
+                    .parse()
+                    .map_err(|_| format!("malformed .fip-stack line: {l}"))?,
+                (*evidence).to_string(),
+            )),
+            ["generic", label, key] => r.generics.push(((*label).to_string(), (*key).to_string())),
+            ["inst", key, label, sym] => {
+                r.insts
+                    .push(((*key).to_string(), (*label).to_string(), (*sym).to_string()))
+            }
+            ["objs", dir, stem] => r.objs = Some(((*dir).to_string(), (*stem).to_string())),
             _ => return Err(format!("malformed .fip-stack line: {l}")),
         }
     }
@@ -374,6 +422,7 @@ pub fn parse_record(text: &str) -> Result<Record, String> {
 /// The whole build: functions of every object, and the MIR facts of every record.
 #[derive(Default)]
 pub struct Build {
+    machine: Option<u16>,
     frames: HashMap<String, u64>,
     calls: HashMap<String, BTreeSet<String>>,
     defined: HashSet<String>,
@@ -386,6 +435,15 @@ pub struct Build {
 
 impl Build {
     pub fn add_object(&mut self, o: Object) {
+        match self.machine {
+            None => self.machine = Some(o.machine),
+            Some(m) if m != o.machine => self.unreadable.push(format!(
+                "objects of two machines ({} and {})",
+                machine_name(m),
+                machine_name(o.machine)
+            )),
+            Some(_) => {}
+        }
         for (n, f) in o.frames {
             let e = self.frames.entry(n).or_insert(0);
             *e = (*e).max(f);
@@ -424,6 +482,53 @@ impl Build {
         }
     }
 
+    /// The objects of an executable (`<dir>/<stem>.*.rcgu.o`, kept by `-Csave-temps`).
+    pub fn add_objects(&mut self, dir: &Path, stem: &str) {
+        let prefix = format!("{stem}.");
+        let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name().is_some_and(|n| {
+                        let n = n.to_string_lossy();
+                        n.starts_with(&prefix) && n.ends_with(".rcgu.o")
+                    })
+                })
+                .collect(),
+            Err(e) => {
+                self.unreadable.push(format!("{}: {e}", dir.display()));
+                return;
+            }
+        };
+        files.sort();
+        if files.is_empty() {
+            self.unreadable.push(format!(
+                "{}: no objects `{prefix}*.rcgu.o` (`-Csave-temps`)",
+                dir.display()
+            ));
+        }
+        for f in files {
+            match std::fs::read(&f)
+                .map_err(|e| e.to_string())
+                .and_then(|b| read_object(&b))
+            {
+                Ok(o) => self.add_object(o),
+                Err(e) => self.unreadable.push(format!("{}: {e}", f.display())),
+            }
+        }
+    }
+
+    /// Return-address bytes per call for the build's machine.
+    pub fn return_address(&self) -> u64 {
+        self.machine.and_then(return_address).unwrap_or(0)
+    }
+
+    /// The build's machine, for messages.
+    pub fn machine(&self) -> &'static str {
+        self.machine.map_or("unknown", machine_name)
+    }
+
     pub fn add_record(&mut self, r: &Record) {
         for (sym, label, why) in &r.fns {
             self.mapped
@@ -445,7 +550,14 @@ impl Build {
 
     /// The bound of the function `sym` and its longest path (labels with frames), or
     /// why there is none.
+    #[cfg(test)]
     pub fn bound(&self, sym: &str) -> Found {
+        self.bound_with(sym, &HashMap::new())
+    }
+
+    /// [`Build::bound`] with the declared stack leaves of the root's crate:
+    /// symbol → bytes (the return address included).
+    pub fn bound_with(&self, sym: &str, leaves: &HashMap<String, u64>) -> Found {
         if let Some(u) = self.unreadable.first() {
             return Err(format!("an object of the build could not be read: {u}"));
         }
@@ -457,12 +569,13 @@ impl Build {
         }
         let mut memo: HashMap<String, Found> = HashMap::new();
         let mut on_path: Vec<String> = Vec::new();
-        self.visit(sym, &mut memo, &mut on_path)
+        self.visit(sym, leaves, &mut memo, &mut on_path)
     }
 
     fn visit(
         &self,
         sym: &str,
+        leaves: &HashMap<String, u64>,
         memo: &mut HashMap<String, Found>,
         on_path: &mut Vec<String>,
     ) -> Found {
@@ -477,7 +590,7 @@ impl Build {
                 .collect();
             return Err(format!("recursion: `{}`", cycle.join("` -> `")));
         }
-        let r = self.visit_new(sym, memo, on_path);
+        let r = self.visit_new(sym, leaves, memo, on_path);
         memo.insert(sym.to_string(), r.clone());
         r
     }
@@ -485,9 +598,18 @@ impl Build {
     fn visit_new(
         &self,
         sym: &str,
+        leaves: &HashMap<String, u64>,
         memo: &mut HashMap<String, Found>,
         on_path: &mut Vec<String>,
     ) -> Found {
+        if !self.defined.contains(sym)
+            && let Some(&bytes) = leaves.get(sym)
+        {
+            return Ok((
+                bytes,
+                vec![(format!("{} (declared stack leaf)", self.label(sym)), bytes)],
+            ));
+        }
         if !self.defined.contains(sym) {
             return Err(format!(
                 "`{}` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)",
@@ -516,7 +638,7 @@ impl Build {
             if self.div.contains(&c) {
                 continue;
             }
-            match self.visit(&c, memo, on_path) {
+            match self.visit(&c, leaves, memo, on_path) {
                 Ok(b) if b.0 > best.0 || best.1.is_empty() => best = b,
                 Ok(_) => {}
                 Err(e) => {
@@ -528,7 +650,7 @@ impl Build {
         on_path.pop();
         let mut path = vec![(label.clone(), frame)];
         path.extend(best.1);
-        Ok((frame + RETURN_ADDRESS + best.0, path))
+        Ok((frame + self.return_address() + best.0, path))
     }
 }
 
@@ -575,7 +697,7 @@ mod tests {
     #[test]
     fn record_round_trip() {
         let r = parse_record(
-            "fip-prelint stack 1\ncrate\tc\ntarget\tx86_64-unknown-linux-gnu\nopt-level\tNo\nrlib\t/x/libc.rlib\nroot\tc::f\t_RNv1f\nroot\tc::g\t-\tgeneric\nfn\t_RNv1f\tc::f\nfn\t_RNv1h\tc::h\ta call through a function pointer\ndiv\t_RNvpanic\n",
+            "fip-prelint stack 2\ncrate\tc\ntarget\tx86_64-unknown-linux-gnu\nopt-level\tNo\nrlib\t/x/libc.rlib\nroot\tc::f\t_RNv1f\nroot\tc::g\t-\tgeneric\nfn\t_RNv1f\tc::f\nfn\t_RNv1h\tc::h\ta call through a function pointer\ndiv\t_RNvpanic\n",
         )
         .unwrap();
         assert_eq!(r.roots.len(), 2);
@@ -584,11 +706,21 @@ mod tests {
             r.fns[1].2.as_deref(),
             Some("a call through a function pointer")
         );
-        assert!(parse_record("fip-prelint stack 2\n").is_err());
+        assert!(parse_record("fip-prelint stack 1\n").is_err());
+        let r = parse_record(
+            "fip-prelint stack 2\nleaf\tmemcpy\t64\taudit\ngeneric\tc::g\tk1\ninst\tk1\tc::g::<u8>\t_RIg\nobjs\t/d\tc-1\n",
+        )
+        .unwrap();
+        assert_eq!(r.leaves[0].1, 64);
+        assert_eq!(r.insts[0].0, r.generics[0].1);
+        assert_eq!(r.objs, Some(("/d".to_string(), "c-1".to_string())));
     }
 
     fn build(edges: &[(&str, &[&str])], frames: &[(&str, u64)]) -> Build {
-        let mut b = Build::default();
+        let mut b = Build {
+            machine: Some(EM_X86_64),
+            ..Build::default()
+        };
         for (f, cs) in edges {
             b.calls.insert(
                 (*f).to_string(),
@@ -635,6 +767,11 @@ mod tests {
                 .unwrap_err()
                 .contains("not defined in the objects")
         );
+        let leaves: HashMap<String, u64> = [("memset".to_string(), 40)].into();
+        assert_eq!(b.bound_with("c", &leaves).unwrap().0, 8 + 40);
+        b.machine = Some(EM_AARCH64);
+        assert_eq!(b.bound_with("c", &leaves).unwrap().0, 40);
+        b.machine = Some(EM_X86_64);
         b.div.insert("memset".to_string());
         assert_eq!(b.bound("c").unwrap().0, 8);
         b.mapped.insert(
