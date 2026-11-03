@@ -77,8 +77,10 @@
 //!
 //! **Bindings and std summaries.** A node is also keyed by what its parameters hold,
 //! known at its call sites ([`Bind`]): the output behind a `&mut dyn fmt::Write` or a
-//! `&mut fmt::Formatter`, and the formatting functions of a value containing
-//! `fmt::Arguments`. They resolve the dynamic calls and formatting-function pointers of
+//! `&mut fmt::Formatter`, the formatting functions of a value containing
+//! `fmt::Arguments`, and what a callable argument holds ([`Callable`]: functions, a
+//! trait object's concrete type, a declared parameter; up to [`MAX_CALLABLE_DEPTH`]
+//! nested callees). They resolve the dynamic calls and formatting-function pointers of
 //! `core::fmt`, and the open terms of a standard-library function without MIR taken
 //! from the generated std summaries ([`crate::stdsum`], used only when its stamp
 //! matches). Generating them (`--std-summaries`), the summarised function's own
@@ -2312,7 +2314,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     ) -> Option<Item> {
         match origin_of(self.tcx, body, op)? {
             Origin::Fn(t) => self.function_item(inst, t),
-            Origin::Arg(l) => self.declared_param_call(inst, body, l),
+            Origin::Arg(l) => match self.bind_of(l) {
+                Some(Bind::Callable(c)) => self.callable_item(&c, None),
+                _ => self.declared_param_call(inst, body, l),
+            },
             Origin::Const(c) => self.data_item(inst, c, None),
             Origin::Load(c, proj) => self.data_item(inst, c, Some(proj)),
             Origin::Pointee(_) | Origin::BufOf(_) => None,
@@ -2551,8 +2556,16 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
             }
             Origin::Arg(l) => {
-                if let Some(Bind::Dyn(out) | Bind::Formatter(out)) = self.bind_of(l) {
-                    return self.output_call(def_id, callee, &out);
+                match self.bind_of(l) {
+                    Some(Bind::Dyn(out) | Bind::Formatter(out)) => {
+                        return self.output_call(def_id, callee, &out);
+                    }
+                    Some(Bind::Callable(c)) => {
+                        if let Some(item) = self.callable_item(&c, Some(callee)) {
+                            return Some(item);
+                        }
+                    }
+                    _ => {}
                 }
                 let trait_id = tcx.trait_of_assoc(def_id)?;
                 if !self.is_callable_trait(trait_id) {
@@ -2571,7 +2584,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// The binding of parameter local `l` of the node being classified.
     fn bind_of(&self, l: mir::Local) -> Option<Bind<'tcx>> {
         let l = u32::try_from(l.as_usize()).ok()?;
-        self.nodes[self.current]
+        // No node: a body checked on its own (`arguments_in`), without bindings.
+        self.nodes
+            .get(self.current)?
             .binds
             .iter()
             .find(|(k, _)| *k == l)
@@ -2638,6 +2653,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             } else if mentions_fmt_args(tcx, ty, 2) {
                 self.fmt_set(inst, body, &a.node)
                     .map(|(fns, params)| Bind::Fmt(fns, params))
+            } else if (ty.is_fn_ptr() || self.callable_dyn(ty).is_some())
+                && self.callable_depth() < MAX_CALLABLE_DEPTH
+            {
+                self.callable_of(inst, body, &a.node, ty)
+                    .map(Bind::Callable)
             } else {
                 None
             };
@@ -2646,6 +2666,115 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
         }
         binds
+    }
+
+    /// Nodes with a callable binding from the node being classified up its first
+    /// callers (bounded by [`MAX_CALLABLE_DEPTH`]).
+    fn callable_depth(&self) -> usize {
+        let mut n = 0;
+        let mut at = (self.current < self.nodes.len()).then_some(self.current);
+        while let Some(i) = at {
+            if self.nodes[i]
+                .binds
+                .iter()
+                .any(|(_, b)| matches!(b, Bind::Callable(_)))
+            {
+                n += 1;
+            }
+            at = self.nodes[i].parent;
+        }
+        n
+    }
+
+    /// What the callable operand `op` (of type `ty`: a function pointer or a
+    /// `&dyn Fn*`) of `inst`'s body holds on every path: the function(s) it is
+    /// reified from or read from immutable data, the concrete type a trait object is
+    /// unsized from, the binding of a parameter it passes on, or a parameter declared
+    /// `param(h = K)`. `None`: not known (the callee is analysed without it).
+    fn callable_of(
+        &mut self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> Option<Callable<'tcx>> {
+        let tcx = self.tcx;
+        match origin_of(tcx, body, op)? {
+            Origin::Fn(t) if ty.is_fn_ptr() => {
+                let t = self.subst(inst, t)?;
+                let f = match *t.kind() {
+                    ty::FnDef(d, a) => {
+                        Instance::try_resolve(tcx, self.env, d, a.no_bound_vars()?).ok()??
+                    }
+                    ty::Closure(d, a) => {
+                        Instance::resolve_closure(tcx, d, a, ty::ClosureKind::FnOnce)
+                    }
+                    _ => return None,
+                };
+                Some(Callable::Fns(vec![f]))
+            }
+            Origin::Const(c) if ty.is_fn_ptr() => {
+                Some(Callable::Fns(self.data_targets(inst, c, None)?))
+            }
+            Origin::Load(c, proj) if ty.is_fn_ptr() => {
+                Some(Callable::Fns(self.data_targets(inst, c, Some(proj))?))
+            }
+            Origin::Pointee(t) if !ty.is_fn_ptr() => {
+                let t = self.subst(inst, t)?;
+                t.is_sized(tcx, self.env).then_some(Callable::Pointee(t))
+            }
+            Origin::Arg(l) => {
+                if let Some(Bind::Callable(c)) = self.bind_of(l) {
+                    return Some(c);
+                }
+                let InstanceKind::Item(d) = inst.def else {
+                    return None;
+                };
+                let (g, _) = self.declared_param(d, body, l)?;
+                Some(Callable::Declared(d, g))
+            }
+            _ => None,
+        }
+    }
+
+    /// The call through a callable parameter bound to `c` (`recv` the dynamic
+    /// callee of a trait object call, `None` for a function pointer).
+    fn callable_item(&mut self, c: &Callable<'tcx>, recv: Option<Instance<'tcx>>) -> Option<Item> {
+        let tcx = self.tcx;
+        match c {
+            Callable::Fns(fs) => {
+                if recv.is_some() {
+                    return None;
+                }
+                let mut items: Vec<Item> =
+                    fs.iter().map(|f| Item::Call(self.node_for(*f))).collect();
+                if items.len() == 1 {
+                    items.pop()
+                } else {
+                    Some(Item::Alt(items))
+                }
+            }
+            Callable::Pointee(t) => {
+                let callee = recv?;
+                let InstanceKind::Virtual(def_id, _) = callee.def else {
+                    return None;
+                };
+                let args = tcx.mk_args_from_iter(
+                    std::iter::once((*t).into()).chain(callee.args.iter().skip(1)),
+                );
+                match Instance::try_resolve(tcx, self.env, def_id, args) {
+                    Ok(Some(f)) if !matches!(f.def, InstanceKind::Virtual(..)) => {
+                        Some(Item::Call(self.node_for(f)))
+                    }
+                    _ => None,
+                }
+            }
+            Callable::Declared(d, g) => {
+                let mark = self.crates.param_mark(*d)?;
+                let k = mark.params.iter().find(|(n, _)| n == g)?.1;
+                Some(Item::Evs(param_events(g, k, mark)))
+            }
+        }
     }
 
     /// The output a `&mut dyn fmt::Write` operand of `inst`'s body writes to.
@@ -2659,7 +2788,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             Origin::Pointee(t) => Some(Out::Ty(self.subst(inst, t)?)),
             Origin::Arg(l) => match self.bind_of(l)? {
                 Bind::Dyn(o) | Bind::Formatter(o) => Some(o),
-                Bind::Fmt(..) => None,
+                Bind::Fmt(..) | Bind::Callable(_) => None,
             },
             Origin::BufOf(l) => match self.bind_of(l)? {
                 Bind::Formatter(o) => Some(o),
@@ -3167,7 +3296,44 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let Some(op) = op else {
             return (shown(input), unknown(not_known));
         };
-        match origin_of(tcx, body, op) {
+        let mut origin = origin_of(tcx, body, op);
+        // A parameter of the caller bound at the caller's call sites (top plan B):
+        // what it holds there.
+        if let Some(Origin::Arg(l)) = origin
+            && let Some(Bind::Callable(c)) = self.bind_of(l)
+        {
+            match c {
+                Callable::Pointee(t) => origin = Some(Origin::Pointee(t)),
+                Callable::Fns(fs) if input.is_fn_ptr() => {
+                    let items: Vec<(String, Item)> = fs
+                        .into_iter()
+                        .map(|f| (self.label(f), Item::Call(self.node_for(f))))
+                        .collect();
+                    let names: Vec<&str> = items.iter().map(|(l, _)| l.as_str()).collect();
+                    let label = match names.as_slice() {
+                        [one] => (*one).to_string(),
+                        many => format!("one of {}", many.join(", ")),
+                    };
+                    return (label, items);
+                }
+                Callable::Declared(d, h) => {
+                    if let Some(mark) = self.crates.param_mark(d)
+                        && let Some(&(_, k)) = mark.params.iter().find(|(n, _)| *n == h)
+                    {
+                        let what = format!(
+                            "call of parameter `{h}` of `{}`, declared `param({h} = {k})`",
+                            def_path(tcx, d)
+                        );
+                        return (
+                            shown(input),
+                            vec![(what, Item::Evs(param_events(&h, k, mark)))],
+                        );
+                    }
+                }
+                Callable::Fns(_) => {}
+            }
+        }
+        match origin {
             Some(Origin::Fn(t)) if input.is_fn_ptr() => {
                 let label = self.subst(caller, t).map_or_else(|| shown(t), shown);
                 match self.function_item(caller, t) {
@@ -3930,7 +4096,28 @@ enum Bind<'tcx> {
     /// functions it may carry (function item or closure types) and, generating std
     /// summaries, the summarised function's parameters whose functions it carries.
     Fmt(Vec<Ty<'tcx>>, Vec<u32>),
+    /// A callable value (a function pointer, a `&dyn Fn*`) known at the call sites
+    /// (top plan B).
+    Callable(Callable<'tcx>),
 }
+
+/// What a callable parameter holds, known at the call sites of a node: a must-fact
+/// of every call site that reaches it (top plan B).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Callable<'tcx> {
+    /// A function pointer to one of these functions (a reified function or
+    /// closure, a constant, the candidates of immutable data).
+    Fns(Vec<Instance<'tcx>>),
+    /// A callable trait object unsized from a pointer to this concrete type.
+    Pointee(Ty<'tcx>),
+    /// A parameter `g` of the function `d` that declares `param(g = K)`: calls cost
+    /// what that declaration allows (checked at every call site of `d`).
+    Declared(DefId, String),
+}
+
+/// Nodes with callable bindings on the way from the root before an argument is no
+/// longer bound (the node falls back to no binding, as without top plan B).
+const MAX_CALLABLE_DEPTH: usize = 3;
 
 /// Bindings of a node's parameters, by local (`1..=arg_count`).
 type Binds<'tcx> = Vec<(u32, Bind<'tcx>)>;

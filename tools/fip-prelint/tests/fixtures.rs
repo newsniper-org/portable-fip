@@ -276,6 +276,15 @@ fn indirect_data() {
     check("indirect_data");
 }
 
+/// Callable parameters bound at their call sites (top plan B): callees without
+/// `param(..)` analysed with the function, table candidates, trait object type or
+/// declared parameter the call site passes; three nested bound callees pass, a fourth
+/// falls back to no binding (`⊤`); an undeclared parameter passed on stays `⊤`.
+#[test]
+fn callable_binds() {
+    check("callable_binds");
+}
+
 /// A dependency declaring `fip::export` (not a workspace member, compiled without
 /// roots) whose implementation breaks a trait method's contract: rejected where it
 /// is compiled (limits plan L4).

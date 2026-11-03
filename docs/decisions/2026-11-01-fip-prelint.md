@@ -608,6 +608,18 @@ loaded from memory stays `⊤`. Fixture `indirect_data`. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: function pointers from constants,
 immutable statics and local aggregates".
 
+## Amendment 2026-11-03: callable bindings across calls (top plan B)
+
+A node's parameters may also be bound to what a callable argument holds at the call
+sites that reach it: the function(s) of a function pointer (reified, constant, or the
+candidates of immutable data), the concrete type of a `&dyn Fn*`, or a caller's
+parameter declared `param(g = K)`. A call through a bound parameter resolves to that
+binding before the callee's own declaration; call-site checks inside a bound node use
+it too. Bindings are must-facts at the call sites (nodes are keyed by them) and nest up
+to 3 callees; roots and local functions checked on their own are analysed unbound, as
+before. Fixture `callable_binds`. Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-03: callable bindings across calls".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

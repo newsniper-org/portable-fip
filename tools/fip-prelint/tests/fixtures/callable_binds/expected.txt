@@ -1,0 +1,7 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+binds/src/lib.rs:39:5: error: fip-prelint: `via_plain_callee_alloc` is #[fip] but may allocate 1 time(s), at most 0 allowed: `via_plain_callee_alloc` -> `call_plain` (binds/src/lib.rs:39) -> `boxed_value` (binds/src/lib.rs:22) -> `alloc::boxed::Box::<u32>::new` (binds/src/lib.rs:15) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
+binds/src/lib.rs:39:5: error: fip-prelint: `via_plain_callee_alloc` is #[fip] but may free: `via_plain_callee_alloc` -> `call_plain` (binds/src/lib.rs:39) -> `boxed_value` (binds/src/lib.rs:22) -> `drop glue of alloc::boxed::Box<u32>` (binds/src/lib.rs:15) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
+binds/src/lib.rs:64:5: error: fip-prelint: cannot check `forward_undeclared` (#[fip]): unresolved: `forward_undeclared` -> `call_plain` (binds/src/lib.rs:64): call through a function pointer `fn(u32) -> u32` (binds/src/lib.rs:22)
+binds/src/lib.rs:92:5: error: fip-prelint: cannot check `via_four_levels` (#[fip]): unresolved: `via_four_levels` -> `level0` (binds/src/lib.rs:92) -> `level1` (binds/src/lib.rs:80) -> `level2` (binds/src/lib.rs:68) -> `level3` (binds/src/lib.rs:72): call through a function pointer `fn(u32) -> u32` (binds/src/lib.rs:76)
+note: fip-prelint: crate `binds`: 8 roots, 5 passed, 4 errors, 0 warnings, 0 notes

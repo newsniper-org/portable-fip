@@ -197,8 +197,8 @@ pub fn apply_ptr_fbip(p: fn(u32) -> u32, x: u32) -> u32 {
     p(x)
 }
 
-/// A `#[fip]` root calling it: may free and recurses (as `apply_ptr_fbip` allows its
-/// argument), reported; the argument itself is fine for `fbip`.
+/// A `#[fip]` root calling it: `p` is bound to `frees` (top plan B), which may free:
+/// reported; it does not recurse. The argument itself is fine for `fbip`.
 #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
 pub fn fip_through_fbip(x: u32) -> u32 {
     apply_ptr_fbip(frees, x)

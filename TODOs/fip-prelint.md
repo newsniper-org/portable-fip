@@ -1619,3 +1619,47 @@ maximum (1), not the sum (2), of the candidates.
 `UnsafeCell` (its allocation is mutable); pointers behind a reference stored in a
 static (`static S: &[fn()]`, a dereference inside the data); local arrays of function
 pointers (only fields of local aggregates are followed); call results (T4.4).
+
+## Resolved 2026-11-03: callable bindings across calls (top plan B)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, B (item 3 of its order).
+Before: a node's parameters carried bindings for formatting values only
+(`Bind::Dyn`/`Formatter`/`Fmt`); a callee calling its undeclared function-pointer or
+`&dyn Fn*` parameter was `⊤` in every caller's graph, and a declared one cost its
+declaration even where the call site passed a known function.
+
+**Mechanism** (`src/analysis.rs`). `Bind::Callable(Callable)`:
+
+- `Callable::Fns(instances)`: a reified function or closure, a constant, or the
+  candidates of immutable data (T1); `Callable::Pointee(ty)`: a `&dyn Fn*` unsized from
+  a pointer to `ty`; `Callable::Declared(fn, g)`: a parameter `g` of the caller that
+  declares `param(g = K)`.
+- `call_binds` binds every argument of function-pointer or `&dyn Fn*` type whose origin
+  is known (`callable_of`; a caller's own bound parameter passes its binding on).
+- In the callee, `pointer_target` and `devirtualize` consult the binding of a parameter
+  before its declaration (`callable_item`); `indirect_argument` (the call-site check of
+  a `param(..)` callee) uses it too, so a call site inside a bound node is checked
+  against what reaches it.
+- Depth: a binding is added only while fewer than 3 nodes with callable bindings lie on
+  the first-caller chain (`MAX_CALLABLE_DEPTH`); deeper, the callee is analysed without
+  it (as before). `bind_of` without a node (`arguments_in`) is `None` (fixed a panic
+  found by the N4 probe).
+
+**Soundness.** A binding is a must-fact at every call site whose node it keys (nodes are
+keyed by instance, context and bindings), the same argument as the L1 contexts. The
+standalone checks (roots analysed unbound, `arguments_in` for every local function)
+are unchanged.
+
+**Measured** (before = `9b7f0a3`):
+
+| case | before | after |
+|---|---|---|
+| fixture `callable_binds` (new) | 8 roots, 0 passed, 8 errors (all `⊤`) | 8 roots, 5 passed, 4 errors: `via_plain_callee_alloc` (bound to `boxed_value`: allocates, frees), `forward_undeclared` and `via_four_levels` stay `⊤` (undeclared, depth limit) |
+| fixture `param_bounds` | `fip_through_fbip`: "may free" and "recurses" by `apply_ptr_fbip`'s declaration; 23 errors | `p` bound to `frees`: "may free" through `frees`, no recursion; 22 errors, same roots passing |
+| fixture `indirect_data` | `pass_mixed`: call-site error only; 11 errors | plus the root's own allocation through `apply_ptr` -> `leaked`; 12 errors |
+| N4 `top` | 44 roots, 22 passed | 23 passed: `through_mid` (its graph binds `mid`'s `q` to `plus1`; `mid`'s standalone call-site `⊤` stays, T4.3) |
+| self-check dev / `--release`, other fixtures | — | unchanged; 23 `param` call sites |
+
+**Deviation from the plan:** predicted "no verdict change alone"; measured: one more
+passing root in N4 and more precise witnesses in two fixtures (above). `Certified(N)`
+(T1.4) is not implemented yet; `Box<dyn Fn*>` and generic `F` bindings come with T2/T3.

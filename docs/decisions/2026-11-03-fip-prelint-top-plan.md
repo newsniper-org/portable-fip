@@ -254,6 +254,18 @@ already keyed by instance and bindings.
 
 Effort M (2 days).
 
+**Implemented** (item 3). `Bind::Callable` with `Callable::Fns` (instances: a reified
+function or closure, a constant, the candidates of immutable data), `Pointee` (the
+concrete type of a `&dyn Fn*`) and `Declared(fn, g)`; arguments of function-pointer
+and `&dyn Fn*` type are bound (`Box<dyn Fn*>` and generic `F` come with item 4).
+`Certified(N)` waits for T1.4. Depth: at most 3 nodes with callable bindings on the
+first-caller chain. **Deviation:** the prediction "no verdict change alone" did not
+hold. Measured: `top::through_mid` passes (its exploration no longer carries `mid`'s
+unbound call-site `⊤`; `mid`'s standalone report stays); `param_bounds::fip_through_fbip`
+reports the bound `frees` (may free) and no longer "recurses"; `indirect_data::pass_mixed`
+also reports its root allocation through `apply_ptr`; new fixture `callable_binds`
+8 roots, 0 → 5 passed.
+
 ### T2. `Box<dyn ..>` receivers and parameters
 
 **Current.** Measured (N4): `Box<dyn Trait>` receivers of **contracted** methods pass
