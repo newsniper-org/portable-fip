@@ -299,9 +299,8 @@ gated too.
 
 ### 8. State-passing helpers for the `_st` combinators
 
-**Status:** `Stateless` implemented in the commit "fip-strict: Stateless and
-Compose adapters (fip-fn ergonomics 4)"; `fip_fn_st!` and the invariant snippet not
-implemented (below).
+**Status:** `Stateless` implemented in da394d5; `fip_fn_st!` and the invariant
+snippet not implemented (below).
 
 **Probe (2026-11-03), files `/tmp/tp-verus/p4`, both builds identical
 (upstream `0.2026.10.18.7d82994`, fork `0.2026.10.31.559ac52`, `--no-cheating`):**
@@ -431,6 +430,16 @@ type mismatch if `N ≠ 0`).
 
 ### 11. Driver-checked `fip_fn!` (defer the bound to `fip-prelint`)
 
+**Status:** REVIEWED in `docs/decisions/2026-11-03-fip-fn-driver-mode.md`: opt-in
+per use, default-off, and unusable outside a checking driver run (plain builds,
+a forged environment variable, dependency/stack/generation runs all fail to
+compile; measured). The driver checks the full claim at the construction through a
+`&dyn Fn` parameter declared `param(g = N)` (allocations, frees, recursion; a
+`FipFn`-generic parameter caught allocations only). Costs: such crates build only
+through the driver (pinned toolchain, `-Copt-level=0`). Implementation: see the
+record.
+
+
 ```rust
 fip_fn!(prelint, 1, |x: u8| x.wrapping_add(1).count_ones() as u8)
 ```
@@ -489,8 +498,8 @@ callee (see idea 10).
 
 ### 13. Composition combinators
 
-**Status:** `Compose` implemented in the same commit as idea 8's `Stateless`
-(A3b's specification, explicit type parameters per A5; bound `F::ALLOCS +
+**Status:** `Compose` implemented in da394d5 (with idea 8's `Stateless`;
+A3b's specification, explicit type parameters per A5; bound `F::ALLOCS +
 G::ALLOCS`: an overflow is "attempt to compute `u64::MAX + 1_u64`, which would
 overflow" at compile time, a `compile_fail` example; Verus rejects
 `saturating_add` there, A3). Verified caller `verify/compose_state.rs` `quadrupled`
