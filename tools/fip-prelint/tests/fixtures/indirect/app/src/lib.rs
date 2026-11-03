@@ -114,7 +114,8 @@ impl Shape for Circle {
     }
 }
 
-/// `param(..)` in a contract is rejected.
+/// `param(..)` in a contract (top plan T5): accepted, `g` is a function pointer
+/// (no implementation here).
 pub trait Apply {
     #[cfg_attr(fip_prelint, fip::mark(kind = "fip", param(g = 0)))]
     fn apply(&self, g: fn(u32) -> u32) -> u32;
@@ -261,4 +262,116 @@ pub fn box_dyn_caller_alloc(x: u32) -> u32 {
 #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
 pub fn rc_dyn_fn(g: &std::rc::Rc<dyn Fn(u32) -> u32>, x: u32) -> u32 {
     g(x)
+}
+
+// (7) Contracts with `param(..)` (top plan T5): every implementation is checked with
+// the parameter costing its bound, every call through the contract checks its
+// argument.
+
+/// Through the macro: `#[fip]` with `param(g = 0)` on a declaration.
+pub trait Visit {
+    #[fip_macros::fip(param(g = 0))]
+    fn visit(&self, g: &dyn Fn(u32) -> u32) -> u32;
+}
+
+/// By hand: one allocation per call, `g` may allocate once.
+pub trait Fold {
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1, param(g = 1)))]
+    fn fold(&self, g: fn(u32) -> u32) -> u32;
+}
+
+pub struct Walk(pub u32);
+
+/// Calls `g` (named `f` here: the bound follows the position) in a loop: `g` costs
+/// 0, passes.
+impl Visit for Walk {
+    fn visit(&self, f: &dyn Fn(u32) -> u32) -> u32 {
+        let mut s = 0u32;
+        let mut i = 0u32;
+        while i < self.0 {
+            s = s.wrapping_add(f(i));
+            i = i.wrapping_add(1);
+        }
+        s
+    }
+}
+
+/// Calls `g` once: within the contract's one allocation, passes.
+impl Fold for Walk {
+    fn fold(&self, g: fn(u32) -> u32) -> u32 {
+        g(self.0)
+    }
+}
+
+pub struct Twice(pub u32);
+
+/// Calls `g` twice: up to 2 allocations, over the contract's 1, reported.
+impl Fold for Twice {
+    fn fold(&self, g: fn(u32) -> u32) -> u32 {
+        g(g(self.0))
+    }
+}
+
+pub struct Hoard(pub u32);
+
+/// Allocates itself: reported.
+impl Visit for Hoard {
+    fn visit(&self, g: &dyn Fn(u32) -> u32) -> u32 {
+        g(boxed_value(self.0))
+    }
+}
+
+pub struct Narrow(pub u32);
+
+/// Declares a tighter bound for `g` than the contract (dynamic callers may pass a
+/// function allocating once): weaker than the contract, reported.
+impl Fold for Narrow {
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1, param(g = 0)))]
+    fn fold(&self, g: fn(u32) -> u32) -> u32 {
+        g(self.0)
+    }
+}
+
+/// A dynamic call passing an allocation-free function: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn visit_dyn(v: &dyn Visit) -> u32 {
+    v.visit(&add_one)
+}
+
+/// A dynamic call passing an allocating closure: reported at the call site.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn visit_dyn_alloc(v: &dyn Visit) -> u32 {
+    v.visit(&|x| boxed_value(x))
+}
+
+/// A call on a type parameter (costs the contract) passing an allocating function:
+/// reported at the call site.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn visit_generic_alloc<V: Visit>(v: &V) -> u32 {
+    v.visit(&boxed_value)
+}
+
+/// Allocates once and never frees.
+pub fn leaked_value(x: u32) -> u32 {
+    *Box::leak(Box::new(x))
+}
+
+/// A dynamic call of `fold` passing a function allocating once (no free): within
+/// `param(g = 1)`, costs the contract's one allocation, passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1))]
+pub fn fold_dyn(f: &dyn Fold) -> u32 {
+    f.fold(leaked_value)
+}
+
+/// The same with a function that also frees: `Fold::fold`'s `#[fip(1)]` forbids
+/// frees, reported at the call site.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1))]
+pub fn fold_dyn_frees(f: &dyn Fold) -> u32 {
+    f.fold(boxed_value)
+}
+
+/// A caller that is not a root, passing an allocating function to a dynamic call:
+/// reported at the call site.
+pub fn visit_dyn_caller(v: &dyn Visit) -> u32 {
+    v.visit(&boxed_value)
 }

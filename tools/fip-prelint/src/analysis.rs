@@ -73,7 +73,11 @@
 //! what the function's mark allows; its call sites must pass a function known there
 //! that meets them. A dynamic call of a trait method whose declaration carries a
 //! `fip::mark` costs that contract ([`Crates::contract_of`]); every implementation
-//! is checked against it in its own crate (`crate::report`). Anything else is `⊤`.
+//! is checked against it in its own crate (`crate::report`). A contract's
+//! `param(g = K)` is inherited by every implementation (by position,
+//! [`inherited_params`]), and every call through the contract (dynamic, or on a type
+//! parameter) checks its argument for `g` like a call site of a function declaring
+//! it. Anything else is `⊤`.
 //!
 //! **Bindings and std summaries.** A node is also keyed by what its parameters hold,
 //! known at its call sites ([`Bind`]): the output behind a `&mut dyn fmt::Write` or a
@@ -627,6 +631,53 @@ fn trait_method(tcx: TyCtxt<'_>, def_id: DefId) -> Option<DefId> {
     }
 }
 
+/// A contract's `param(..)` bounds (`params`, named as in the trait method
+/// declaration `method`) renamed to the parameters of the implementation `item` at
+/// the same positions; a position whose parameter has no name in `item` (`_`) is
+/// dropped (the implementation cannot call it).
+pub fn inherited_params(
+    tcx: TyCtxt<'_>,
+    params: &[(String, u64)],
+    method: DefId,
+    item: DefId,
+) -> Vec<(String, u64)> {
+    let decl = tcx.fn_arg_idents(method);
+    let own = tcx.fn_arg_idents(item);
+    params
+        .iter()
+        .filter_map(|(g, k)| {
+            let pos = decl
+                .iter()
+                .position(|i| i.is_some_and(|i| i.name.as_str() == g))?;
+            let name = (*own.get(pos)?)?.name;
+            (name.as_str() != "_").then(|| (name.to_string(), *k))
+        })
+        .collect()
+}
+
+/// `true` if a parameter of type `t` can carry `param(g = K)` in a trait method
+/// contract: a function pointer, or `&dyn Tr`, `&mut dyn Tr`, `Box<dyn Tr>` or a
+/// reference to `Box<dyn Tr>` with a callable `Tr` (`Fn*`, `FipFn`). A generic
+/// parameter makes the method not dyn-compatible (its calls resolve per instance).
+pub fn contract_callable(tcx: TyCtxt<'_>, t: Ty<'_>) -> bool {
+    if t.is_fn_ptr() {
+        return true;
+    }
+    let inner = match *t.kind() {
+        ty::Ref(_, inner, _) if inner.is_box() => inner.expect_boxed_ty(),
+        ty::Ref(_, inner, _) => inner,
+        _ if t.is_box() => t.expect_boxed_ty(),
+        _ => return false,
+    };
+    let ty::Dynamic(preds, ..) = *inner.kind() else {
+        return false;
+    };
+    preds.principal().is_some_and(|p| {
+        tcx.fn_trait_kind_from_def_id(p.def_id()).is_some()
+            || tcx.item_name(p.def_id()).as_str() == "FipFn"
+    })
+}
+
 /// A certificate or an exclusion of one foreign declaration.
 #[derive(Clone, Debug)]
 pub enum FfiMark {
@@ -931,9 +982,32 @@ impl Crates {
     pub fn has_param_marks(&self) -> bool {
         self.marks.values().any(|m| !m.params.is_empty())
     }
-    /// The mark of `def_id` if it declares `param(..)`.
-    fn param_mark(&self, def_id: DefId) -> Option<&Mark> {
-        self.marks.get(&def_id).filter(|m| !m.params.is_empty())
+    /// The mark of `def_id` if it declares `param(..)`. An implementation of a trait
+    /// method whose contract declares `param(..)`, and whose own mark (if any)
+    /// declares none, inherits the contract's bounds, mapped by position to its own
+    /// parameter names (top plan T5): its static call sites are checked against them,
+    /// and its body counts them for its parameters.
+    pub(crate) fn param_mark(
+        &self,
+        tcx: TyCtxt<'_>,
+        def_id: DefId,
+    ) -> Option<std::borrow::Cow<'_, Mark>> {
+        if let Some(m) = self.marks.get(&def_id).filter(|m| !m.params.is_empty()) {
+            return Some(std::borrow::Cow::Borrowed(m));
+        }
+        tcx.trait_impl_of_assoc(def_id)?;
+        let method = tcx.trait_item_of(def_id)?;
+        let c = self
+            .contract_of(tcx, method)
+            .filter(|m| !m.params.is_empty())?;
+        let params = inherited_params(tcx, &c.params, method, def_id);
+        if params.is_empty() {
+            return None;
+        }
+        Some(std::borrow::Cow::Owned(Mark {
+            params,
+            ..c.clone()
+        }))
     }
     /// The `fip::mark` of `def_id` itself (a local root, or a function of an exported
     /// crate).
@@ -943,12 +1017,13 @@ impl Crates {
     /// The contract of a trait method: the `fip::mark` on its declaration (local
     /// crate or an exported crate). A dynamic call of the method costs the contract;
     /// every implementation is checked against it, without its own or the
-    /// declaration's `fip::requires(..)`. A contract with `param(..)` is rejected
-    /// where it is declared and not used; one with `fip::requires(..)` is rejected
-    /// where it is declared.
+    /// declaration's `fip::requires(..)`. A contract's `param(g = K)` (a callable
+    /// parameter, checked where the contract is declared) is assumed by every
+    /// implementation and checked at every call through the contract (top plan T5);
+    /// a contract with `fip::requires(..)` is rejected where it is declared.
     pub fn contract_of(&self, tcx: TyCtxt<'_>, def_id: DefId) -> Option<&Mark> {
         tcx.trait_of_assoc(def_id)?;
-        self.marks.get(&def_id).filter(|m| m.params.is_empty())
+        self.marks.get(&def_id)
     }
     /// Every trait method with a contract, in a stable order.
     pub fn contracts(&self, tcx: TyCtxt<'_>) -> Vec<(DefId, Mark)> {
@@ -1598,6 +1673,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     let binds = a.call_binds(inst, body, callee, call_args);
                     a.node_bound(callee, Vec::new(), 0, binds);
                 }
+            } else if tcx.trait_of_assoc(def_id).is_some()
+                && a.crates.contract_of(tcx, def_id).is_some()
+            {
+                // A call on `Self` or a type parameter that does not resolve here
+                // costs the contract: its arguments are checked against the
+                // contract's `param(..)` (top plan T5).
+                let callee = Instance::new_raw(def_id, args);
+                a.note_arg_site(inst, body, term.source_info.span, callee, call_args);
             }
         }
         if a.arg_sites.is_empty() && a.queue.is_empty() {
@@ -3271,9 +3354,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
             }
             Callable::Declared(d, g) => {
-                let mark = self.crates.param_mark(*d)?;
+                let mark = self.crates.param_mark(self.tcx, *d)?;
                 let k = mark.params.iter().find(|(n, _)| n == g)?.1;
-                Some(Item::Evs(param_events(g, k, mark)))
+                Some(Item::Evs(param_events(g, k, &mark)))
             }
         }
     }
@@ -3500,8 +3583,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             return None;
         };
         let (g, k) = self.declared_param(d, body, l)?;
-        let mark = self.crates.param_mark(d)?;
-        Some(Item::Evs(param_events(&g, k, mark)))
+        let mark = self.crates.param_mark(self.tcx, d)?;
+        Some(Item::Evs(param_events(&g, k, &mark)))
     }
 
     /// The name and declared bound of the parameter in local `l` of `d`'s body, if
@@ -3517,7 +3600,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
         let ident = (*tcx.fn_arg_idents(d).get(pos)?)?;
         let g = ident.name.to_string();
-        let mark = self.crates.param_mark(d)?;
+        let mark = self.crates.param_mark(self.tcx, d)?;
         let k = mark.params.iter().find(|(n, _)| *n == g)?.1;
         Some((g, k))
     }
@@ -3644,7 +3727,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// Records the call of `callee` at `span` in `caller` (whose MIR is `body`, the
     /// call's arguments `call_args`) if the callee declares `param(g = K)`: for each
     /// such `g`, the argument's callable entry points are resolved and become nodes
-    /// of the graph.
+    /// of the graph. A dynamic call (and an unresolved one on a type parameter,
+    /// whose callee is the trait method itself) is checked against the contract's
+    /// `param(..)` (top plan T5).
     fn note_arg_site(
         &mut self,
         caller: Instance<'tcx>,
@@ -3653,11 +3738,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         callee: Instance<'tcx>,
         call_args: &[Spanned<Operand<'tcx>>],
     ) {
-        let InstanceKind::Item(def_id) = callee.def else {
+        let (InstanceKind::Item(def_id) | InstanceKind::Virtual(def_id, _)) = callee.def else {
             return;
         };
         let crates = self.crates;
-        let Some(mark) = crates.param_mark(def_id) else {
+        let Some(mark) = crates.param_mark(self.tcx, def_id) else {
             return;
         };
         let caller_label = self.label(caller);
@@ -3668,7 +3753,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             else {
                 continue;
             };
-            let indirect = indirect.then(|| mark.clone());
+            let indirect = indirect.then(|| mark.clone().into_owned());
             let from_param = self
                 .tcx
                 .fn_arg_idents(def_id)
@@ -3892,7 +3977,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     return (label, items);
                 }
                 Callable::Declared(d, h) => {
-                    if let Some(mark) = self.crates.param_mark(d)
+                    if let Some(mark) = self.crates.param_mark(self.tcx, d)
                         && let Some(&(_, k)) = mark.params.iter().find(|(n, _)| *n == h)
                     {
                         let what = format!(
@@ -3901,7 +3986,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         );
                         return (
                             shown(input),
-                            vec![(what, Item::Evs(param_events(&h, k, mark)))],
+                            vec![(what, Item::Evs(param_events(&h, k, &mark)))],
                         );
                     }
                 }
@@ -3985,8 +4070,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         let evs = match caller.def {
                             InstanceKind::Item(d) => self
                                 .crates
-                                .param_mark(d)
-                                .map(|m| param_events(&h, k, m))
+                                .param_mark(self.tcx, d)
+                                .map(|m| param_events(&h, k, &m))
                                 .unwrap_or_default(),
                             _ => Vec::new(),
                         };

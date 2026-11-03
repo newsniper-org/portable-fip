@@ -417,6 +417,22 @@ is an error at the `dyn` call; an implementation that calls `g` twice in a loop 
 
 **Effort.** M (1.5 days). Mark validation in `fip-macros` and in the driver.
 
+**Implemented** (item 9). `Crates::contract_of` keeps contracts with `param(..)`; the
+driver checks at the declaration that `g` is a function-pointer or callable
+trait-object parameter. Implementations inherit the bound by position
+(`inherited_params`, also through `Crates::param_mark` for static calls); calls through
+the contract (`Virtual` callees, and unresolved calls on a type parameter, also in
+non-root bodies) check their argument (`note_arg_site`). An implementation's own
+tighter `param` is an error. `fip-macros` accepts `param(..)` on a non-strict
+declaration (name and callable type checked) and keeps rejecting it with
+`strict = true`. Fixture `indirect`: `app` 30 roots, 15 passed → 41 roots, 20 passed,
+with every planned case (a loop calling `g` under `fip` passes; the allocating
+implementation, the over-bound implementation, the allocating `dyn` argument and the
+weaker implementation are reported). N4: a `&dyn Fn` contract, its implementation and
+its `dyn` caller pass. **Deviation:** the plan's probe trait (`visit<G: Fn>`) has a
+generic parameter; it is rejected with a specific message (not dyn-compatible, so its
+calls resolve per instance), not accepted.
+
 ### T6. `dyn` calls without a contract, and implementations in non-exported crates
 
 **Current.** `⊤` (`analysis.rs:1557-1573`; `contract_dep`). This is the deliberate

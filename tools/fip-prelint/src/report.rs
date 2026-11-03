@@ -19,7 +19,8 @@
 //! | an implementation (in this crate) of a trait method whose declaration carries `fip::mark` (a contract) that breaks it, checked without any `fip::requires(..)` (a dynamic call checks none) | error, as for a root (also when the driver compiles a dependency that declares `fip::export`) |
 //! | an implementation of a contracted trait method whose own `fip::mark` is weaker than the contract (more allocations, `fbip` for a `fip` contract, less strict) | error, at the implementation |
 //! | an implementation of a contracted trait method in a crate without `fip::export` | error (`⊤`), at the implementation |
-//! | `param(..)` or `fip::requires(..)` in a trait method contract | error |
+//! | `fip::requires(..)` in a trait method contract; `param(g = ..)` in one whose `g` is not a function-pointer or callable trait-object parameter | error |
+//! | an implementation's own `param(g = K)` below the contract's bound for that parameter | error |
 //! | a standard-library function without MIR not covered by the std summaries, or summaries not used (missing file, stamp of another rustc or target) | `⊤` (error), with the reason |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
@@ -802,11 +803,30 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             continue;
         }
         let decl = tcx.trait_of_assoc(*def_id).is_some();
-        if decl && !mark.params.is_empty() {
-            out.error(
-                tcx.def_span(*def_id),
-                "`param(..)` is not supported in the contract of a trait method: its dynamic calls are `⊤`",
-            );
+        // `param(g = K)` in a contract (top plan T5): `g` must be a callable
+        // parameter a dynamic call can pass (a function pointer, a callable trait
+        // object); every implementation assumes the bound, every call through the
+        // contract checks its argument.
+        if decl {
+            let idents = tcx.fn_arg_idents(*def_id);
+            let inputs = tcx.fn_sig(*def_id).skip_binder().skip_binder().inputs();
+            for (g, _) in &mark.params {
+                let pos = idents
+                    .iter()
+                    .position(|i| i.is_some_and(|i| i.name.as_str() == g));
+                let ok = pos
+                    .and_then(|p| inputs.get(p))
+                    .is_some_and(|t| crate::analysis::contract_callable(tcx, *t));
+                if !ok {
+                    out.error(
+                        tcx.def_span(*def_id),
+                        &format!(
+                            "`param({g} = ..)` in the contract of `{}`: `{g}` is not a parameter of a function-pointer or callable trait-object type (`fn(..)`, `&dyn Fn*`, `&Box<dyn Fn*>`, `&dyn FipFn`), whose argument a dynamic call can check",
+                            tcx.def_path_str(*def_id)
+                        ),
+                    );
+                }
+            }
         }
         if decl && crates.requires_of(*def_id).is_some() {
             out.error(
@@ -815,7 +835,16 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             );
         }
         if !decl || tcx.defaultness(*def_id).has_value() {
-            roots.push((*def_id, mark.clone()));
+            // An implementation whose own mark declares no `param(..)` assumes the
+            // contract's, renamed to its parameters (top plan T5).
+            let mut mark = mark.clone();
+            if !decl
+                && mark.params.is_empty()
+                && let Some(m) = crates.param_mark(tcx, *def_id)
+            {
+                mark.params = m.params.clone();
+            }
+            roots.push((*def_id, mark));
         }
     }
     // A violation reached from several roots (or also found in the body scan below) is
@@ -1060,8 +1089,11 @@ fn implementations(tcx: TyCtxt<'_>, method: DefId) -> Vec<DefId> {
 /// Checks the implementation of `method` in `impl_def` against the method's contract
 /// `mark`, as a root: the impl's own method, or the trait's default body for that
 /// impl, without any `fip::requires(..)` (a dynamic call checks none). An impl
-/// method's own `fip::mark` that is weaker than the contract is an error. `None` if
-/// neither has MIR here (an error).
+/// method's own `fip::mark` that is weaker than the contract is an error, also when
+/// its own `param(g = K)` bounds an argument more tightly than the contract's (a
+/// dynamic call checks only the contract's). The contract's `param(..)` is renamed
+/// to the implementation's parameters (top plan T5). `None` if neither has MIR here
+/// (an error).
 fn check_implementation(
     out: &mut Out<'_>,
     crates: &Crates,
@@ -1075,10 +1107,28 @@ fn check_implementation(
         .impl_item_implementor_ids(impl_def)
         .get(&method)
         .copied();
+    // The contract as the implementation's body sees it: its `param(..)` named as the
+    // implementation's parameters at the same positions.
+    let renamed = match item {
+        Some(item) if !mark.params.is_empty() => Mark {
+            params: crate::analysis::inherited_params(tcx, &mark.params, method, item),
+            ..mark.clone()
+        },
+        _ => mark.clone(),
+    };
     if let Some(item) = item
         && let Some(own) = crates.mark_of(item)
     {
-        let weaker = own.weaker_than(mark);
+        let mut weaker = own.weaker_than(mark);
+        for (g, k) in &renamed.params {
+            if let Some((_, own_k)) = own.params.iter().find(|(n, _)| n == g)
+                && own_k < k
+            {
+                weaker.push(format!(
+                    "it declares `param({g} = {own_k})`, the contract allows arguments for `{g}` that allocate up to {k} time(s) per call"
+                ));
+            }
+        }
         if !weaker.is_empty() {
             out.error(
                 tcx.def_span(item),
@@ -1094,8 +1144,8 @@ fn check_implementation(
     }
     let r = match item {
         Some(item) if tcx.is_mir_available(item) => {
-            let r = Analysis::run_contract(tcx, crates, item, mark);
-            verdict(out, item, mark, None, Some(&contract), &r);
+            let r = Analysis::run_contract(tcx, crates, item, &renamed);
+            verdict(out, item, &renamed, None, Some(&contract), &r);
             Some(r)
         }
         Some(_) => None,

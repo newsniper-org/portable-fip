@@ -328,8 +328,8 @@ impl Mark {
 
     /// What this mark (of an implementation) allows that the contract `c` (of the
     /// trait method it implements) does not; empty if it is at least as strong.
-    /// `param(..)` is not compared: the implementation is checked against the
-    /// contract without its parameter bounds.
+    /// `param(..)` is compared where the parameter names are known
+    /// (`crate::report`, by position: an implementation's tighter bound is weaker).
     pub fn weaker_than(&self, c: &Mark) -> Vec<String> {
         let mut v = Vec::new();
         if self.allowed() > c.allowed() {

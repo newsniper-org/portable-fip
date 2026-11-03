@@ -682,6 +682,21 @@ functions inside `std` (the random source, paths that print to stderr),
 which std summaries record as `⊤`. Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-03: thread locals through their `static` key".
 
+## Amendment 2026-11-03: contracts with `param(..)` (top plan T5)
+
+A trait method contract may declare `param(g = K)` for a parameter of function-pointer
+or callable trait-object type (before: rejected by the driver and by `fip-macros`).
+Every implementation is checked with `g` costing `K` (the bound follows the position
+to the implementation's own parameter name; its own tighter `param` is an error, as a
+weaker mark), and every call through the contract, dynamic or on a type parameter,
+checks its argument against `K` and the contract's permissions, like any call site of
+a function declaring `param(..)`. `#[fip(param(g = K))]` is accepted on a declaration
+without `strict = true` (the name and the type are checked); with `strict = true` it
+stays rejected, since a `#[fip_trait]` certificate carries no parameter bounds. This
+supersedes "`param(..)` (the driver rejects it in a contract too)" of the amendment
+"`#[fip]` on trait method declarations". Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-03: contracts with `param(..)`".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

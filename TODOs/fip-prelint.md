@@ -1934,3 +1934,58 @@ A user's FFI marks cannot reach into a summary. Open point: a summary term for a
 foreign call (`§ffi <symbol> <abi>`, resolved with the marks of the analysed crate)
 would turn these into FFI verdicts at the use site; not implemented. The seed was
 left unchanged.
+
+## Resolved 2026-11-03: contracts with `param(..)` (top plan T5)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T5 (item 9 of its order),
+with B.
+
+**Before.** `param(g = K)` in a trait method contract was rejected by the driver
+("its dynamic calls are `⊤`", `report.rs`) and by `fip-macros` on a declaration;
+`Crates::contract_of` ignored such a contract, so a dynamic call of the method was `⊤`
+and its implementations were not checked against it.
+
+**Mechanism.**
+
+- Driver: `Crates::contract_of` keeps contracts with `param(..)`. Where the contract is
+  declared, each `g` must name a parameter of function-pointer or callable
+  trait-object type (`fn(..)`, `&dyn Fn*`, `&mut dyn Fn*`, `Box<dyn Fn*>`,
+  `&Box<dyn Fn*>`, `&dyn FipFn`; `analysis::contract_callable`), else an error. A
+  generic `G: Fn*` makes the method not dyn-compatible; its calls resolve per
+  instance and need no contract parameter.
+- Implementations inherit the contract's bounds, mapped by position to their own
+  parameter names (`analysis::inherited_params`): `check_implementation` runs the
+  body with the renamed contract (`g` costs `K` with the contract's permissions), and
+  `Crates::param_mark` returns the renamed contract for an implementation whose own
+  mark declares no `param(..)`, so its static call sites are checked and its body
+  counts a declared parameter as usual. An implementation that is itself a root and
+  declares no `param(..)` takes the contract's.
+- Calls through the contract: `note_arg_site` accepts a `Virtual` callee (a `dyn`
+  call) and the trait method itself (a call on a type parameter that does not
+  resolve, `node_contract`; also from `arguments_in` for bodies that are not roots),
+  and checks the argument for `g` against `K` and the contract's permissions, like an
+  ordinary call site.
+- An implementation's own `param(g = K')` with `K' < K` is "weaker than the contract"
+  (dynamic callers may pass what it does not accept): an error at the implementation.
+- `fip-macros`: `param(..)` without `strict = true` is accepted on a trait method
+  declaration when the name is a parameter whose type tokens are a function pointer
+  or a callable trait object (the same list); on a function with a body it still
+  "requires `strict = true` before it". `strict = true` with `param(..)` on a
+  declaration stays rejected (a `#[fip_trait]` certificate carries no parameter
+  bounds), with that message.
+
+**Soundness.** Assume-guarantee, both sides in analysed code: every implementation in
+an analysed crate is checked with `g` costing `K`; every call through the contract in
+an analysed body passes an argument checked against `K` (an argument not known there
+is `⊤` at the call site, as for any `param`). An implementation in a crate without
+`fip::export` is `⊤` as before; calls from unanalysed crates are not checked (as for
+`requires`).
+
+**Measured** (before = `10ab401`, after = this commit):
+
+| case | before | after |
+|---|---|---|
+| fixture `indirect` (`Apply` now accepted; new: `Visit` through `#[fip(param(g = 0))]` on `g: &dyn Fn`, `Fold` by hand `#[fip(1)]` with `param(g = 1)` on `g: fn`, 5 implementations, 5 roots, 1 non-root caller) | `app`: 30 roots, 15 passed, 22 errors (`Apply`: "not supported") | `app`: 41 roots, 20 passed, 29 errors: `Walk` (`visit` calling `f` in a loop, `fold` calling `g` once), `Narrow` as a root, `visit_dyn`, `fold_dyn` pass; reported: `Twice::fold` (2 > 1 allocations through `g`), `Hoard::visit` (allocates itself), `Narrow::fold` (`param(g = 0)` weaker than the contract's 1), `visit_dyn_alloc` (closure), `visit_generic_alloc` (call on a type parameter), `fold_dyn_frees` (argument frees under a `fip` contract), `visit_dyn_caller` (not a root), each at the call site |
+| N4 `top` (probe `Visit` with a generic `G`, plus a `VisitDyn` contract on `&dyn Fn`, its implementation and a `dyn` caller) | 45 roots, 34 passed, 21 errors: both contracts "not supported", `visit_dyn` `⊤` | 46 roots, 36 passed, 19 errors: the `dyn` contract, its implementation and `visit_dyn` pass; the generic one is rejected with the new message |
+| self-check dev / `--release`, other fixtures, sidecar | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
+

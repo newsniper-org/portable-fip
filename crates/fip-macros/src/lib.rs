@@ -302,12 +302,33 @@
 //! # fn main() { assert_eq!(Square(3).twice(), 18); }
 //! ```
 //!
+//! A declaration may bound a callable parameter with `param(g = K)` (without
+//! `strict = true`): `g` must be a parameter of function-pointer or callable
+//! trait-object type (`fn(..)`, `&dyn Fn*`, `&Box<dyn Fn*>`, `&dyn FipFn`; a generic
+//! parameter would make the method not dyn-compatible). `fip-macros` checks the name
+//! and the type; `fip-prelint` checks every implementation with `g` costing `K`
+//! (mapped by position to the implementation's parameter names) and every call
+//! through the contract, dynamic or on a type parameter, against `K`:
+//!
+//! ```
+//! pub trait Visit {
+//!     /// Calls `g` any number of times; `g` must not allocate.
+//!     #[fip_macros::fip(param(g = 0))]
+//!     fn visit(&self, g: &dyn Fn(u8) -> u8) -> u8;
+//! }
+//! pub struct One(pub u8);
+//! impl Visit for One {
+//!     fn visit(&self, f: &dyn Fn(u8) -> u8) -> u8 { f(self.0) }
+//! }
+//! # fn main() { assert_eq!(One(1).visit(&|x| x + 1), 2); }
+//! ```
+//!
 //! Rejected on a declaration, because no implementation could be held to it:
-//! `param(..)` (a dynamic call cannot check the arguments' bounds), `strict = true`
-//! (a certificate `__fip_strict_..` belongs to one function body, and a declaration
-//! has none; so also `panic_macros = ..` and `crate = ..`, which need it) and
-//! `requires(..)` (a dynamic call does not check a precondition). A strict contract,
-//! which `fip-prelint` supports, is written by hand:
+//! `strict = true` (a certificate `__fip_strict_..` belongs to one function body, and a
+//! declaration has none; so also `panic_macros = ..` and `crate = ..`, which need it;
+//! under `#[fip_trait]`, see below, without `param(..)`, whose bounds a certificate
+//! does not carry) and `requires(..)` (a dynamic call does not check a precondition).
+//! A strict contract, which `fip-prelint` supports, is written by hand:
 //! `#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = true, panic_macros = false))]`.
 //! `strict = true` on a default body is rejected as well, with a message saying so
 //! (a certificate belongs to one body; `#[fip_impl]` cannot certify a default body
@@ -454,13 +475,22 @@
 //! }
 //! # fn main() {}
 //! ```
-//! `param(..)` on a declaration:
+//! `param(..)` with `strict = true` on a declaration (accepted without it, above):
 //! ```compile_fail
-//! # // expect: `param(..)` is not supported in the contract of a trait method declaration
+//! # // expect: `param(..)` with `strict = true` is not supported on a trait method declaration
 //! #[fip_macros::fip_trait]
 //! trait T {
 //!     #[fip_macros::fip(strict = true, param(g = 0))]
 //!     fn f(&self, g: fn(u8) -> u8) -> u8;
+//! }
+//! # fn main() {}
+//! ```
+//! `param(..)` on a declaration's parameter that is not callable:
+//! ```compile_fail
+//! # // expect: `param(n = ..)` in a contract needs a parameter of function-pointer or callable trait-object type
+//! trait T {
+//!     #[fip_macros::fip(param(n = 0))]
+//!     fn f(&self, n: u8) -> u8;
 //! }
 //! # fn main() {}
 //! ```
@@ -1051,6 +1081,10 @@ struct FipArgs {
     strict: bool,
     trait_checked: bool,
     params: Vec<(String, u64, Span)>,
+    /// `param(..)` written without `strict = true` before it: rejected on a function
+    /// with a body ("requires `strict = true`"), accepted on a trait method
+    /// declaration (a contract's parameter bounds, checked by `fip-prelint`).
+    param_unstrict: Option<Span>,
     /// `panic_macros = false`: strict bodies may not use the panicking macros.
     panic_macros: bool,
     /// `crate = path`: path of the `fip_strict` crate in generated code.
@@ -1148,6 +1182,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
         trait_checked: false,
         params: Vec::new(),
         panic_macros: true,
+        param_unstrict: None,
         krate: None,
         requires: None,
     };
@@ -1214,11 +1249,10 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
             [TokenTree::Ident(key), TokenTree::Group(g)]
                 if key.to_string() == "param" && g.delimiter() == Delimiter::Parenthesis =>
             {
-                if !args.strict {
-                    return Err((
-                        key.span(),
-                        "`param(..)` requires `strict = true` before it".to_string(),
-                    ));
+                // Without `strict = true` only a trait method declaration accepts it
+                // (decided when the item is seen, `expand_parts`/`expand_decl`).
+                if !args.strict && args.param_unstrict.is_none() {
+                    args.param_unstrict = Some(key.span());
                 }
                 for decl in split_commas(g.stream()) {
                     match decl.as_slice() {
@@ -1708,6 +1742,12 @@ fn expand_parts(
     let Some(body) = shape.body.clone() else {
         return expand_decl(mode, args, &toks, &shape, ctx);
     };
+    if let Some(sp) = args.and_then(|a| a.param_unstrict) {
+        return Err(compile_error(
+            sp,
+            "`param(..)` requires `strict = true` before it",
+        ));
+    }
     let mut scan = Scan {
         fn_name: &shape.name,
         sites: Vec::new(),
@@ -1801,13 +1841,19 @@ fn expand_parts(
 /// *contract* for `fip-prelint`: every implementation is checked against it, and a
 /// dynamic call of the method costs it. `fip-macros` checks nothing (there is no
 /// body): the item is emitted unchanged with the `# FIP` section and, under the
-/// driver, the same `fip::mark(..)` a hand-written contract carries. Rejected:
+/// driver, the same `fip::mark(..)` a hand-written contract carries.
 ///
-/// - `param(..)`: a dynamic call cannot check the arguments' bounds (the driver
-///   rejects it in a contract too);
-/// - `strict = true` (and so `panic_macros = ..` and `crate = ..`, which need it): a
-///   certificate `__fip_strict_..` belongs to one function body, and a declaration
-///   has none; nothing could make every implementation carry one;
+/// `param(g = K)` (without `strict = true`) is accepted when `g` is a parameter of
+/// the declaration whose type is a function pointer or a callable trait object
+/// (`&dyn Fn*`, `&mut dyn Fn*`, `Box<dyn Fn*>`, `&Box<dyn Fn*>`, `&dyn FipFn`):
+/// `fip-prelint` checks every implementation with `g` costing `K` and every call
+/// through the contract against `K`. Rejected:
+///
+/// - `param(..)` with `strict = true`: a `#[fip_trait]` certificate
+///   (`<dyn Trait>::__fip_strict_..`) carries no parameter bounds;
+/// - `strict = true` (and so `panic_macros = ..` and `crate = ..`, which need it)
+///   without `#[fip_trait]`: a certificate `__fip_strict_..` belongs to one function
+///   body, and a declaration has none;
 /// - `requires(..)`: a dynamic call does not check a precondition, so an
 ///   implementation could not assume it.
 fn expand_decl(
@@ -1835,13 +1881,32 @@ fn expand_decl(
     }
     let mut errors = TokenStream::new();
     if let Some(a) = args {
-        if let Some((_, _, sp)) = a.params.first() {
+        if let Some((_, _, sp)) = a.params.first()
+            && a.strict
+        {
             errors.extend(compile_error(
                 *sp,
                 &format!(
-                    "{tag}: `param(..)` is not supported in the contract of a trait method declaration: its dynamic calls cannot check the arguments' bounds"
+                    "{tag}: `param(..)` with `strict = true` is not supported on a trait method declaration: a `#[fip_trait]` certificate carries no parameter bounds; declare the contract without `strict = true` (`fip-prelint` checks its `param(..)` at every implementation and every call)"
                 ),
             ));
+        }
+        if !a.strict {
+            for (g, _, sp) in &a.params {
+                match param_type(shape.params.as_ref(), g) {
+                    None => errors.extend(compile_error(
+                        *sp,
+                        &format!("{tag}: `param({g} = ..)`: `{g}` is not a parameter of `{}`", shape.name),
+                    )),
+                    Some(t) if !callable_param_type(&t) => errors.extend(compile_error(
+                        *sp,
+                        &format!(
+                            "{tag}: `param({g} = ..)` in a contract needs a parameter of function-pointer or callable trait-object type (`fn(..)`, `&dyn Fn*`, `&Box<dyn Fn*>`, `&dyn FipFn`), whose argument a dynamic call can check"
+                        ),
+                    )),
+                    Some(_) => {}
+                }
+            }
         }
         if let Some((_, sp)) = &a.requires {
             errors.extend(compile_error(
@@ -1972,6 +2037,93 @@ fn param_names(params: Option<&Group>) -> Vec<String> {
             .last()
         })
         .collect()
+}
+
+/// The type tokens of the parameter `name` in `( .. )` (after its first `:`),
+/// splitting at commas outside `<..>` (a `>` of `->` does not close one).
+fn param_type(params: Option<&Group>, name: &str) -> Option<Vec<TokenTree>> {
+    let g = params?;
+    let mut parts: Vec<Vec<TokenTree>> = vec![Vec::new()];
+    let mut depth = 0_i32;
+    let mut prev_dash = false;
+    for t in g.stream() {
+        let dash = is_punct(&t, '-');
+        if is_punct(&t, '<') {
+            depth += 1;
+        } else if is_punct(&t, '>') && !prev_dash {
+            depth -= 1;
+        }
+        prev_dash = dash;
+        if depth == 0 && is_punct(&t, ',') {
+            parts.push(Vec::new());
+        } else if let Some(last) = parts.last_mut() {
+            last.push(t);
+        }
+    }
+    parts.into_iter().find_map(|part| {
+        let colon = part.iter().position(|t| is_punct(t, ':'))?;
+        let own = part[..colon]
+            .iter()
+            .filter_map(|t| match t {
+                TokenTree::Ident(i) if i.to_string() != "mut" => Some(i.to_string()),
+                _ => None,
+            })
+            .next_back()?;
+        (own == name).then(|| part[colon + 1..].to_vec())
+    })
+}
+
+/// `true` if the type tokens `t` are a function pointer (`fn(..)`, `unsafe fn`,
+/// `extern ".." fn`) or a callable trait object a dynamic call can pass: `&dyn Tr`,
+/// `&mut dyn Tr`, `Box<dyn Tr>`, `&Box<dyn Tr>` with `Tr` one of `Fn`, `FnMut`,
+/// `FnOnce`, `FipFn` (the last segment of its path).
+fn callable_param_type(t: &[TokenTree]) -> bool {
+    let mut i = 0;
+    loop {
+        match t.get(i) {
+            Some(x) if is_punct(x, '&') => i += 1,
+            Some(x) if is_punct(x, '\'') => i += 2,
+            Some(x) if is_ident(x, "mut") => i += 1,
+            _ => break,
+        }
+    }
+    let rest = &t[i.min(t.len())..];
+    match rest.first() {
+        Some(x) if is_ident(x, "fn") || is_ident(x, "unsafe") || is_ident(x, "extern") => {
+            rest.iter().any(|x| is_ident(x, "fn"))
+        }
+        Some(x) if is_ident(x, "dyn") => {
+            let path_end = rest[1..]
+                .iter()
+                .position(|x| {
+                    matches!(x, TokenTree::Group(_)) || is_punct(x, '<') || is_punct(x, '+')
+                })
+                .map_or(rest.len(), |p| p + 1);
+            rest[1..path_end]
+                .iter()
+                .rev()
+                .find_map(|x| match x {
+                    TokenTree::Ident(id) => Some(id.to_string()),
+                    _ => None,
+                })
+                .is_some_and(|last| matches!(last.as_str(), "Fn" | "FnMut" | "FnOnce" | "FipFn"))
+        }
+        _ => {
+            // `Box<..>`, possibly by path (`std::boxed::Box<..>`).
+            let open = rest.iter().position(|x| is_punct(x, '<'));
+            match open {
+                Some(o)
+                    if o > 0
+                        && is_ident(&rest[o - 1], "Box")
+                        && rest.last().is_some_and(|x| is_punct(x, '>')) =>
+                {
+                    let inner = &rest[o + 1..rest.len() - 1];
+                    inner.first().is_some_and(|x| is_ident(x, "dyn")) && callable_param_type(inner)
+                }
+                _ => false,
+            }
+        }
+    }
 }
 
 /// `requires(..)`: every name it uses is a parameter, and, when the item carries a
@@ -2110,7 +2262,8 @@ fn mark_only_doc() -> TokenStream {
 /// panic_macros = true|false[, param(name = K, ..)])`
 ///
 /// `n` is the declared allocation bound (`#[fip]` and `#[fbip]`: 0, `#[fip(N)]`: N);
-/// `param(..)` repeats the declared `FipFn` parameter bounds of strict functions.
+/// `param(..)` repeats the declared parameter bounds (of strict functions, and of
+/// trait method declarations: a contract's callable parameters).
 /// With `requires(..)` a second attribute follows:
 /// `#[cfg_attr(fip_prelint, fip::requires(..))]` (normalised conjuncts).
 fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
