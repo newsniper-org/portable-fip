@@ -203,3 +203,28 @@ pub fn apply_ptr_fbip(p: fn(u32) -> u32, x: u32) -> u32 {
 pub fn fip_through_fbip(x: u32) -> u32 {
     apply_ptr_fbip(frees, x)
 }
+
+// `G` instantiated with a function pointer: the `Fn` shim calls through `self`, bound
+// to what the call site passes (top plan T3).
+
+/// A local function pointer reified from an allocation-free function: the shim is
+/// bound to it, passes (root and call site).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn generic_with_fnptr_local(x: u32) -> u32 {
+    let p: fn(u32) -> u32 = plus_one;
+    apply(p, x)
+}
+
+/// The same with an allocating function: the call site is reported with the
+/// allocation.
+pub fn generic_with_fnptr_local_alloc(x: u32) -> u32 {
+    let p: fn(u32) -> u32 = boxed_value;
+    apply(p, x)
+}
+
+/// A parameter declared `param(p = 0)` passed for `G`: the shim costs the
+/// declaration, passes (root and call site).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", param(p = 0)))]
+pub fn gen_declared(p: fn(u32) -> u32, x: u32) -> u32 {
+    apply(p, x)
+}

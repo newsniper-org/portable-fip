@@ -206,8 +206,10 @@ fn export_detection() {
 /// unsized at the call site is checked (passes or is reported), a pointer loaded from
 /// data or an undeclared parameter is `⊤` at the call site, a declared one passed on is
 /// checked against its own bound; an argument that frees or recurses under a `fip`
-/// callee is reported, and a `fip` root calling an `fbip` callee inherits the frees and
-/// recursion `fbip` allows its argument.
+/// callee is reported, and a `fip` root calling an `fbip` callee with a bound argument
+/// gets what that argument does (top plan B). A generic `G` instantiated with a
+/// function pointer (top plan T3): its `Fn` shim is bound to a local reification or a
+/// declared parameter (passes; an allocating one is reported at the call site).
 #[test]
 fn param_bounds() {
     check("param_bounds");
@@ -260,6 +262,9 @@ fn cells() {
 /// default body `Scaled::scaled`) or by hand (`Grow::grow`, the strict `Pick::pick`):
 /// the same mark. An implementation's own mark weaker than the contract is rejected;
 /// an implementation is checked against a contract without its own precondition.
+/// `&Box<dyn Fn>` parameters (top plan T2): with `param(g = 0)` the call through the
+/// box passes and call sites are checked (a box of an allocating function is
+/// reported); undeclared, and `Rc<dyn Fn>`, stay `⊤`.
 #[test]
 fn indirect() {
     check("indirect");

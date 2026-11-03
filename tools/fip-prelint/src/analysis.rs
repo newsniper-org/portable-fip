@@ -2320,7 +2320,13 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             },
             Origin::Const(c) => self.data_item(inst, c, None),
             Origin::Load(c, proj) => self.data_item(inst, c, Some(proj)),
-            Origin::Pointee(_) | Origin::BufOf(_) => None,
+            // `*self` in the `Fn`/`FnMut` shim of a function pointer: what the
+            // reference is bound to (top plan T3).
+            Origin::DerefArg(l) => match self.bind_of(l) {
+                Some(Bind::Callable(c)) => self.callable_item(&c, None),
+                _ => None,
+            },
+            Origin::Pointee(_) | Origin::BufOf(_) | Origin::Ref(_) | Origin::BoxPtr(_) => None,
         }
     }
 
@@ -2577,7 +2583,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Some(Bind::Formatter(out)) => self.output_call(def_id, callee, &out),
                 _ => None,
             },
-            Origin::Fn(_) | Origin::Const(_) | Origin::Load(..) => None,
+            // The receiver `&**self` of `<Box<dyn Fn*> as Fn*>::call*`: what the
+            // `&Box` parameter is bound to (top plan T2).
+            Origin::BoxPtr(l) => match self.bind_of(l) {
+                Some(Bind::Callable(c)) => self.callable_item(&c, Some(callee)),
+                _ => None,
+            },
+            Origin::Fn(_)
+            | Origin::Const(_)
+            | Origin::Load(..)
+            | Origin::Ref(_)
+            | Origin::DerefArg(_) => None,
         }
     }
 
@@ -2653,9 +2669,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             } else if mentions_fmt_args(tcx, ty, 2) {
                 self.fmt_set(inst, body, &a.node)
                     .map(|(fns, params)| Bind::Fmt(fns, params))
-            } else if (ty.is_fn_ptr() || self.callable_dyn(ty).is_some())
-                && self.callable_depth() < MAX_CALLABLE_DEPTH
-            {
+            } else if self.is_callable_value(ty) && self.callable_depth() < MAX_CALLABLE_DEPTH {
                 self.callable_of(inst, body, &a.node, ty)
                     .map(Bind::Callable)
             } else {
@@ -2686,11 +2700,21 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         n
     }
 
-    /// What the callable operand `op` (of type `ty`: a function pointer or a
-    /// `&dyn Fn*`) of `inst`'s body holds on every path: the function(s) it is
+    /// `true` for the types a callable binding describes: a function pointer, a
+    /// reference to one, and a callable trait object behind a reference or a `Box`
+    /// ([`Analysis::callable_dyn`]).
+    fn is_callable_value(&self, ty: Ty<'tcx>) -> bool {
+        ty.is_fn_ptr()
+            || matches!(*ty.kind(), ty::Ref(_, inner, _) if inner.is_fn_ptr())
+            || self.callable_dyn(ty).is_some()
+    }
+
+    /// What the callable operand `op` (of type `ty`, [`Analysis::is_callable_value`])
+    /// of `inst`'s body holds on every path: the function(s) a function pointer is
     /// reified from or read from immutable data, the concrete type a trait object is
     /// unsized from, the binding of a parameter it passes on, or a parameter declared
-    /// `param(h = K)`. `None`: not known (the callee is analysed without it).
+    /// `param(h = K)`. For a reference `&l` to a function pointer or to a `Box<dyn
+    /// Fn*>`: what `l` holds. `None`: not known (the callee is analysed without it).
     fn callable_of(
         &mut self,
         inst: Instance<'tcx>,
@@ -2722,6 +2746,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             Origin::Pointee(t) if !ty.is_fn_ptr() => {
                 let t = self.subst(inst, t)?;
                 t.is_sized(tcx, self.env).then_some(Callable::Pointee(t))
+            }
+            Origin::Ref(l) => {
+                let ty::Ref(_, inner, _) = *ty.kind() else {
+                    return None;
+                };
+                if !self.is_callable_value(inner) {
+                    return None;
+                }
+                self.callable_of(inst, body, &Operand::Copy(mir::Place::from(l)), inner)
             }
             Origin::Arg(l) => {
                 if let Some(Bind::Callable(c)) = self.bind_of(l) {
@@ -2794,7 +2827,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Bind::Formatter(o) => Some(o),
                 _ => None,
             },
-            Origin::Fn(_) | Origin::Const(_) | Origin::Load(..) => None,
+            Origin::Fn(_)
+            | Origin::Const(_)
+            | Origin::Load(..)
+            | Origin::Ref(_)
+            | Origin::DerefArg(_)
+            | Origin::BoxPtr(_) => None,
         }
     }
 
@@ -3220,6 +3258,16 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         };
         let arg_ty = args.type_at(p.index as usize);
         let arg = with_no_visible_paths!(with_no_trimmed_paths!(arg_ty.to_string()));
+        // `G` instantiated with a function pointer: its `Fn*` methods are shims that
+        // call through `self`, bound to what the argument holds here (top plan T3).
+        let bound = if arg_ty.is_fn_ptr() {
+            call_args.get(pos).and_then(|a| {
+                let aty = self.subst(caller, a.node.ty(&body.local_decls, tcx))?;
+                self.callable_of(caller, body, &a.node, aty)
+            })
+        } else {
+            None
+        };
         let mut items: Vec<(String, Item)> = Vec::new();
         for clause in tcx.param_env(callee).caller_bounds() {
             let Some(pred) = clause.as_trait_clause() else {
@@ -3236,10 +3284,25 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
                 let margs = EarlyBinder::bind(tcx, pred.trait_ref.args).instantiate(tcx, args);
                 let (label, item) = match tcx.try_normalize_erasing_regions(self.env, margs) {
-                    Ok(margs) => (
-                        def_path_args(tcx, m.def_id, margs),
-                        self.resolve(m.def_id, margs),
-                    ),
+                    Ok(margs) => {
+                        let item = match (
+                            &bound,
+                            Instance::try_resolve(tcx, self.env, m.def_id, margs),
+                        ) {
+                            (Some(c), Ok(Some(shim)))
+                                if matches!(shim.def, InstanceKind::Shim(_)) =>
+                            {
+                                Item::Call(self.node_bound(
+                                    shim,
+                                    Vec::new(),
+                                    0,
+                                    vec![(1, Bind::Callable(c.clone()))],
+                                ))
+                            }
+                            _ => self.resolve(m.def_id, margs),
+                        };
+                        (def_path_args(tcx, m.def_id, margs), item)
+                    }
                     Err(_) => {
                         let label = def_path(tcx, m.def_id);
                         let what = format!("`{label}` for `{arg}` (not normalizable)");
@@ -3258,11 +3321,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
     }
 
-    /// The principal trait of `t = &dyn Tr` or `&mut dyn Tr` if `Tr` is callable
-    /// (`Fn*`, `FipFn`).
+    /// The principal trait of `t = &dyn Tr`, `&mut dyn Tr`, `Box<dyn Tr>` or a
+    /// reference to `Box<dyn Tr>` if `Tr` is callable (`Fn*`, `FipFn`).
     fn callable_dyn(&self, t: Ty<'tcx>) -> Option<ty::Binder<'tcx, ty::ExistentialTraitRef<'tcx>>> {
-        let ty::Ref(_, inner, _) = *t.kind() else {
-            return None;
+        let inner = match *t.kind() {
+            ty::Ref(_, inner, _) if inner.is_box() => inner.expect_boxed_ty(),
+            ty::Ref(_, inner, _) => inner,
+            _ if t.is_box() => t.expect_boxed_ty(),
+            _ => return None,
         };
         let ty::Dynamic(preds, ..) = *inner.kind() else {
             return None;
@@ -3332,6 +3398,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
                 Callable::Fns(_) => {}
             }
+        }
+        // `&l` for a `&Box<dyn Fn*>` parameter: the box `l` (top plan T2).
+        if let Some(Origin::Ref(l)) = origin {
+            origin = origin_of(tcx, body, &Operand::Copy(mir::Place::from(l)));
         }
         match origin {
             Some(Origin::Fn(t)) if input.is_fn_ptr() => {
@@ -4075,6 +4145,15 @@ enum Origin<'tcx> {
     /// A load at these projections below the reference constant: a `static` or
     /// constant memory ([`Analysis::data_targets`] decides whether it is immutable).
     Load(mir::Const<'tcx>, &'tcx ty::List<mir::PlaceElem<'tcx>>),
+    /// A shared reference to this local of the body (`&l`).
+    Ref(mir::Local),
+    /// The value behind the reference parameter in this local, never reassigned
+    /// (`*_1` in the `Fn` shim of a function pointer).
+    DerefArg(mir::Local),
+    /// The pointer owned by the `Box` behind the reference parameter in this local
+    /// (`(*_1).0`, cast to `*const F`, reborrowed: the receiver in `<Box<F, A> as
+    /// Fn<Args>>::call`).
+    BoxPtr(mir::Local),
 }
 
 /// The output of a formatting: a concrete type implementing `fmt::Write`, or
@@ -4521,6 +4600,17 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
         }
         match p.projection.first()? {
             mir::ProjectionElem::Deref => match self.local(p.local, depth)? {
+                Origin::Arg(l) if p.projection.len() == 1 => Some(Origin::DerefArg(l)),
+                Origin::Arg(l)
+                    if p.projection.len() == 2
+                        && matches!(p.projection[1], mir::ProjectionElem::Field(f, _) if f.as_usize() == 0)
+                        && self.body.local_decls[p.local]
+                            .ty
+                            .builtin_deref(true)
+                            .is_some_and(|t| t.is_box()) =>
+                {
+                    Some(Origin::BoxPtr(l))
+                }
                 Origin::Const(c) => {
                     // An index local holding one constant is that element only.
                     let elems: Vec<mir::PlaceElem<'tcx>> = p.projection[1..]
@@ -4679,6 +4769,15 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             {
                 self.local(p.local, depth)
             }
+            // `&l`: a shared borrow keeps `l` unchanged while it lives.
+            mir::Rvalue::Ref(_, mir::BorrowKind::Shared, p) if p.projection.is_empty() => {
+                Some(Origin::Ref(p.local))
+            }
+            // A `Box`'s pointer keeps its origin through the casts of its deref.
+            mir::Rvalue::Cast(_, op, _) => match self.operand(op, depth)? {
+                o @ Origin::BoxPtr(_) => Some(o),
+                _ => None,
+            },
             _ => None,
         }
     }

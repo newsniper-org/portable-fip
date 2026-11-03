@@ -296,6 +296,17 @@ stays `⊤`. `Rc<dyn Fn>` is a control.
 
 **Effort.** S after B.
 
+**Implemented** (item 4, candidate 1). `Origin::BoxPtr(l)`: `(*_1).0` of a `&Box`
+parameter, through its `BoxDerefTransmute` cast and reborrow (the 1.99.1 shape of
+`<Box<F, A> as Fn<Args>>::call`, not the plan's `(*((*_1).0.0.0))`), restricted by
+`is_box()`; the `&Box` parameter is bound (B) to the caller's declared parameter or to
+the type the box was unsized from (`Origin::Ref` for `&b`). `callable_dyn` accepts
+`Box<dyn Fn*>` and references to it, so `param(g = K)` on `&Box<dyn Fn*>` is checked at
+call sites. Fixture `indirect`: `box_dyn_fn` passes, `box_dyn_fn_undeclared` and
+`rc_dyn_fn` stay `⊤`, `box_dyn_caller_alloc` is reported at the call site. N4
+`box_dyn_fn` passes. **Deviation:** `Rc<dyn Fn>` is not followed through `Deref` (a
+call result), so it stays `⊤`, unlike the plan's "needs no special case".
+
 ### T3. Generic `F` instantiated with a function pointer (the `Fn` shim)
 
 **Current.** `apply::<fn(u8) -> u8>(p)` reaches `<fn(u8) -> u8 as Fn<(u8,)>>::call
@@ -316,6 +327,16 @@ origin: a reified function resolves to that function, and a declared parameter c
 and `generic_with_fnptr_param` (undeclared) stays `⊤`.
 
 **Effort.** S after B. **Dependencies:** B.
+
+**Implemented** (item 4). `Origin::DerefArg(l)` (`*_1` of a reference parameter) and
+`Origin::Ref(l)` (`&l`): the shim's `&fn` parameter is bound to what the argument
+holds; `argument_items` binds the shim nodes of a function-pointer `G` at the call
+site. Fixture `param_bounds`: `generic_with_fnptr_local` and `gen_declared` pass (root
+and call site), `generic_with_fnptr_local_alloc` is reported with its allocation,
+`fn_pointer` (undeclared) stays `⊤` at its call site. N4: `gen_declared`,
+`generic_with_fnptr_local` pass; `generic_with_fnptr_param` keeps its call-site `⊤`
+and its root now passes (the shim costs `apply`'s declaration, like any declared
+callee). `FnMut` bounds are not covered (`&mut g` makes `g` unstable).
 
 ### T4. Origins passed through functions without `param`, and call results
 

@@ -1663,3 +1663,49 @@ are unchanged.
 **Deviation from the plan:** predicted "no verdict change alone"; measured: one more
 passing root in N4 and more precise witnesses in two fixtures (above). `Certified(N)`
 (T1.4) is not implemented yet; `Box<dyn Fn*>` and generic `F` bindings come with T2/T3.
+
+## Resolved 2026-11-03: the `Fn` shim of a function pointer and `Box<dyn Fn*>` (top plan T3 + T2)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T3 and T2 candidate 1 (item
+4 of its order), on top of B.
+
+**Before.** `apply::<fn(u8) -> u8>(p)` reached `<fn(u8) -> u8 as Fn<(u8,)>>::call
+(shim)`, whose body `move (*_1)(..)` calls through its `&fn` parameter: `⊤` for a
+local reification, an undeclared and even a declared parameter, at the root and at the
+call site. `g(1)` with `g: &Box<dyn Fn(u8) -> u8>` went through `<Box<F, A> as
+Fn<Args>>::call`, whose receiver `&*((*_1).0 as *const F)` was not followed: `⊤`; a
+`param(g = K)` on such a parameter was "neither generic, a function pointer nor a
+reference to a callable trait object" at every call site.
+
+**Mechanism** (`src/analysis.rs`).
+
+- `Origin::Ref(l)` (`&l`, shared), `Origin::DerefArg(l)` (`*_1` of a reference
+  parameter), `Origin::BoxPtr(l)` (`(*_1).0` of a `&Box` parameter, through the casts
+  of the `Box` deref and the reborrow; only for `is_box()` types).
+- Callable bindings (B) also cover `&fn(..)` arguments and `Box<dyn Fn*>`/`&Box<dyn
+  Fn*>` (`is_callable_value`, `callable_dyn`); `callable_of` follows `&l` to what `l`
+  holds.
+- In the shim, `pointer_target` resolves `DerefArg(l)` through the binding of `l`; in
+  the `Box` impl, `devirtualize` resolves `BoxPtr(l)` through the binding of the `&Box`
+  parameter (the caller's declared parameter, or the type the box was unsized from).
+- At call sites, a generic `G` instantiated with a function pointer gets its `Fn*`
+  shims as nodes bound to the argument (`argument_items`); `indirect_argument` follows
+  `&b` to the box for `&Box<dyn Fn*>` parameters.
+
+**Soundness.** As B: each binding is a must-fact at its call sites. `&l` is a shared
+borrow, so `l` is unchanged while the callee runs. The `Box` projection reads the
+pointer the box owns.
+
+**Measured** (before = `78fbffa`):
+
+| case | before | after |
+|---|---|---|
+| fixture `param_bounds` (3 new roots/functions) | 16 roots, 7 passed, 27 errors: `generic_with_fnptr_local`, `gen_declared` `⊤` (root and call site), `generic_with_fnptr_local_alloc` `⊤` at the call site | 16 roots, 9 passed, 23 errors: both pass; the allocating one is reported with its allocation; `fn_pointer` (undeclared) stays `⊤` |
+| fixture `indirect` (5 new functions, 3 roots) | 30 roots, 14 passed, 24 errors: `box_dyn_fn` `⊤`; call sites of `box_dyn_caller*` `⊤` | 30 roots, 15 passed, 22 errors: `box_dyn_fn` passes; `box_dyn_caller` passes, `box_dyn_caller_alloc` reported; `box_dyn_fn_undeclared`, `rc_dyn_fn` stay `⊤` |
+| N4 `top` | 44 roots, 23 passed, 32 errors | 26 passed, 26 errors: `box_dyn_fn`, `gen_declared`, `generic_with_fnptr_local` pass (root and call site); `generic_with_fnptr_param`'s root passes (the shim costs `apply`'s declaration), its call site stays `⊤` |
+| self-check dev / `--release`, other fixtures | — | unchanged; 23 `param` call sites |
+
+**Deviations:** the `Box` impl's MIR in 1.99.1 is `(*_1).0` + `BoxDerefTransmute` cast
++ reborrow, not the plan's `(*((*_1).0.0.0))`. `Rc<dyn Fn>` stays `⊤` (its `Deref` is
+a call result; not "no special case needed"). `FnMut`-bound generics with a function
+pointer stay `⊤` (`&mut g` makes `g` unstable in the must-analysis).

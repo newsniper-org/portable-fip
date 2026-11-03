@@ -226,3 +226,39 @@ impl Scaled for BadScaled {
         boxed_value(self.0)
     }
 }
+
+// (6) `Box<dyn Fn*>` parameters (top plan T2): the `Box`'s `Fn` impl calls
+// `(**self).call(..)`, bound to what the call site passes for the `&Box`.
+
+/// Declares `param(g = 0)` for a `&Box<dyn Fn>`: the call through the box costs the
+/// declaration, passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", param(g = 0)))]
+pub fn box_dyn_fn(g: &Box<dyn Fn(u32) -> u32>, x: u32) -> u32 {
+    g(x)
+}
+
+/// The same without `param(..)`: `⊤`.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn box_dyn_fn_undeclared(g: &Box<dyn Fn(u32) -> u32>, x: u32) -> u32 {
+    g(x)
+}
+
+/// A caller (not a root) passing a box made from an allocation-free function: the
+/// call site passes.
+pub fn box_dyn_caller(x: u32) -> u32 {
+    let b: Box<dyn Fn(u32) -> u32> = Box::new(add_one);
+    box_dyn_fn(&b, x)
+}
+
+/// A box made from an allocating function: reported at the call site.
+pub fn box_dyn_caller_alloc(x: u32) -> u32 {
+    let b: Box<dyn Fn(u32) -> u32> = Box::new(boxed_value);
+    box_dyn_fn(&b, x)
+}
+
+/// `Rc<dyn Fn>` (a control): reached through `Rc`'s `Deref`, an ordinary call; the
+/// trait object's origin is not followed there, `⊤`.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn rc_dyn_fn(g: &std::rc::Rc<dyn Fn(u32) -> u32>, x: u32) -> u32 {
+    g(x)
+}

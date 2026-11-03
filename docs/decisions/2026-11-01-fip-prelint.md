@@ -620,6 +620,19 @@ to 3 callees; roots and local functions checked on their own are analysed unboun
 before. Fixture `callable_binds`. Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-03: callable bindings across calls".
 
+## Amendment 2026-11-03: the `Fn` shim of a function pointer and `Box<dyn Fn*>` (top plan T3 + T2)
+
+Callable bindings also bind references to function pointers and `Box<dyn Fn*>` /
+`&Box<dyn Fn*>` arguments. The `Fn*` shim of a function pointer calls through its
+`self`, which is resolved through that binding; the `Box` impl of `Fn*` calls the trait
+object its `&Box` parameter owns (the projection `(*self).0` with its deref casts, only
+for `Box`), resolved through the binding of that parameter. At call sites, a generic
+`G` instantiated with a function pointer is checked through its shims bound to the
+argument, and `param(g = K)` on a `&Box<dyn Fn*>` parameter is checked like on a `&dyn
+Fn*`. `Rc<dyn Fn*>` and `FnMut`-bound function pointers stay `⊤`. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: the `Fn` shim of a function pointer and
+`Box<dyn Fn*>`".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
