@@ -709,6 +709,16 @@ establish them, as for the other terms. Relational nonlinear guards, variable in
 and interior mutability stay reported. Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-03: element paths and access-path preconditions".
 
+## Amendment 2026-11-03: foreign calls inside std summaries (top plan item 8b)
+
+A foreign call inside a summarised `std` function is stored as the term `§ffi <symbol>
+<abi>` (sidecar format 2; format-1 files and drivers refuse each other) and resolved
+at the use site with the analysed crate's FFI marks, by symbol and ABI, as a direct
+call: certified, excluded (both listed), else the FFI error naming the std function.
+The seed adds `HashMap::new` and a lazily initialised thread local; both still reach
+function pointers from mutable data (`⊤`). Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-03: foreign calls inside std summaries".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

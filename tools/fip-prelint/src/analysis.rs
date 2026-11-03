@@ -88,7 +88,9 @@
 //! `core::fmt`, and the open terms of a standard-library function without MIR taken
 //! from the generated std summaries ([`crate::stdsum`], used only when its stamp
 //! matches). Generating them (`--std-summaries`), the summarised function's own
-//! parameters are bound symbolically and the calls through them become those terms.
+//! parameters are bound symbolically and the calls through them become those terms;
+//! a foreign call becomes the term `§ffi <symbol> <abi>`, resolved at the use site with
+//! the analysed crate's FFI marks ([`Crates::ffi_verdict_std`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -636,9 +638,16 @@ pub struct Crates {
     /// Calls whose foreign callee was matched by symbol to a mark on another
     /// declaration: `(callee, marked declaration)`, reported in the crate summary.
     ffi_matches: std::cell::RefCell<Vec<(DefId, DefId)>>,
+    /// Foreign calls inside std summaries (`§ffi` terms) matched to a mark by symbol:
+    /// `(summarised std function, symbol, ABI, marked declaration)`, reported in the
+    /// crate summary.
+    ffi_std_matches: std::cell::RefCell<Vec<(String, String, String, DefId)>>,
     /// Generated summaries of standard-library functions without MIR, or why they
     /// are not used ([`crate::stdsum`]).
     pub std_summaries: Result<crate::stdsum::Sidecar, String>,
+    /// Generating std summaries (`--std-summaries`): a foreign call is the term
+    /// `§ffi <symbol> <abi>`, resolved where the summary is used.
+    pub generating: bool,
 }
 
 /// The rustc version of this driver (`1.99.1 (<commit> <date>)`).
@@ -804,6 +813,15 @@ pub fn ffi_abi(tcx: TyCtxt<'_>, def_id: DefId) -> String {
     tcx.fn_sig(def_id).skip_binder().abi().to_string()
 }
 
+/// The marked declaration of a symbol shown in reports: a local one first, then the
+/// first in source order.
+fn shown_decl(tcx: TyCtxt<'_>, decls: &[FfiDecl]) -> DefId {
+    decls
+        .iter()
+        .min_by_key(|d| (!d.def_id.is_local(), tcx.def_span(d.def_id)))
+        .map_or_else(|| decls[0].def_id, |d| d.def_id)
+}
+
 /// The certified properties a call counts (the evidence is not compared).
 fn cert_key(c: &marks::FfiCert) -> (marks::Kind, u64, bool) {
     (c.kind, c.alloc, c.free)
@@ -918,7 +936,9 @@ impl Crates {
             requires,
             ffi,
             ffi_matches: std::cell::RefCell::new(Vec::new()),
+            ffi_std_matches: std::cell::RefCell::new(Vec::new()),
             std_summaries,
+            generating: generate,
         }
     }
     /// Adds the marks of the local crate (the roots).
@@ -975,7 +995,53 @@ impl Crates {
     /// declaration of its link symbol. A match through another declaration than
     /// `def_id` is recorded for the crate summary.
     pub fn ffi_verdict(&self, tcx: TyCtxt<'_>, def_id: DefId) -> FfiVerdict<'_> {
-        let decls = self.ffi_decls(&ffi_symbol(tcx, def_id));
+        let symbol = ffi_symbol(tcx, def_id);
+        let abi = ffi_abi(tcx, def_id);
+        let v = self.ffi_verdict_of(&symbol, &abi);
+        if matches!(v, FfiVerdict::Cert(_) | FfiVerdict::Excluded) {
+            let decls = self.ffi_decls(&symbol);
+            if !decls.iter().any(|d| d.def_id == def_id) {
+                // The declaration reported: a local one first, then the first in
+                // source order.
+                let shown = shown_decl(tcx, decls);
+                let mut m = self.ffi_matches.borrow_mut();
+                if !m.contains(&(def_id, shown)) {
+                    m.push((def_id, shown));
+                }
+            }
+        }
+        v
+    }
+    /// The verdict for a foreign call inside the std summary of `path` (a `§ffi`
+    /// term: the link symbol and ABI recorded when the summary was generated), from
+    /// the marks of this crate and the exported crates; a match is recorded for the
+    /// crate summary.
+    pub fn ffi_verdict_std(
+        &self,
+        tcx: TyCtxt<'_>,
+        path: &str,
+        symbol: &str,
+        abi: &str,
+    ) -> FfiVerdict<'_> {
+        let v = self.ffi_verdict_of(symbol, abi);
+        if matches!(v, FfiVerdict::Cert(_) | FfiVerdict::Excluded) {
+            let shown = shown_decl(tcx, self.ffi_decls(symbol));
+            let entry = (path.to_string(), symbol.to_string(), abi.to_string(), shown);
+            let mut m = self.ffi_std_matches.borrow_mut();
+            if !m.contains(&entry) {
+                m.push(entry);
+            }
+        }
+        v
+    }
+    /// Foreign calls inside std summaries matched by symbol so far.
+    pub fn ffi_std_matches(&self) -> Vec<(String, String, String, DefId)> {
+        self.ffi_std_matches.borrow().clone()
+    }
+    /// The verdict for a call of a foreign function with link symbol `symbol` and ABI
+    /// `abi`, from the marks on any declaration of that symbol.
+    fn ffi_verdict_of(&self, symbol: &str, abi: &str) -> FfiVerdict<'_> {
+        let decls = self.ffi_decls(symbol);
         if decls.is_empty() {
             return FfiVerdict::Neither;
         }
@@ -992,23 +1058,11 @@ impl Crates {
         if certs.iter().any(|c| cert_key(c) != cert_key(certs[0])) {
             return FfiVerdict::Conflict;
         }
-        let abi = ffi_abi(tcx, def_id);
         if let Some(d) = decls.iter().find(|d| d.abi != abi) {
             return FfiVerdict::Abi {
                 marked: d.def_id,
                 marked_abi: d.abi.clone(),
             };
-        }
-        if !decls.iter().any(|d| d.def_id == def_id) {
-            // The declaration reported: a local one first, then the first in source order.
-            let shown = decls
-                .iter()
-                .min_by_key(|d| (!d.def_id.is_local(), tcx.def_span(d.def_id)))
-                .map_or(decls[0].def_id, |d| d.def_id);
-            let mut m = self.ffi_matches.borrow_mut();
-            if !m.contains(&(def_id, shown)) {
-                m.push((def_id, shown));
-            }
         }
         match certs.first() {
             Some(c) => FfiVerdict::Cert(c),
@@ -2070,6 +2124,21 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             if rules::is_alloc_free_symbol(name) {
                 return NodeKind::Leaf(Vec::new());
             }
+            // Generating std summaries: the seed has no marks; the call is the term
+            // `§ffi <symbol> <abi>`, resolved with the marks of the crate that uses
+            // the summary ([`Analysis::resolve_term`]).
+            if self.crates.generating {
+                let key = format!("§ffi {} {}", ffi_symbol(tcx, def_id), ffi_abi(tcx, def_id));
+                return NodeKind::Body(BodyInfo {
+                    blocks: vec![vec![Site {
+                        item: Item::Term(key),
+                        span: DUMMY_SP,
+                    }]],
+                    succ: vec![Vec::new()],
+                    reachable: vec![true],
+                    in_loop: vec![false],
+                });
+            }
             // Marks apply by link symbol, so a declaration in `std`, `libc` or any
             // dependency is covered by a mark on a declaration in the user's crate.
             let symbol = ffi_symbol(tcx, def_id);
@@ -2288,8 +2357,56 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     _ => unknown(format!("`{method}` for `{t}` does not resolve")),
                 }
             }
+            // A foreign call inside the summarised function: the verdict of this
+            // crate's FFI marks for its link symbol and ABI, as for a direct call.
+            ["§ffi", symbol, abi] => self.ffi_term(path, symbol, abi),
             _ => unknown("unknown term".to_string()),
         }
+    }
+
+    /// The events of the foreign call `§ffi <symbol> <abi>` inside the std summary of
+    /// `path`: a certificate's events, nothing for an exclusion (both listed in the
+    /// crate summary), else the FFI error (neither certified nor excluded, both,
+    /// conflicting certificates, another ABI) naming the summarised function.
+    fn ffi_term(&mut self, path: &str, symbol: &str, abi: &str) -> Vec<Item> {
+        let tcx = self.tcx;
+        let inside = format!("called inside `{path}` (std summary)");
+        let msg = match self.crates.ffi_verdict_std(tcx, path, symbol, abi) {
+            FfiVerdict::Cert(c) => {
+                let count = if c.alloc > 1 {
+                    format!(" (n = {})", c.alloc)
+                } else {
+                    String::new()
+                };
+                let mut items = Vec::new();
+                for _ in 0..c.alloc {
+                    items.push(Item::Ev(Ev::Alloc(format!(
+                        "allocation: certified foreign function `{symbol}`{count}, {inside}"
+                    ))));
+                }
+                if c.free {
+                    items.push(Item::Ev(Ev::Free(format!(
+                        "free: certified foreign function `{symbol}`, {inside}"
+                    ))));
+                }
+                return items;
+            }
+            FfiVerdict::Excluded => return Vec::new(),
+            FfiVerdict::Neither => format!(
+                "foreign function `{symbol}` (`extern {abi}`), {inside}, is neither certified nor excluded"
+            ),
+            FfiVerdict::Both => format!(
+                "foreign function `{symbol}` (`extern {abi}`), {inside}, is both certified and excluded"
+            ),
+            FfiVerdict::Conflict => format!(
+                "foreign function `{symbol}`, {inside}: its symbol has certificates with different properties"
+            ),
+            FfiVerdict::Abi { marked, marked_abi } => format!(
+                "foreign function `{symbol}`, {inside}, is declared `extern {abi}`, but its symbol is marked on `{}`, declared `extern {marked_abi}`: marks do not apply across ABIs",
+                tcx.def_path_str(marked)
+            ),
+        };
+        vec![Item::Ev(Ev::Unknown(format!("ffi:{msg}")))]
     }
 
     /// The output a summary term names ([`out_desc`]): `param <j>` (what this node's

@@ -139,8 +139,8 @@ pub fn call_dep_other_abi(c: core::ffi::c_int) -> core::ffi::c_int {
     unsafe { cdep::toupper(c) }
 }
 
-/// 12. `std`'s declaration of `__errno_location` is excluded by symbol; the
-/// remaining error is a std function without MIR on the same path.
+/// 12. `std`'s declaration of `__errno_location` is excluded by symbol; the std
+/// function without MIR on the same path is summarised (top plan 8b): passes.
 #[fip]
 pub fn call_std_errno() -> std::io::Error {
     std::io::Error::last_os_error()

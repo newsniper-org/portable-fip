@@ -3,5 +3,13 @@
 version = 4
 
 [[package]]
+name = "fmtabi"
+version = "0.1.0"
+
+[[package]]
+name = "fmtffi"
+version = "0.1.0"
+
+[[package]]
 name = "fmtuse"
 version = "0.1.0"

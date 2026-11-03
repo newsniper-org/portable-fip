@@ -477,6 +477,24 @@ fn report_ffi_matches(tcx: TyCtxt<'_>, crates: &Crates) -> usize {
             )
         })
         .collect();
+    // Foreign calls inside std summaries (`§ffi` terms), matched by symbol.
+    for (path, symbol, abi, decl) in crates.ffi_std_matches() {
+        let how = match crates
+            .ffi_decls(&symbol)
+            .iter()
+            .find(|x| x.def_id == decl)
+            .map(|x| &x.mark)
+        {
+            Some(FfiMark::Cert(_)) => "certified",
+            _ => "excluded",
+        };
+        let at = user_location(tcx, tcx.def_span(decl))
+            .unwrap_or_else(|| format!("crate `{}`", tcx.crate_name(decl.krate)));
+        lines.push(format!(
+            "fip-prelint: foreign function `{symbol}` (`extern {abi}`), called inside `{path}` (std summary), {how} by symbol: `{}` ({at})",
+            tcx.def_path_str(decl)
+        ));
+    }
     lines.sort();
     lines.dedup();
     for l in &lines {

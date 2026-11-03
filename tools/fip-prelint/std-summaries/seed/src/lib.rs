@@ -5,8 +5,11 @@
 //! (`format!`, `write!` into a buffer, `Display`/`Debug` of the primitive types
 //! including floats and 128-bit integers, the radix and exponent formats of every
 //! integer type, formatting options, user `Display` impls that write through the
-//! `Formatter`). Every standard-library function without shipped MIR reached from
-//! here, and from those, is summarised. Add a root here to cover a new path.
+//! `Formatter`), `HashMap::new` and a lazily initialised thread local (their random
+//! source and destructor registration reach foreign functions, which a summary
+//! records as `§ffi` terms). Every standard-library function without shipped MIR
+//! reached from here, and from those, is summarised. Add a root here to cover a new
+//! path.
 
 use core::fmt::{self, Write};
 
@@ -228,4 +231,18 @@ pub fn write_std_debug(
 ) -> fmt::Result {
     write!(b, "{s:?}{a:?}{o:?}{r:?}{t:?}{st:?}")?;
     write!(b, "{s:#?}{a:#?}{o:#?}{r:#?}{t:#?}")
+}
+
+std::thread_local! {
+    static LAZY: core::cell::Cell<u32> = core::cell::Cell::new(u32::from(u8::MAX));
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn thread_local_lazy() -> u32 {
+    LAZY.with(core::cell::Cell::get)
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn hashmap_new() -> usize {
+    std::collections::HashMap::<u8, u8>::new().len()
 }

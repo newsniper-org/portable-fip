@@ -5,4 +5,4 @@
 # MIR, through the generated std summaries (limits plan L6).
 [workspace]
 resolver = "3"
-members = ["fmtuse"]
+members = ["fmtuse", "fmtffi", "fmtabi"]

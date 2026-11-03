@@ -45,12 +45,19 @@
 //! `<out>`, the `{:#?}` path) or `ty <type>`. The `§dyn` and `pad` forms were added
 //! without a format change: they only add keys, and a driver that does not know a
 //! key reports it as `⊤`.
+//!
+//! Format 2 (top plan item 8b): a call of a foreign function inside a summarised
+//! function is the term `§ffi <symbol> <abi>` (its link symbol and ABI as rustc
+//! prints it, `"C"`), resolved at the use site with the FFI marks of the analysed
+//! crate (certified: its events; excluded: none; else the FFI error), where format 1
+//! recorded it as `top`. The format number changed so that a format-1 driver refuses
+//! the file instead of reading a summary that leaves out what format 1 put in `top`.
 
 use std::collections::BTreeMap;
 
 /// Version of the format and of the meaning of its entries; bumped whenever the
 /// analysis that produces them changes what an entry means.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The stamp of a sidecar: what it was generated for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -301,6 +308,7 @@ mod tests {
                 terms: vec![
                     (Count::Inf, "§out 0 core::fmt::Write::write_str".to_string()),
                     (Count::Inf, "§fmt 1 out param 0".to_string()),
+                    (Count::Fin(1), "§ffi syscall \"C\"".to_string()),
                 ],
                 free: Vec::new(),
                 panic: vec!["`core::panicking::panic_fmt`".to_string()],
@@ -362,6 +370,12 @@ mod tests {
             old.check_stamp("1.99.1 (abc 2026-01-01)", "x86_64-unknown-linux-gnu")
                 .is_err()
         );
+        // A format-1 file (foreign calls as `top`) is not read as format 2.
+        old.stamp.format = 1;
+        assert!(
+            old.check_stamp("1.99.1 (abc 2026-01-01)", "x86_64-unknown-linux-gnu")
+                .is_err()
+        );
     }
 
     #[test]
@@ -372,7 +386,7 @@ mod tests {
         assert!(Sidecar::parse(&text.replace("end\n", "")).is_err());
         assert!(Sidecar::parse(&text.replace("alloc inf", "alloc lots")).is_err());
         assert!(Sidecar::parse(&text.replace("panic ", "panik ")).is_err());
-        assert!(Sidecar::parse(&text.replace("format 1\n", "")).is_err());
+        assert!(Sidecar::parse(&text.replace(&format!("format {FORMAT}\n"), "")).is_err());
         let twice = format!("{text}\nfn core::fmt::write\nend\n");
         assert!(Sidecar::parse(&twice).is_err());
     }

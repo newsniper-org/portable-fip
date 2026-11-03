@@ -525,6 +525,14 @@ committed: 232 functions, generation 646.5 s) gives "may allocate 22 time(s)" pl
 initialised thread locals stay `⊤` for the same reason. Open: a `§ffi` summary term
 resolved with the user's FFI marks.
 
+**Implemented** (item 8b, the open point). Summaries store foreign calls as `§ffi
+<symbol> <abi>` (format 2), resolved with the use site's FFI marks; seed adds
+`HashMap::new` and a lazy thread local (230 functions). Fixture `std_summaries`: with
+marks (`fmtffi`) `HashMap::new` is "may allocate 22 time(s)"; without (`fmtuse`) the
+specific FFI errors replace `⊤`; ABI / both errors (`fmtabi`). **Deviation:** both
+stay partly `⊤` through function pointers from mutable data (weak `getrandom`,
+`io::Error` OS functions, `CustomOwner` drop, `Once` `dyn FnMut`).
+
 ### T8. Stack mode gaps
 
 **Current.** See N5 and limits plan L9 "Implemented".

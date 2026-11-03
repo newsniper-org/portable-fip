@@ -2038,3 +2038,45 @@ by the caller's own precondition, which is checked in turn.
 | self-check dev / `--release`, other fixtures | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
 | std sidecar regenerated with this driver | — | identical to the committed file (198 functions; 211.9 s of analysis, 274 s wall) |
 
+## Resolved 2026-11-03: foreign calls inside std summaries (`§ffi`, top plan item 8b)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, open point of item 8 (T7g).
+
+**Before.** Generating the std sidecar, a foreign call inside `std` (`syscall`,
+`read`, ..) got the seed crate's FFI verdict (no marks: "neither"), stored as a `top`
+line; the user's FFI marks could not reach into a summary, so `HashMap::new` and lazy
+thread locals stayed `⊤` there.
+
+**Mechanism.** In generation mode (`Crates::generating`) a foreign call that is not in
+the allocator / allocation-free symbol tables is the term `§ffi <symbol> <abi>`. At
+the use site `Analysis::ffi_term` resolves it with `Crates::ffi_verdict_std` (the same
+symbol + ABI rules as a direct call, `ffi_verdict_of`): certified → its allocations
+and free; excluded → nothing; both listed in the crate summary ("called inside `<std
+fn>` (std summary), certified/excluded by symbol"); neither / both / conflicting
+certificates / another ABI → the FFI error naming the symbol and the summarised std
+function. Sidecar `FORMAT` 1 → 2: a format-1 driver refuses the new file
+(`check_stamp`), and this driver refuses format-1 files. Seed: `HashMap::new` and a
+lazily initialised `thread_local!`.
+
+**Soundness.** A summary term is resolved per use site from marks that are checked
+like direct FFI marks (by symbol and ABI); a term the use site cannot resolve is an
+error, never a pass. Older drivers do not read the new format.
+
+**Measured** (before = `5e46ea8`, after = this commit; machine load average ≈ 37, so
+wall times are noisy):
+
+| case | before | after |
+|---|---|---|
+| sidecar | 198 functions, 2 099 lines, 461 674 bytes, 0 `top` lines | 230 functions, 2 412 lines, 528 577 bytes; 17 `top` lines (all function pointers or `dyn`: the weak `getrandom` symbol, `io::Error::is_interrupted`, `CustomOwner`'s drop pointer, `Once::call`'s `dyn FnMut`); 15 functions carry `§ffi` terms over 9 symbols (`syscall`, `read`, `write`, `open64`, `close`, `fcntl`, `poll`, `clock_gettime`, `__errno_location`) |
+| generation (`--std-summaries`, cold target dir) | 211.9 s analysis, 274 s wall | 235.2 / 244.7 s analysis, 1 039 / 530 s wall (two runs, identical output); the growth is in the `-Zbuild-std` build under load, the analysis grew 11–15 %. Below the ~10 min budget in the second run; kept the full seed |
+| fixture `std_summaries` `fmtuse` (no marks) | 19 roots, 11 passed, 23 errors | 19 roots, 11 passed, 36 errors: `hashmap_new` "may allocate 22 time(s)" plus the specific "neither certified nor excluded" errors per symbol, naming the std function |
+| new `fmtffi` (certifies `__errno_location`, `clock_gettime`; excludes the 7 others) | — | 2 roots, 0 passed, 11 errors: `hashmap_new` "may allocate 22 time(s)"; 11 by-symbol notes; remaining `⊤` only the function pointers above and a `core::fmt::write` with unknown arguments |
+| new `fmtabi` (`write` marked `extern "system"`, `__errno_location` both) | — | 1 root, 6 errors: the ABI and "both" errors for the summary's calls |
+| fixture `ffi` | 14 roots, 6 passed | 7 passed: `call_std_errno` (its std function is now summarised) |
+| N4 `top` | 46 roots, 37 passed, 18 errors | 46 roots, 37 passed, 31 errors: `hashmap_new`'s `⊤` lines become per-symbol FFI errors plus the function-pointer `⊤` |
+| self-check dev / `--release` | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
+
+**Deviation.** `HashMap::new` gets an allocation verdict (22) but no complete one: past
+the FFI calls, `std`'s random source and error paths call through function pointers
+loaded from mutable data (T1 "stays"). Lazily initialised thread locals likewise.
+
