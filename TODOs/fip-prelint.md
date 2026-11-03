@@ -1563,3 +1563,59 @@ The note texts are unchanged: an overflow or debug-assertion note now exists onl
 the analysed profile has that check, so the profile is implied by the run
 (`cargo fip-prelint` vs `--release`); adding it to every note would change every
 expected line without adding a fact.
+
+## Resolved 2026-11-03: function pointers from constants, immutable statics and local aggregates (top plan T1.1–T1.3)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T1 candidates 1–3 (item 2
+of its order). Before: `origin_of` gave up on `Operand::Constant`, on projections and
+on loads, so `CONE(x)`, `ONE(x)`, `TABLE[i](x)`, `(SOPS.f)(x)` and `(o.f)(x)` with a
+local `o = Ops { f: plus1 }` were `⊤`.
+
+**Mechanism** (`src/analysis.rs`).
+
+- `Origin::Const(c)`: an `Operand::Constant`. `Origin::Load(c, proj)`: a place
+  `(*l).proj` where `l` holds the reference constant `c` (`_3 = const {alloc1:
+  &[fn(u8) -> u8; 2]}`; `_2 = copy (*_3)[_4]`). An `Index` by a local assigned one
+  integer constant becomes a `ConstantIndex` (`MIXED[2]`).
+- `Analysis::data_targets`: evaluates `c` in the instance (`mir::Const::eval`). A
+  function pointer constant is its `GlobalAlloc::Function` instance. For a load, the
+  referenced allocation must be immutable: a `GlobalAlloc::Static` that is not `static
+  mut`, not thread-local, not foreign, of a `Freeze` type (initializer from
+  `eval_static_initializer`, also across crates), or `GlobalAlloc::Memory`; and its
+  `mutability` must be `Not`. A `const` slice evaluates to `ConstValue::Indirect`: the
+  wide pointer is read from that memory. The projections are walked over the layout
+  (struct and tuple fields; array and slice elements, all of them for an unknown index,
+  at most 256); every value read must be a pointer to a function. Anything else
+  (a dereference inside the data, an enum variant, a non-function value): `None`, `⊤`.
+- One candidate is the call; several are `Item::Alt`, a site costing the maximum of
+  its alternatives with the events of every one (`site_cost`). Each candidate is
+  checked at the call like a direct callee (declared parameter bounds,
+  `fip::requires`).
+- `OriginCx::field`: `l.f` (chains of fields) where `l` is a non-parameter local
+  assigned only as whole struct or tuple aggregates, never mutably borrowed or written
+  in part ([`Unstable`]), of a `Freeze` type; the origin of the field's operand, if
+  every aggregate agrees.
+- At call sites of a callee with `param(p = K)`, a constant or table argument gives its
+  candidates as alternatives (label `one of ..`).
+
+**Soundness.** A constant has one value. Memory of an immutable `Freeze` static or of
+a constant is never written after initialisation (a write is undefined behaviour), so a
+load yields one of the pointers in the initializer; an unknown index takes every
+element. The local-aggregate rule is the existing must-origin over whole-local writes.
+
+**Measured** (rustc 1.99.1; before = `fbfa608`):
+
+| case | before | after |
+|---|---|---|
+| fixture `indirect_data` (new) | 22 roots, 1 passed (`apply_ptr`), 21 errors, every one `⊤` | 22 roots, 13 passed, 11 errors: `via_mixed` (the `leaked` candidate allocates), `via_local_struct_alloc` (resolved, allocates and frees), `via_guarded_table` (precondition of `small` not established; its overflow), `pass_mixed` (argument may allocate once, `param(p = 0)`); `⊤`: `via_cell_struct`, `via_atomic`, `via_static_mut`, `via_local_written`, `via_param_field` |
+| N4 `top` (`/tmp/tp-m3`) | 44 roots, 19 passed, 36 errors | 44 roots, 22 passed, 32 errors: `fnptr_const`, `fnptr_static`, `fnptr_local_struct` pass; `fnptr_static_table` loses its `⊤`, keeps its bounds-check error (`(i & 1) as usize < 2` not proved: `BitAnd` is outside the value domain) |
+| N3 limits probe, other crates of `/tmp/tp-m3` | — | unchanged (`via_fn_ptr`, `via_dyn` stay `⊤`) |
+| self-check dev / `--release`, every other fixture | — | unchanged; 23 `param` call sites |
+
+`via_mixed_one` (`#[fip(n = 1)]` over `[add_one, leaked, double]`) passes: the
+maximum (1), not the sum (2), of the candidates.
+
+**Open:** a static whose type is not `Freeze` stays `⊤` even for a field outside the
+`UnsafeCell` (its allocation is mutable); pointers behind a reference stored in a
+static (`static S: &[fn()]`, a dereference inside the data); local arrays of function
+pointers (only fields of local aggregates are followed); call results (T4.4).

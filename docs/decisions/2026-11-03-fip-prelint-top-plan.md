@@ -209,6 +209,18 @@ call result. All are `⊤`.
 **Stays.** Pointers from FFI, from mutable memory, from call results of unanalysed
 code, and from `Freeze`-violating statics stay `⊤` (an error).
 
+**Implemented** (item 2, candidates 1–3). Constants and loads below a reference
+constant (a `static` or constant memory, read from the evaluated initializer;
+`ConstValue::Indirect` for `const` slices) resolve to the function pointers found
+there; an index local assigned one constant selects one element. Several candidates
+are one call site `Item::Alt` costing their maximum. Fields of local aggregates
+resolve through the aggregate's operand. Fixture `indirect_data`: 22 roots, 13 passed
+(1 before, `apply_ptr`; the rest `⊤`). N4: `fnptr_const`, `fnptr_static`, `fnptr_local_struct` pass.
+**Deviation:** `fnptr_static_table` is no longer `⊤`, but stays an error: the bounds
+check of `TABLE[(i & 1) as usize]` is not proved (`BitAnd` is outside the value
+domain). A static whose type is not `Freeze` stays `⊤` even for a field outside its
+`UnsafeCell` (its allocation is mutable; conservative).
+
 **Tests.** A new fixture `indirect_data` with the N4 cases:
 
 - `const` and `static` pass, and the table passes with the max over its elements;

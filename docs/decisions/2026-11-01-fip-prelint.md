@@ -593,6 +593,21 @@ the `build-override` profile (no overflow checks): without the `w - 1` overflow 
 the analysis cannot prove `w >= 1`, a Verus invariant. Details: `TODOs/fip-prelint.md`,
 "Resolved 2026-11-03: the profile's overflow checks and debug assertions".
 
+## Amendment 2026-11-03: function pointers from constants, immutable statics and local aggregates (top plan T1.1–T1.3)
+
+The must-origin of a function pointer also follows constants and loads from immutable
+data. A constant of function pointer type is the function it evaluates to. A load below
+a constant reference (a `static` or constant memory) reads the evaluated initializer:
+the static must not be `static mut`, thread-local or foreign, its type must be
+`Freeze` and its allocation immutable; struct and tuple fields and array or slice
+elements are followed, an unknown index takes every element, and the candidates are
+alternatives of one call site (their maximum counts, every one is checked like a
+direct callee). A field of a local aggregate assigned only as a whole, never borrowed
+mutably or written in part, has the origin of the aggregate's operand. Everything else
+loaded from memory stays `⊤`. Fixture `indirect_data`. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: function pointers from constants,
+immutable statics and local aggregates".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

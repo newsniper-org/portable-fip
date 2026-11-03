@@ -65,7 +65,10 @@
 //!
 //! **Indirect calls.** A call through a function pointer, and a dynamic call, is
 //! resolved when the pointer's origin in the body is one reified function or closure,
-//! or one unsized concrete type, on every path ([`origin_of`]). A parameter declared
+//! or one unsized concrete type, on every path ([`origin_of`], also through fields of
+//! local aggregates), or a function pointer read from a constant or from immutable
+//! data ([`Analysis::data_targets`]; several candidates cost their maximum). A
+//! parameter declared
 //! `param(g = K)` of function-pointer or `&dyn Fn*`/`&dyn FipFn` type counts `K` and
 //! what the function's mark allows; its call sites must pass a function known there
 //! that meets them. A dynamic call of a trait method whose declaration carries a
@@ -398,6 +401,21 @@ enum Item {
     /// Several callees of one call site (the formatting functions a formatting may
     /// call); only returned by `call_item`, flattened into the block.
     Many(Vec<Item>),
+    /// One of several callees: a call through a function pointer loaded from
+    /// immutable data holding several candidates (a static table). Costs the maximum
+    /// over the alternatives and has the events of every one.
+    Alt(Vec<Item>),
+}
+
+impl Item {
+    /// The nodes this item calls (through alternatives and sequences).
+    fn calls(&self) -> Vec<usize> {
+        match self {
+            Item::Call(j) => vec![*j],
+            Item::Many(items) | Item::Alt(items) => items.iter().flat_map(Item::calls).collect(),
+            Item::Term(_) | Item::Ev(_) | Item::Evs(_) => Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2008,7 +2026,13 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 | TerminatorKind::TailCall { func, args, .. } => {
                     let here = proved.contexts.get(&b);
                     let item = self.call_item(inst, body, func, args, here, depth);
-                    if let Item::Call(j) = item {
+                    // The callees of this call: one, or the candidates of a pointer
+                    // loaded from a static table (each checked as if called here).
+                    let callees = match &item {
+                        Item::Call(_) | Item::Alt(_) => item.calls(),
+                        _ => Vec::new(),
+                    };
+                    for j in callees {
                         // Call sites in analysed crates (local, `fip::export`) are
                         // checked against the callee's declared parameter bounds.
                         let callee = self.nodes[j].inst;
@@ -2276,8 +2300,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     }
 
     /// The function a function pointer `op` in `inst`'s body calls: the function item
-    /// or closure it is reified from on every path, or the declared bound of a
-    /// parameter `param(g = K)`. `None`: not known here (`⊤`).
+    /// or closure it is reified from on every path, the function a constant or a
+    /// load from immutable data holds (several candidates: their maximum,
+    /// [`Analysis::data_targets`]), or the declared bound of a parameter
+    /// `param(g = K)`. `None`: not known here (`⊤`).
     fn pointer_target(
         &mut self,
         inst: Instance<'tcx>,
@@ -2287,8 +2313,197 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         match origin_of(self.tcx, body, op)? {
             Origin::Fn(t) => self.function_item(inst, t),
             Origin::Arg(l) => self.declared_param_call(inst, body, l),
+            Origin::Const(c) => self.data_item(inst, c, None),
+            Origin::Load(c, proj) => self.data_item(inst, c, Some(proj)),
             Origin::Pointee(_) | Origin::BufOf(_) => None,
         }
+    }
+
+    /// The call through a function pointer held in immutable data
+    /// ([`Analysis::data_targets`]): the one candidate, or the alternatives.
+    fn data_item(
+        &mut self,
+        inst: Instance<'tcx>,
+        c: mir::Const<'tcx>,
+        proj: Option<&'tcx ty::List<mir::PlaceElem<'tcx>>>,
+    ) -> Option<Item> {
+        let mut items: Vec<Item> = self
+            .data_targets(inst, c, proj)?
+            .into_iter()
+            .map(|t| Item::Call(self.node_for(t)))
+            .collect();
+        if items.len() == 1 {
+            items.pop()
+        } else {
+            Some(Item::Alt(items))
+        }
+    }
+
+    /// The functions a function pointer read from immutable data may be. With `proj`
+    /// `None`, `c` is a constant of function pointer type: the function it evaluates
+    /// to. Else `c` is a constant reference (to a `static` or to constant memory) and
+    /// the pointer is read at `proj` (fields of structs and tuples, array or slice
+    /// elements) below it: every function pointer an index may select is a candidate
+    /// (top plan T1.1, T1.2). `None` (so `⊤`) if the memory may change after
+    /// initialisation (a `static mut`, a thread local, a foreign static, a static
+    /// whose type is not `Freeze`, a mutable allocation), for any other projection
+    /// (a dereference inside the data, an enum variant), or if a value read is not a
+    /// pointer to a function.
+    fn data_targets(
+        &self,
+        inst: Instance<'tcx>,
+        c: mir::Const<'tcx>,
+        proj: Option<&'tcx ty::List<mir::PlaceElem<'tcx>>>,
+    ) -> Option<Vec<Instance<'tcx>>> {
+        use rustc_abi::Size;
+        use rustc_middle::mir::interpret::{GlobalAlloc, Scalar, alloc_range};
+        /// Above this many elements a table is not enumerated (`⊤`).
+        const MAX_CANDIDATES: u64 = 256;
+        let tcx = self.tcx;
+        let c = self.subst(inst, c)?;
+        let val = c.eval(tcx, self.env, DUMMY_SP).ok()?;
+        let function = |s: Scalar| -> Option<Instance<'tcx>> {
+            let Scalar::Ptr(ptr, _) = s else {
+                return None;
+            };
+            match tcx.global_alloc(ptr.provenance.alloc_id()) {
+                GlobalAlloc::Function { instance } => Some(instance),
+                _ => None,
+            }
+        };
+        let Some(proj) = proj else {
+            if !c.ty().is_fn_ptr() {
+                return None;
+            }
+            let mir::ConstValue::Scalar(s) = val else {
+                return None;
+            };
+            return function(s).map(|f| vec![f]);
+        };
+        let pointee = c.ty().builtin_deref(true)?;
+        let (alloc_id, start, slice_len) = match val {
+            mir::ConstValue::Scalar(Scalar::Ptr(ptr, _)) => {
+                let (prov, off) = ptr.into_raw_parts();
+                (prov.alloc_id(), off, None)
+            }
+            mir::ConstValue::Slice { alloc_id, meta } => (alloc_id, Size::ZERO, Some(meta)),
+            // A wide reference stored in constant memory (`const CT: &[fn()] = &[..]`):
+            // its data pointer and length.
+            mir::ConstValue::Indirect { alloc_id, offset } => {
+                let GlobalAlloc::Memory(holder) = tcx.global_alloc(alloc_id) else {
+                    return None;
+                };
+                let holder = holder.inner();
+                let ptr_size = tcx.data_layout.pointer_size();
+                let Scalar::Ptr(ptr, _) = holder
+                    .read_scalar(&tcx, alloc_range(offset, ptr_size), true)
+                    .ok()?
+                else {
+                    return None;
+                };
+                let len = if pointee.is_sized(tcx, self.env) {
+                    None
+                } else {
+                    let len = holder
+                        .read_scalar(&tcx, alloc_range(offset + ptr_size, ptr_size), false)
+                        .ok()?;
+                    Some(len.to_target_usize(&tcx).discard_err()?)
+                };
+                let (prov, off) = ptr.into_raw_parts();
+                (prov.alloc_id(), off, len)
+            }
+            _ => return None,
+        };
+        let alloc = match tcx.global_alloc(alloc_id) {
+            GlobalAlloc::Static(def) => {
+                if tcx.is_mutable_static(def)
+                    || tcx.is_thread_local_static(def)
+                    || tcx.is_foreign_item(def)
+                    || !tcx
+                        .type_of(def)
+                        .instantiate_identity()
+                        .skip_norm_wip()
+                        .is_freeze(tcx, self.env)
+                {
+                    return None;
+                }
+                tcx.eval_static_initializer(def).ok()?
+            }
+            GlobalAlloc::Memory(a) => a,
+            _ => return None,
+        };
+        if alloc.inner().mutability != rustc_ast::Mutability::Not {
+            return None;
+        }
+        let layout = |t: Ty<'tcx>| tcx.layout_of(self.env.as_query_input(t)).ok();
+        let mut places: Vec<(Ty<'tcx>, Size)> = vec![(pointee, start)];
+        for elem in proj.iter() {
+            let mut next = Vec::new();
+            for (t, off) in places {
+                match elem {
+                    mir::ProjectionElem::Field(f, fty) => {
+                        let is_struct = match t.kind() {
+                            ty::Adt(def, _) => def.is_struct(),
+                            ty::Tuple(_) => true,
+                            _ => false,
+                        };
+                        if !is_struct {
+                            return None;
+                        }
+                        let fty = self.subst(inst, fty)?;
+                        next.push((fty, off + layout(t)?.fields.offset(f.as_usize())));
+                    }
+                    mir::ProjectionElem::Index(_) | mir::ProjectionElem::ConstantIndex { .. } => {
+                        let (et, n) = match *t.kind() {
+                            ty::Array(et, n) => (et, n.try_to_target_usize(tcx)?),
+                            ty::Slice(et) => (et, slice_len?),
+                            _ => return None,
+                        };
+                        if n > MAX_CANDIDATES {
+                            return None;
+                        }
+                        let range = match elem {
+                            mir::ProjectionElem::ConstantIndex {
+                                offset,
+                                from_end: false,
+                                ..
+                            } => offset..offset + 1,
+                            mir::ProjectionElem::ConstantIndex {
+                                offset,
+                                from_end: true,
+                                ..
+                            } => {
+                                let i = n.checked_sub(offset)?;
+                                i..i + 1
+                            }
+                            _ => 0..n,
+                        };
+                        let stride = layout(et)?.size;
+                        for i in range.filter(|i| *i < n) {
+                            next.push((et, off + stride * i));
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            places = next;
+        }
+        let ptr_size = tcx.data_layout.pointer_size();
+        let mut out = Vec::new();
+        for (t, off) in places {
+            if !t.is_fn_ptr() {
+                return None;
+            }
+            let s = alloc
+                .inner()
+                .read_scalar(&tcx, alloc_range(off, ptr_size), true)
+                .ok()?;
+            let f = function(s)?;
+            if !out.contains(&f) {
+                out.push(f);
+            }
+        }
+        (!out.is_empty()).then_some(out)
     }
 
     /// The callee for a value of the function item or closure type `t` (of `inst`'s
@@ -2349,7 +2564,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Some(Bind::Formatter(out)) => self.output_call(def_id, callee, &out),
                 _ => None,
             },
-            Origin::Fn(_) => None,
+            Origin::Fn(_) | Origin::Const(_) | Origin::Load(..) => None,
         }
     }
 
@@ -2450,7 +2665,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Bind::Formatter(o) => Some(o),
                 _ => None,
             },
-            Origin::Fn(_) => None,
+            Origin::Fn(_) | Origin::Const(_) | Origin::Load(..) => None,
         }
     }
 
@@ -2960,6 +3175,26 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     None => (label, unknown(not_known)),
                 }
             }
+            Some(o @ (Origin::Const(_) | Origin::Load(..))) if input.is_fn_ptr() => {
+                let (c, proj) = match o {
+                    Origin::Load(c, proj) => (c, Some(proj)),
+                    Origin::Const(c) => (c, None),
+                    _ => return (shown(input), unknown(not_known)),
+                };
+                let Some(targets) = self.data_targets(caller, c, proj) else {
+                    return (shown(input), unknown(not_known));
+                };
+                let items: Vec<(String, Item)> = targets
+                    .into_iter()
+                    .map(|t| (self.label(t), Item::Call(self.node_for(t))))
+                    .collect();
+                let names: Vec<&str> = items.iter().map(|(l, _)| l.as_str()).collect();
+                let label = match names.as_slice() {
+                    [one] => (*one).to_string(),
+                    many => format!("one of {}", many.join(", ")),
+                };
+                (label, items)
+            }
             Some(Origin::Pointee(t)) => {
                 let Some(principal) = self.callable_dyn(input) else {
                     return (shown(input), unknown(not_known));
@@ -3106,7 +3341,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         }
                         cost = cost.max(&c);
                     }
-                    Item::Many(_) => {
+                    Item::Many(_) | Item::Alt(_) => {
                         let what = "several callees (internal)".to_string();
                         push_w(&mut s.unknown, unknown(&what), MAX_UNKNOWN, key_what);
                     }
@@ -3162,10 +3397,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     .blocks
                     .iter()
                     .flatten()
-                    .filter_map(|s| match s.item {
-                        Item::Call(j) => Some(j),
-                        _ => None,
-                    })
+                    .flat_map(|s| s.item.calls())
                     .collect();
                 v.sort_unstable();
                 v.dedup();
@@ -3191,8 +3423,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 continue;
             };
             for (b, sites) in info.blocks.iter().enumerate() {
-                for s in sites {
-                    let Item::Call(j) = s.item else { continue };
+                for (s, j) in sites
+                    .iter()
+                    .flat_map(|s| s.item.calls().into_iter().map(move |j| (s, j)))
+                {
                     if !set.contains(&j) {
                         continue;
                     }
@@ -3281,55 +3515,77 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     }
                     let in_loop = info.in_loop[b];
                     for site in &info.blocks[b] {
-                        let local = |what: &String| Witness {
-                            steps: Vec::new(),
-                            what: what.clone(),
-                            span: site.span,
-                            in_loop,
-                        };
-                        match &site.item {
-                            Item::Call(j) => {
-                                if skip.is_some_and(|k| k.contains(j)) {
-                                    continue;
-                                }
-                                let Some(cs) = sums[*j].as_ref() else {
-                                    continue;
-                                };
-                                let step = Step {
-                                    label: self.nodes[*j].label.clone(),
-                                    span: site.span,
-                                    in_loop,
-                                };
-                                *cost = cost.add(&cs.alloc.looped(in_loop));
-                                s.merge_events(cs, std::slice::from_ref(&step));
-                            }
-                            Item::Term(k) => {
-                                *cost = cost.add(&Cost::term(k).looped(in_loop));
-                                s.terms_w
-                                    .entry(k.clone())
-                                    .or_insert_with(|| local(&format!("call of `{k}`")));
-                            }
-                            Item::Ev(ev) => {
-                                *cost = cost.add(&local_event(&mut s, ev, local).looped(in_loop));
-                            }
-                            Item::Evs(evs) => {
-                                for ev in evs {
-                                    *cost =
-                                        cost.add(&local_event(&mut s, ev, local).looped(in_loop));
-                                }
-                            }
-                            // Flattened by `scan_body`; never stored.
-                            Item::Many(_) => {
-                                let what = "several callees (internal)".to_string();
-                                push_w(&mut s.unknown, local(&what), MAX_UNKNOWN, key_what);
-                            }
-                        }
+                        let c = self.site_cost(&site.item, site.span, in_loop, sums, skip, &mut s);
+                        *cost = cost.add(&c);
                     }
                 }
                 s.alloc = longest_path(info, &bcost);
             }
         }
         s
+    }
+
+    /// The cost of one site of a body (looped if `in_loop`), its events merged into
+    /// `s`; calls into `skip` contribute nothing. Alternatives cost their maximum.
+    fn site_cost(
+        &self,
+        item: &Item,
+        span: Span,
+        in_loop: bool,
+        sums: &[Option<Summary>],
+        skip: Option<&HashSet<usize>>,
+        s: &mut Summary,
+    ) -> Cost {
+        let local = |what: &String| Witness {
+            steps: Vec::new(),
+            what: what.clone(),
+            span,
+            in_loop,
+        };
+        match item {
+            Item::Call(j) => {
+                if skip.is_some_and(|k| k.contains(j)) {
+                    return Cost::default();
+                }
+                let Some(cs) = sums[*j].as_ref() else {
+                    return Cost::default();
+                };
+                let step = Step {
+                    label: self.nodes[*j].label.clone(),
+                    span,
+                    in_loop,
+                };
+                s.merge_events(cs, std::slice::from_ref(&step));
+                cs.alloc.looped(in_loop)
+            }
+            Item::Term(k) => {
+                s.terms_w
+                    .entry(k.clone())
+                    .or_insert_with(|| local(&format!("call of `{k}`")));
+                Cost::term(k).looped(in_loop)
+            }
+            Item::Ev(ev) => local_event(s, ev, local).looped(in_loop),
+            Item::Evs(evs) => {
+                let mut c = Cost::default();
+                for ev in evs {
+                    c = c.add(&local_event(s, ev, local).looped(in_loop));
+                }
+                c
+            }
+            Item::Alt(items) => {
+                let mut c = Cost::default();
+                for item in items {
+                    c = c.max(&self.site_cost(item, span, in_loop, sums, skip, s));
+                }
+                c
+            }
+            // Flattened by `scan_body`; never stored.
+            Item::Many(_) => {
+                let what = "several callees (internal)".to_string();
+                push_w(&mut s.unknown, local(&what), MAX_UNKNOWN, key_what);
+                Cost::default()
+            }
+        }
     }
 
     fn evaluate(&self) -> Vec<Summary> {
@@ -3391,6 +3647,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                 Item::Ev(e) => items.push(format!("{e:?}{l}")),
                                 Item::Evs(es) => items.push(format!("{es:?}{l}")),
                                 Item::Many(is) => items.push(format!("{is:?}{l}")),
+                                Item::Alt(is) => items.push(format!("one of {is:?}{l}")),
                             }
                         }
                     }
@@ -3485,7 +3742,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         }
                         cost = cost.max(&c);
                     }
-                    Item::Many(_) => unknown = true,
+                    Item::Many(_) | Item::Alt(_) => unknown = true,
                 }
             }
             let bound = if unknown {
@@ -3647,6 +3904,11 @@ enum Origin<'tcx> {
     /// The output (`buf`) of the `fmt::Formatter` that the parameter in this local
     /// points to.
     BufOf(mir::Local),
+    /// A constant (of function pointer type, or a reference to immutable data).
+    Const(mir::Const<'tcx>),
+    /// A load at these projections below the reference constant: a `static` or
+    /// constant memory ([`Analysis::data_targets`] decides whether it is immutable).
+    Load(mir::Const<'tcx>, &'tcx ty::List<mir::PlaceElem<'tcx>>),
 }
 
 /// The output of a formatting: a concrete type implementing `fmt::Write`, or
@@ -3783,8 +4045,10 @@ impl<'tcx> mir::visit::Visitor<'tcx> for Unstable {
 /// A must-analysis over one body: the origin of `op` if every assignment that can
 /// produce its value (through copies, moves and reborrows `&*p`) is the same
 /// reification of one function or closure, the same unsizing of one concrete type,
-/// or the unchanged parameter. Anything else (two origins, a value loaded from
-/// memory, a call result, a local changed in place) is `None`.
+/// the unchanged parameter, the same constant, the same load below a constant
+/// reference, or the same field of a local aggregate. Anything else (two origins, a
+/// value loaded through a parameter, a call result, a local changed in place) is
+/// `None`.
 fn origin_of<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
@@ -4054,8 +4318,114 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => {
                 self.local(p.local, depth)
             }
+            Operand::Copy(p) | Operand::Move(p) => self.place(*p, depth),
+            Operand::Constant(c) => Some(Origin::Const(c.const_)),
             _ => None,
         }
+    }
+
+    /// The value at a place with projections: the output of a formatter parameter
+    /// ([`OriginCx::buf_of`]), a load below a reference constant (`(*_3)[_4]` with
+    /// `_3 = const {TABLE: &[fn(u8) -> u8; 2]}`), or a field of a local aggregate
+    /// ([`OriginCx::field`]).
+    fn place(&self, p: mir::Place<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
+        if let Some(o) = self.buf_of(p, depth) {
+            return Some(o);
+        }
+        match p.projection.first()? {
+            mir::ProjectionElem::Deref => match self.local(p.local, depth)? {
+                Origin::Const(c) => {
+                    // An index local holding one constant is that element only.
+                    let elems: Vec<mir::PlaceElem<'tcx>> = p.projection[1..]
+                        .iter()
+                        .map(|e| match *e {
+                            mir::ProjectionElem::Index(i) => match self.constant_index(i, depth) {
+                                Some(offset) => mir::ProjectionElem::ConstantIndex {
+                                    offset,
+                                    min_length: offset.saturating_add(1),
+                                    from_end: false,
+                                },
+                                None => *e,
+                            },
+                            e => e,
+                        })
+                        .collect();
+                    Some(Origin::Load(c, self.tcx.mk_place_elems(&elems)))
+                }
+                _ => None,
+            },
+            mir::ProjectionElem::Field(..) => self.field(p.local, p.projection, depth),
+            _ => None,
+        }
+    }
+
+    /// The value of an index local assigned exactly once, from an integer constant,
+    /// and never changed otherwise.
+    fn constant_index(&self, l: mir::Local, depth: usize) -> Option<u64> {
+        if depth > Self::MAX_DEPTH || self.unstable[l.as_usize()] || self.is_arg(l) {
+            return None;
+        }
+        let [Def::Rv(mir::Rvalue::Use(Operand::Constant(c), ..))] =
+            self.writes[l.as_usize()].as_slice()
+        else {
+            return None;
+        };
+        let env = TypingEnv::post_analysis(self.tcx, self.body.source.def_id());
+        c.const_.try_eval_target_usize(self.tcx, env)
+    }
+
+    /// `l.f` (`proj` a chain of fields): `l` is a local of the body (not a
+    /// parameter) that is only ever assigned as a whole, every time by a struct or
+    /// tuple aggregate, and never borrowed mutably or written in part
+    /// ([`Unstable`]); the origin of the field's operand in each aggregate, if they
+    /// agree (top plan T1.3).
+    fn field(
+        &self,
+        l: mir::Local,
+        proj: &[mir::PlaceElem<'tcx>],
+        depth: usize,
+    ) -> Option<Origin<'tcx>> {
+        if depth > Self::MAX_DEPTH || self.unstable[l.as_usize()] || self.is_arg(l) {
+            return None;
+        }
+        // A shared borrow could change a value with interior mutability in place.
+        let env = TypingEnv::post_analysis(self.tcx, self.body.source.def_id());
+        if !self.body.local_decls[l].ty.is_freeze(self.tcx, env) {
+            return None;
+        }
+        let (mir::ProjectionElem::Field(f, _), rest) = proj.split_first()? else {
+            return None;
+        };
+        let mut found = None;
+        for w in &self.writes[l.as_usize()] {
+            let Def::Rv(mir::Rvalue::Aggregate(kind, ops)) = w else {
+                return None;
+            };
+            let is_struct = match **kind {
+                mir::AggregateKind::Tuple => true,
+                mir::AggregateKind::Adt(d, _, _, _, None) => self.tcx.adt_def(d).is_struct(),
+                _ => false,
+            };
+            if !is_struct {
+                return None;
+            }
+            let op = ops.get(*f)?;
+            let o = if rest.is_empty() {
+                self.operand(op, depth + 1)?
+            } else {
+                match op {
+                    Operand::Copy(q) | Operand::Move(q) if q.projection.is_empty() => {
+                        self.field(q.local, rest, depth + 1)?
+                    }
+                    _ => return None,
+                }
+            };
+            if found.is_some_and(|x| x != o) {
+                return None;
+            }
+            found = Some(o);
+        }
+        found
     }
 
     fn local(&self, l: mir::Local, depth: usize) -> Option<Origin<'tcx>> {
@@ -4088,7 +4458,7 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             | mir::Rvalue::CopyForDeref(p)
                 if !p.projection.is_empty() =>
             {
-                self.buf_of(*p, depth)
+                self.place(*p, depth)
             }
             mir::Rvalue::Use(op, ..) => self.operand(op, depth),
             mir::Rvalue::CopyForDeref(p) => self.local(p.local, depth),

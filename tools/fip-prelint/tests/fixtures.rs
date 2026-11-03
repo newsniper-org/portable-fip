@@ -265,6 +265,17 @@ fn indirect() {
     check("indirect");
 }
 
+/// Function pointers loaded from immutable data (top plan T1.1–T1.3): a constant, an
+/// immutable static, static tables (every element a candidate, the maximum counted;
+/// a constant index selects one), a field of a static struct, a constant slice, a
+/// dependency's static table, fields of local aggregates; the same at call sites of a
+/// callee with `param(p = 0)`. Interior mutability, `static mut`, an atomic, a local
+/// written in part and a parameter's field stay `⊤`.
+#[test]
+fn indirect_data() {
+    check("indirect_data");
+}
+
 /// A dependency declaring `fip::export` (not a workspace member, compiled without
 /// roots) whose implementation breaks a trait method's contract: rejected where it
 /// is compiled (limits plan L4).
