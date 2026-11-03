@@ -298,6 +298,24 @@ fn std_summaries_stale() {
     );
 }
 
+/// The profile's semantics (top plan T14.1): the driver analyses with the overflow
+/// checks and debug assertions of the profile, not those `-Copt-level=0` implies. In
+/// dev both crates have an overflow check and a `debug_assert!` panic path; under
+/// `--release` only `checked` (`[profile.release.package.checked] overflow-checks =
+/// true`) keeps its overflow check, and neither has the debug assertion.
+#[test]
+fn profiles() {
+    for (variant, extra) in [("-dev", &[][..]), ("-release", &["--release"][..])] {
+        let mut args = vec!["--message-format", "short"];
+        args.extend_from_slice(extra);
+        compare(
+            "profiles",
+            variant,
+            &run_args("profiles", variant, &[], &args),
+        );
+    }
+}
+
 /// Stack bounds (limits plan L9): `cargo fip-prelint --stack` in the dev profile
 /// (opt-level 0) and with `--release` (opt-level 3), target x86_64-unknown-linux-gnu,
 /// rustc 1.99.1; the expected bounds hold for these builds only. A three-level chain

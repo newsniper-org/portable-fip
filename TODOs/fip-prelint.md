@@ -1508,3 +1508,58 @@ and in `checker_agreement`'s `REJECTED`): `Vec::<u8>::with_capacity(4)`,
 `checkers_agree_on_the_spelling_table`: `fip_testkit` reports a violation for every
 allocating spelling and none for an audited one, the verdicts `#[fip]` gives in
 `verify/ctor_spellings.py` (which the test pins to read the same table).
+
+## Resolved 2026-11-03: the profile's overflow checks and debug assertions (top plan T14.1)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T14.1 (item 1 of its
+order). Before: the driver appended `-Copt-level=0` to every crate it compiles. For
+rustc 1.99.1 that switches debug assertions and overflow checks on unless cargo passed
+them explicitly, and cargo passes them only when they differ from the opt-level's
+default; so a release-profile crate was analysed **with** both checks, which its build
+does not have (sound, but notes about code that does not ship).
+
+**Mechanism.** `main.rs::profile_checks` reads cargo's arguments before the driver's
+flags are added: the last explicit `-C debug-assertions` / `-C overflow-checks`
+(`-C x`, `-Cx`, `--codegen x`, `--codegen=x`; a bare key is `on`), else rustc's
+defaults (debug assertions on exactly at opt-level 0, `-O` and `s`/`z` count as
+optimised; overflow checks as debug assertions). The driver then appends
+`-Copt-level=0 -Cdebug-assertions=<v> -Coverflow-checks=<v>`. Stack mode keeps the
+profile's opt-level and is unchanged; generation mode's `std` crates keep their
+explicit release flags. Unit tests in `main.rs`.
+
+**The extra `dedup_by` note under `--release` (N6), located.** A release run has two
+`fip_core` library units: the target one (`-C opt-level=3`) and a host one for the
+proc macro `fip-macros`, compiled with cargo's `build-override` profile (`-C
+debug-assertions=off`, opt-level 0, so no overflow checks either; seen with `cargo
+fip-prelint --release -v -j1`). In dev both are one unit. The MIR of `dedup_by` is the
+same in both profiles (`FIP_PRELINT_DUMP_MIR=strict::dedup_by`, identical apart from
+crate hashes); the difference is the `Sub` overflow assert of `w - 1` at
+`strict.rs:324`: with overflow checks the assert's success gives the value analysis
+`w >= 1`, which, with the loop's guards, proves `xs[w - 1]` in bounds; without them
+`w - 1` wraps, and the bound `1 <= w` is only a Verus loop invariant, which the driver
+does not read. So the host unit, the only one analysed with the build's real
+semantics, reports the bounds check. With this change the target unit has the same
+semantics, so the note now appears for it too (`fip_core` 1 note), and in
+`strict_behaviour` through the `dedup_by` instance its `pipeline` calls. Both are real
+panic paths of the build as far as the driver can prove (sound); T13.4 (Verus as an
+oracle) would drop them.
+
+**Measured** (rustc 1.99.1, x86_64 Linux; before = driver at `31401f3`):
+
+| run | before | after |
+|---|---|---|
+| self-check, dev (`just prelint`) | 79 roots, 76 passed, 3 errors, 1 warning, 26 notes, 23 `param` call sites | identical (every line) |
+| self-check, `--release` | 79 roots, 76 passed, 3 errors, 1 warning, 27 distinct notes: 15 overflow, 8 `handle_alloc_error`, 2 contract, 1 `assert!`, 1 `dedup_by` bounds (host unit only; the `fip_core` summary printed twice, 0 and 1 notes) | 79 roots, 76 passed, 3 errors, 1 warning, 13 notes: 0 overflow, 8 `handle_alloc_error`, 2 contract, 1 `assert!`, 2 `dedup_by` bounds (root and `strict_behaviour::pipeline`); 23 `param` call sites |
+| fixture `profiles`, dev | — | `plain` and `checked`: 2 notes each (overflow `Add`, `debug_assert!`) |
+| fixture `profiles`, `--release` | 2 notes each (both checks analysed) | `plain` 0 notes; `checked` (`[profile.release.package.checked] overflow-checks = true`) 1 note (overflow only) |
+| every other fixture (dev) | — | unchanged |
+
+New expectation `tools/fip-prelint/tests/selfcheck-release.expected` (test
+`workspace_self_check_release`) and fixture `profiles` (`expected-dev.txt`,
+`expected-release.txt`).
+
+**Deviation from the plan:** the plan said "a note's text then states the profile".
+The note texts are unchanged: an overflow or debug-assertion note now exists only when
+the analysed profile has that check, so the profile is implied by the run
+(`cargo fip-prelint` vs `--release`); adding it to every note would change every
+expected line without adding a fact.

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# Fixture for tools/fip-prelint/tests/fixtures.rs: the profile's overflow checks and debug
+# assertions are the ones analysed (top plan T14.1); run in dev and with `--release`
+[workspace]
+resolver = "3"
+members = ["plain", "checked"]
+
+# `checked` keeps overflow checks in release; `plain` has the release defaults (off).
+[profile.release.package.checked]
+overflow-checks = true

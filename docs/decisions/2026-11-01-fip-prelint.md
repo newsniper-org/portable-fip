@@ -577,6 +577,22 @@ non-strict mode (fixture `ctor_spellings`: the driver rejects the allocating one
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-02: one normaliser for constructor
 spellings (token rule)".
 
+## Amendment 2026-11-03: the profile's overflow checks and debug assertions (top plan T14.1)
+
+Item 4's `-Copt-level=0` no longer changes the analysed semantics. The driver reads the
+debug-assertion and overflow-check settings the crate's own arguments imply (the last
+explicit `-C debug-assertions` / `-C overflow-checks`, else rustc's defaults for the
+original opt-level) and appends them explicitly after `-Copt-level=0`. The analysed MIR
+has exactly the checks of the profile's build: under `overflow-checks = false` an
+arithmetic overflow wraps and is not a panic path; a `debug_assert!` counts only where
+debug assertions are on. Dev-profile runs are unchanged (measured: identical
+self-check). The self-check gains a `--release` expectation; fixture `profiles`. The
+one extra `--release` note before this change (`fip_core::strict::dedup_by`, a bounds
+check) came from the host unit of `fip_core` that cargo builds for the proc macro with
+the `build-override` profile (no overflow checks): without the `w - 1` overflow assert
+the analysis cannot prove `w >= 1`, a Verus invariant. Details: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-03: the profile's overflow checks and debug assertions".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

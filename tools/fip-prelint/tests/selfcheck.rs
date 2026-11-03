@@ -6,18 +6,30 @@
 //! conditional results (not the panic-path notes, which follow every line shift)
 //! and the per-crate summaries with `tests/selfcheck.expected`.
 //! `FIP_PRELINT_BLESS=1` rewrites the file. Investigation of each reported line:
-//! `TODOs/fip-prelint.md`.
+//! `TODOs/fip-prelint.md`. The same with `--release` is compared with
+//! `tests/selfcheck-release.expected` (the release profile's overflow checks and debug
+//! assertions, top plan T14.1).
 
 use std::path::Path;
 use std::process::Command;
 
 #[test]
 fn workspace_self_check() {
+    self_check("", &[]);
+}
+
+#[test]
+fn workspace_self_check_release() {
+    self_check("-release", &["--release"]);
+}
+
+fn self_check(variant: &str, extra: &[&str]) {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest.join("../..");
-    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("selfcheck");
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("selfcheck{variant}"));
     let out = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"))
         .args(["fip-prelint", "--warn-only", "--message-format", "short"])
+        .args(extra)
         .current_dir(&root)
         .env("FIP_PRELINT_TARGET_DIR", &target)
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
@@ -43,10 +55,13 @@ fn workspace_self_check() {
         .collect();
     got.sort();
     got.dedup();
-    let path = manifest.join("tests").join("selfcheck.expected");
+    let path = manifest
+        .join("tests")
+        .join(format!("selfcheck{variant}.expected"));
     if std::env::var("FIP_PRELINT_BLESS").is_ok_and(|v| v == "1") {
-        let mut text = String::from(
-            "# `cargo fip-prelint --warn-only` on the workspace (tests/selfcheck.rs); notes omitted.\n",
+        let mut text = format!(
+            "# `cargo fip-prelint --warn-only{}` on the workspace (tests/selfcheck.rs); notes omitted.\n",
+            extra.iter().map(|a| format!(" {a}")).collect::<String>()
         );
         for l in &got {
             text.push_str(l);
@@ -65,6 +80,6 @@ fn workspace_self_check() {
     let extra: Vec<&String> = got.iter().filter(|l| !want.contains(l)).collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
-        "self-check differs from selfcheck.expected\nmissing:\n{missing:#?}\nunexpected:\n{extra:#?}"
+        "self-check differs from selfcheck{variant}.expected\nmissing:\n{missing:#?}\nunexpected:\n{extra:#?}"
     );
 }

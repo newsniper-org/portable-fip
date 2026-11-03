@@ -10,7 +10,11 @@
 //! contract are checked); every other crate is handed to the real `rustc`
 //! unchanged. The driver is that compiler (same version, same sysroot) plus an
 //! analysis after type checking. For every crate it compiles itself it adds `-Zalways-encode-mir -Copt-level=0 --cfg fip_prelint` and registers the tool
-//! `fip` (decision record `docs/decisions/2026-11-01-fip-prelint.md`, item 4).
+//! `fip` (decision record `docs/decisions/2026-11-01-fip-prelint.md`, item 4). Since
+//! `-Copt-level=0` alone would switch debug assertions and overflow checks on, it also
+//! passes `-Cdebug-assertions=..` and `-Coverflow-checks=..` with the values the
+//! profile's own arguments imply ([`profile_checks`]), so the analysed MIR has exactly
+//! the checks of the build (top plan T14.1).
 //!
 //! Environment:
 //! - `FIP_PRELINT_SYSROOT`: sysroot to compile against (default: the sysroot of the
@@ -272,6 +276,65 @@ fn role(args: &[String]) -> Role {
     }
 }
 
+/// Debug assertions and overflow checks of the build as cargo's arguments ask for
+/// them: the last explicit `-C debug-assertions` / `-C overflow-checks`, else rustc's
+/// defaults (debug assertions on exactly at opt-level 0, overflow checks as debug
+/// assertions). The driver replaces the opt-level with `-Copt-level=0` and passes
+/// both values explicitly, so that the analysed MIR keeps the profile's semantics.
+fn profile_checks(args: &[String]) -> (bool, bool) {
+    fn flag(v: Option<&str>) -> Option<bool> {
+        match v {
+            None | Some("y" | "yes" | "on" | "true") => Some(true),
+            Some("n" | "no" | "off" | "false") => Some(false),
+            Some(_) => None,
+        }
+    }
+    let mut opt_zero = true;
+    let mut debug_assertions = None;
+    let mut overflow_checks = None;
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
+        let cg = if a == "-C" || a == "--codegen" {
+            match it.next() {
+                Some(v) => v.as_str(),
+                None => break,
+            }
+        } else if let Some(v) = a.strip_prefix("--codegen=") {
+            v
+        } else if let Some(v) = a.strip_prefix("-C") {
+            v
+        } else {
+            if a == "-O" {
+                opt_zero = false;
+            }
+            continue;
+        };
+        let (key, value) = match cg.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (cg, None),
+        };
+        match key {
+            "opt-level" => opt_zero = value == Some("0"),
+            "debug-assertions" => {
+                if let Some(b) = flag(value) {
+                    debug_assertions = Some(b);
+                }
+            }
+            "overflow-checks" => {
+                if let Some(b) = flag(value) {
+                    overflow_checks = Some(b);
+                }
+            }
+            _ => {}
+        }
+    }
+    let debug_assertions = debug_assertions.unwrap_or(opt_zero);
+    (
+        debug_assertions,
+        overflow_checks.unwrap_or(debug_assertions),
+    )
+}
+
 fn main() -> std::process::ExitCode {
     let mut args: Vec<String> = std::env::args().collect();
     let mut real_rustc = None;
@@ -314,13 +377,23 @@ fn main() -> std::process::ExitCode {
         }
     }
     let compiles = matches!(role, Role::Primary | Role::ExportedDependency);
+    if compiles && !stack {
+        // Read before the driver's flags are appended; ours come last and win.
+        let (debug_assertions, overflow_checks) = profile_checks(&args);
+        let on_off = |b: bool| if b { "on" } else { "off" };
+        args.push("-Copt-level=0".to_string());
+        args.push(format!("-Cdebug-assertions={}", on_off(debug_assertions)));
+        args.push(format!("-Coverflow-checks={}", on_off(overflow_checks)));
+    }
     if compiles {
         // Skip flags already present (e.g. from RUSTFLAGS): a repeated
         // `register_tool(fip)` is an error.
         let mut i = 0;
         while i < CRATE_FLAGS.len() {
             let f = CRATE_FLAGS[i];
-            if stack && f == "-Copt-level=0" {
+            if f == "-Copt-level=0" {
+                // Added above with the profile's checks; stack mode keeps the
+                // profile's opt-level.
                 i += 1;
                 continue;
             }
@@ -345,4 +418,55 @@ fn main() -> std::process::ExitCode {
     rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&args, &mut Prelint { role });
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_checks;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        std::iter::once("rustc")
+            .chain(a.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn profile_defaults_follow_the_opt_level() {
+        assert_eq!(profile_checks(&args(&["--crate-name", "c"])), (true, true));
+        assert_eq!(
+            profile_checks(&args(&["-C", "opt-level=3"])),
+            (false, false)
+        );
+        assert_eq!(profile_checks(&args(&["-Copt-level=s"])), (false, false));
+        assert_eq!(profile_checks(&args(&["-O"])), (false, false));
+        assert_eq!(
+            profile_checks(&args(&["-C", "opt-level=3", "-C", "opt-level=0"])),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn explicit_flags_win() {
+        assert_eq!(
+            profile_checks(&args(&["-C", "opt-level=3", "-C", "overflow-checks=on"])),
+            (false, true)
+        );
+        assert_eq!(
+            profile_checks(&args(&["-C", "debug-assertions=off"])),
+            (false, false)
+        );
+        assert_eq!(
+            profile_checks(&args(&["-C", "debug-assertions=off", "-Coverflow-checks"])),
+            (false, true)
+        );
+        assert_eq!(
+            profile_checks(&args(&[
+                "--codegen=opt-level=2",
+                "--codegen",
+                "debug-assertions=yes"
+            ])),
+            (true, true)
+        );
+    }
 }

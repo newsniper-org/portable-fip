@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: success
+checked/src/lib.rs:10:5: note: fip-prelint: `add` is #[fip(strict = true)]: reachable panic path: `add`: arithmetic overflow check (Add) (checked/src/lib.rs:10)
+note: fip-prelint: crate `checked`: 2 roots, 2 passed, 0 errors, 0 warnings, 1 notes
+note: fip-prelint: crate `plain`: 2 roots, 2 passed, 0 errors, 0 warnings, 0 notes

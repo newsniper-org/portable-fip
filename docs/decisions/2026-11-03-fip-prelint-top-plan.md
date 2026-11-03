@@ -566,6 +566,14 @@ checks that the profile does not have.
    - A note's text then states the profile.
    - Also locate the extra `dedup_by` note under `--release` (N6) before landing.
    - Dev-profile runs (`just prelint`) are unchanged.
+   - **Implemented** (item 1): as proposed. The `dedup_by` note came from the host
+     unit of `fip_core` built for the proc macro with cargo's `build-override` profile
+     (no overflow checks): without the `w - 1` overflow assert the value analysis cannot
+     prove `w >= 1` (a Verus invariant). It now appears for the target unit too.
+     `--release` self-check: 13 notes (0 overflow, 2 `dedup_by`). **Deviation:** note
+     texts do not state the profile (a check's note exists only when the profile has
+     the check). Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-03: the profile's
+     overflow checks and debug assertions".
 2. **Overflow notes (15).** All measured cases are real unguarded `+`/`*` in tests and
    in `fip_fn!` closures. **Stay** as notes (non-strict marks allow panics; under
    `panic_macros = false` they are errors, as N4's `add_err` shows). No suppression.
