@@ -327,6 +327,57 @@ fn std_summaries_stale() {
     );
 }
 
+/// The analysis cache is keyed on the std summaries' content, not only on their
+/// modification time. Fixture `sidecar_cache`, one target directory, one
+/// `FIP_PRELINT_STD_SUMMARIES` path: first the real sidecar (the root passes, so cargo
+/// caches the result), then the stale one with the same (old) modification time. The
+/// second run must re-check (`⊤`), not replay the first run's success from the cache.
+/// Without the content key in `FIP_PRELINT_INPUTS_ID` the second run passed (measured).
+#[test]
+fn std_summaries_cache_key() {
+    if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        eprintln!("std_summaries_cache_key: x86_64 Linux only (the host sidecar)");
+        return;
+    }
+    let real = std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("std-summaries"))
+        .expect("std-summaries directory")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name().is_some_and(|n| {
+                n.to_string_lossy()
+                    .ends_with("-x86_64-unknown-linux-gnu.txt")
+            })
+        })
+        .expect("the x86_64 Linux sidecar");
+    let stale = fixtures_dir()
+        .join("std_summaries")
+        .join("stale-summaries.txt");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sidecar-cache");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(
+        Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("fixtures")
+            .join("sidecar_cache"),
+    );
+    std::fs::create_dir_all(&dir).expect("create the sidecar directory");
+    let path = dir.join("summaries.txt");
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let put = |from: &Path| {
+        std::fs::copy(from, &path).expect("copy the sidecar");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(old))
+            .expect("set the sidecar's modification time");
+    };
+    let envs = [("FIP_PRELINT_STD_SUMMARIES", path.clone().into_os_string())];
+    put(&real);
+    compare("sidecar_cache", "-real", &run("sidecar_cache", "", &envs));
+    put(&stale);
+    compare("sidecar_cache", "-stale", &run("sidecar_cache", "", &envs));
+}
+
 /// The profile's semantics (top plan T14.1): the driver analyses with the overflow
 /// checks and debug assertions of the profile, not those `-Copt-level=0` implies. In
 /// dev both crates have an overflow check and a `debug_assert!` panic path; under

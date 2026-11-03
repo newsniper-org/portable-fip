@@ -719,6 +719,14 @@ The seed adds `HashMap::new` and a lazily initialised thread local; both still r
 function pointers from mutable data (`⊤`). Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-03: foreign calls inside std summaries".
 
+## Amendment 2026-11-03: the analysis cache follows the std summaries' content
+
+`cargo fip-prelint` passes a content hash of the std summaries files
+(`FIP_PRELINT_INPUTS_ID`) and the driver records it, with `FIP_PRELINT_SYSROOT`, in the
+dep-info, so cargo re-checks a crate when a sidecar's content changes, not only when
+its modification time moves. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-03:
+the analysis cache follows the std summaries' content".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

@@ -59,6 +59,50 @@ fn driver_id(driver: &std::path::Path) -> String {
     }
 }
 
+/// Content hash of the std summaries the driver may read: the file named by
+/// `FIP_PRELINT_STD_SUMMARIES`, or else every `*.txt` file of the driver's
+/// `std-summaries/` directory (file name and content, in name order). Passed to the
+/// driver as `FIP_PRELINT_INPUTS_ID`, which it records in the dep-info: a sidecar
+/// change re-checks every crate even if the file's modification time did not move
+/// (cargo's file dep-info compares modification times only).
+fn inputs_id() -> String {
+    // FNV-1a, 64 bit: not cryptographic, only a change detector.
+    fn feed(h: &mut u64, bytes: &[u8]) {
+        for &b in bytes {
+            *h ^= u64::from(b);
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Some(p) = std::env::var_os("FIP_PRELINT_STD_SUMMARIES") {
+        files.push(PathBuf::from(p));
+    } else {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("std-summaries");
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "txt") {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+    }
+    for f in &files {
+        feed(&mut h, f.to_string_lossy().as_bytes());
+        feed(&mut h, &[0]);
+        match std::fs::read(f) {
+            Ok(bytes) => {
+                feed(&mut h, &(bytes.len() as u64).to_le_bytes());
+                feed(&mut h, &bytes);
+            }
+            Err(_) => feed(&mut h, b"<unreadable>"),
+        }
+    }
+    format!("std-summaries-{}-{h:016x}", files.len())
+}
+
 fn sysroot(toolchain: &str) -> Result<String, String> {
     let out = Command::new("rustc")
         .env("RUSTUP_TOOLCHAIN", toolchain)
@@ -442,6 +486,7 @@ fn main() -> ExitCode {
     let mut cmd = Command::new("cargo");
     cmd.env("RUSTUP_TOOLCHAIN", &toolchain)
         .env("FIP_PRELINT_DRIVER_ID", driver_id(&driver))
+        .env("FIP_PRELINT_INPUTS_ID", inputs_id())
         // Every crate goes through the driver, dependencies included: a dependency
         // that declares `fip::export` (e.g. `fip-core` used as a git or path
         // dependency by another project) must be compiled with the driver's flags so

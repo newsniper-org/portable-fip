@@ -2080,3 +2080,30 @@ wall times are noisy):
 the FFI calls, `std`'s random source and error paths call through function pointers
 loaded from mutable data (T1 "stays"). Lazily initialised thread locals likewise.
 
+## Resolved 2026-11-03: the analysis cache follows the std summaries' content
+
+**Before.** `cargo fip-prelint` keyed cargo's cache (replayed diagnostics of a crate
+that compiled) on the driver binary (`FIP_PRELINT_DRIVER_ID`: size and modification
+time) and the tracked environment variables; the sidecar was a file dep-info entry,
+which cargo compares by modification time only. A sidecar replaced by a file with an
+older modification time (`cp -p`, an archive, a checkout tool preserving times) left
+the previous results in place, and only for a crate whose check succeeded (a failed
+check is never cached). `FIP_PRELINT_SYSROOT`, read by the driver, was not tracked.
+
+**Change.** `cargo-fip-prelint` hashes (FNV-1a, 64 bit, a change detector) the file
+named by `FIP_PRELINT_STD_SUMMARIES`, or else every `*.txt` of the driver's
+`std-summaries/` directory (name and content, in name order), into
+`FIP_PRELINT_INPUTS_ID`; the driver records it and `FIP_PRELINT_SYSROOT` in the
+dep-info (`TRACKED_ENV`). Every sidecar file is hashed, not only the target's, so a
+change of any one re-checks every crate (over-invalidation, never staleness). The
+other environment variables the driver reads were already tracked (`WARN_ONLY`,
+`DUMP`, `DUMP_MIR`, `STD_SUMMARIES`, `STD_SUMMARIES_OUT`, `STACK`,
+`FIP_MACROS_MARK_ONLY`).
+
+**Measured.** New test `std_summaries_cache_key`, fixture `sidecar_cache` (one root,
+`write!` of an integer into a buffer): one target directory and one
+`FIP_PRELINT_STD_SUMMARIES` path, first the real sidecar (1 root, 1 passed, cached),
+then the stale stamped file with the same modification time (2001). Before (the
+`INPUTS_ID` line disabled): the second run replayed "1 passed", the test failed.
+After: the second run reports the `⊤` ("std summaries not used"). Every other fixture
+and the self-check are unchanged.

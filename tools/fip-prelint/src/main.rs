@@ -95,9 +95,14 @@ struct Prelint {
 /// Environment variables that change the driver's output; recorded in the dep-info
 /// so that cargo re-checks a crate (instead of replaying cached diagnostics) when
 /// they change. `FIP_PRELINT_DRIVER_ID` is set by `cargo fip-prelint` from the
-/// driver binary (size and modification time).
+/// driver binary (size and modification time), `FIP_PRELINT_INPUTS_ID` from the
+/// content of the std summaries files (a sidecar-only change re-checks the crate even
+/// when its modification time is unchanged), `FIP_PRELINT_SYSROOT` names the standard
+/// library the analysis reads.
 const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_WARN_ONLY",
+    "FIP_PRELINT_INPUTS_ID",
+    "FIP_PRELINT_SYSROOT",
     "FIP_PRELINT_DUMP",
     "FIP_PRELINT_DUMP_MIR",
     "FIP_PRELINT_DRIVER_ID",
