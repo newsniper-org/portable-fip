@@ -16,12 +16,16 @@
 //! - `number_from_11_closure`: the same step as a closure in `fip_fn!` carrying a
 //!   `verus_spec` attribute, which `fip_fn!` keeps on the closure: `pre` / `post` are
 //!   the closure's `requires` / `ensures`.
+//! - `doubled_stateless` / `quadrupled`: the adapters `fip_strict::Stateless` (a
+//!   one-argument step that keeps the state) and `fip_strict::Compose`, whose
+//!   `pre` / `post` are built from the wrapped closures' specifications.
 //! - `odd_count` / `keep_odd`: the same for `compact_map_st`, naming the witnesses with
 //!   `compact_map_st_by_witnesses`; `keep_odd`'s count is bounded by the invariant `c <= k`.
 //!
 //! `just verify-negative` checks that wrong final claims, a missing invariant, an
-//! invariant the step does not preserve, a closure without its spec attribute and a
-//! closure whose body breaks its `ensures` are rejected.
+//! invariant the step does not preserve, a closure without its spec attribute, a
+//! closure whose body breaks its `ensures` and wrong claims through the adapters
+//! are rejected.
 #![no_std]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #[cfg(verus_keep_ghost)]
@@ -163,6 +167,53 @@ pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
         };
     }
     c
+}
+
+/// Doubles every element through `fip_strict::Stateless`: a one-argument specified
+/// closure as a state-passing step that keeps the state (7 here).
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        forall|k: int| 0 <= k < old(xs)@.len() ==> old(xs)@[k] < 1000,
+    ensures
+        final(xs)@.len() == old(xs)@.len(),
+        forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 2 * old(xs)@[k],
+        r == 7,
+))]
+pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
+    let g = fip_macros::fip_fn!(
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        |x: u32| x * 2
+    );
+    let f = fip_strict::Stateless(g);
+    proof! { assert(map_st_fip_inv(old(xs)@, f, 7u32, |k: int, c: u32| c == 7 && forall|j: int| 0 <= j < old(xs)@.len() ==> old(xs)@[j] < 1000)); }
+    let (c, _hole) = fip_core::strict::map_in_place_st(xs, 0, 7, f);
+    proof! {
+        let ss = map_st_fip_trace(old(xs)@, xs@, f, 7u32, c);
+        assert(st_trace_inv(ss, |k: int, c: u32| c == 7 && forall|j: int| 0 <= j < old(xs)@.len() ==> old(xs)@[j] < 1000));
+        assert(ss[old(xs)@.len() as int] == c);
+    }
+    c
+}
+
+/// Multiplies every element by 4 through `fip_strict::Compose` of two specified
+/// closures: `post` is "some intermediate result satisfies both".
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    requires
+        forall|k: int| 0 <= k < old(xs)@.len() ==> old(xs)@[k] < 250,
+    ensures
+        final(xs)@.len() == old(xs)@.len(),
+        forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 4 * old(xs)@[k],
+))]
+pub fn quadrupled(xs: &mut [u32]) {
+    let d1 = fip_macros::fip_fn!(
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        |x: u32| x * 2
+    );
+    let d2 = fip_macros::fip_fn!(
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        |x: u32| x * 2
+    );
+    let _hole = fip_core::strict::map_in_place(xs, 0, fip_strict::Compose(d1, d2));
 }
 
 /// Counts odd elements in the state; elements are kept unchanged, the odd ones kept.

@@ -553,6 +553,15 @@ impl<'a> Builder<'a> {
     ) -> Option<usize> {
         let s = id(t, i)?;
         match s {
+            // Verus ghost functions (`spec fn`, `proof fn`, inside `verus! { }`) are
+            // erased from the compiled program: not functions of the model.
+            "fn" if i > 0
+                && (is_id(t, i - 1, "spec") || is_id(t, i - 1, "proof"))
+                && id(t, i + 1).is_some() =>
+            {
+                let body = find_top(t, i + 2, end, |q| is_p(t, q, '{') || is_p(t, q, ';'));
+                Some(body.map_or(end, |b| group_end(t, b)))
+            }
             "fn" if id(t, i + 1).is_some() => Some(self.fn_item(t, i, sc, std::mem::take(mark))),
             "mod" if id(t, i + 1).is_some() && is_p(t, i + 2, '{') => {
                 let e = group_end(t, i + 2);

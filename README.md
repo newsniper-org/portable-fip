@@ -67,7 +67,9 @@ functions with a certificate from `fip_fn!(f)` (also `a::f`, `f::<T>`,
 no `unsafe` is written, and strict bodies may use it. With an expected type
 `Certified<N, fn(..) -> ..>` the value is a certified function pointer.
 `fip_fn!(bound <= K, ..)` fails to compile (also under `cargo check`) when the
-computed bound exceeds `K`.
+computed bound exceeds `K`. `fip_strict::Stateless(f)` lifts a one-argument callable
+to a state-passing step for the `_st` combinators, `fip_strict::Compose(f, g)` calls
+`g(f(x))` with the summed bound; both are also specified under Verus.
 
 ```rust
 #[fip(strict = true, param(keep = 0))]
@@ -283,10 +285,10 @@ state.
   (`number_from_11_closure`).
 
 Measured (`--no-cheating`, Verus 0.2026.10.18.7d82994 and Y4's fork
-0.2026.10.31.559ac52, identical counts): `fip-strict` 7, `fip-core` 56 (51 before
+0.2026.10.31.559ac52, identical counts): `fip-strict` 11 (7 before the adapters), `fip-core` 56 (51 before
 the invariants and named traces, 36 before the state-passing variants), `fip-alloc`
-1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4, `verify/compose_state.rs` 10
-(4 before the strict caller, 9 before the specified closure).
+1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4, `verify/compose_state.rs` 12
+(4 before the strict caller, 9 before the specified closure, 10 before the adapters).
 
 **Pre-verification → implementation → post-verification.** For `dedup_by` and
 `compact_map` the postcondition was first written as a spec predicate

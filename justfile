@@ -198,6 +198,10 @@ verify-negative: verify-strict verify-core
     # invariant cannot be shown preserved; a closure body breaking its `ensures` fails.
     state_fail closure-spec-missing '/^pub fn number_from_11_closure(/,/^}/ { /^        #\[cfg_attr(verus_keep_ghost, verus_spec(r: (u32, u32) =>$/,/^        ))\]$/d; }' 'map_st_fip_inv\(old\(xs\)@, f, 10u32, \|k: int, c: u32\| c == 10 \+ k\)\); \}'
     state_fail closure-wrong-ensures '/^pub fn number_from_11_closure(/,/^}/ s/^                r.0 == c + 1,$/                r.0 == c + 2,/' 'unable to prove post-condition of closure'
+    # Adapters: `Stateless` / `Compose` promise only what the wrapped closures do.
+    state_fail stateless-wrong-final '/^\/\/\/ Doubles every element through/,/^}/ s/final(xs)@\[k\] == 2 \* old(xs)@\[k\],$/final(xs)@[k] == 3 * old(xs)@[k],/' 'postcondition not satisfied'
+    state_fail compose-wrong-final   '/^\/\/\/ Multiplies every element by 4/,/^}/ s/final(xs)@\[k\] == 4 \* old(xs)@\[k\],$/final(xs)@[k] == 5 * old(xs)@[k],/' 'postcondition not satisfied'
+    state_fail compose-pre-missing   '/^\/\/\/ Multiplies every element by 4/,/^}/ s/old(xs)@\[k\] < 250,$/old(xs)@[k] < 1000,/' 'precondition not satisfied'
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.

@@ -201,7 +201,7 @@ fn verus_declarations_match_the_plain_ones() {
         "macro_rules! certified_fip_fn",
     );
     let verus = items(verus_decls);
-    assert_eq!(plain.len(), 5, "plain items: {plain:#?}");
+    assert_eq!(plain.len(), 11, "plain items: {plain:#?}");
     assert_eq!(plain, verus);
 }
 

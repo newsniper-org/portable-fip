@@ -589,3 +589,13 @@ fn every_constructor_spelling_is_classified_like_the_shared_table() {
         }
     }
 }
+
+#[test]
+fn verus_ghost_functions_are_not_functions() {
+    // `spec fn` / `proof fn` are erased from the program; a same-named ghost function
+    // calling itself (resolved by name) is not a recursion of `g`.
+    let src = "#[fip]\nfn f(x: u8) -> u8 { g(x) }\nfn g(x: u8) -> u8 { x }\nverus! {\npub open spec fn g(x: u8) -> u8 { g(x) }\nproof fn lemma(x: u8) { lemma(x) }\n}\n";
+    let r = report(src);
+    assert!(r.violations.is_empty(), "{r}");
+    assert_eq!(summary_of(&r, "f"), "0");
+}

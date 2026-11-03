@@ -852,6 +852,18 @@
 //! # // expect: a method of a value (`x.m`) cannot be named
 //! fn main() { let v = 3_u8; let _w = fip_macros::fip_fn!(v.count_ones); }
 //! ```
+//! `fip_strict::Compose` whose summed bound overflows (a compile error, not a wrapped
+//! bound):
+//! ```compile_fail
+//! # // expect: attempt to compute `u64::MAX + 1_u64`, which would overflow
+//! use fip_strict::FipFn;
+//! #[fip_macros::fip(strict = true, param(g = 0))]
+//! fn f<F: FipFn<(u8,), Output = u8>>(g: F) -> u8 { g.call((1,)) }
+//! fn main() {
+//!     let big = unsafe { fip_strict::Certified::<{ u64::MAX }, _>::assume(|x: u8| x) };
+//!     f(fip_strict::Compose(big, unsafe { fip_strict::Certified::<1, _>::assume(|x: u8| x) }));
+//! }
+//! ```
 //! `fip_fn!(path)` claiming another bound than the certificate's:
 //! ```compile_fail
 //! # // expect: mismatched types

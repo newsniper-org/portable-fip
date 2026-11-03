@@ -37,6 +37,16 @@
 //! review and to `grep -n "Cert::assume\|unsafe impl.*FipBound"`. `fip_testkit::certs`
 //! lists them so a test can pin the expected set.
 //!
+//! ## Adapters
+//!
+//! [`Stateless`]`(f)` turns a one-argument callable into a state-passing step for
+//! the `_st` combinators (`(s, x)` to `(s, f(x))`, bound `F::ALLOCS`);
+//! [`Compose`]`(f, g)` calls `g(f(x))` (bound `F::ALLOCS + G::ALLOCS`, an overflow is
+//! a compile error). Both are tuple structs, so a strict body builds them as
+//! constructors, and their `FipBound` impls are the audited claims (pinned by
+//! `tests/hand_written_certs.rs`). Under Verus their `pre` / `post` are built from the
+//! wrapped callables' (`verify/compose_state.rs`).
+//!
 //! ## Verus
 //!
 //! Under the `verus` driver (`cfg(verus_keep_ghost)`) [`FipBound`], [`FipFn`] and
@@ -279,6 +289,65 @@ unsafe impl<const ALLOCS: u64, C> FipBound for Certified<ALLOCS, C> {
     const ALLOCS: u64 = ALLOCS;
 }
 
+/// Lifts a one-argument certified callable to a state-passing step for the `_st`
+/// combinators: `Stateless(f)` called with `(s, x)` returns `(s, f(x))`, keeping the
+/// state. Same bound as `f` (one call of `f`, nothing else).
+///
+/// Under Verus, `pre((s, x))` is `f.pre((x,))` and `post((s, x), (s2, y))` is
+/// `s2 == s && f.post((x,), y)`.
+#[cfg(not(verus_keep_ghost))]
+pub struct Stateless<F>(pub F);
+
+#[allow(
+    unsafe_code,
+    reason = "one call of `Stateless(f)` is one call of `f`, bounded by `F::ALLOCS`"
+)]
+#[cfg(not(verus_keep_ghost))]
+unsafe impl<F: FipBound> FipBound for Stateless<F> {
+    const ALLOCS: u64 = F::ALLOCS;
+}
+
+#[cfg(not(verus_keep_ghost))]
+impl<S, A, B, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
+    type Output = (S, B);
+    #[inline]
+    fn call(&self, args: (S, A)) -> (S, B) {
+        let (s, x) = args;
+        let y = self.0.call((x,));
+        (s, y)
+    }
+}
+
+/// `Compose(f, g)` called with `(x,)` returns `g(f(x))`. Its bound is
+/// `F::ALLOCS + G::ALLOCS` (one call of each); an overflowing sum is a compile error
+/// in constant evaluation, not a wrapped bound.
+///
+/// Under Verus, `pre((x,))` is `f.pre((x,))` and `g.pre` for every result `f.post`
+/// allows; `post((x,), z)` is: some `y` with `f.post((x,), y)` and `g.post((y,), z)`.
+#[cfg(not(verus_keep_ghost))]
+pub struct Compose<F, G>(pub F, pub G);
+
+#[allow(
+    unsafe_code,
+    reason = "one call of `Compose(f, g)` is one call of `f` and one of `g`"
+)]
+#[cfg(not(verus_keep_ghost))]
+unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {
+    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
+}
+
+#[cfg(not(verus_keep_ghost))]
+impl<A, B, C, F: FipFn<(A,), Output = B>, G: FipFn<(B,), Output = C>> FipFn<(A,)>
+    for Compose<F, G>
+{
+    type Output = C;
+    #[inline]
+    fn call(&self, args: (A,)) -> C {
+        let y = self.0.call(args);
+        self.1.call((y,))
+    }
+}
+
 // ---- Verus declarations (only under the `verus` driver).
 
 #[cfg(verus_keep_ghost)]
@@ -344,6 +413,54 @@ impl<const ALLOCS: u64, C> Certified<ALLOCS, C> {
 #[allow(unsafe_code, reason = "the bound was claimed by the `unsafe` constructor `Certified::assume`")]
 unsafe impl<const ALLOCS: u64, C> FipBound for Certified<ALLOCS, C> {
     const ALLOCS: u64 = ALLOCS;
+}
+
+/// A state-keeping adapter; see the plain declaration.
+pub struct Stateless<F>(pub F);
+
+#[allow(unsafe_code, reason = "one call of `Stateless(f)` is one call of `f`, bounded by `F::ALLOCS`")]
+unsafe impl<F: FipBound> FipBound for Stateless<F> {
+    const ALLOCS: u64 = F::ALLOCS;
+}
+
+impl<S, A, B, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
+    type Output = (S, B);
+    open spec fn pre(&self, args: (S, A)) -> bool {
+        self.0.pre((args.1,))
+    }
+    open spec fn post(&self, args: (S, A), out: (S, B)) -> bool {
+        out.0 == args.0 && self.0.post((args.1,), out.1)
+    }
+    #[inline]
+    fn call(&self, args: (S, A)) -> (r: (S, B)) {
+        let (s, x) = args;
+        let y = self.0.call((x,));
+        (s, y)
+    }
+}
+
+/// Composition; see the plain declaration.
+pub struct Compose<F, G>(pub F, pub G);
+
+#[allow(unsafe_code, reason = "one call of `Compose(f, g)` is one call of `f` and one of `g`")]
+unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {
+    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
+}
+
+impl<A, B, C, F: FipFn<(A,), Output = B>, G: FipFn<(B,), Output = C>> FipFn<(A,)> for Compose<F, G> {
+    type Output = C;
+    open spec fn pre(&self, args: (A,)) -> bool {
+        &&& self.0.pre(args)
+        &&& forall|y: B| #[trigger] self.0.post(args, y) ==> self.1.pre((y,))
+    }
+    open spec fn post(&self, args: (A,), out: C) -> bool {
+        exists|y: B| #[trigger] self.0.post(args, y) && self.1.post((y,), out)
+    }
+    #[inline]
+    fn call(&self, args: (A,)) -> (r: C) {
+        let y = self.0.call(args);
+        self.1.call((y,))
+    }
 }
 
 } // verus!

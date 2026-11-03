@@ -299,6 +299,41 @@ gated too.
 
 ### 8. State-passing helpers for the `_st` combinators
 
+**Status:** `Stateless` implemented in the commit "fip-strict: Stateless and
+Compose adapters (fip-fn ergonomics 4)"; `fip_fn_st!` and the invariant snippet not
+implemented (below).
+
+**Probe (2026-11-03), files `/tmp/tp-verus/p4`, both builds identical
+(upstream `0.2026.10.18.7d82994`, fork `0.2026.10.31.559ac52`, `--no-cheating`):**
+
+| # | probe | result |
+|---|---|---|
+| A1 | `Stateless<F>` (user crate) with `unsafe impl<F: FipBound> FipBound { ALLOCS = F::ALLOCS }` and `impl FipFn<(S, A)>` in `verus!`, `pre((s, x)) = f.pre((x,))`, `post = out.0 == s && f.post((x,), out.1)`, passed to `fip_core::strict::map_in_place_st` with a `map_st_fip_inv` invariant; caller proves every element doubled and the state unchanged | 3 verified; wrong final claim: "postcondition not satisfied"; `post` without `out.0 == args.0`: "assertion failed" at the caller's trace invariant |
+| A2 | `unsafe trait` with a defaulted `const NO_PANIC_MACROS: bool = false`, a struct `Cert2<const N: u64, C, const P: bool = false>` in `verus!`, impls with and without the const | 5 verified |
+| A3 | `Compose<F, G>` with `ALLOCS = F::ALLOCS.saturating_add(G::ALLOCS)` | rejected: "Verus does not support const items in traits, except for simple expressions and external_body consts"; `#[verifier::external_body]` on it: "not allowed with --no-cheating" |
+| A3b | the same with `ALLOCS = F::ALLOCS + G::ALLOCS`; `pre = f.pre(a) && forall\|y\| #[trigger] f.post(a, y) ==> g.pre((y,))`, `post = exists\|y\| #[trigger] f.post(a, y) && g.post((y,), out)`; caller proves `apply(Compose(inc, dbl), 5) == 12` | 4 verified; claim 13: "postcondition not satisfied"; `dbl` requiring `x < 6`: "precondition not satisfied" |
+| A3d | A3's `saturating_add` impl placed outside `verus!` | 3 verified (Verus does not look at it; not used: fragile) |
+| A4 | the expansion a `fip_fn_st!` sugar would produce (`\|c: u32, x: u32\| { let mut c = c; let y = { c = c + 1; x + c }; (c, y) }` with a `verus_spec`) through `map_in_place_st` with an invariant | 1 verified |
+| A5 | `Compose` with `G: FipFn<(F::Output,)>` (projection instead of explicit `B`, `C`) applied to two `fip_fn!` closures under Verus | rustc E0275 "overflow evaluating the requirement `<{closure} as FnOnce<(u32,)>>::Output == <Certified<0, {closure}> as FipFn<(u32,)>>::Output`" (plain rustc accepts it); explicit type parameters fix it |
+
+Decisions from the probe:
+
+- `fip_strict::Stateless(f)` (tuple struct, so strict bodies build it as a
+  constructor without a certificate), declared plainly and in `verus!` (drift test
+  now 11 items), A1's specification with an explicit output parameter `B`.
+  `fip-strict` 11 verified (7 before); `verify/compose_state.rs`
+  `doubled_stateless` verifies (12 total on both builds), and its wrong final claim
+  is a `verify-negative` control. Plain: `crates/fip-core/tests/adapters.rs`, a
+  strict caller passing `Stateless(fip_fn!(double))` to `map_in_place_st` (0
+  allocations), bounds 0 and 1 carried over.
+- `fip_fn_st!` not implemented: A4 shows the plain closure it would expand to
+  already verifies, so the sugar saves one `let mut c = c;` and a tuple; it would add
+  a third closure grammar to `fip_fn!`, `fip_testkit` and the driver tests for that.
+  Revisit if callers repeat the pattern.
+- The `proof!` snippet for `map_st_fip_inv` assertions: not done; the assertions
+  name a caller-chosen invariant, which a snippet cannot choose.
+
+
 Sketches:
 
 - **Adapters in `fip-strict`.**
@@ -329,8 +364,7 @@ if a spec is attached.
 
 ### 9. Better error messages
 
-**Status:** Implemented with idea 10 in the commit "fip-macros: fip_fn! misuse
-messages and creation-site bounds (fip-fn ergonomics 3)". Measured with rustc
+**Status:** Implemented with idea 10 in a67a878. Measured with rustc
 1.99.1 (`cargo build`, first error line; before = `470d7e3`, after = this commit):
 
 | input | before | after |
@@ -363,7 +397,7 @@ messages and creation-site bounds (fip-fn ergonomics 3)". Measured with rustc
 
 ### 10. Bound checks at the creation site; integration with `param(g = K)`
 
-**Status:** Implemented in the same commit as idea 9: `fip_fn!(bound <= K, ..)`
+**Status:** Implemented in a67a878 (with idea 9): `fip_fn!(bound <= K, ..)`
 (integer literal, optional `u64` suffix; after `crate = ..`, before the closure or
 path) wraps the bound in `let b = { .. }; assert!(b <= K, ..); b`. Measured:
 
@@ -424,6 +458,17 @@ crate-level opt-in (`#![cfg_attr(fip_prelint, fip::driver_certified)]`), without
 
 ### 12. Panic strictness in `FipBound`
 
+**Status:** probed, not implemented. A2 verifies on both builds (a defaulted
+associated const and a const-generic default in `verus!`), so the declaration side
+is not blocked. Not implemented because the rest is not small: `fip_fn!` must set
+`P` from its scan (`panic_macros = false` is not a `fip_fn!` option today), the
+`param(..)` checks of `panic_macros = false` callees must assert
+`F::NO_PANIC_MACROS` (post-monomorphisation, idea 10's limit), `Stateless` /
+`Compose` must propagate it (`F::NO_PANIC_MACROS && G::NO_PANIC_MACROS`, a simple
+expression per A3b), and `fip-prelint` already checks panics of a `param(..)`
+argument at the call site. Cost stays M.
+
+
 `FipBound` carries only `ALLOCS`. A `panic_macros = false` strict callee receiving
 `F: FipFn` cannot demand a panic-free argument at compile time, so only the driver
 checks it. Sketch:
@@ -443,6 +488,16 @@ callee (see idea 10).
 **Cost.** M.
 
 ### 13. Composition combinators
+
+**Status:** `Compose` implemented in the same commit as idea 8's `Stateless`
+(A3b's specification, explicit type parameters per A5; bound `F::ALLOCS +
+G::ALLOCS`: an overflow is "attempt to compute `u64::MAX + 1_u64`, which would
+overflow" at compile time, a `compile_fail` example; Verus rejects
+`saturating_add` there, A3). Verified caller `verify/compose_state.rs` `quadrupled`
+(`map_in_place` with `Compose` of two specified closures) with two controls (wrong
+final claim; the first step's output no longer within the second's `requires`).
+`then` / `map_output` not added: `Compose` covers them for one-argument callables.
+
 
 `fip_strict::compose(f, g)`, `then`, `map_output`, each a struct with
 `ALLOCS = F::ALLOCS + G::ALLOCS` (saturating). The associated const compiles on stable
