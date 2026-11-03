@@ -3,8 +3,10 @@
 
 # `fip-prelint`: a plan for every case still reported as `⊤`, a warning or a note
 
-**Status:** PROPOSED, 2026-11-03. Execution is ordered separately by the user. Nothing
-here is implemented.
+**Status:** ACCEPTED by the user, 2026-11-03, for items 1–15 of "Recommended order";
+implemented on branch `prelint/top-plan`, one commit per item. Item 16 (Verus
+panic-freedom sidecar, a trust change) awaits a separate user decision; the "stay" and
+"only on demand" items are not executed.
 Builds on `docs/decisions/2026-11-02-fip-prelint-limits-plan.md` (ACCEPTED,
 implemented: L1–L12) and its "Other limits found and kept", on the amendments of
 `docs/decisions/2026-11-01-fip-prelint.md`, and on `TODOs/fip-prelint.md` and
