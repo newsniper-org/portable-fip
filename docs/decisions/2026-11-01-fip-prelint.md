@@ -633,6 +633,16 @@ Fn*`. `Rc<dyn Fn*>` and `FnMut`-bound function pointers stay `⊤`. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: the `Fn` shim of a function pointer and
 `Box<dyn Fn*>`".
 
+## Amendment 2026-11-03: private functions checked at their call sites (top plan T4.3)
+
+The "declared parameter bounds" amendment keeps its rule for exported functions: a
+parameter without `param(..)` passed on is reported where it is passed. A local
+function that is not exported by name, not a trait method or implementation, has no
+external symbol and is never used as a value (only called by name) is instead checked
+at each of its call sites in the crate, with what that call passes (callable
+bindings); an unknown argument reports the `⊤` there. Details: `TODOs/fip-prelint.md`,
+"Resolved 2026-11-03: private functions checked at their call sites".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

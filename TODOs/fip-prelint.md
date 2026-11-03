@@ -1709,3 +1709,51 @@ pointer the box owns.
 + reborrow, not the plan's `(*((*_1).0.0.0))`. `Rc<dyn Fn>` stays `⊤` (its `Deref` is
 a call result; not "no special case needed"). `FnMut`-bound generics with a function
 pointer stay `⊤` (`&mut g` makes `g` unstable in the must-analysis).
+
+## Resolved 2026-11-03: private functions checked at their call sites (top plan T4.3)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T4 candidate 3 (item 5 of
+its order); candidate 2 (context-sensitive resolution for roots) came with B.
+
+**Before.** `mid(q) { apply_ptr(q, x) }` without `param(q = ..)` was reported `⊤` at
+its call of `apply_ptr` whenever `mid` was checked on its own (every local function
+is), even when every caller passes a known function. An allocating argument passed by
+a non-root caller was covered only by that `⊤`.
+
+**Mechanism.**
+
+- `analysis::inferable_private`: local `fn`s and inherent methods that are not
+  exported by name, not trait methods or trait implementations, without an external
+  symbol, never named outside the callee position of a call (HIR scan of every body,
+  closures, consts and statics included), with a callable-typed parameter. All their
+  callers are analysed code of this crate.
+- `ArgSite`/`ArgViolation` record the caller (`caller_def`) and whether the argument
+  is an unbound, undeclared parameter of the caller (`from_param`, `unbound_param`).
+- `report.rs`: for such a function checked on its own, violations with `from_param` in
+  its own body are not reported.
+- `Analysis::arguments_in(owner)`: every call of such a function explores its body
+  bound to what the call passes (`call_binds`), so its call sites are checked per
+  caller (an unknown argument explores it unbound and reports the `⊤`). An inferable
+  owner passing its own unbound parameter on leaves that to its own call sites.
+- `arguments_in` reads the owner's body with no current node (`bind_of` is `None`),
+  and nodes created then have no parent (a stale-binding hazard found while
+  implementing).
+
+**Soundness.** Such a function can be called only by name from this crate's code (no
+pointer to it exists, it is not callable through a trait, and it is not reachable by
+name from other crates), and every such call is checked with its binding, or unbound
+(`⊤`) when the argument is unknown. `pub` (exported), reified, trait and `extern`
+functions keep the standalone report.
+
+**Measured** (before = `54dd6cc`, fixture `param_bounds` with the 8 new functions):
+
+| case | before | after |
+|---|---|---|
+| fixture `param_bounds` | 18 roots, 11 passed, 26 errors: `mid_private` `⊤` (standalone), `via_mid_private_alloc`'s allocation not reported as such | 18 roots, 11 passed, 27 errors: `mid_private`'s standalone `⊤` dropped (the line stays because `via_mid_private_unknown` passes an unknown pointer, deliberately; without that caller it disappears, measured); `via_mid_private_alloc`/`via_mid_outer_alloc` reported with the allocation at `mid_private`'s call; `mid_public`, `mid_reified` keep the report; `mid_outer` (private, passes its parameter on) not reported |
+| N4 `top` | `mid` (`pub`) reported | unchanged |
+| self-check dev / `--release`, other fixtures | — | unchanged; 23 `param` call sites |
+
+**Deviation:** the plan's "every call site binds `q`" is not a precondition; a call
+site with an unknown argument reports the `⊤` itself. The `⊤` text still names the
+private function's parameter (`the parameter q of the caller`), not the caller that
+passed the unknown pointer.

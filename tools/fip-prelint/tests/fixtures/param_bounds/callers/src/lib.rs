@@ -228,3 +228,62 @@ pub fn generic_with_fnptr_local_alloc(x: u32) -> u32 {
 pub fn gen_declared(p: fn(u32) -> u32, x: u32) -> u32 {
     apply(p, x)
 }
+
+// A private function passing its own undeclared parameter on (top plan T4.3): not
+// exported, never used as a value, so every call site is in this crate; each call site
+// checks its body with what it passes, instead of a report at the function.
+
+/// Passes `q` (no `param(q = ..)`) to `apply_ptr`: not reported here.
+fn mid_private(q: fn(u32) -> u32, x: u32) -> u32 {
+    apply_ptr(q, x)
+}
+
+/// Passes an allocation-free function to `mid_private`: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn via_mid_private(x: u32) -> u32 {
+    mid_private(plus_one, x)
+}
+
+/// Passes an allocating function to `mid_private`: reported at `mid_private`'s call
+/// of `apply_ptr` (checked with this binding).
+pub fn via_mid_private_alloc(x: u32) -> u32 {
+    mid_private(boxed_value, x)
+}
+
+/// Passes an unknown pointer (its own undeclared parameter, exported): `mid_private`
+/// is checked without a binding, its call of `apply_ptr` is `⊤`.
+pub fn via_mid_private_unknown(x: u32, r: fn(u32) -> u32) -> u32 {
+    mid_private(r, x)
+}
+
+/// The same shape, but `pub`: reported at the function, as before.
+pub fn mid_public(q: fn(u32) -> u32, x: u32) -> u32 {
+    apply_ptr(q, x)
+}
+
+/// Private, but used as a value below: reported at the function.
+fn mid_reified(q: fn(u32) -> u32, x: u32) -> u32 {
+    apply_ptr(q, x)
+}
+
+/// Returns `mid_reified` as a function pointer.
+pub fn reify_mid() -> fn(fn(u32) -> u32, u32) -> u32 {
+    mid_reified
+}
+
+/// Private, passes its own parameter on to the private `mid_private`: not reported;
+/// its call sites check both bodies with what they pass.
+fn mid_outer(q: fn(u32) -> u32, x: u32) -> u32 {
+    mid_private(q, x)
+}
+
+/// Passes an allocation-free function through two private functions: passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn via_mid_outer(x: u32) -> u32 {
+    mid_outer(plus_one, x)
+}
+
+/// Passes an allocating one: reported at `mid_private`'s call of `apply_ptr`.
+pub fn via_mid_outer_alloc(x: u32) -> u32 {
+    mid_outer(boxed_value, x)
+}

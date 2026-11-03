@@ -1003,6 +1003,93 @@ pub fn declares_export(tcx: TyCtxt<'_>, root: DefId) -> bool {
     })
 }
 
+/// Local functions whose call sites are all in analysed code of this crate and pass
+/// the function itself only as a callee (top plan T4.3): not exported by name, not a
+/// trait method or trait implementation, without an external symbol (`#[no_mangle]`,
+/// `#[export_name]`), never named outside the callee position of a call (so never
+/// reified, coerced or passed as a callable), with a parameter of callable type. A
+/// call site inside such a function that passes one of its unbound, undeclared
+/// parameters is not reported on its own: each of the function's call sites checks
+/// its body with what it passes (`Analysis::arguments_in`).
+pub fn inferable_private(tcx: TyCtxt<'_>) -> HashSet<DefId> {
+    use rustc_hir::intravisit::{self, Visitor};
+    struct Values<'tcx> {
+        tcx: TyCtxt<'tcx>,
+        body: Option<rustc_hir::def_id::LocalDefId>,
+        used: HashSet<DefId>,
+    }
+    impl<'tcx> Visitor<'tcx> for Values<'tcx> {
+        type NestedFilter = rustc_middle::hir::nested_filter::All;
+        fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+            self.tcx
+        }
+        fn visit_nested_body(&mut self, id: rustc_hir::BodyId) {
+            let prev = self.body.replace(self.tcx.hir_body_owner_def_id(id));
+            let body = self.tcx.hir_body(id);
+            self.visit_body(body);
+            self.body = prev;
+        }
+        fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+            if let rustc_hir::ExprKind::Call(callee, args) = e.kind
+                && matches!(callee.kind, rustc_hir::ExprKind::Path(_))
+            {
+                for a in args {
+                    self.visit_expr(a);
+                }
+                return;
+            }
+            if let rustc_hir::ExprKind::Path(ref qpath) = e.kind
+                && let Some(owner) = self.body
+            {
+                let res = self.tcx.typeck(owner).qpath_res(qpath, e.hir_id);
+                if let rustc_hir::def::Res::Def(_, d) = res {
+                    self.used.insert(d);
+                }
+            }
+            intravisit::walk_expr(self, e);
+        }
+    }
+    let mut v = Values {
+        tcx,
+        body: None,
+        used: HashSet::new(),
+    };
+    tcx.hir_walk_toplevel_module(&mut v);
+    let visibilities = tcx.effective_visibilities(());
+    let callable = |t: Ty<'_>| {
+        let inner = match *t.kind() {
+            ty::Ref(_, inner, _) => inner,
+            _ => t,
+        };
+        let inner = if inner.is_box() {
+            inner.expect_boxed_ty()
+        } else {
+            inner
+        };
+        inner.is_fn_ptr() || matches!(inner.kind(), ty::Dynamic(..))
+    };
+    tcx.mir_keys(())
+        .iter()
+        .filter(|&&d| {
+            let def = d.to_def_id();
+            matches!(tcx.def_kind(def), DefKind::Fn | DefKind::AssocFn)
+                && !visibilities.is_exported(d)
+                && tcx.trait_of_assoc(def).is_none()
+                && tcx.trait_impl_of_assoc(def).is_none()
+                && !tcx.codegen_fn_attrs(def).contains_extern_indicator()
+                && !v.used.contains(&def)
+                && tcx
+                    .fn_sig(def)
+                    .skip_binder()
+                    .skip_binder()
+                    .inputs()
+                    .iter()
+                    .any(|t| callable(*t))
+        })
+        .map(|d| d.to_def_id())
+        .collect()
+}
+
 pub(crate) fn is_std_crate(name: &str) -> bool {
     matches!(name, "core" | "alloc" | "std")
 }
@@ -1097,6 +1184,11 @@ pub struct RootResult {
 /// entry points resolved.
 struct ArgSite {
     caller: String,
+    /// The function or closure containing the call.
+    caller_def: DefId,
+    /// `true` if the argument is a parameter of the caller that is neither bound at
+    /// the caller's call sites nor declared `param(..)` (top plan T4.3).
+    from_param: bool,
     span: Span,
     /// `true` if the call site lies in the local crate.
     local: bool,
@@ -1125,6 +1217,9 @@ type ArgItems = (String, Vec<(String, Item)>, bool);
 pub struct ArgViolation {
     /// The function or closure containing the call.
     pub caller: String,
+    pub caller_def: DefId,
+    /// The argument is an unbound, undeclared parameter of the caller.
+    pub from_param: bool,
     /// The call site.
     pub span: Span,
     /// `true` if the call site lies in the local crate.
@@ -1403,10 +1498,20 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
 
     /// Declared parameter bounds at the call sites of one local function or closure
     /// body (identity arguments, its own typing environment). Only the arguments'
-    /// entry points are explored, not the body's other callees. Used for every local
-    /// body that is not a root, so that callers which are not roots are checked.
-    pub fn arguments_in(tcx: TyCtxt<'tcx>, crates: &'a Crates, owner: DefId) -> Vec<ArgViolation> {
+    /// entry points are explored, not the body's other callees, except the bodies of
+    /// the `inferable` private functions it calls, bound to what it passes (top plan
+    /// T4.3). Used for every local body that is not a root, so that callers which are
+    /// not roots are checked.
+    pub fn arguments_in(
+        tcx: TyCtxt<'tcx>,
+        crates: &'a Crates,
+        owner: DefId,
+        inferable: &HashSet<DefId>,
+    ) -> Vec<ArgViolation> {
         let mut a = Analysis::new(tcx, crates, owner);
+        // No node is being classified while the owner's body is read: its parameters
+        // have no bindings.
+        a.current = usize::MAX;
         let inst = a.identity(owner);
         let body = tcx.instance_mir(inst.def);
         for data in body.basic_blocks.iter() {
@@ -1438,9 +1543,24 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             };
             if let Ok(Some(callee)) = Instance::try_resolve(tcx, a.env, def_id, args) {
                 a.note_arg_site(inst, body, term.source_info.span, callee, call_args);
+                // A private function whose own call-site reports for its unbound
+                // parameters are replaced by this call site (top plan T4.3): its body
+                // is checked with what this call passes.
+                // An inferable owner passing its own unbound parameter on is checked the
+                // same way from its own call sites (the binding then reaches the callee).
+                let passes_own = inferable.contains(&owner)
+                    && call_args
+                        .iter()
+                        .any(|c| a.unbound_param(inst, body, &c.node));
+                if !passes_own
+                    && matches!(callee.def, InstanceKind::Item(d) if inferable.contains(&d))
+                {
+                    let binds = a.call_binds(inst, body, callee, call_args);
+                    a.node_bound(callee, Vec::new(), 0, binds);
+                }
             }
         }
-        if a.arg_sites.is_empty() {
+        if a.arg_sites.is_empty() && a.queue.is_empty() {
             return Vec::new();
         }
         while let Some(i) = a.queue.pop() {
@@ -1514,7 +1634,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
         let i = self.nodes.len();
         let label = self.label(inst);
-        let parent = (i > 0).then_some(self.current);
+        let parent = (i > 0 && self.current < i).then_some(self.current);
         self.nodes.push(Node {
             inst,
             ctx: key.1.clone(),
@@ -1536,7 +1656,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
         let i = self.nodes.len();
         let label = self.label(inst);
-        let parent = (i > 0).then_some(self.current);
+        let parent = (i > 0 && self.current < i).then_some(self.current);
         let evs = contract_call_events(&format!("call of `{}`", def_path(self.tcx, def_id)), m);
         self.nodes.push(Node {
             inst,
@@ -3193,8 +3313,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 continue;
             };
             let indirect = indirect.then(|| mark.clone());
+            let from_param = self
+                .tcx
+                .fn_arg_idents(def_id)
+                .iter()
+                .position(|i| i.is_some_and(|i| i.name.as_str() == g))
+                .and_then(|pos| call_args.get(pos))
+                .is_some_and(|a| self.unbound_param(caller, body, &a.node));
             self.arg_sites.push(ArgSite {
                 caller: caller_label.clone(),
+                caller_def: caller.def_id(),
+                from_param,
                 span,
                 local: caller.def_id().is_local(),
                 callee: callee_label.clone(),
@@ -3204,6 +3333,30 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 items,
                 indirect,
             });
+        }
+    }
+
+    /// `true` if `op` (in `caller`'s body) is, directly or as `&l`, a parameter of
+    /// `caller` that has no callable binding and no `param(..)` declaration.
+    fn unbound_param(
+        &self,
+        caller: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> bool {
+        let mut origin = origin_of(self.tcx, body, op);
+        if let Some(Origin::Ref(l)) = origin {
+            origin = origin_of(self.tcx, body, &Operand::Copy(mir::Place::from(l)));
+        }
+        let Some(Origin::Arg(l)) = origin else {
+            return false;
+        };
+        if self.bind_of(l).is_some() {
+            return false;
+        }
+        match caller.def {
+            InstanceKind::Item(d) => self.declared_param(d, body, l).is_none(),
+            _ => true,
         }
     }
 
@@ -3611,6 +3764,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             if violated {
                 out.push(ArgViolation {
                     caller: site.caller.clone(),
+                    caller_def: site.caller_def,
+                    from_param: site.from_param,
                     span: site.span,
                     local: site.local,
                     callee: site.callee.clone(),

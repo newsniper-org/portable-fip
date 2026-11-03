@@ -896,11 +896,17 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     // Callers that are not roots: every other local body, with identity arguments.
     let mut outside_roots = 0usize;
     if crates.has_param_marks() {
+        let inferable = crate::analysis::inferable_private(tcx);
         for owner in local_bodies(tcx) {
             if roots.iter().any(|(d, _)| *d == owner) {
                 continue;
             }
-            for v in Analysis::arguments_in(tcx, &crates, owner) {
+            for v in Analysis::arguments_in(tcx, &crates, owner, &inferable) {
+                // A private function's own unbound parameter passed on: checked at
+                // each of its call sites instead (top plan T4.3).
+                if v.from_param && v.caller_def == owner && inferable.contains(&owner) {
+                    continue;
+                }
                 if seen.insert(v.key()) {
                     report_argument(&mut out, tcx.def_span(owner), &v);
                     outside_roots += 1;

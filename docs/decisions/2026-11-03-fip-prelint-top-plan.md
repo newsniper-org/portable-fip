@@ -372,6 +372,23 @@ parameter bounds").
 **Tests.** `param_bounds`: private `mid` with bound callers has no report; `pub mid`
 is reported; a reified private `mid` is reported.
 
+**Implemented** (item 5, candidate 3; candidate 2 came with item 3). "Private" is
+measured as "not exported by name" (`effective_visibilities().is_exported`), not a
+trait method or trait implementation, no `#[no_mangle]`/`#[export_name]`, never named
+outside the callee position of a call expression (a HIR scan of every body, so also
+consts, statics and closures), with a parameter of callable type
+(`analysis::inferable_private`). Such a function's call-site violations whose argument
+is its own unbound, undeclared parameter are not reported on its own; instead every
+call site (`arguments_in` of each caller) explores its body bound to what that call
+passes (B). **Deviation:** the plan's condition "every call site binds `q`" is not
+checked up front; a call site that passes an unknown pointer explores the function
+unbound, which reports the same `⊤` there. A private function passing its own unbound
+parameter on to another inferable one is checked through its own callers. Fixture
+`param_bounds`: `mid_private`'s standalone `⊤` is gone (it remains only because
+`via_mid_private_unknown` passes an unknown pointer, deliberately);
+`via_mid_private_alloc` is reported with the allocation at `mid_private`'s call;
+`mid_public`, `mid_reified` keep the report. N4 `mid` is `pub`: unchanged.
+
 **Effort.** M (3 after B). **Dependencies:** B.
 
 ### T5. Contracts with `param(..)`

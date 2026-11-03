@@ -210,6 +210,10 @@ fn export_detection() {
 /// gets what that argument does (top plan B). A generic `G` instantiated with a
 /// function pointer (top plan T3): its `Fn` shim is bound to a local reification or a
 /// declared parameter (passes; an allocating one is reported at the call site).
+/// Private functions passing an undeclared parameter on (top plan T4.3): not reported
+/// on their own; each call site checks them with what it passes (an allocating or
+/// unknown argument is reported at the private function's call); `pub` and reified
+/// ones keep the report.
 #[test]
 fn param_bounds() {
     check("param_bounds");
