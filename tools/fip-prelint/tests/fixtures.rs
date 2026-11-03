@@ -279,7 +279,11 @@ fn indirect() {
 /// a constant index selects one), a field of a static struct, a constant slice, a
 /// dependency's static table, fields of local aggregates; the same at call sites of a
 /// callee with `param(p = 0)`. Interior mutability, `static mut`, an atomic, a local
-/// written in part and a parameter's field stay `⊤`.
+/// written in part and a parameter's field stay `⊤`. Crate `certs` (top plan T1.4):
+/// calls through `fip_strict::Certified<N, fn(..)>` fields cost `N` (and a panic
+/// path); every analysed `Certified::assume` is checked against `N` (an allocating or
+/// freeing function is an error there, a pointer of unknown origin or a generic
+/// callable type `⊤`, a declared parameter passes and its callers are checked).
 #[test]
 fn indirect_data() {
     check("indirect_data");

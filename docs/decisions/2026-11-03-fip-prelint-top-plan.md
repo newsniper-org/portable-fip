@@ -221,6 +221,24 @@ check of `TABLE[(i & 1) as usize]` is not proved (`BitAnd` is outside the value
 domain). A static whose type is not `Freeze` stays `⊤` even for a field outside its
 `UnsafeCell` (its allocation is mutable; conservative).
 
+**Implemented** (item 13, candidate 4). Inside `<Certified<N, P> as FipFn<A>>::call`
+with `P` a function pointer, the call of the held pointer (its `Fn` shim) costs the
+certificate: `N` allocations, no free, no recursion, and a panic path (the certificate
+bounds no panics). Every analysed `Certified::<N, P>::assume(f)` (in every local body,
+as for `param` call sites) is checked like an argument for `param(f = N)` of a
+`#[fip(N)]` callee calling `f` by its declaration: an allocating (above `N`), freeing
+or recursing function is an error at the construction, a pointer of unknown origin is
+`⊤` there, a declared `param(p = K)` passes and its callers are checked; an `assume`
+whose callable type is a type parameter is `⊤` (a function-pointer instantiation would
+carry an unchecked bound). Fixture `indirect_data`, new crate `certs`: 6 roots, 4
+passed (`call_field`, `call_field1`, `make_good`, `make_declared`); errors as planned
+for the over-bound call, the strict panic, the allocating and the freeing
+construction, `⊤` for the unknown pointer and the generic wrapper. `data` unchanged.
+**Deviations:** no safe `erase` from `Certified<N, FnDef>`: a function item coerces to
+a pointer only at a concrete type, which no generic signature in `fip-strict` can
+express, so values come from `Certified::assume` (`unsafe`, greppable) only; the call
+also costs a panic path, which the plan did not state.
+
 **Tests.** A new fixture `indirect_data` with the N4 cases:
 
 - `const` and `static` pass, and the table passes with the max over its elements;
@@ -258,7 +276,9 @@ Effort M (2 days).
 function or closure, a constant, the candidates of immutable data), `Pointee` (the
 concrete type of a `&dyn Fn*`) and `Declared(fn, g)`; arguments of function-pointer
 and `&dyn Fn*` type are bound (`Box<dyn Fn*>` and generic `F` come with item 4).
-`Certified(N)` waits for T1.4. Depth: at most 3 nodes with callable bindings on the
+`Certified(N)` waits for T1.4 (item 13: realised at the `Certified` call itself, not
+as a binding, because the pointer lives in the `Certified` value, whose constructions
+are checked). Depth: at most 3 nodes with callable bindings on the
 first-caller chain. **Deviation:** the prediction "no verdict change alone" did not
 hold. Measured: `top::through_mid` passes (its exploration no longer carries `mid`'s
 unbound call-site `⊤`; `mid`'s standalone report stays); `param_bounds::fip_through_fbip`

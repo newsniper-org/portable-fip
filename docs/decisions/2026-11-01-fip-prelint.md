@@ -747,6 +747,15 @@ stack use of a symbol the build has no frame for (a trusted declaration, listed 
 summary, used only for that crate's roots). Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-03: stack mode gaps".
 
+## Amendment 2026-11-03: certified function pointers (top plan T1.4)
+
+A call through the pointer held in a `fip_strict::Certified<N, fn(..)>` costs `N`
+allocations and a possible panic (no free, no recursion). Every analysed
+`Certified::assume` is checked against `N` like a `param(f = N)` argument; a pointer of
+unknown origin or a generic callable type is `⊤` there. Constructions in crates the
+driver does not analyse are trusted (`assume` is `unsafe`). Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: certified function pointers".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

@@ -1488,6 +1488,26 @@ pub fn def_path_pub(tcx: TyCtxt<'_>, def_id: DefId) -> String {
     def_path(tcx, def_id)
 }
 
+/// `(N, C)` for `fip_strict::Certified<N, C>` (`N` evaluated).
+fn certified_parts<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<(u64, Ty<'tcx>)> {
+    let ty::Adt(def, args) = *ty.kind() else {
+        return None;
+    };
+    if tcx.crate_name(def.did().krate).as_str() != "fip_strict"
+        || tcx.item_name(def.did()).as_str() != "Certified"
+    {
+        return None;
+    }
+    let c = args.get(1)?.as_type()?;
+    let n = args.first()?.as_const()?.try_to_leaf()?.to_u64();
+    Some((n, c))
+}
+
+/// `(N, P)` for `fip_strict::Certified<N, P>` with `P` a function pointer type.
+fn certified_fn_ptr<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<(u64, Ty<'tcx>)> {
+    certified_parts(tcx, ty).filter(|(_, p)| p.is_fn_ptr())
+}
+
 fn def_path(tcx: TyCtxt<'_>, def_id: DefId) -> String {
     with_no_visible_paths!(with_no_trimmed_paths!(tcx.def_path_str(def_id)))
 }
@@ -2750,6 +2770,25 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 "callee of type `{fty}` (not normalizable)"
             )));
         };
+        // Inside `<Certified<N, fn(..)> as FipFn<A>>::call`: the call of the held
+        // pointer (`Fn::call` of the pointer type, or a direct pointer call) costs
+        // the certificate (top plan T1.4).
+        let pointer_call = match *fty.kind() {
+            ty::FnPtr(..) => true,
+            ty::FnDef(d, a) => {
+                self.tcx
+                    .trait_of_assoc(d)
+                    .is_some_and(|t| self.tcx.fn_trait_kind_from_def_id(t).is_some())
+                    && a.no_bound_vars()
+                        .and_then(|a| a.first())
+                        .and_then(|g| g.as_type())
+                        .is_some_and(|t| t.is_fn_ptr())
+            }
+            _ => false,
+        };
+        if pointer_call && let Some(item) = self.certified_call(inst) {
+            return item;
+        }
         match *fty.kind() {
             ty::FnDef(def_id, fargs) => match fargs.no_bound_vars() {
                 Some(fargs) => match Instance::try_resolve(self.tcx, self.env, def_id, fargs) {
@@ -2832,6 +2871,34 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             },
             Origin::Pointee(_) | Origin::BufOf(_) | Origin::Ref(_) | Origin::BoxPtr(_) => None,
         }
+    }
+
+    /// The call through the function pointer of a `fip_strict::Certified<N, fn(..)>`
+    /// (top plan T1.4): inside its `FipFn::call` (`(self.f)(..)`, the only call
+    /// through a pointer in a `Certified` method), the certificate's bound `N`: at
+    /// most `N` allocations, no free, no recursion. The certificate says nothing
+    /// about panics, so a panic path is assumed. Every analysed construction
+    /// (`Certified::assume`) is checked against `N` at its call site
+    /// ([`Analysis::note_arg_site`]); constructions in unanalysed crates are trusted
+    /// (`assume` is `unsafe`).
+    fn certified_call(&self, inst: Instance<'tcx>) -> Option<Item> {
+        let tcx = self.tcx;
+        let InstanceKind::Item(d) = inst.def else {
+            return None;
+        };
+        let imp = tcx.impl_of_assoc(d)?;
+        let self_ty = tcx.type_of(imp).instantiate(tcx, inst.args).skip_norm_wip();
+        let (n, p) = certified_fn_ptr(tcx, self_ty)?;
+        let shown = with_no_visible_paths!(with_no_trimmed_paths!(p.to_string()));
+        let what = format!("call of a certified function pointer `Certified<{n}, {shown}>`");
+        let mut evs = vec![Ev::Bound(
+            n,
+            format!("{what}: {n} allocation(s) certified by its construction"),
+        )];
+        evs.push(Ev::Panic(format!(
+            "{what}: its certificate bounds allocations, not panics, so it may panic"
+        )));
+        Some(Item::Evs(evs))
     }
 
     /// The call through a function pointer held in immutable data
@@ -3937,6 +4004,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let (InstanceKind::Item(def_id) | InstanceKind::Virtual(def_id, _)) = callee.def else {
             return;
         };
+        if self.certified_construction(caller, body, span, callee, call_args) {
+            return;
+        }
         let crates = self.crates;
         let Some(mark) = crates.param_mark(self.tcx, def_id) else {
             return;
@@ -3971,6 +4041,81 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 indirect,
             });
         }
+    }
+
+    /// A construction `Certified::<N, fn(..)>::assume(f)` (top plan T1.4): checked
+    /// like an argument for a declared `param(f = N)` of a `#[fip(N)]` callee that
+    /// calls `f` by its declaration (so a free or recursion of `f` is forbidden, a
+    /// panic allowed): the function `f` holds must allocate at most `N` times per call;
+    /// a pointer of unknown origin is `⊤` here. `false` for any other callee.
+    fn certified_construction(
+        &mut self,
+        caller: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        span: Span,
+        callee: Instance<'tcx>,
+        call_args: &[Spanned<Operand<'tcx>>],
+    ) -> bool {
+        let tcx = self.tcx;
+        let InstanceKind::Item(def_id) = callee.def else {
+            return false;
+        };
+        if tcx
+            .opt_item_name(def_id)
+            .is_none_or(|n| n.as_str() != "assume")
+        {
+            return false;
+        }
+        let Some(imp) = tcx.impl_of_assoc(def_id) else {
+            return false;
+        };
+        if tcx.trait_impl_of_assoc(def_id).is_some() {
+            return false;
+        }
+        let self_ty = tcx
+            .type_of(imp)
+            .instantiate(tcx, callee.args)
+            .skip_norm_wip();
+        let Some((n, p)) = certified_parts(tcx, self_ty) else {
+            return false;
+        };
+        let op = call_args.first().map(|a| &a.node);
+        let (arg, items) = if p.is_fn_ptr() {
+            self.indirect_argument(caller, body, op, "f", p)
+        } else if p.has_param() {
+            // A generic callable type: instantiated with a function pointer, calls
+            // would trust a bound no analysed site checked.
+            let shown = with_no_visible_paths!(with_no_trimmed_paths!(p.to_string()));
+            let what = format!(
+                "`Certified::assume` with the generic callable type `{shown}`: if it is instantiated with a function pointer, calls trust a bound that is not checked here"
+            );
+            (shown, vec![(what.clone(), Item::Ev(Ev::Unknown(what)))])
+        } else {
+            // A closure or function item: its calls are analysed through its body.
+            return false;
+        };
+        let from_param = op.is_some_and(|o| self.unbound_param(caller, body, o));
+        let shown = with_no_visible_paths!(with_no_trimmed_paths!(p.to_string()));
+        self.arg_sites.push(ArgSite {
+            caller: self.label(caller),
+            caller_def: caller.def_id(),
+            from_param,
+            span,
+            local: caller.def_id().is_local(),
+            callee: format!("fip_strict::Certified::<{n}, {shown}>::assume"),
+            param: "f".to_string(),
+            declared: n,
+            arg,
+            items,
+            indirect: Some(Mark {
+                kind: crate::marks::Kind::Fip,
+                n,
+                strict: false,
+                panic_macros: true,
+                params: vec![("f".to_string(), n)],
+            }),
+        });
+        true
     }
 
     /// `true` if `op` (in `caller`'s body) is, directly or as `&l`, a parameter of

@@ -2211,3 +2211,56 @@ COFF and WASM have no frame sizes. A generic instance inlined into every caller 
 symbol (release `generic::<u32>`). In `--tests` the executable's allocator shim defines
 `__rust_alloc`, so `boxed` is `⊤` as "defined in the build but not codegened from MIR".
 Undeclared runtime functions and foreign functions stay `⊤`.
+
+## Resolved 2026-11-03: certified function pointers (top plan T1.4)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, item 13.
+
+**Before.** A function pointer in a parameter's field or on the heap was `⊤`
+("call through a function pointer"), also when held in a
+`fip_strict::Certified<N, fn(..)>`: its `FipFn::call` calls the pointer through the
+`Fn` shim, and the driver did not use `N`. Constructions with a wrong `N` were not
+checked.
+
+**Change.** `Analysis::certified_call`: inside `<Certified<N, P> as FipFn<A>>::call`
+with `P` a function pointer, the call of the held pointer (the `Fn`-family shim of
+`P`, or a direct pointer call) is the events "`N` allocation(s) certified by its
+construction" and a panic path (the certificate bounds no panics); no free, no
+recursion. `Analysis::certified_construction`: every `Certified::<N, P>::assume(f)` in
+an analysed body (roots' graphs and `arguments_in` for every local body) is an
+argument site for `param(f = N)` with a `#[fip(N)]` mark whose calls are counted by
+the declaration, so the function `f` holds must allocate at most `N` times and must
+not free or recurse; unknown origin is `⊤` at the construction; a callable type that
+is a type parameter is `⊤` (an instantiation with a pointer would be unchecked).
+
+**Soundness.** Assume-guarantee, as `param(g = K)`: analysed constructions are
+checked; constructions in crates the driver does not analyse are trusted, as the
+`unsafe` constructor states.
+
+**Measured** (fixture `indirect_data`, new crate `certs`). Before: the call rows were
+measured with an intermediate build that had the construction check but not the call
+rule (`⊤` through `<fn(u8) -> u8 as Fn<(u8,)>>::call (shim)`); the construction rows
+"nothing" are read from `b3903cb`'s code (no rule checked `Certified::assume`),
+unmeasured.
+
+| case | before | after |
+|---|---|---|
+| `call_field` (`Certified<0, fn>` field, `#[fip]`) | `⊤` | passes |
+| `call_field1` (`Certified<1, fn>`, `#[fip(1)]`) | `⊤` | passes |
+| `call_field1_over` (`Certified<1, fn>`, `#[fip]`) | `⊤` | may allocate 1 time(s) |
+| `call_field_strict` (`panic_macros = false`) | `⊤` | panic path (the certificate bounds no panics) |
+| `make_good` (`assume(plus1)`, `N = 0`) | passes (unchecked) | passes (checked) |
+| `make_over` (`assume(leak_once)`, `N = 0`) | nothing | error at the construction, 1 allocation |
+| `make_frees` (`assume(boxed_round_trip)`, `N = 1`) | nothing | error: may free |
+| `make_unknown(p)` | nothing | `⊤` at the construction |
+| `make_declared(p)` with `param(p = 0)` / its allocating caller | passes / nothing | passes / error at the caller |
+| `wrap<C>` (generic callable type) | nothing | `⊤` at the construction |
+
+`certs`: 6 roots, 4 passed, 7 errors. `data`, every other fixture and the self-check
+(79 roots, 26 notes, 23 `param` call sites) are unchanged. An internal compiler error
+found on the way (`item_name` of a closure callee, compile_fail examples) was fixed
+before landing (`opt_item_name`).
+
+**Deviation.** No safe `erase` from `Certified<N, FnDef>` in `fip-strict`: the
+coercion of a function item to a pointer exists only at concrete types, so no generic
+signature can perform it; values come from `Certified::assume`.

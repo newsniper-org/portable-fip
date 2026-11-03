@@ -3,11 +3,22 @@
 version = 4
 
 [[package]]
+name = "certs"
+version = "0.1.0"
+dependencies = [
+ "fip-strict",
+]
+
+[[package]]
 name = "data"
 version = "0.1.0"
 dependencies = [
  "tables",
 ]
+
+[[package]]
+name = "fip-strict"
+version = "0.1.0"
 
 [[package]]
 name = "tables"
