@@ -727,6 +727,15 @@ dep-info, so cargo re-checks a crate when a sidecar's content changes, not only 
 its modification time moves. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-03:
 the analysis cache follows the std summaries' content".
 
+## Amendment 2026-11-03: std summaries for every installed `std` target (top plan T7j)
+
+The sidecar is generated and committed for every installed target with `std` (10),
+not only the host; `repin.sh` regenerates or compares all of them. A target without a
+sidecar keeps the `⊤` of "std summaries not used". The wasm32 results equal the
+host's for formatting and differ where `std::sys` differs. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: std summaries for every installed `std`
+target".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

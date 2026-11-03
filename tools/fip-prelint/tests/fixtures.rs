@@ -327,6 +327,39 @@ fn std_summaries_stale() {
     );
 }
 
+/// The same crate for `wasm32-unknown-unknown` with that target's sidecar (top plan
+/// T7j): the formatting results equal the host's; the `std::sys` paths differ by
+/// platform (no OS random source, no foreign calls, no thread-local destructors), so
+/// `hashmap_new`, the thread locals and the FFI marks have their own expectations.
+/// Skipped if the target's `std` is not installed.
+#[test]
+fn std_summaries_wasm32() {
+    let triple = "wasm32-unknown-unknown";
+    let out = Command::new("rustc")
+        .env(
+            "RUSTUP_TOOLCHAIN",
+            std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".to_string()),
+        )
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("rustc --print sysroot");
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    if !sysroot.join("lib").join("rustlib").join(triple).is_dir() {
+        eprintln!("std_summaries_wasm32: `{triple}` not installed, skipped");
+        return;
+    }
+    compare(
+        "std_summaries",
+        "-wasm32",
+        &run_args(
+            "std_summaries",
+            "-wasm32",
+            &[],
+            &["--message-format", "short", "--target", triple],
+        ),
+    );
+}
+
 /// The analysis cache is keyed on the std summaries' content, not only on their
 /// modification time. Fixture `sidecar_cache`, one target directory, one
 /// `FIP_PRELINT_STD_SUMMARIES` path: first the real sidecar (the root passes, so cargo

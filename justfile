@@ -269,3 +269,17 @@ prelint-repin version:
 prelint-std-summaries target="x86_64-unknown-linux-gnu":
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build
     cd tools/fip-prelint && FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGET_DIR=/tmp/fip-prelint-std-summaries target/debug/cargo-fip-prelint fip-prelint --std-summaries --target {{target}}
+
+# The std summaries for every installed target with `std` (top plan T7j), one after
+# the other, into one build directory under /tmp (measured 2026-11-03: 3.8-12.4
+# min per target with three in parallel at load average ~34).
+prelint-std-summaries-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sysroot=$(rustc +{{prelint_tc}} --print sysroot)
+    for d in "$sysroot"/lib/rustlib/*/lib; do
+      if ls "$d"/libstd-*.rlib > /dev/null 2>&1; then
+        t=$(basename "$(dirname "$d")")
+        just prelint-std-summaries "$t"
+      fi
+    done

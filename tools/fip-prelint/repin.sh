@@ -20,10 +20,11 @@
 #      Vec::with_capacity, String::from, format!, Vec::push and a Box drop: each must
 #      still reach an allocation (or free) leaf; the leaves are printed for comparison
 #      with TODOs/fip-prelint.md "Allocator entry points";
-#   5. the std summaries sidecar for the host (`--std-summaries`): for the pinned
-#      version it is regenerated under /tmp and must equal the committed file byte for
-#      byte; for a new version it is written to std-summaries/<release>-<host>.txt
-#      (commit it after review);
+#   5. the std summaries sidecars (`--std-summaries`) for every installed target with
+#      `std` (top plan T7j; TARGETS="<triple> .." restricts the list): for the pinned
+#      version each is regenerated under /tmp and must equal the committed file byte
+#      for byte; for a new version they are written to
+#      std-summaries/<release>-<target>.txt (commit them after review);
 #   6. the driver's tests (unit tests, every fixture, the self-check, every installed
 #      target, the compile_fail examples) with the new toolchain; their diffs must be
 #      reviewed one by one before blessing (FIP_PRELINT_BLESS=1);
@@ -147,22 +148,32 @@ echo "leaves reached (compare with TODOs/fip-prelint.md, \"Allocator entry point
 grep 'is #\[fip\] but may' "$e/dump.log" \
   | sed -E 's/^.*`([a-z_]+)` is #\[fip\] but (may [a-z]+).*: ((allocation|free)[^;]*)$/  \1: \2, leaf: \3/' | sort -u
 
-step "5. std summaries for $host"
-committed="$here/std-summaries/$release-$host.txt"
-if [ "$v" = "$cur" ] && [ -f "$committed" ]; then
-  gen="$out/std-summaries-$release-$host.txt"
-else
-  gen="$committed"
-fi
-FIP_PRELINT_TOOLCHAIN="$v" FIP_PRELINT_TARGET_DIR="$out/std-build" FIP_PRELINT_DRIVER_PATH="$bin/fip-prelint" \
-  "$bin/cargo-fip-prelint" fip-prelint --std-summaries --target "$host" --out "$gen" > "$out/std-summaries.log" 2>&1 \
-  || { tail -30 "$out/std-summaries.log"; fail "std summaries generation"; }
-if [ "$gen" != "$committed" ]; then
-  cmp "$gen" "$committed" || fail "regenerated std summaries differ from $committed"
-  echo "regenerated std summaries are identical to $committed"
-else
-  echo "written: $committed (review and commit it; remove files of rustc versions no longer pinned)"
-fi
+std_targets() {
+  for d in "$sysroot"/lib/rustlib/*/lib; do
+    if ls "$d"/libstd-*.rlib > /dev/null 2>&1; then
+      basename "$(dirname "$d")"
+    fi
+  done
+}
+targets=${TARGETS:-$(std_targets | sort | tr '\n' ' ')}
+step "5. std summaries for: $targets"
+for t in $targets; do
+  committed="$here/std-summaries/$release-$t.txt"
+  if [ "$v" = "$cur" ] && [ -f "$committed" ]; then
+    gen="$out/std-summaries-$release-$t.txt"
+  else
+    gen="$committed"
+  fi
+  FIP_PRELINT_TOOLCHAIN="$v" FIP_PRELINT_TARGET_DIR="$out/std-build" FIP_PRELINT_DRIVER_PATH="$bin/fip-prelint" \
+    "$bin/cargo-fip-prelint" fip-prelint --std-summaries --target "$t" --out "$gen" > "$out/std-summaries-$t.log" 2>&1 \
+    || { tail -30 "$out/std-summaries-$t.log"; fail "std summaries generation for $t"; }
+  if [ "$gen" != "$committed" ]; then
+    cmp "$gen" "$committed" || fail "regenerated std summaries differ from $committed"
+    echo "regenerated std summaries are identical to $committed"
+  else
+    echo "written: $committed (review and commit it; remove files of rustc versions no longer pinned)"
+  fi
+done
 
 step "6. driver tests with $v (fixtures, self-check, targets, compile_fail examples)"
 if (cd "$here" && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN="$v" cargo +"$v" test --ignore-rust-version --target-dir "$out/target") > "$out/test.log" 2>&1; then

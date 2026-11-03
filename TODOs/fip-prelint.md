@@ -2107,3 +2107,49 @@ then the stale stamped file with the same modification time (2001). Before (the
 `INPUTS_ID` line disabled): the second run replayed "1 passed", the test failed.
 After: the second run reports the `⊤` ("std summaries not used"). Every other fixture
 and the self-check are unchanged.
+
+## Resolved 2026-11-03: std summaries for every installed `std` target (top plan T7j)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, item 11.
+
+**Before.** One sidecar, `1.99.1-x86_64-unknown-linux-gnu.txt`. For any other target
+every `std` function without MIR was `⊤` ("std summaries not used"); N7:
+`std_summaries` with `--target wasm32-unknown-unknown` reported all roots `⊤`.
+
+**Change.** Generated with the committed driver and seed (`cargo fip-prelint
+--std-summaries --target <t>`, each into its own `/tmp` build directory) for the 9
+installed non-host targets with `std`. `repin.sh` step 5 loops over every installed
+`std` target (`TARGETS=".."` restricts it); `just prelint-std-summaries-all` runs the
+recipe per target. No driver change: the file is already chosen per target and
+stamped with it.
+
+**Measured** (rustc 1.99.1, x86_64 Linux host, three generations in parallel at load
+average ≈ 34):
+
+| target | functions | lines | bytes | `top` lines | `§ffi` lines | wall (analysis) |
+|---|---|---|---|---|---|---|
+| x86_64-unknown-linux-gnu (committed before) | 230 | 2 412 | 528 577 | 17 | 43 | — |
+| aarch64-unknown-linux-gnu | 230 | 2 412 | 528 578 | 17 | 43 | 10 m 43 s (187.3 s) |
+| armv7-unknown-linux-gnueabihf | 229 | 2 430 | 532 168 | 22 | 43 | 11 m 19 s (181.7 s) |
+| i686-unknown-linux-gnu | 229 | 2 430 | 532 161 | 22 | 43 | 12 m 23 s (189.7 s) |
+| aarch64-apple-darwin | 209 | 2 162 | 464 161 | 1 | 6 | 3 m 46 s (165.6 s) |
+| aarch64-pc-windows-gnullvm | 216 | 2 312 | 489 886 | 15 | 51 | 3 m 53 s (176.5 s) |
+| x86_64-pc-windows-gnullvm | 216 | 2 312 | 489 885 | 15 | 51 | 3 m 52 s (172.3 s) |
+| wasm32-unknown-unknown | 201 | 2 062 | 433 724 | 0 | 0 | 8 m 26 s (185.7 s) |
+| wasm32-wasip1 | 210 | 2 110 | 435 444 | 1 | 5 | 6 m 38 s (178.6 s) |
+| wasm32-wasip2 | 209 | 2 103 | 435 163 | 1 | 4 | 7 m 18 s (181.3 s) |
+
+Fixture `std_summaries` with `--target wasm32-unknown-unknown` (new
+`expected-wasm32.txt`): before, all roots `⊤`; after, `fmtuse` 19 roots, 12 passed, 12
+errors; `fmtffi` 2 roots, 1 passed; `fmtabi` 1 root, 1 passed (host: 11, 0, 0 passed).
+Every formatting root has the host's verdict. The differences are the platform's
+`std::sys`: no thread-local destructor registration and no foreign calls on wasm32
+(`thread_local_lazy` passes in all three crates, the FFI errors and by-symbol notes
+are gone), the `unsupported` random source boxes a value for its address
+(`hashmap_new`: "may allocate 1 time(s)", no `⊤`), and one panic chain fewer under
+`write_strict` (32-bit `usize` chunks in `do_count_chars`). Per-target self-check
+(`tests/targets.rs`, 11 targets): unchanged. Host fixtures and self-check: unchanged.
+
+**Deviation.** "wasm32 `std_summaries` equals host" holds only for the formatting
+roots; the `std::sys` differences are real target differences, recorded in their own
+expectation.

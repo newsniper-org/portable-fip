@@ -533,6 +533,25 @@ specific FFI errors replace `⊤`; ABI / both errors (`fmtabi`). **Deviation:** 
 stay partly `⊤` through function pointers from mutable data (weak `getrandom`,
 `io::Error` OS functions, `CustomOwner` drop, `Once` `dyn FnMut`).
 
+**Implemented** (item 11, j). Sidecars for the 9 installed non-host `std` targets
+(`aarch64-apple-darwin`, `aarch64-pc-windows-gnullvm`, `aarch64-unknown-linux-gnu`,
+`armv7-unknown-linux-gnueabihf`, `i686-unknown-linux-gnu`, `wasm32-unknown-unknown`,
+`wasm32-wasip1`, `wasm32-wasip2`, `x86_64-pc-windows-gnullvm`): 201–230 functions,
+433 724–532 168 bytes each; generation 3 m 46 s – 12 m 23 s wall (165.6–189.7 s of
+analysis), three in parallel at load average ≈ 34. `repin.sh` step 5 regenerates
+(pinned version: compares) every installed `std` target; `just
+prelint-std-summaries-all`. Fixture `std_summaries` with `--target
+wasm32-unknown-unknown` (`expected-wasm32.txt`): 22 roots, 14 passed (before: every
+function without MIR `⊤`, "std summaries not used"). **Deviation:** the prediction
+"wasm32 equals host" holds for the formatting roots (`write!` of integers, floats,
+`u128`, strings, derived `Debug`, `{:#?}`, builders, `format!`: the same verdicts), not
+for the `std::sys` paths: on wasm32 `thread_local_lazy` passes (no thread-local
+destructor registration, no foreign calls), `hashmap_new` "may allocate 1 time(s)"
+(the `unsupported` random source boxes a value for its address) with no `⊤` and no
+FFI errors, and `write_strict` has one panic chain fewer (32-bit `usize` chunking in
+`do_count_chars`). Measured, recorded as its own expectation. The per-target
+self-check (`tests/targets.rs`) is unchanged.
+
 ### T8. Stack mode gaps
 
 **Current.** See N5 and limits plan L9 "Implemented".
