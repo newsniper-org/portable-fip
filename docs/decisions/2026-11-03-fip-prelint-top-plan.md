@@ -497,6 +497,18 @@ constructors, builder methods returning `self`, `PadAdapter::wrap`, the audited
 fields); `entries(iter)` needed the "returns `self`" model, not only per-instance
 resolution; the format number stays 1 (keys only added).
 
+**Implemented** (item 8, g). `Bind::Data(c)`: a `&T` argument (`T` holding a
+function pointer) whose origin is a reference constant binds the parameter; a call
+through a pointer loaded below it is a T1.2 load from the evaluated initializer. N4
+`tls_get` and fixture `thread_local_get` pass. **Deviation:** the prediction
+"`HashMap::new` gets a verdict" did not hold: past the key, `RandomState::new`'s lazy
+initialisation reaches the OS random source and paths printing to stderr, i.e. foreign functions
+inside `std` (`syscall`, `open64`, `read`, ..). Seeding them (measured, not
+committed: 232 functions, generation 646.5 s) gives "may allocate 22 time(s)" plus
+`⊤`, because summaries record foreign calls as `⊤` at generation time. Lazily
+initialised thread locals stay `⊤` for the same reason. Open: a `§ffi` summary term
+resolved with the user's FFI marks.
+
 ### T8. Stack mode gaps
 
 **Current.** See N5 and limits plan L9 "Implemented".

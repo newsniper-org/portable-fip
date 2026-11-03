@@ -1891,3 +1891,46 @@ Debug`), a `Formatter` built by user code over a `dyn Write` from data.
 `Formatter` over a `dyn Write` from data, and `<PadAdapter as Write>::write_fmt` reached
 through a `dyn Write` (its default body unsizes `self` to `dyn Write` without the
 binding; by construction, not measured): `⊤`, as the plan's "stays".
+
+## Resolved 2026-11-03: thread locals through their `static` key (top plan T7g)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T7 row g (item 8 of its
+order), with B and T1.2.
+
+**Before.** `TL.with(|c| c.get())` reached `LocalKey::try_with`, which calls
+`(self.inner)(None)`: a function pointer loaded through the parameter `self:
+&'static LocalKey` (`⊤`, "call through a function pointer"). `HashMap::new` reached
+the same call through `RandomState::new`'s thread-local keys.
+
+**Mechanism.** `Bind::Data(c)`: an argument of type `&T` (shared) where `T` holds a
+function pointer in a field (`holds_fn_ptr`, two levels) whose origin is a reference
+constant `c` (`&KEY` of a `static`, or constant memory) on every path, or a parameter
+already bound so, binds the callee's parameter to `c`. A call through a pointer loaded
+below that parameter (`Origin::ArgAt(l, [Deref, ..])`, from item 7) is resolved as a
+load below the constant (`Analysis::data_targets`, T1.2): only if the memory is
+immutable (not `static mut`, not a thread-local or foreign static, a `Freeze` type, an
+immutable allocation); the candidates' maximum counts.
+
+**Soundness.** As T1.2: a load from immutable memory yields one of the pointers in the
+evaluated initializer. The binding is a must-fact at the call site (B).
+
+**Measured** (before = `2f00109`, after = this commit):
+
+| case | before | after |
+|---|---|---|
+| fixture `std_summaries` (3 new roots: `thread_local_get` `const` thread local, `thread_local_lazy`, `hashmap_new`) | 19 roots, 10 passed, 15 errors: all three `⊤` at `LocalKey::try_with`'s pointer | 19 roots, 11 passed, 23 errors: `thread_local_get` passes; `thread_local_lazy` (5 lines) and `hashmap_new` (6 lines) stay `⊤`, now past the key: paths of the lazy initialisation that print to stderr (`Stderr::write`, `io::Error` functions without summaries, an `is_interrupted` function pointer) and, for `HashMap::new`, `hashmap_random_keys` |
+| N4 `top` | 44 roots, 33 passed, 15 errors | 44 roots, 34 passed, 19 errors: `tls_get` passes; `hashmap_new` stays `⊤` with 6 reasons instead of 1 |
+| self-check dev / `--release`, other fixtures | 79 roots, 26 / 13 notes, 23 `param` call sites | unchanged |
+
+**Deviation (prediction not met).** `HashMap::new` does not get a verdict. Measured
+with the seed extended by `HashMap::new` and a lazily initialised thread local (not
+committed): the sidecar grows to 232 functions, generation takes 646.5 s (227.9 s
+without), and `hashmap_new` reports "may allocate 22 time(s)" (the `/dev/urandom`
+fallback path opens a file through `run_with_cstr_allocating`) but stays `⊤`: the
+random source and the stderr paths reach foreign functions inside `std` (`syscall`,
+`open64`, `read`, `close`, `poll`, `clock_gettime`, `__errno_location`, `getpid`),
+which a summary records as `⊤` at generation time (the seed has no marks for them).
+A user's FFI marks cannot reach into a summary. Open point: a summary term for a
+foreign call (`§ffi <symbol> <abi>`, resolved with the marks of the analysed crate)
+would turn these into FFI verdicts at the use site; not implemented. The seed was
+left unchanged.

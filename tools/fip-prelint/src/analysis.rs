@@ -2541,11 +2541,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 Some(Bind::Callable(c)) => self.callable_item(&c, None),
                 _ => None,
             },
-            Origin::Pointee(_)
-            | Origin::BufOf(_)
-            | Origin::Ref(_)
-            | Origin::BoxPtr(_)
-            | Origin::ArgAt(..) => None,
+            // A load below a parameter bound to a reference constant (`(self.inner)`
+            // in `LocalKey::try_with` with `self = &KEY`): the load below the
+            // constant (top plan T7g).
+            Origin::ArgAt(l, proj) => match (self.bind_of(l), proj.first()) {
+                (Some(Bind::Data(c)), Some(mir::ProjectionElem::Deref)) => {
+                    let rest = self.tcx.mk_place_elems(&proj[1..]);
+                    self.data_item(inst, c, Some(rest))
+                }
+                _ => None,
+            },
+            Origin::Pointee(_) | Origin::BufOf(_) | Origin::Ref(_) | Origin::BoxPtr(_) => None,
         }
     }
 
@@ -3061,6 +3067,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     .map(Bind::Callable)
             } else if is_obj_ref(tcx, ty) {
                 self.obj_of(inst, body, &a.node).map(Bind::Obj)
+            } else if holds_fn_ptr(tcx, ty) {
+                self.data_of(inst, body, &a.node).map(Bind::Data)
             } else {
                 None
             };
@@ -3091,6 +3099,29 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
         }
         binds
+    }
+
+    /// The reference constant a shared-reference operand of `inst`'s body is on
+    /// every path ([`Origin::Const`], instantiated), or the [`Bind::Data`] of the
+    /// parameter it passes on (top plan T7g). Whether the memory is immutable is
+    /// decided where a load is resolved ([`Analysis::data_targets`]).
+    fn data_of(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        op: &Operand<'tcx>,
+    ) -> Option<mir::Const<'tcx>> {
+        match origin_of(self.tcx, body, op)? {
+            Origin::Const(c) => {
+                let c = self.subst(inst, c)?;
+                (!c.has_param()).then_some(c)
+            }
+            Origin::Arg(l) => match self.bind_of(l)? {
+                Bind::Data(c) => Some(c),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// What a `&dyn Debug`/`&dyn Display` operand of `inst`'s body holds: the
@@ -3258,7 +3289,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             Origin::Pointee(t) => Some(Out::Ty(self.subst(inst, t)?)),
             Origin::Arg(l) => match self.bind_of(l)? {
                 Bind::Dyn(o) | Bind::Formatter(o) => Some(o),
-                Bind::Fmt(..) | Bind::Callable(_) | Bind::Obj(_) | Bind::At(..) => None,
+                Bind::Fmt(..) | Bind::Callable(_) | Bind::Obj(_) | Bind::At(..) | Bind::Data(_) => {
+                    None
+                }
             },
             Origin::ArgAt(l, p) => match self.bind_at(l, &place_path(p)?)? {
                 Bind::Dyn(o) | Bind::Formatter(o) => Some(o),
@@ -4689,6 +4722,11 @@ enum Bind<'tcx> {
     /// output or a `dyn Debug` inside a closure's captures or a `core::fmt` builder;
     /// top plan T7a/b). A parameter may have several.
     At(Path, Box<Bind<'tcx>>),
+    /// A shared reference to immutable data holding function pointers: this
+    /// reference constant (a `static` or constant memory, as [`Origin::Const`]), so
+    /// loads below the parameter read the evaluated initializer (top plan T7g with
+    /// T1.2: `&'static LocalKey`).
+    Data(mir::Const<'tcx>),
 }
 
 /// What a callable parameter holds, known at the call sites of a node: a must-fact
@@ -4835,6 +4873,25 @@ fn bindable_paths<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Vec<(Vec<mir::PlaceE
         walk(tcx, ty, &mut Vec::new(), &mut out);
     }
     out
+}
+
+/// `&T` (shared) where `T` holds a function pointer in a field (structs and tuples,
+/// two levels): a reference whose target, if it is immutable data, is resolved
+/// through [`Bind::Data`] (top plan T7g).
+fn holds_fn_ptr<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    fn has<'tcx>(tcx: TyCtxt<'tcx>, t: Ty<'tcx>, depth: u8) -> bool {
+        match *t.kind() {
+            ty::FnPtr(..) => true,
+            ty::Tuple(ts) if depth > 0 => ts.iter().any(|t| has(tcx, t, depth - 1)),
+            ty::Adt(def, args) if depth > 0 && def.is_struct() => def
+                .non_enum_variant()
+                .fields
+                .iter()
+                .any(|f| has(tcx, f.ty(tcx, args).skip_norm_wip(), depth - 1)),
+            _ => false,
+        }
+    }
+    matches!(*ty.kind(), ty::Ref(_, inner, ty::Mutability::Not) if has(tcx, inner, 2))
 }
 
 /// The [`Path`] of a projection of fields and dereferences.

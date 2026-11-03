@@ -671,6 +671,17 @@ list/set/map builders, with `{:?}` and `{:#?}`, are checked into a buffer. Detai
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: derived `Debug`, the debug builders and
 `PadAdapter`".
 
+## Amendment 2026-11-03: thread locals through their `static` key (top plan T7g)
+
+A shared reference to immutable data that holds function pointers (`&'static
+LocalKey`) is bound at the call site to its reference constant, and a pointer loaded
+below the parameter is read from the evaluated initializer under the T1.2 rules
+(immutable memory only). `LocalKey::with` on a `const` thread local is checked.
+`HashMap::new` and lazily initialised thread locals stay `⊤`: they reach foreign
+functions inside `std` (the random source, paths that print to stderr),
+which std summaries record as `⊤`. Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-03: thread locals through their `static` key".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

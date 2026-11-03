@@ -199,3 +199,28 @@ pub struct Six {
 pub fn write_debug_six(b: &mut Buf, s: &Six) -> fmt::Result {
     write!(b, "{s:?}")
 }
+
+std::thread_local! {
+    static COUNTER: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    static LAZY: core::cell::Cell<u32> = core::cell::Cell::new(u32::from(u8::MAX));
+}
+
+/// A `const` thread local: `LocalKey::with` calls the accessor read from the
+/// `static` key (top plan T7g): passes.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn thread_local_get() -> u32 {
+    COUNTER.with(core::cell::Cell::get)
+}
+
+/// A lazily initialised thread local: its first access registers a destructor.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn thread_local_lazy() -> u32 {
+    LAZY.with(core::cell::Cell::get)
+}
+
+/// `HashMap::new` reads the thread-local random keys, initialised from the
+/// operating system's random source (foreign functions inside `std`).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn hashmap_new() -> usize {
+    std::collections::HashMap::<u8, u8>::new().len()
+}
