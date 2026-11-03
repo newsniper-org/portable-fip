@@ -207,6 +207,11 @@ const fn str_eq(a: &str, b: &str) -> bool {
     unsafe_code,
     reason = "certificate trait; `unsafe impl` marks a trusted claim"
 )]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` carries no allocation certificate (`fip_strict::FipBound`)",
+    label = "not a certified callable",
+    note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`"
+)]
 pub unsafe trait FipBound {
     /// Upper bound on allocations per call.
     const ALLOCS: u64;
@@ -222,6 +227,12 @@ pub unsafe trait FipBound {
 /// `spec fn post(&self, args: Args, out: Self::Output) -> bool`; `call` requires
 /// `pre` and ensures `post`.
 #[cfg(not(verus_keep_ghost))]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a certified callable taking `{Args}` (`fip_strict::FipFn`)",
+    label = "not a certified callable",
+    note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`",
+    note = "a `fip_fn!` value takes `{Args}` only if its parameter types match; annotate them (`|v: &u8| ..`)"
+)]
 pub trait FipFn<Args>: FipBound {
     /// Return type.
     type Output;
@@ -275,12 +286,23 @@ verus! {
 
 /// Certificate for a callable value; see the plain declaration.
 #[allow(unsafe_code, reason = "certificate trait; `unsafe impl` marks a trusted claim")]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` carries no allocation certificate (`fip_strict::FipBound`)",
+    label = "not a certified callable",
+    note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`"
+)]
 pub unsafe trait FipBound {
     /// Upper bound on allocations per call.
     const ALLOCS: u64;
 }
 
 /// A certified callable taking `Args`, with a specification.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a certified callable taking `{Args}` (`fip_strict::FipFn`)",
+    label = "not a certified callable",
+    note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`",
+    note = "a `fip_fn!` value takes `{Args}` only if its parameter types match; annotate them (`|v: &u8| ..`)"
+)]
 pub trait FipFn<Args>: FipBound {
     /// Return type.
     type Output;

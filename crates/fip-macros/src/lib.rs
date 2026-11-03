@@ -715,9 +715,11 @@
 //! fn f<F: FipFn<(u8,), Output = Box<u8>>>(g: F) -> u8 { *g.call((1,)) }
 //! fn main() { f(fip_macros::fip_fn!(|x: u8| Box::new(x))); }
 //! ```
-//! uncertified closure as a `FipFn` argument:
+//! uncertified closure as a `FipFn` argument (`#[diagnostic::on_unimplemented]` on
+//! `FipFn` points to `fip_fn!`; before: "the trait bound `{closure}: FipFn<(u8,)>` is
+//! not satisfied"):
 //! ```compile_fail
-//! # // expect: is not satisfied
+//! # // expect: is not a certified callable taking `(u8,)`
 //! use fip_strict::FipFn;
 //! #[fip_macros::fip(strict = true, param(g = 0))]
 //! fn f<F: FipFn<(u8,), Output = u8>>(g: F) -> u8 { g.call((1,)) }
@@ -813,6 +815,42 @@
 //! ```compile_fail
 //! # // expect: fip_fn!: expected a closure `|args| body` or the path of a function with a certificate
 //! fn main() { let _w = fip_macros::fip_fn!(1 + 2); }
+//! ```
+//! `fip_fn!(bound <= K, ..)` with a larger computed bound (checked where the value is
+//! written, also by `cargo check`, unlike a callee's `param(g = K)`):
+//! ```compile_fail
+//! # // expect: fip_fn!: the allocation bound exceeds the declared `bound <= 0`
+//! fn main() { let _w = fip_macros::fip_fn!(bound <= 0, |x: u8| Box::new(x)); }
+//! ```
+//! the same for a named function:
+//! ```compile_fail
+//! # // expect: fip_fn!: the allocation bound exceeds the declared `bound <= 0`
+//! #[fip_macros::fip(1, strict = true)]
+//! fn boxed(x: u8) -> Box<u8> { Box::new(x) }
+//! fn main() { let _w = fip_macros::fip_fn!(bound <= 0, boxed); }
+//! ```
+//! `bound <= ..` without an integer literal:
+//! ```compile_fail
+//! # // expect: fip_fn!: expected `bound <= K, ..` with an integer literal `K`
+//! const K: u64 = 0;
+//! fn main() { let _w = fip_macros::fip_fn!(bound <= K, |x: u8| x); }
+//! ```
+//! `requires` / `ensures` as `fip_fn!` arguments:
+//! ```compile_fail
+//! # // expect: fip_fn!: `requires` clauses are not arguments of `fip_fn!`
+//! fn main() { let _w = fip_macros::fip_fn!(requires x < 10, |x: u8| x + 1); }
+//! ```
+//! an attribute on a named function:
+//! ```compile_fail
+//! # // expect: fip_fn!: attributes are kept only on a closure
+//! #[fip_macros::fip(strict = true)]
+//! fn flip(x: u8) -> u8 { x ^ 1 }
+//! fn main() { let _w = fip_macros::fip_fn!(#[allow(unused)] flip); }
+//! ```
+//! a method of a value:
+//! ```compile_fail
+//! # // expect: a method of a value (`x.m`) cannot be named
+//! fn main() { let v = 3_u8; let _w = fip_macros::fip_fn!(v.count_ones); }
 //! ```
 //! `fip_fn!(path)` claiming another bound than the certificate's:
 //! ```compile_fail
@@ -3669,6 +3707,19 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// assert_eq!(table[1].call((2,)), 2);
 /// ```
 ///
+/// **A bound at the creation site.** `fip_fn!(bound <= K, ..)` (an integer literal
+/// `K`, before the closure or path, after `crate = ..` if any) fails to compile when
+/// the computed bound exceeds `K`: "the allocation bound exceeds the declared `bound
+/// <= K`". The check is in the value's type, so `cargo check` reports it, also in an
+/// uncalled generic function; a callee's `param(g = K)` check runs only when the
+/// callee is instantiated (not under `cargo check`). The callee's declaration stays
+/// authoritative; this is an earlier, local error.
+///
+/// ```
+/// let f = fip_macros::fip_fn!(bound <= 0, |x: u8| x ^ 1);
+/// # let _ = f;
+/// ```
+///
 /// `fip_fn!(crate = path::to::fip_strict, ..)` sets the path of the `fip_strict`
 /// crate in the generated code (see `crate = ..` in the crate documentation).
 #[proc_macro]
@@ -3688,13 +3739,17 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         }
         _ => (None, all),
     };
+    let (limit, toks) = match bound_limit(toks) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let (arity, body_start) = match closure_shape(&toks) {
         Ok(v) => v,
         Err(sp) => {
             if fn_path_shape(&toks) {
-                return fip_fn_path(krate, toks);
+                return fip_fn_path(krate, toks, limit);
             }
-            return compile_error(sp, FIP_FN_SHAPE);
+            return compile_error(sp, &misuse_message(&toks));
         }
     };
     let body: TokenStream = toks[body_start..].iter().cloned().collect();
@@ -3734,13 +3789,96 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
     let closure: TokenStream = toks.into_iter().collect();
     fip_fn_wrapper(
         &strict_scan.krate(),
-        strict_scan.emit_fip_fn_bound(local),
+        limited(strict_scan.emit_fip_fn_bound(local), limit),
         closure,
     )
 }
 
 /// The message for an argument that is neither a closure nor a function path.
 const FIP_FN_SHAPE: &str = "fip_fn!: expected a closure `|args| body` or the path of a function with a certificate (`f`, `a::f`, `f::<T>`, `Type::m`, `<Type<..>>::m`, `<Type as Trait>::m`)";
+
+/// [`FIP_FN_SHAPE`], specialised for common misuse.
+fn misuse_message(toks: &[TokenTree]) -> String {
+    let first = toks.first().map(ToString::to_string).unwrap_or_default();
+    if toks.is_empty() {
+        return format!("{FIP_FN_SHAPE}; got nothing");
+    }
+    if ["requires", "ensures", "recommends", "decreases", "returns"].contains(&first.as_str()) {
+        return format!(
+            "fip_fn!: `{first}` clauses are not arguments of `fip_fn!`; attach a Verus specification to the closure as an attribute: `fip_fn!(#[cfg_attr(verus_keep_ghost, verus_spec(r: T => requires .., ensures ..))] |x: U| ..)`"
+        );
+    }
+    if first == "bound" {
+        return "fip_fn!: expected `bound <= K, ..` with an integer literal `K`, then the closure or path".to_string();
+    }
+    if first == "#" {
+        let mut i = 0;
+        while toks.get(i).is_some_and(|t| is_punct(t, '#'))
+            && toks
+                .get(i + 1)
+                .is_some_and(|t| is_group(t, Delimiter::Bracket))
+        {
+            i += 2;
+        }
+        if fn_path_shape(&toks[i..]) {
+            return "fip_fn!: attributes are kept only on a closure; a named function's specification is the function's own (`verus_spec` on its declaration), so write `fip_fn!(path)` without attributes".to_string();
+        }
+    }
+    if toks.iter().any(|t| is_punct(t, '.')) && !toks.iter().any(|t| is_punct(t, '|')) {
+        return format!(
+            "{FIP_FN_SHAPE}; a method of a value (`x.m`) cannot be named: name it by its type (`Type::m`, `<Type as Trait>::m`), which takes the receiver as its first argument"
+        );
+    }
+    FIP_FN_SHAPE.to_string()
+}
+
+/// A leading `bound <= K,`: the largest allocation bound the value may have.
+fn bound_limit(toks: Vec<TokenTree>) -> Result<(Option<u64>, Vec<TokenTree>), TokenStream> {
+    let [TokenTree::Ident(key), lt, eq, ..] = toks.as_slice() else {
+        return Ok((None, toks));
+    };
+    if key.to_string() != "bound" || !is_punct(lt, '<') || !is_punct(eq, '=') {
+        return Ok((None, toks));
+    }
+    let bad = |sp: Span| {
+        compile_error(
+            sp,
+            "fip_fn!: expected `bound <= K, ..` with an integer literal `K`, then the closure or path",
+        )
+    };
+    let (Some(TokenTree::Literal(lit)), Some(comma)) = (toks.get(3), toks.get(4)) else {
+        return Err(bad(key.span()));
+    };
+    if !is_punct(comma, ',') {
+        return Err(bad(comma.span()));
+    }
+    let text = lit.to_string().replace('_', "");
+    let digits = text.strip_suffix("u64").unwrap_or(&text);
+    let Ok(k) = digits.parse::<u64>() else {
+        return Err(bad(lit.span()));
+    };
+    Ok((Some(k), toks[5..].to_vec()))
+}
+
+/// The bound block `{ checks; sum }`, asserting `sum <= limit` if a limit is given.
+/// Evaluated with the value's type (also by `cargo check`), where the closure or
+/// function is written.
+fn limited(bound: TokenStream, limit: Option<u64>) -> TokenStream {
+    let Some(k) = limit else {
+        return bound;
+    };
+    let mut out: TokenStream = "let __fip_fn_bound: u64 = ".parse().unwrap_or_default();
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, bound))]);
+    out.extend(
+        format!(
+            "; ::core::assert!(__fip_fn_bound <= {k}u64, {:?}); __fip_fn_bound",
+            format!("fip_fn!: the allocation bound exceeds the declared `bound <= {k}`")
+        )
+        .parse::<TokenStream>()
+        .unwrap_or_default(),
+    );
+    out
+}
 
 /// `true` if `toks` looks like the path of a function: identifiers, `::`, `<..>`
 /// (generic arguments, a qualified self type), ending in an identifier or a
@@ -3784,7 +3922,11 @@ fn fn_path_shape(toks: &[TokenTree]) -> bool {
 /// table, std constructors as allocation sites). A function without a certificate
 /// fails to compile as a strict call of it does. No `unsafe` at the call site: the
 /// macro output pairs the function with its own certificate's bound.
-fn fip_fn_path(krate: Option<TokenStream>, toks: Vec<TokenTree>) -> TokenStream {
+fn fip_fn_path(
+    krate: Option<TokenStream>,
+    toks: Vec<TokenTree>,
+    limit: Option<u64>,
+) -> TokenStream {
     let mut as_call: TokenStream = toks.iter().cloned().collect();
     as_call.extend([TokenTree::Group(Group::new(
         Delimiter::Parenthesis,
@@ -3807,7 +3949,7 @@ fn fip_fn_path(krate: Option<TokenStream>, toks: Vec<TokenTree>) -> TokenStream 
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
     fip_fn_wrapper(
         &strict_scan.krate(),
-        strict_scan.emit_fip_fn_bound(local),
+        limited(strict_scan.emit_fip_fn_bound(local), limit),
         toks.into_iter().collect(),
     )
 }

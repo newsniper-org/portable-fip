@@ -66,6 +66,8 @@ functions with a certificate from `fip_fn!(f)` (also `a::f`, `f::<T>`,
 `<Type<..>>::m`, `<Type as Trait>::m`): the bound is the function's own certificate,
 no `unsafe` is written, and strict bodies may use it. With an expected type
 `Certified<N, fn(..) -> ..>` the value is a certified function pointer.
+`fip_fn!(bound <= K, ..)` fails to compile (also under `cargo check`) when the
+computed bound exceeds `K`.
 
 ```rust
 #[fip(strict = true, param(keep = 0))]

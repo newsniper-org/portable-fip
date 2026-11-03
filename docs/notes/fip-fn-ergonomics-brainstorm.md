@@ -155,8 +155,7 @@ the strict callee lookup. Tests:
 
 ### 2. Accept a spec attribute on the closure inside `fip_fn!`
 
-**Status:** Implemented in the commit "fip-macros: spec attributes on fip_fn!
-closures (fip-fn ergonomics 2)". `closure_shape` skips leading `#[..]` and the
+**Status:** Implemented in 80eda41. `closure_shape` skips leading `#[..]` and the
 output keeps them on the closure; `fip_testkit`'s `fip_fn!` parser skips them too.
 Measured:
 
@@ -330,6 +329,26 @@ if a spec is attached.
 
 ### 9. Better error messages
 
+**Status:** Implemented with idea 10 in the commit "fip-macros: fip_fn! misuse
+messages and creation-site bounds (fip-fn ergonomics 3)". Measured with rustc
+1.99.1 (`cargo build`, first error line; before = `470d7e3`, after = this commit):
+
+| input | before | after |
+|---|---|---|
+| `fip_fn!(inc)` (certified) | "expected a closure `\|args\| body`" | compiles (idea 1) |
+| `fip_fn!(#[cfg_attr(verus_keep_ghost, verus_spec(..))] \|x: u32\| ..)` | "expected a closure" | compiles (idea 2) |
+| `fip_fn!(plain)` (no certificate) | "expected a closure" | E0425 "cannot find value `__fip_strict_plain`" (unchanged from a strict call; not improvable from a token macro: the macro cannot tell whether the constant exists) |
+| `fip_fn!(c)`, `c` a local closure | "expected a closure" | E0425 "cannot find value `__fip_strict_c`" |
+| `fip_fn!()` | "expected a closure" | "expected a closure `\|args\| body` or the path of a function with a certificate (..); got nothing" |
+| `fip_fn!(1 + 2)` | "expected a closure" | "expected a closure .. or the path of a function with a certificate (`f`, `a::f`, `f::<T>`, `Type::m`, `<Type<..>>::m`, `<Type as Trait>::m`)" |
+| `fip_fn!(requires x < 10, \|x: u32\| ..)` | "expected a closure" | "`requires` clauses are not arguments of `fip_fn!`; attach a Verus specification to the closure as an attribute: .." |
+| `fip_fn!(#[..] inc)` | "expected a closure" | "attributes are kept only on a closure; a named function's specification is the function's own .." |
+| `fip_fn!(v.count_ones)` | "expected a closure" | ".. a method of a value (`x.m`) cannot be named: name it by its type (`Type::m`, ..)" |
+| `fip_fn!(bound <= k, ..)` (not a literal) | "expected a closure" | "expected `bound <= K, ..` with an integer literal `K`, then the closure or path" |
+| raw closure for `F: FipFn<(u32,)>` | E0277 "the trait bound `{closure}: FipFn<(u32,)>` is not satisfied" | E0277 "`{closure}` is not a certified callable taking `(u32,)` (`fip_strict::FipFn`)", label "not a certified callable", notes pointing to `fip_fn!(\|x: T\| ..)` / `fip_fn!(path)` and to parameter annotations (`#[diagnostic::on_unimplemented]` on `FipFn` and `FipBound`, both declarations; Verus accepts it: fip-strict 7 verified) |
+| closure body with `x.wrapping_add(1)` | "fip_fn! strict: method call `.wrapping_add(..)` cannot be resolved; call it by path" | unchanged |
+| Verus: spec without return type | — | unchanged, Verus's own "Closure must have a return type, or add `$ret: $type =>` in verus_spec" (measured, clear enough; preceded by "macro expansion ignores `;`") |
+
 - `fip_fn!(f)` while idea 1 is missing: say "named functions: write `fip_fn!(f)` once
   supported / see idea 1". With idea 1: "`f` has no certificate: mark it
   `#[fip(strict = true)]`". Today the user sees E0425 on `__fip_strict_f`, as in the FFI
@@ -343,6 +362,22 @@ if a spec is attached.
 **Trust.** None. **Verus.** Diagnostics only. **Cost** S.
 
 ### 10. Bound checks at the creation site; integration with `param(g = K)`
+
+**Status:** Implemented in the same commit as idea 9: `fip_fn!(bound <= K, ..)`
+(integer literal, optional `u64` suffix; after `crate = ..`, before the closure or
+path) wraps the bound in `let b = { .. }; assert!(b <= K, ..); b`. Measured:
+
+- `fip_fn!(bound <= 0, |x: u32| *Box::new(x))`: E0080 "fip_fn!: the allocation bound
+  exceeds the declared `bound <= 0`" under `cargo build` and under `cargo check`,
+  also inside an uncalled generic function; the same for `fip_fn!(bound <= 0,
+  boxed)` (bound 1 from the certificate).
+- Contrast: the same closure passed to a `param(g = 0)` callee without `bound <=`:
+  `cargo check` exits 0, `cargo build` fails (E0080 in the callee's
+  post-monomorphisation check).
+- Verus: `verify/compose_state.rs` `number_from_11_closure` uses `fip_fn!(bound <= 0,
+  #[..] |c, _x| ..)`: 10 verified on both builds.
+- Combined with a strict caller (`step_twice` in `tests/fip_fn_path.rs`) and with
+  attributes; `fip_testkit` skips `bound <= K,` when it reads the closure.
 
 ```rust
 apply0(fip_fn!(bound <= 0, |x: u8| x ^ 1))

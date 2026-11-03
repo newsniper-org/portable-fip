@@ -98,10 +98,11 @@ fn number(xs: &mut [u32]) -> u32 {
     c
 }
 
-/// A strict caller passing a generic function instance and a free function.
+/// A strict caller passing a generic function instance and a free function, the
+/// latter with a creation-site bound.
 #[fip(strict = true)]
 fn step_twice(x: u32) -> u32 {
-    apply0(fip_fn!(id::<u32>), apply0(fip_fn!(double), x))
+    apply0(fip_fn!(id::<u32>), apply0(fip_fn!(bound <= 0, double), x))
 }
 
 fn bound<B: FipBound>(_: &B) -> u64 {
@@ -185,4 +186,19 @@ fn spec_attributes_stay_on_the_closure() {
     );
     assert_eq!(bound(&add), 1);
     assert_eq!(*assert_fip_n!(1, apply1(add, 1)), 3);
+}
+
+#[test]
+fn creation_site_bounds() {
+    let f = fip_fn!(bound <= 0, |x: u32| x + 1);
+    assert_eq!(bound(&f), 0);
+    // A limit above the bound is accepted; the value keeps its computed bound.
+    let b = fip_fn!(bound <= 3, boxed);
+    assert_eq!(bound(&b), 1);
+    let c = fip_fn!(
+        bound <= 1_u64,
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: Box<u32> => ensures *r == x))]
+        |x: u32| Box::new(x)
+    );
+    assert_eq!(*assert_fip_n!(1, apply1(c, 4)), 4);
 }

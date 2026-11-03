@@ -142,6 +142,7 @@ pub fn number_from_11_strict(xs: &mut [u32]) -> u32 {
 ))]
 pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
     let f = fip_macros::fip_fn!(
+        bound <= 0,
         #[cfg_attr(verus_keep_ghost, verus_spec(r: (u32, u32) =>
             requires
                 c < 1000,
