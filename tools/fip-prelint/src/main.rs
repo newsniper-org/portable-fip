@@ -56,6 +56,7 @@ extern crate rustc_span;
 mod analysis;
 mod export;
 mod marks;
+mod poolhint;
 mod report;
 mod stack;
 mod stdsum;
@@ -110,6 +111,7 @@ const TRACKED_ENV: &[&str] = &[
     "FIP_PRELINT_STD_SUMMARIES_OUT",
     "FIP_MACROS_MARK_ONLY",
     "FIP_PRELINT_STACK",
+    "FIP_PRELINT_POOL_HINTS",
 ];
 
 /// Added in stack mode (`cargo fip-prelint --stack`, [`stack`]):

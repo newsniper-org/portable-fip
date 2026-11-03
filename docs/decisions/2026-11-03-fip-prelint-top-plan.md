@@ -851,6 +851,26 @@ labelled heuristic:
   `Arena`, `Slab`, `Pool`). Report precision as measured.
 - Effort M (1.5 days). Low priority.
 
+**Implemented** (item 15). `cargo fip-prelint --pool-hints` sets
+`FIP_PRELINT_POOL_HINTS=1` (tracked in the dep-info); `src/poolhint.rs` reads the
+optimized MIR of the `&mut self` methods of crates declaring `fip::export` (members
+and exported dependencies) and prints `note: fip-prelint: heuristic: ..` through the
+diagnostics directly (no count, no exit status). Shape as planned, made precise: an
+unmarked method returning `Option`/`Result` of a mutable borrow or `usize` that writes
+an integer field or a slot of an array/slice field of `self`, borrows (for a borrow)
+or writes/indexes (for an index) an array/slice field, and a sibling method resets
+that integer field to a constant, writes `None` below `self` (also through a local) or
+calls `Option::take`. Measured: fixture `pool_hints` 2 hits (`Pool::alloc`,
+`Bump::alloc`), 0 on the controls (marked arena, stack, cursor, the arena of a crate
+without `fip::export`); the default output equals the `--pool-hints` output without
+the hint lines (test). `/tmp/tp-m3`: 2 hits, `Arena::alloc` and `Slab::insert` (both
+real pools); workspace self-check: 0 hits, summaries identical with and without the
+flag. Precision on these: 4 of 4 hits are pools; recall 4 of 5 known unmarked pools.
+**Deviations:** `alloc_sources` gives 0 hits, not the "expected hits": its arena and
+slab are marked (hints cover unmarked methods only) and the unmarked `PlainArena` has
+no release method; `/tmp/tp-m3`'s `top::Pool` is missed because `top` does not declare
+`fip::export` (the plan's scope).
+
 **Rejected.** A default warning or `⊤` for pool-shaped code: unsound to rely on, and
 noisy. Treating any `&mut self` method returning a borrow of `self`'s buffer as an
 allocation: it changes the meaning of FIP for ordinary data structures.

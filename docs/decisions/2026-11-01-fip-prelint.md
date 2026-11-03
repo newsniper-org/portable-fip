@@ -763,6 +763,15 @@ Under a mark that permits allocations, the panic path of a failed allocation
 the verdict is unchanged (a note, an error under `panic_macros = false`). Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: allocation failure label".
 
+## Amendment 2026-11-03: opt-in pool hints (top plan T17)
+
+`cargo fip-prelint --pool-hints` prints notes labelled "heuristic" for unmarked
+methods of crates declaring `fip::export` that look like pool allocators (hand out a
+borrow of or an index into their own buffer, with a sibling release method). Off by
+default; never a verdict, a count or an exit status. Unmarked pools remain the
+declared assumption. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-03: opt-in
+pool hints".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

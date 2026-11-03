@@ -10,8 +10,11 @@
 //! `LD_LIBRARY_PATH` pointing at the toolchain's `lib` directory.
 //!
 //! `--warn-only` reports violations as warnings, so every crate is checked even if a
-//! dependency has violations. A target selection (`--lib`, `--tests`, ..) replaces
-//! `--all-targets`. The exit status is cargo's.
+//! dependency has violations. `--pool-hints` (top plan T17) adds heuristic notes for
+//! methods of crates declaring `fip::export` that look like unmarked pool allocators
+//! (`src/poolhint.rs`); off by default, they change no verdict, count or exit status.
+//! A target selection (`--lib`, `--tests`, ..) replaces `--all-targets`. The exit
+//! status is cargo's.
 //!
 //! `cargo fip-prelint --std-summaries [--target <triple>] [--out <file>]` (maintainers)
 //! regenerates the std summaries (limits plan L6, sidecar of L10e): `cargo check
@@ -557,6 +560,15 @@ fn main() -> ExitCode {
             true
         }
     });
+    let mut pool_hints = false;
+    args.retain(|a| {
+        if a == "--pool-hints" {
+            pool_hints = true;
+            false
+        } else {
+            true
+        }
+    });
     let toolchain =
         std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| DEFAULT_TOOLCHAIN.to_string());
     let manifest = args
@@ -650,6 +662,11 @@ fn main() -> ExitCode {
         .args(&args);
     if warn_only {
         cmd.env("FIP_PRELINT_WARN_ONLY", "1");
+    }
+    if pool_hints {
+        cmd.env("FIP_PRELINT_POOL_HINTS", "1");
+    } else {
+        cmd.env_remove("FIP_PRELINT_POOL_HINTS");
     }
     match cmd.status() {
         Ok(st) => match st.code() {

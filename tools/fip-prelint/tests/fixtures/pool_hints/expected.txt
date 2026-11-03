@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+note: fip-prelint: crate `plain`: 1 roots, 1 passed, 0 errors, 0 warnings, 0 notes
+note: fip-prelint: crate `pooly`: 2 roots, 1 passed, 1 errors, 0 warnings, 0 notes, 2 declared sources
+pooly/src/lib.rs:144:5: error: fip-prelint: `use_marked` is #[fip] but may allocate 1 time(s), at most 0 allowed: `use_marked` -> `MarkedBump::alloc` (pooly/src/lib.rs:144): allocation: declared source `MarkedBump::alloc`

@@ -2287,3 +2287,41 @@ Summaries (`selfcheck.expected`, `selfcheck-release.expected`) unchanged. Fixtur
 `implicit`: `calls` 8 → 11 roots (5 → 6 passed, 1 → 3 notes): `alloc_permitted`
 (note, new label), `alloc_permitted_no_panic` (error, new label), `alloc_forbidden`
 (allocation error, old label).
+
+## Resolved 2026-11-03: opt-in pool hints (top plan T17)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, item 15.
+
+**Before.** An unmarked pure-Rust pool in a crate declaring `fip::export` is ordinary,
+allocation-free code (the declared assumption of limits plan L7); nothing pointed at
+it.
+
+**Change.** `cargo fip-prelint --pool-hints` (off by default; `FIP_PRELINT_POOL_HINTS=1`,
+tracked in the dep-info, so cached results never mix with and without hints).
+`src/poolhint.rs` scans the optimized MIR of every `&mut self` method of a struct in a
+crate that declares `fip::export` (a member or an exported dependency) and prints
+`note: fip-prelint: heuristic: `T::m` looks like an unmarked pool allocation (..)`
+when: `m` has no `fip::alloc_source`/`free_source` (nor its trait method); returns
+`Option`/`Result` of `&mut ..` or `usize`; writes an integer field or a slot of an
+array/slice field of `self`; borrows that array/slice field mutably (borrow) or writes
+or indexes it (index); and another method of `T` resets the written integer field to a
+constant, writes `None` below `self` (directly, as a constant, or through a local), or
+calls `Option::take`. Emitted through the compiler's diagnostics directly: no count,
+no exit status, no verdict.
+
+**Measured.**
+
+| target | hits | of which pools | missed pools |
+|---|---|---|---|
+| fixture `pool_hints` (new) | 2 (`Pool::alloc`, `Bump::alloc`) | 2 | 0; controls without a hit: marked `MarkedBump`, `Stack` (`pop` returns a value), `Cursor` (no slot), `plain::Bump` (crate without `fip::export`) |
+| fixture `alloc_sources` | 0 | — | `PlainArena` (no release method); `Arena`, `Slab` are marked |
+| `/tmp/tp-m3` | 2 (`slab::Arena::alloc`, `slab::Slab::insert`) | 2 | `top::Pool` (crate without `fip::export`) |
+| workspace self-check | 0 | — | — |
+
+Default vs `--pool-hints`: `pool_hints` outputs equal without the hint lines (test);
+workspace summaries identical (same digest). All other fixtures, the self-check and
+the targets run without the flag: unchanged.
+
+**Deviations.** The plan expected hits on `alloc_sources`: its pools are marked and the
+unmarked arena has no release method, so none. `top::Pool` is out of scope (no
+`fip::export`).

@@ -543,6 +543,38 @@ fn stack() {
     }
 }
 
+/// Pool hints (top plan T17): the default run has no hint; with `--pool-hints` the
+/// unmarked `Pool::alloc` and `Bump::alloc` of the exported crate get a heuristic note,
+/// the marked arena, the stack, the cursor and the unexported crate's arena do not.
+/// Without the hint lines, the `--pool-hints` output equals the default output (same
+/// verdicts, counts and exit status).
+#[test]
+fn pool_hints() {
+    let default = run("pool_hints", "", &[]);
+    compare("pool_hints", "", &default);
+    let hints = run_args(
+        "pool_hints",
+        "-hints",
+        &[],
+        &["--message-format", "short", "--pool-hints"],
+    );
+    compare("pool_hints", "-hints", &hints);
+    let without: Vec<String> = hints
+        .iter()
+        .filter(|l| !l.contains("fip-prelint: heuristic: "))
+        .cloned()
+        .collect();
+    assert_eq!(without, default, "--pool-hints changed more than its notes");
+    assert!(
+        hints.iter().any(|l| l.contains("heuristic: ")),
+        "--pool-hints printed no hint"
+    );
+    assert!(
+        !default.iter().any(|l| l.contains("heuristic")),
+        "a hint without --pool-hints"
+    );
+}
+
 #[test]
 fn clean() {
     check("clean");
