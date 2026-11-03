@@ -265,6 +265,22 @@ fn fip_fn_with_a_crate_path_is_a_closure() {
 }
 
 #[test]
+fn fip_fn_with_a_spec_attribute_is_a_closure() {
+    let src = "#[fip(1, strict = true, param(make = 1))]\nfn make_once<F>(make: F, x: u32) -> Box<u32>\nwhere\n    F: FipFn<(u32,), Output = Box<u32>>,\n{\n    FipFn::call(&make, (x,))\n}\nfn user() {\n    let mk = fip_macros::fip_fn!(#[cfg_attr(verus_keep_ghost, verus_spec(r: Box<u32> => ensures *r == x))] |x: u32| Box::new(x));\n    let _a = make_once(mk, 1);\n    let _b = make_once(fip_fn!(#[cfg_attr(verus_keep_ghost, verus_spec(r: Box<u32> => ensures *r == x))] move |x: u32| { let _y = Box::new(x); Box::new(x) }), 2);\n}\n";
+    let r = report(src);
+    assert_eq!(
+        kinds(&r),
+        vec![ViolationKind::ArgumentExceedsDeclared {
+            caller: "user".to_string(),
+            param: "make".to_string(),
+            declared: 1,
+            bound: Bound::Finite(2),
+            at: "x.rs:11".to_string()
+        }]
+    );
+}
+
+#[test]
 fn fip_fn_of_a_path_is_the_named_function() {
     let src = "#[fip(1, strict = true, param(make = 1))]\nfn make_once<F>(make: F, x: u32) -> Box<u32>\nwhere\n    F: FipFn<(u32,), Output = Box<u32>>,\n{\n    FipFn::call(&make, (x,))\n}\n#[fip(2, strict = true)]\nfn two(x: u32) -> Box<u32> { let _y = Box::new(x); Box::new(x) }\nfn user() {\n    let _b = make_once(fip_macros::fip_fn!(two), 2);\n}\n";
     let r = report(src);

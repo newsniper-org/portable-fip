@@ -3630,6 +3630,21 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// assert!(gt1.call((&2,)));
 /// ```
 ///
+/// **Specifications.** Outer attributes before the closure are kept on it, so a
+/// Verus specification can be attached; under Verus the value's `pre` / `post` are
+/// the closure's `requires` / `ensures`. Plain builds drop the `cfg_attr`. Verus
+/// needs the closure's return type (`r: T =>` or `-> T`); it rejects `with` on
+/// closures. Attributes are not part of the checked body.
+///
+/// ```
+/// use fip_strict::FipFn;
+/// let inc = fip_macros::fip_fn!(
+///     #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 10, ensures r == x + 1))]
+///     |x: u32| x + 1
+/// );
+/// assert_eq!(inc.call((5,)), 6);
+/// ```
+///
 /// **Named functions.** `fip_fn!(path)` takes the path of a function that a strict
 /// body could call: `f`, `a::f`, `f::<T>`, `Type::m` / `<Type<..>>::m` (a
 /// `#[fip_impl]` method), `<Type as Trait>::m` (a trait-impl method), a `core` table
@@ -3801,10 +3816,20 @@ fn fip_fn_path(krate: Option<TokenStream>, toks: Vec<TokenTree>) -> TokenStream 
 /// `Certified`; `tests/strict_accept.rs` uses arity 4, a doctest rejects 5).
 const MAX_FIP_FN_ARITY: usize = 4;
 
-/// Arity of the closure in `toks` and the index where its body starts.
+/// Arity of the closure in `toks` and the index where its body starts. Leading outer
+/// attributes (`#[..]`, e.g. `#[cfg_attr(verus_keep_ghost, verus_spec(..))]`) are
+/// skipped here and kept on the closure in the output: they are not body tokens.
 fn closure_shape(toks: &[TokenTree]) -> Result<(usize, usize), Span> {
     let first_span = toks.first().map_or_else(Span::call_site, TokenTree::span);
-    let i = usize::from(toks.first().is_some_and(|t| is_ident(t, "move")));
+    let mut i = 0;
+    while toks.get(i).is_some_and(|t| is_punct(t, '#'))
+        && toks
+            .get(i + 1)
+            .is_some_and(|t| is_group(t, Delimiter::Bracket))
+    {
+        i += 2;
+    }
+    i += usize::from(toks.get(i).is_some_and(|t| is_ident(t, "move")));
     if !toks.get(i).is_some_and(|t| is_punct(t, '|')) {
         return Err(first_span);
     }

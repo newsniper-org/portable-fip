@@ -11,14 +11,17 @@
 //! - `number_from_11` / `number_from_11_strict`: a counter step that would overflow
 //!   without a bound (`tick_checked` requires the count below 1000) on a slice of any
 //!   length below 990. The caller states the invariant `c == 10 + k` (count before call
-//!   `k`) and gets it back along the trace; the strict form passes `tick_checked` as a
-//!   `fip_strict::Certified` value, so `FipFn::pre` / `post` are its `requires` /
-//!   `ensures`.
+//!   `k`) and gets it back along the trace; the strict form passes `tick_checked` as
+//!   `fip_fn!(tick_checked)`, so `FipFn::pre` / `post` are its `requires` / `ensures`.
+//! - `number_from_11_closure`: the same step as a closure in `fip_fn!` carrying a
+//!   `verus_spec` attribute, which `fip_fn!` keeps on the closure: `pre` / `post` are
+//!   the closure's `requires` / `ensures`.
 //! - `odd_count` / `keep_odd`: the same for `compact_map_st`, naming the witnesses with
 //!   `compact_map_st_by_witnesses`; `keep_odd`'s count is bounded by the invariant `c <= k`.
 //!
-//! `just verify-negative` checks that wrong final claims, a missing invariant and an
-//! invariant the step does not preserve are rejected.
+//! `just verify-negative` checks that wrong final claims, a missing invariant, an
+//! invariant the step does not preserve, a closure without its spec attribute and a
+//! closure whose body breaks its `ensures` are rejected.
 #![no_std]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #[cfg(verus_keep_ghost)]
@@ -112,6 +115,42 @@ pub fn number_from_11(xs: &mut [u32]) -> u32 {
 ))]
 pub fn number_from_11_strict(xs: &mut [u32]) -> u32 {
     let f = fip_macros::fip_fn!(tick_checked);
+    proof! { assert(map_st_fip_inv(old(xs)@, f, 10u32, |k: int, c: u32| c == 10 + k)); }
+    let (c, _hole) = fip_core::strict::map_in_place_st(xs, 0, 10, f);
+    proof! {
+        let ss = map_st_fip_trace(old(xs)@, xs@, f, 10u32, c);
+        assert(st_trace_inv(ss, |k: int, c: u32| c == 10 + k));
+        assert(ss[old(xs)@.len() as int] == c);
+        assert forall|k: int| 0 <= k < xs@.len() implies xs@[k] == 11 + k by {
+            assert(ss[k] == 10 + k);
+        };
+    }
+    c
+}
+
+/// `number_from_11_strict` with a closure instead of a named function: `fip_fn!`
+/// keeps the closure's `verus_spec` attribute, so the value's `pre` / `post` are the
+/// closure's `requires` / `ensures`. Verus needs the closure's return type (`r: T =>`
+/// here, or `-> T`).
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        old(xs)@.len() < 990,
+    ensures
+        final(xs)@.len() == old(xs)@.len(),
+        forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
+        r == 10 + old(xs)@.len(),
+))]
+pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
+    let f = fip_macros::fip_fn!(
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: (u32, u32) =>
+            requires
+                c < 1000,
+            ensures
+                r.0 == c + 1,
+                r.1 == r.0,
+        ))]
+        |c: u32, _x: u32| (c + 1, c + 1)
+    );
     proof! { assert(map_st_fip_inv(old(xs)@, f, 10u32, |k: int, c: u32| c == 10 + k)); }
     let (c, _hole) = fip_core::strict::map_in_place_st(xs, 0, 10, f);
     proof! {

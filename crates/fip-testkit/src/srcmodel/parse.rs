@@ -313,7 +313,8 @@ fn find_top(t: &[Tok], from: usize, to: usize, f: impl Fn(usize) -> bool) -> Opt
 }
 
 /// Start of the closure inside `fip_fn!(..)` whose `(` is `t[open]` and whose group
-/// ends before `ge`: skips a leading `crate = path,` and `move`.
+/// ends before `ge`: skips a leading `crate = path,`, outer attributes (`#[..]`, a
+/// Verus spec on the closure) and `move`.
 fn fip_fn_closure(t: &[Tok], open: usize, ge: usize) -> usize {
     let mut k = open + 1;
     if is_id(t, k, "crate")
@@ -321,6 +322,9 @@ fn fip_fn_closure(t: &[Tok], open: usize, ge: usize) -> usize {
         && let Some(comma) = find_top(t, k + 2, ge - 1, |q| is_p(t, q, ','))
     {
         k = comma + 1;
+    }
+    while is_p(t, k, '#') && is_p(t, k + 1, '[') {
+        k = group_end(t, k + 1);
     }
     if is_id(t, k, "move") { k + 1 } else { k }
 }

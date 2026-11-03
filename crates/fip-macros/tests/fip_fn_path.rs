@@ -4,7 +4,7 @@
 //! `fip_fn!(path)`: certified function items (free, generic, `#[fip_impl]` methods,
 //! trait-impl methods) as `FipFn` values, with the bound of their own certificate and
 //! no `unsafe` at the call site; also from strict callers, and as
-//! `Certified<N, fn(..)>` pointers.
+//! `Certified<N, fn(..)>` pointers; closures keep their (Verus) spec attributes.
 
 #![forbid(unsafe_code)] // the macro output carries the `unsafe`, not this crate
 #![allow(
@@ -166,4 +166,23 @@ fn std_and_core_paths() {
     assert_eq!(bound(&mk), 1);
     let b: Box<u32> = assert_fip_n!(1, mk.call((7,)));
     assert_eq!(*b, 7);
+}
+
+#[test]
+fn spec_attributes_stay_on_the_closure() {
+    // `cfg_attr(verus_keep_ghost, ..)`: a Verus specification, dropped in plain builds;
+    // not part of the checked body (its `requires`/`ensures` tokens are not calls).
+    let inc = fip_fn!(
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 10, ensures r == x + 1))]
+        |x: u32| x + 1
+    );
+    assert_eq!(assert_fip!(apply0(inc, 5)), 6);
+    let k = 2_u32;
+    let add = fip_fn!(
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: Box<u32> => ensures *r == x + k))]
+        #[allow(clippy::unnecessary_box_returns)]
+        move |x: u32| Box::new(x + k)
+    );
+    assert_eq!(bound(&add), 1);
+    assert_eq!(*assert_fip_n!(1, apply1(add, 1)), 3);
 }

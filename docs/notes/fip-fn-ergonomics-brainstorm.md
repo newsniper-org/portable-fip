@@ -80,7 +80,7 @@ L 3–5 days; estimates).
 
 ### 1. `fip_fn!(path)` for function items with a certificate
 
-**Status:** Implemented in the commit "fip-macros: fip_fn! of certified function paths (fip-fn ergonomics 1)". As sketched, plus certified function
+**Status:** Implemented in 6dbbf4b. As sketched, plus certified function
 pointers (idea 5's safe half). Measured:
 
 - `fip_fn!(inc)`: before "expected a closure `|args| body`", after it compiles;
@@ -154,6 +154,29 @@ the strict callee lookup. Tests:
 - `compile_fail` for an uncertified function and for a non-path.
 
 ### 2. Accept a spec attribute on the closure inside `fip_fn!`
+
+**Status:** Implemented in the commit "fip-macros: spec attributes on fip_fn!
+closures (fip-fn ergonomics 2)". `closure_shape` skips leading `#[..]` and the
+output keeps them on the closure; `fip_testkit`'s `fip_fn!` parser skips them too.
+Measured:
+
+- before: `fip_fn!(#[cfg_attr(verus_keep_ghost, verus_spec(..))] |x: u32| -> u32 { x + 1 })`
+  gave "expected a closure `|args| body`"; after: compiles (plain rustc 1.99.1, no
+  warning in the workspace, which declares `cfg(verus_keep_ghost)`).
+- `verify/compose_state.rs` `number_from_11_closure`: the `tick_checked` step as a
+  closure with `verus_spec(r: (u32, u32) => requires c < 1000, ensures r.0 == c + 1,
+  r.1 == r.0)` passed to `fip_core::strict::map_in_place_st`, with the same
+  invariant and postcondition as `number_from_11_strict`: compose_state 10 verified,
+  0 errors (9 before) on upstream Verus and on the fork.
+- Negative controls in `just verify-negative`: without the attribute,
+  "possible arithmetic underflow/overflow" in the closure and "assertion failed" at
+  the caller's `map_st_fip_inv` (the closure's `post` says nothing); with `ensures
+  r.0 == c + 2`, "unable to prove post-condition of closure". Both rejected on both
+  builds.
+- Plain tests (`tests/fip_fn_path.rs`): an attributed closure and an attributed
+  capturing `move` closure with a second, ordinary attribute; bounds 0 and 1 as
+  without attributes. `fip_testkit::summaries` still sees an attributed `fip_fn!`
+  closure as a closure (`fip_fn_with_a_spec_attribute_is_a_closure`).
 
 ```rust
 fip_fn!(#[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 10, ensures r == x + 1))]

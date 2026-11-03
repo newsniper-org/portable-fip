@@ -194,6 +194,10 @@ verify-negative: verify-strict verify-core
     state_fail strict-inv-missing   '/^pub fn number_from_11_strict(/,/^}/ { /^    proof! { assert(map_st_fip_inv(/d }' 'precondition not satisfied'
     state_fail strict-wrong-final   '/^\/\/\/ `number_from_11` through/,/^}/ s/^        r == 10 + old(xs)@.len(),$/        r == 11 + old(xs)@.len(),/' 'postcondition not satisfied'
     state_fail keep-odd-inv-missing '/^pub fn keep_odd(/,/^}/ { /^    proof! { assert(compact_map_st_by_inv(/d }' 'precondition not satisfied'
+    # A `fip_fn!` closure without its `verus_spec` attribute promises nothing, so the
+    # invariant cannot be shown preserved; a closure body breaking its `ensures` fails.
+    state_fail closure-spec-missing '/^pub fn number_from_11_closure(/,/^}/ { /^        #\[cfg_attr(verus_keep_ghost, verus_spec(r: (u32, u32) =>$/,/^        ))\]$/d; }' 'map_st_fip_inv\(old\(xs\)@, f, 10u32, \|k: int, c: u32\| c == 10 \+ k\)\); \}'
+    state_fail closure-wrong-ensures '/^pub fn number_from_11_closure(/,/^}/ s/^                r.0 == c + 1,$/                r.0 == c + 2,/' 'unable to prove post-condition of closure'
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.

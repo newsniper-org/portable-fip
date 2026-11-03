@@ -275,13 +275,16 @@ state.
   `FipFn::pre` / `post`. A verified caller passes a named function as a `FipFn` value
   (`fip_fn!(tick_checked)`, bounded by the function's generated certificate, no
   `unsafe` at the call site), whose `pre` / `post` are the function's `requires` /
-  `ensures`.
+  `ensures`. A closure works too: `fip_fn!` keeps a
+  `#[cfg_attr(verus_keep_ghost, verus_spec(r: T => requires .., ensures ..))]`
+  attribute on it, and `pre` / `post` are its `requires` / `ensures`
+  (`number_from_11_closure`).
 
 Measured (`--no-cheating`, Verus 0.2026.10.18.7d82994 and Y4's fork
 0.2026.10.31.559ac52, identical counts): `fip-strict` 7, `fip-core` 56 (51 before
 the invariants and named traces, 36 before the state-passing variants), `fip-alloc`
-1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4, `verify/compose_state.rs` 9
-(4 before).
+1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4, `verify/compose_state.rs` 10
+(4 before the strict caller, 9 before the specified closure).
 
 **Pre-verification → implementation → post-verification.** For `dedup_by` and
 `compact_map` the postcondition was first written as a spec predicate
