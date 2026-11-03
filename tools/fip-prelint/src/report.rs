@@ -10,6 +10,7 @@
 //! | `⊤`: unresolved call, no usable MIR ("cannot check") | error, one per distinct leaf |
 //! | panic path, `strict = true` with `panic_macros = false` | error |
 //! | panic path, `strict = true` otherwise | note |
+//! | `alloc::alloc::handle_alloc_error` under a mark allowing `n ≥ 1` allocations | the same, labelled "allocation failure path (diverges)" |
 //! | terms left: callable parameters without `param(..)`, trait methods on generic parameters, drops of a bare type parameter (`drop(T)`, also inside the glue of `Option<T>`, `Vec<T>`, ..) | warning |
 //! | a call site passing, for a callee's `param(g = K)`, an argument that may allocate more than `K` times per call, or `⊤` (in any analysed body: roots, what they reach in analysed crates, every local function and closure) | error, at the call site |
 //! | unknown name under `fip::`, misplaced or malformed attribute | error |
@@ -622,10 +623,14 @@ fn verdict(
     }
     if mark.strict {
         for w in &s.panics {
-            let msg = format!(
-                "`{label}` is {tag}: reachable panic path: {}",
-                render(tcx, label, w)
-            );
+            // A failed allocation in a root that permits allocations (top plan
+            // T14.3): the same verdict, a label that tells it from a logic panic.
+            let kind = if mark.allowed() >= 1 && is_alloc_failure(&w.what) {
+                "allocation failure path (diverges)"
+            } else {
+                "reachable panic path"
+            };
+            let msg = format!("`{label}` is {tag}: {kind}: {}", render(tcx, label, w));
             if mark.panic_macros {
                 out.note(primary(w, fspan), &msg);
             } else {
@@ -666,6 +671,13 @@ fn verdict(
             ),
         );
     }
+}
+
+/// `true` for the panic leaf of `alloc::alloc::handle_alloc_error` (what an
+/// allocation calls when the allocator returns null).
+fn is_alloc_failure(what: &str) -> bool {
+    what.starts_with("`alloc::alloc::handle_alloc_error` ")
+        || what.starts_with("`std::alloc::handle_alloc_error` ")
 }
 
 /// A call site whose argument violates the callee's `param(g = K)`.

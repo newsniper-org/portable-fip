@@ -786,6 +786,13 @@ checks that the profile does not have.
    allocation (`n ≥ 1`), so the reader can tell them from logic panics (S).
    Verdicts are unchanged: still a note, and an error under `panic_macros = false`.
    **Stays** reported.
+   **Implemented** (item 14): a panic witness ending in `alloc::alloc::handle_alloc_error`
+   under a mark with `allowed() ≥ 1` reads "allocation failure path (diverges)" instead
+   of "reachable panic path"; counts and verdicts unchanged. Self-check: 7 of the 26
+   dev notes (7 of the 13 `--release` notes); the 8th `handle_alloc_error` note of N1
+   (`strict_gaps::sum`, `#[fip(strict = true)]`, `n = 0`) keeps "reachable panic path",
+   because there the allocation itself is the error. Fixture `implicit`: 3 roots added
+   (note, error under `panic_macros = false`, `n = 0` control). **Deviation:** none.
 4. **Contract allows panics (2).** Correct. The user-level fix is
    `#[fip(strict = true, panic_macros = false)]` on the contract. **Stays.**
 5. **`assert!` (1).** Real, in the deliberate `strict_gaps` test. **Stays.**

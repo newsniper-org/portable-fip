@@ -93,3 +93,26 @@ pub fn method_plain(p: &Plain) -> u32 {
 pub fn method_boxing(p: &Boxing) -> Box<u32> {
     p.value()
 }
+
+/// An allocation permitted by the mark (`n = 1`): its failure path
+/// (`handle_alloc_error`) is a note labelled "allocation failure path" (top plan T14.3).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 1, strict = true))]
+pub fn alloc_permitted(x: u32) -> Box<u32> {
+    Box::new(x)
+}
+
+/// The same under `panic_macros = false`: an error, with the same label.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", n = 1, strict = true, panic_macros = false)
+)]
+pub fn alloc_permitted_no_panic(x: u32) -> Box<u32> {
+    Box::new(x)
+}
+
+/// Control: the mark allows no allocation, so the allocation is the error and its
+/// failure path keeps the label "reachable panic path".
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
+pub fn alloc_forbidden(x: u32) -> Box<u32> {
+    Box::new(x)
+}

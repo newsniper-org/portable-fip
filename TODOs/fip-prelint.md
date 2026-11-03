@@ -2264,3 +2264,26 @@ before landing (`opt_item_name`).
 **Deviation.** No safe `erase` from `Certified<N, FnDef>` in `fip-strict`: the
 coercion of a function item to a pointer exists only at concrete types, so no generic
 signature can perform it; values come from `Certified::assume`.
+
+## Resolved 2026-11-03: allocation failure label (top plan T14.3)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, item 14.
+
+**Before.** A failed allocation (`alloc::alloc::handle_alloc_error`, diverging) was
+reported like any panic: "reachable panic path". N1: 8 of the 26 self-check notes.
+
+**Change** (wording only, `report.rs`). Under a mark that permits allocations
+(`Mark::allowed() ≥ 1`), a panic witness ending in `handle_alloc_error` reads
+"`f` is #[fip(N, strict = true)]: allocation failure path (diverges): ..". The same
+note (or error under `panic_macros = false`); counts, verdicts and exit status are
+unchanged. Under a mark allowing no allocation the allocation is already an error,
+and its failure path keeps "reachable panic path".
+
+**Measured.** Self-check dev: 26 notes, 7 "allocation failure path" (`strict_accept`
+3, `strict_crate_path` 2, `strict_impl` 2), 19 "reachable panic path" (before: 26
+"reachable panic path"); the remaining `handle_alloc_error` note is
+`strict_gaps::sum` (`n = 0`). `--release`: 13 notes, 7 allocation failure paths.
+Summaries (`selfcheck.expected`, `selfcheck-release.expected`) unchanged. Fixture
+`implicit`: `calls` 8 → 11 roots (5 → 6 passed, 1 → 3 notes): `alloc_permitted`
+(note, new label), `alloc_permitted_no_panic` (error, new label), `alloc_forbidden`
+(allocation error, old label).

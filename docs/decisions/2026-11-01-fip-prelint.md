@@ -756,6 +756,13 @@ unknown origin or a generic callable type is `⊤` there. Constructions in crate
 driver does not analyse are trusted (`assume` is `unsafe`). Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-03: certified function pointers".
 
+## Amendment 2026-11-03: allocation failure label (top plan T14.3)
+
+Under a mark that permits allocations, the panic path of a failed allocation
+(`alloc::alloc::handle_alloc_error`) is labelled "allocation failure path (diverges)";
+the verdict is unchanged (a note, an error under `panic_macros = false`). Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-03: allocation failure label".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
