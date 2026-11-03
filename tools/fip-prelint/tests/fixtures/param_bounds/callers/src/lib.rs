@@ -287,3 +287,21 @@ pub fn via_mid_outer(x: u32) -> u32 {
 pub fn via_mid_outer_alloc(x: u32) -> u32 {
     mid_outer(boxed_value, x)
 }
+
+/// A strict function with a certificate, bound 0.
+#[fip(strict = true)]
+pub fn flip(x: u8) -> u8 {
+    x ^ 1
+}
+
+/// `fip_fn!(path)`: the named function with its certificate's bound; the driver
+/// analyses `flip` itself at the argument site: passes.
+pub fn named_certified_ok() -> u8 {
+    apply_certified(fip_macros::fip_fn!(flip))
+}
+
+/// The same as a certified function pointer (`Certified<0, fn(u8) -> u8>`): passes.
+pub fn named_certified_ptr_ok() -> u8 {
+    let p: fip_strict::Certified<0, fn(u8) -> u8> = fip_macros::fip_fn!(flip);
+    apply_certified(p)
+}

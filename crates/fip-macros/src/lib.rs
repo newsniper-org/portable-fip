@@ -803,6 +803,24 @@
 //! # // expect: at most 4 closure parameters
 //! fn main() { let _w = fip_macros::fip_fn!(|a: u8, b: u8, c: u8, d: u8, e: u8| a + b + c + d + e); }
 //! ```
+//! `fip_fn!` of a function without a certificate:
+//! ```compile_fail
+//! # // expect: cannot find value `__fip_strict_plain`
+//! fn plain(x: u8) -> u8 { x }
+//! fn main() { let _w = fip_macros::fip_fn!(plain); }
+//! ```
+//! `fip_fn!` of something that is neither a closure nor a function path:
+//! ```compile_fail
+//! # // expect: fip_fn!: expected a closure `|args| body` or the path of a function with a certificate
+//! fn main() { let _w = fip_macros::fip_fn!(1 + 2); }
+//! ```
+//! `fip_fn!(path)` claiming another bound than the certificate's:
+//! ```compile_fail
+//! # // expect: mismatched types
+//! #[fip_macros::fip(1, strict = true)]
+//! fn boxed(x: u8) -> Box<u8> { Box::new(x) }
+//! fn main() { let _w: fip_strict::Certified<0, fn(u8) -> Box<u8>> = fip_macros::fip_fn!(boxed); }
+//! ```
 //! a certificate re-exported under another function's name:
 //! ```compile_fail
 //! # // expect: the certificate names another function
@@ -3597,7 +3615,8 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
     out
 }
 
-/// Wraps a closure into a certified callable implementing `fip_strict::FipFn`.
+/// Wraps a closure, or a function with a certificate, into a certified callable
+/// implementing `fip_strict::FipFn`.
 ///
 /// The closure body is checked with the strict rules: it may call only certified
 /// functions and the audited `core` table, and contain no allocation site inside a
@@ -3611,7 +3630,31 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// assert!(gt1.call((&2,)));
 /// ```
 ///
-/// `fip_fn!(crate = path::to::fip_strict, |..| ..)` sets the path of the `fip_strict`
+/// **Named functions.** `fip_fn!(path)` takes the path of a function that a strict
+/// body could call: `f`, `a::f`, `f::<T>`, `Type::m` / `<Type<..>>::m` (a
+/// `#[fip_impl]` method), `<Type as Trait>::m` (a trait-impl method), a `core` table
+/// function or a std constructor. The bound is read from the function's certificate
+/// as a strict call of it reads it (`Cert::allocs_for(__fip_strict_f, "f")`), so a
+/// function without one does not compile (E0425 on `__fip_strict_f`, as for a strict
+/// call). No `unsafe` is written at the call site, and it works in strict bodies and
+/// in Verus-verified ones (the value's `pre` / `post` are the function's `requires` /
+/// `ensures`). An expected type `Certified<N, fn(..) -> ..>` makes the value a
+/// certified function pointer: the function item coerces at `Certified::assume`'s
+/// argument, and `N` must equal the certificate's bound.
+///
+/// ```
+/// use fip_strict::{Certified, FipFn};
+/// #[fip_macros::fip(strict = true)]
+/// fn flip(x: u8) -> u8 { x ^ 1 }
+/// #[fip_macros::fip(strict = true)]
+/// fn keep(x: u8) -> u8 { x }
+/// let f = fip_macros::fip_fn!(flip);
+/// assert_eq!(f.call((2,)), 3);
+/// let table: [Certified<0, fn(u8) -> u8>; 2] = [fip_macros::fip_fn!(flip), fip_macros::fip_fn!(keep)];
+/// assert_eq!(table[1].call((2,)), 2);
+/// ```
+///
+/// `fip_fn!(crate = path::to::fip_strict, ..)` sets the path of the `fip_strict`
 /// crate in the generated code (see `crate = ..` in the crate documentation).
 #[proc_macro]
 pub fn fip_fn(input: TokenStream) -> TokenStream {
@@ -3632,7 +3675,12 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
     };
     let (arity, body_start) = match closure_shape(&toks) {
         Ok(v) => v,
-        Err(sp) => return compile_error(sp, "fip_fn!: expected a closure `|args| body`"),
+        Err(sp) => {
+            if fn_path_shape(&toks) {
+                return fip_fn_path(krate, toks);
+            }
+            return compile_error(sp, FIP_FN_SHAPE);
+        }
     };
     let body: TokenStream = toks[body_start..].iter().cloned().collect();
     let mut scan = Scan {
@@ -3673,6 +3721,79 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         &strict_scan.krate(),
         strict_scan.emit_fip_fn_bound(local),
         closure,
+    )
+}
+
+/// The message for an argument that is neither a closure nor a function path.
+const FIP_FN_SHAPE: &str = "fip_fn!: expected a closure `|args| body` or the path of a function with a certificate (`f`, `a::f`, `f::<T>`, `Type::m`, `<Type<..>>::m`, `<Type as Trait>::m`)";
+
+/// `true` if `toks` looks like the path of a function: identifiers, `::`, `<..>`
+/// (generic arguments, a qualified self type), ending in an identifier or a
+/// turbofish's `>`. Whether it names a certified function is decided by the strict
+/// callee resolution, as for a call of it.
+fn fn_path_shape(toks: &[TokenTree]) -> bool {
+    let Some(last) = toks.last() else {
+        return false;
+    };
+    let mut depth = 0_i32;
+    for (k, t) in toks.iter().enumerate() {
+        match t {
+            TokenTree::Ident(id) => {
+                if depth == 0 && id.to_string() == "move" {
+                    return false;
+                }
+            }
+            TokenTree::Punct(p) => match p.as_char() {
+                '<' => depth += 1,
+                '>' if k > 0 && is_punct(&toks[k - 1], '-') => {}
+                '>' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                ':' => {}
+                ',' | '&' | '\'' | '-' | '*' | ';' | '=' if depth > 0 => {}
+                _ => return false,
+            },
+            TokenTree::Group(_) if depth > 0 => {}
+            _ => return false,
+        }
+    }
+    depth == 0 && (matches!(last, TokenTree::Ident(_)) || is_punct(last, '>'))
+}
+
+/// `fip_fn!(path)`: the function at `path` with the bound of its certificate, read
+/// as a strict call of it reads it (`Cert::allocs_for(__fip_strict_f, "f")`, the
+/// `#[fip_impl]` / `#[fip_trait]` certificates for methods, the audited `core`
+/// table, std constructors as allocation sites). A function without a certificate
+/// fails to compile as a strict call of it does. No `unsafe` at the call site: the
+/// macro output pairs the function with its own certificate's bound.
+fn fip_fn_path(krate: Option<TokenStream>, toks: Vec<TokenTree>) -> TokenStream {
+    let mut as_call: TokenStream = toks.iter().cloned().collect();
+    as_call.extend([TokenTree::Group(Group::new(
+        Delimiter::Parenthesis,
+        TokenStream::new(),
+    ))]);
+    let mut scan = Scan {
+        fn_name: "",
+        sites: Vec::new(),
+        recursion: Vec::new(),
+    };
+    scan.stream(as_call.clone(), false);
+    let mut strict_scan = strict::StrictScan {
+        krate,
+        ..strict::StrictScan::default()
+    };
+    strict_scan.stream(as_call, false);
+    if let Some((sp, msg)) = strict_scan.errors.first() {
+        return compile_error(*sp, &format!("fip_fn! strict: {msg}"));
+    }
+    let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
+    fip_fn_wrapper(
+        &strict_scan.krate(),
+        strict_scan.emit_fip_fn_bound(local),
+        toks.into_iter().collect(),
     )
 }
 

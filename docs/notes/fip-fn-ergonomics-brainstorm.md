@@ -3,8 +3,8 @@
 
 # Brainstorm: `fip_fn!` and strict higher-order ergonomics
 
-**Status:** BRAINSTORM, 2026-11-03. Nothing here is decided or implemented. The
-shortlist at the end is a recommendation.
+**Status:** BRAINSTORM, 2026-11-03; shortlist being implemented (each idea's
+**Status** line says what landed and where).
 **Measured with:**
 
 - rustc 1.99.1;
@@ -79,6 +79,36 @@ Each idea has a sketch, how it works, the soundness and trust impact (where
 L 3–5 days; estimates).
 
 ### 1. `fip_fn!(path)` for function items with a certificate
+
+**Status:** Implemented in the commit "fip-macros: fip_fn! of certified function paths (fip-fn ergonomics 1)". As sketched, plus certified function
+pointers (idea 5's safe half). Measured:
+
+- `fip_fn!(inc)`: before "expected a closure `|args| body`", after it compiles;
+  `fip_fn!(plain)` (no certificate): E0425 "cannot find value `__fip_strict_plain`";
+  `fip_fn!(1 + 2)`: "expected a closure `|args| body` or the path of a function with
+  a certificate (..)".
+- `crates/fip-macros/tests/fip_fn_path.rs` (`#![forbid(unsafe_code)]`): free,
+  generic (`id::<u32>`), `#[fip_impl]` (`<Slot<u8>>::get`, bound 1 for `boxed`) and
+  trait-impl (`<Ticker as Step>::step`) functions; `core::mem::swap::<u8>` (bound 0)
+  and `Box::new` (bound 1); strict callers passing `fip_fn!(tick)` to
+  `fip_core::strict::map_in_place_st` and `fip_fn!(id::<u32>)`, `fip_fn!(double)` to
+  a `param(g = 0)` callee.
+- `let t: [Certified<0, fn(u32) -> u32>; 2] = [fip_fn!(double), fip_fn!(id::<u32>)]`
+  compiles: the expected type reaches `Certified::assume`'s argument, a coercion
+  site, so the item becomes a pointer while the bound stays the certificate's. A
+  wrong `N` is "mismatched types" (`compile_fail` example). Capture-free closures
+  work the same way. Plain Rust only (V6).
+- `verify/compose_state.rs`: `number_from_11_strict` uses `fip_fn!(tick_checked)`;
+  compose_state 9 verified, 0 errors on upstream Verus and on the fork (as before);
+  `just verify-negative` controls unchanged and rejected.
+- `fip_testkit::summaries`: a `fip_fn!(two)` argument (bound 2) against
+  `param(make = 1)`: before `bound: Unknown`, after `Finite(2)`; also through
+  `let f = fip_fn!(..)` and for `f::<T>`. Qualified method paths and std constructors
+  as values stay `Unknown` there (so the scanned test passes the trait method only
+  through `.call`).
+- `fip-prelint` fixture `param_bounds`: `fip_fn!(flip)` and its `Certified<0, fn>`
+  form pass (19 roots, 12 passed; before 18, 11).
+- Not done: `Type::<T>::m` stays rejected as in strict calls (write `<Type<T>>::m`).
 
 ```rust
 let f = fip_fn!(tick_checked);                 // free function

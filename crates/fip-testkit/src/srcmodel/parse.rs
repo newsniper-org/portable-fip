@@ -47,6 +47,8 @@ struct FnCtx {
     locals: BTreeSet<String>,
     /// Locals bound to a closure literal.
     closures: BTreeMap<String, usize>,
+    /// Locals bound to `fip_fn!(path)`: the named function, as an argument.
+    named: BTreeMap<String, Arg>,
     scope: Scope,
     /// `macro_rules!` names being expanded (recursion guard).
     expanding: Vec<String>,
@@ -323,6 +325,44 @@ fn fip_fn_closure(t: &[Tok], open: usize, ge: usize) -> usize {
     if is_id(t, k, "move") { k + 1 } else { k }
 }
 
+/// The range of the path inside an argument `t[a..b]` that is exactly
+/// `fip_fn!(path)` (or `fip_macros::fip_fn!(crate = .., path)`), without a trailing
+/// turbofish (`f::<T>` is `f`).
+fn fip_fn_path_arg(t: &[Tok], a: usize, b: usize) -> Option<(usize, usize)> {
+    let mut q = a;
+    while id(t, q).is_some() && sep(t, q + 1) {
+        q += 3;
+    }
+    if !(is_id(t, q, "fip_fn") && is_p(t, q + 1, '!') && is_open(t, q + 2)) {
+        return None;
+    }
+    let ge = group_end(t, q + 2);
+    let inner = fip_fn_closure(t, q + 2, ge);
+    if ge != b || inner >= ge - 1 || is_p(t, inner, '|') {
+        return None;
+    }
+    let mut end = ge - 1;
+    if is_p(t, end - 1, '>') {
+        let mut depth = 0_i32;
+        let mut lt = end - 1;
+        while lt > inner {
+            if is_p(t, lt, '>') {
+                depth += 1;
+            } else if is_p(t, lt, '<') {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            lt -= 1;
+        }
+        if lt >= inner + 2 && sep(t, lt - 2) {
+            end = lt - 2;
+        }
+    }
+    Some((inner, end))
+}
+
 /// An `=` that is an assignment, not part of `==`, `<=`, `=>`, `+=`, ...
 fn is_assign(t: &[Tok], q: usize) -> bool {
     is_p(t, q, '=')
@@ -586,6 +626,7 @@ impl<'a> Builder<'a> {
             callable,
             locals,
             closures: BTreeMap::new(),
+            named: BTreeMap::new(),
             scope: Scope {
                 unit: sc.unit,
                 module: sc.module.clone(),
@@ -696,6 +737,7 @@ impl<'a> Builder<'a> {
                 callable: BTreeSet::new(),
                 locals: BTreeSet::new(),
                 closures: BTreeMap::new(),
+                named: BTreeMap::new(),
                 scope: sc.clone(),
                 expanding: Vec::new(),
             };
@@ -823,14 +865,25 @@ impl<'a> Builder<'a> {
             let name = name.to_string();
             if let Some((cid, e)) = self.closure_expr(t, stop + 1, end, cx) {
                 cx.locals.remove(&name);
+                cx.named.remove(&name);
                 cx.closures.insert(name, cid);
                 return e;
             }
             cx.closures.remove(&name);
+            let semi = find_top(t, stop + 1, end, |q| is_p(t, q, ';')).unwrap_or(end);
+            match fip_fn_path_arg(t, stop + 1, semi).map(|(a, b)| classify_path(t, a, b, cx)) {
+                Some(arg @ Arg::Named { .. }) => {
+                    cx.named.insert(name.clone(), arg);
+                }
+                _ => {
+                    cx.named.remove(&name);
+                }
+            }
             cx.locals.insert(name);
         } else {
             for n in pattern_names(t, i + 1, pat_end) {
                 cx.closures.remove(&n);
+                cx.named.remove(&n);
                 cx.locals.insert(n);
             }
         }
@@ -977,6 +1030,11 @@ impl<'a> Builder<'a> {
                 if e < b {
                     self.scan(t, e, b, lp, cx);
                 }
+                continue;
+            }
+            // `fip_fn!(path)`: the function at `path`, as if passed directly.
+            if let Some((pa, pb)) = fip_fn_path_arg(t, a, b) {
+                args.push(classify_path(t, pa, pb, cx));
                 continue;
             }
             let mut x = a;
@@ -1267,9 +1325,11 @@ impl<'a> Builder<'a> {
 fn classify_path(t: &[Tok], x: usize, b: usize, cx: &FnCtx) -> Arg {
     let mut segs = Vec::new();
     let mut q = x;
-    while let Some(s) = id(t, q) {
+    while q < b
+        && let Some(s) = id(t, q)
+    {
         segs.push(s.to_string());
-        if sep(t, q + 1) {
+        if q + 2 < b && sep(t, q + 1) {
             q += 3;
         } else {
             q += 1;
@@ -1281,6 +1341,9 @@ fn classify_path(t: &[Tok], x: usize, b: usize, cx: &FnCtx) -> Arg {
     }
     let name = segs.pop().unwrap_or_default();
     if segs.is_empty() {
+        if let Some(arg) = cx.named.get(&name) {
+            return arg.clone();
+        }
         if cx.callable.contains(&name) {
             return Arg::Param(name);
         }

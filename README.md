@@ -61,13 +61,18 @@ certificate, which strict functions generate. The total allocation bound is summ
 over callees and checked at compile time, callees in loops must have bound 0, and
 recursion through strict functions is rejected as a cycle in constant evaluation.
 Higher-order functions take `fip_strict::FipFn` parameters with declared bounds
-(`param(g = K)`); arguments are certified closures from `fip_fn!(|x: T| ..)`.
+(`param(g = K)`); arguments are certified closures from `fip_fn!(|x: T| ..)`, or
+functions with a certificate from `fip_fn!(f)` (also `a::f`, `f::<T>`,
+`<Type<..>>::m`, `<Type as Trait>::m`): the bound is the function's own certificate,
+no `unsafe` is written, and strict bodies may use it. With an expected type
+`Certified<N, fn(..) -> ..>` the value is a certified function pointer.
 
 ```rust
 #[fip(strict = true, param(keep = 0))]
 fn count_kept<F: for<'a> FipFn<(&'a u8,), Output = bool>>(xs: &[u8], keep: F) -> usize { /* … */ }
 
 count_kept(&xs, fip_fn!(|v: &u8| *v > 1));
+count_kept(&xs, fip_fn!(is_big)); // `#[fip(strict = true)] fn is_big(v: &u8) -> bool`
 ```
 
 Certificates are claims, so hand-writing one requires `unsafe` (`Cert::assume`,
@@ -268,9 +273,9 @@ state.
   the call is rejected.
 - **Strict forms.** `fip_core::strict::*_st` have the same specifications with
   `FipFn::pre` / `post`. A verified caller passes a named function as a `FipFn` value
-  (`Certified::assume(tick_checked)`, bounded by the function's generated
-  certificate): `fip_fn!` takes only closures, and an attribute-mode closure has no
-  `ensures`, so its `post` would say nothing.
+  (`fip_fn!(tick_checked)`, bounded by the function's generated certificate, no
+  `unsafe` at the call site), whose `pre` / `post` are the function's `requires` /
+  `ensures`.
 
 Measured (`--no-cheating`, Verus 0.2026.10.18.7d82994 and Y4's fork
 0.2026.10.31.559ac52, identical counts): `fip-strict` 7, `fip-core` 56 (51 before
