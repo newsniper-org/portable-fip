@@ -227,3 +227,27 @@ crates a root calls.
 - function pointers and closures created outside the scanned sources;
 - a numeric stack bound.
 
+## Resolved 2026-11-04: heap type aliases (top plan T12.2)
+
+**Before.** `fip_testkit::summaries` read allocation sites by the written type name
+only: `type V = Vec<u8>; V::with_capacity(1)`, `use Vec as Seq; Seq::with_capacity(1)`,
+`m::B::new(1)` with `pub type B = Box<u8>` in `m`, `VV::with_capacity` through
+`type VV = V`, and even the non-allocating `V::new()` / `m::S::new()` were 6
+`Unresolved` violations (`⊤`, reported, never passed); `T::default()` likewise.
+
+**Change.** `srcmodel` records module-level `type Name<..> = path<..>;` items (not
+associated types) next to the `use` imports, and before resolving a function's
+events reads a call or value `A::f` / `m::A::f` whose `A` names, through type aliases
+and `use` renames (chained up to depth 8, `crate::`/`self::`/`super::`/relative module
+paths), a std heap type (last segment in `HEAP_TYPES`, path a single segment or
+starting with `std`/`alloc`/`core`) as the type's own `Ty::f`: an allocating
+constructor becomes an allocation site shown as `` `Vec::with_capacity`
+(`V::with_capacity`) ``, an audited non-allocating one is dropped (0). Other calls
+through an alias are unchanged. Not covered: an alias passed as a call argument
+(`fip_fn!(V::new)`, `make(V::with_capacity)`): still `⊤` (over-report).
+
+**After.** `summaries::tests::heap_type_aliases_are_read_as_the_type`: of 9 functions
+(the 6 above, `use std::collections::VecDeque as Q`, `use crate::m::B as BB`, and
+`fn g<T: Default>() -> T { T::default() }`), 6 allocation-site violations with
+bound 1, `V::new()` and `m::S::new()` pass with bound 0, `T::default` stays the one
+`Unresolved` (driver-only, top plan T12).

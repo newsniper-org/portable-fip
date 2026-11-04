@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use fip_lint_rules::callee::{self, Callee};
 use fip_lint_rules::{in_core_table, is_drop_function};
 
 use lex::{Tok, group_end, id, is_id, is_open, is_p, lit};
@@ -487,6 +488,8 @@ pub(crate) struct Program {
     modules: BTreeSet<(usize, Vec<String>)>,
     uses: Uses,
     globs: BTreeMap<(usize, Vec<String>), Vec<Vec<String>>>,
+    /// Module-level `type` aliases per (unit, module): name and aliased path.
+    type_aliases: Uses,
     by_module: BTreeMap<(usize, Vec<String>, String), Vec<usize>>,
     by_owner: BTreeMap<(usize, String, String), Vec<usize>>,
     owned: BTreeMap<String, Vec<usize>>,
@@ -525,6 +528,7 @@ pub(crate) fn build(groups: &[Group], multi: bool) -> Program {
         modules: BTreeSet::new(),
         uses: BTreeMap::new(),
         globs: BTreeMap::new(),
+        type_aliases: BTreeMap::new(),
     };
     for (f, t) in toks.iter().enumerate() {
         let Some(unit) = tree.unit_of.get(f).copied().flatten() else {
@@ -572,6 +576,7 @@ pub(crate) fn build(groups: &[Group], multi: bool) -> Program {
         modules: b.modules,
         uses: b.uses,
         globs: b.globs,
+        type_aliases: b.type_aliases,
         by_module: BTreeMap::new(),
         by_owner: BTreeMap::new(),
         owned: BTreeMap::new(),
@@ -641,11 +646,88 @@ impl Program {
     fn resolve_all(&mut self) {
         for k in 0..self.fns.len() {
             let mut events = std::mem::take(&mut self.fns[k].events);
+            self.alias_sites(k, &mut events);
             for e in &mut events {
                 self.resolve_event(k, &mut e.ev);
             }
             self.fns[k].events = events;
         }
+    }
+
+    /// Calls `A::f(..)` / `m::A::f(..)` (and `A::f` as a value) where `A` is a
+    /// module-level `type` alias or `use` rename of a std heap type (top plan
+    /// T12.2): an allocating constructor becomes an allocation site, an audited
+    /// non-allocating one is dropped, as written with the type's own name. Other
+    /// calls through aliases stay calls (unresolved: reported, never passed).
+    fn alias_sites(&self, k: usize, events: &mut Vec<Event>) {
+        let (unit, module) = (self.fns[k].unit, self.fns[k].module.clone());
+        events.retain_mut(|e| {
+            let (segs, name, shown) = match &e.ev {
+                Ev::Call { segs, name, .. } | Ev::Value { segs, name, .. } if !segs.is_empty() => {
+                    (segs, name, format!("{}::{name}", segs.join("::")))
+                }
+                _ => return true,
+            };
+            let Some(ty) = self.heap_alias(unit, &module, segs, 0) else {
+                return true;
+            };
+            let toks = [
+                callee::Tok::Ident(&ty),
+                callee::Tok::Punct(':'),
+                callee::Tok::Punct(':'),
+                callee::Tok::Ident(name),
+            ];
+            match callee::classify(&toks) {
+                c @ Callee::Alloc { .. } => {
+                    e.ev = Ev::Site(format!("{} (`{shown}`)", c.shown()));
+                    true
+                }
+                Callee::NonAllocating { .. } => false,
+                Callee::Inferred { .. } | Callee::Other => true,
+            }
+        });
+    }
+
+    /// The std heap type a type path `segs` (written in module `m` of `unit`) names
+    /// through module-level `type` aliases and `use` renames, if any.
+    fn heap_alias(&self, unit: usize, m: &[String], segs: &[String], depth: u32) -> Option<String> {
+        let (last, init) = segs.split_last()?;
+        if depth > 8 {
+            return None;
+        }
+        // The module holding the alias: `crate::`, `self::`, `super::` or relative.
+        let mut base: Vec<String> = m.to_vec();
+        for (n, s) in init.iter().enumerate() {
+            match s.as_str() {
+                "crate" if n == 0 => base.clear(),
+                "self" if n == 0 => {}
+                "super" => {
+                    base.pop()?;
+                }
+                _ => {
+                    let mut next = base.clone();
+                    next.push(s.clone());
+                    if self.has_module(unit, &next) {
+                        base = next;
+                    } else if n == 0 && self.has_module(unit, std::slice::from_ref(s)) {
+                        base = vec![s.clone()];
+                    } else {
+                        return None;
+                    }
+                }
+            }
+        }
+        let target = self
+            .type_aliases
+            .get(&(unit, base.clone()))
+            .and_then(|v| v.iter().rev().find(|(a, _)| a == last).map(|(_, p)| p))
+            .or_else(|| self.use_alias(unit, &base, last))?;
+        let t = target.last()?;
+        let std_path = target.len() == 1 || matches!(target[0].as_str(), "std" | "alloc" | "core");
+        if fip_lint_rules::HEAP_TYPES.contains(&t.as_str()) && std_path {
+            return Some(t.clone());
+        }
+        self.heap_alias(unit, &base, target, depth + 1)
     }
 
     fn rctx(&self, k: usize) -> RCtx<'_> {

@@ -689,6 +689,10 @@ allocating instantiation). Strict mode rejects inferred constructors
    - It still leaves `T::default()` to the driver, which is decidable only per
      instantiation.
 
+**Status 2026-11-04: candidate 2 implemented** in `fip_testkit::srcmodel`
+(`TODOs/callgraph-fip-summaries.md`, "Resolved 2026-11-04: heap type aliases"). The
+macro (`#[fip]` at expansion) is unchanged; `T::default()` stays driver-only.
+
 ### T13. Preconditions: nonlinear, heap-dependent, reified
 
 **Current.** The domain is difference bounds (`value.rs:9-24`). `fip::requires` takes

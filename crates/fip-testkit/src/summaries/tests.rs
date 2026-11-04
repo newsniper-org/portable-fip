@@ -663,3 +663,30 @@ fn verus_ghost_functions_are_not_functions() {
     assert!(r.violations.is_empty(), "{r}");
     assert_eq!(summary_of(&r, "f"), "0");
 }
+
+/// Top plan T12.2: module-level `type` aliases and `use` renames of std heap types
+/// (also chained, behind a module path, or `use std::..::Ty as A`) are read like the
+/// type's own name. Before: all six calls `Unresolved` (⊤, reported). `T::default()`
+/// stays unresolved (decidable per instantiation only; `fip-prelint` decides it).
+#[test]
+fn heap_type_aliases_are_read_as_the_type() {
+    let r = report(
+        "type V = Vec<u8>;\nuse Vec as Seq;\nmod m { pub type B = Box<u8>; pub type S = String; }\ntype VV = V;\nuse std::collections::VecDeque as Q;\nuse crate::m::B as BB;\n#[fip]\nfn a() -> V { V::with_capacity(1) }\n#[fip]\nfn b() -> Seq<u8> { Seq::with_capacity(1) }\n#[fip]\nfn c() -> m::B { m::B::new(1) }\n#[fip]\nfn d() -> V { V::new() }\n#[fip]\nfn e() -> VV { VV::with_capacity(2) }\n#[fip]\nfn f() -> m::S { m::S::new() }\n#[fip]\nfn g<T: Default>() -> T { T::default() }\n#[fip]\nfn h() -> Q<u8> { Q::with_capacity(1) }\n#[fip]\nfn i() -> BB { BB::new(1) }\n",
+    );
+    let witnesses: Vec<&str> = r.violations.iter().map(|v| v.witness.as_str()).collect();
+    assert_eq!(
+        witnesses,
+        vec![
+            "a: allocation site `Vec::with_capacity` (`V::with_capacity`) at x.rs:8",
+            "b: allocation site `Vec::with_capacity` (`Seq::with_capacity`) at x.rs:10",
+            "c: allocation site `Box::new` (`m::B::new`) at x.rs:12",
+            "e: allocation site `Vec::with_capacity` (`VV::with_capacity`) at x.rs:16",
+            "g: unresolved call `T::default` at x.rs:20",
+            "h: allocation site `VecDeque::with_capacity` (`Q::with_capacity`) at x.rs:22",
+            "i: allocation site `Box::new` (`BB::new`) at x.rs:24",
+        ],
+        "{r:?}"
+    );
+    assert_eq!(summary_of(&r, "d"), "0");
+    assert_eq!(summary_of(&r, "f"), "0");
+}

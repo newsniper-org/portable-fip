@@ -69,6 +69,9 @@ pub(super) struct Builder<'a> {
     pub(super) modules: BTreeSet<(usize, Vec<String>)>,
     pub(super) uses: Uses,
     pub(super) globs: BTreeMap<(usize, Vec<String>), Vec<Vec<String>>>,
+    /// Module-level `type Name = path<..>;` per (unit, module): name and the
+    /// aliased type's path (generic arguments dropped).
+    pub(super) type_aliases: Uses,
 }
 
 /// Parses `#[..]` contents `t[a..b]`: FIP marks (also inside `cfg_attr`) and `path`.
@@ -595,6 +598,9 @@ impl<'a> Builder<'a> {
             "trait" if id(t, i + 1).is_some() => Some(self.trait_item(t, i, end, sc)),
             "macro_rules" if is_p(t, i + 1, '!') => Some(group_end(t, i + 3)),
             "use" => Some(self.use_item(t, i, end, sc)),
+            "type" if sc.owner.is_none() && id(t, i + 1).is_some() => {
+                Some(self.type_item(t, i, end, sc))
+            }
             "const" | "static" if is_value_item(t, i) => Some(self.value_item(t, i, end, sc)),
             _ if is_p(t, i + 1, '!') && is_open(t, i + 2) && !GHOST_MACROS.contains(&s) => {
                 // item-level macro invocation (e.g. `verus! { .. }`): parse as items
@@ -743,6 +749,35 @@ impl<'a> Builder<'a> {
         let key = (sc.unit, sc.module.clone());
         self.uses.entry(key.clone()).or_default().extend(uses);
         self.globs.entry(key).or_default().extend(globs);
+        semi + 1
+    }
+
+    /// Module-level `type Name<..> = a::b::Ty<..>;`: records `Name` → `[a, b, Ty]`
+    /// (a leading `::` dropped); an aliased type that is not a path is not recorded.
+    fn type_item(&mut self, t: &'a [Tok], i: usize, end: usize, sc: &Scope) -> usize {
+        let semi = find_top(t, i, end, |q| is_p(t, q, ';')).unwrap_or(end);
+        let name = id(t, i + 1).unwrap_or_default().to_string();
+        let Some(eq) = find_top(t, i + 2, semi, |q| is_p(t, q, '=')) else {
+            return semi + 1;
+        };
+        let mut k = eq + 1;
+        if sep(t, k) {
+            k += 2;
+        }
+        let mut segs = Vec::new();
+        while let Some(s) = id(t, k) {
+            segs.push(s.to_string());
+            if !sep(t, k + 1) {
+                break;
+            }
+            k += 3;
+        }
+        if !segs.is_empty() {
+            self.type_aliases
+                .entry((sc.unit, sc.module.clone()))
+                .or_default()
+                .push((name, segs));
+        }
         semi + 1
     }
 

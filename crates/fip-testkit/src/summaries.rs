@@ -22,7 +22,11 @@
 //! values). Per function, `alloc(f) = Σ` over its body of
 //!
 //! - allocation sites (the `fip-lint-rules` tables: `Box::new`, `vec!`, `.clone()`, …):
-//!   1 each;
+//!   1 each; a module-level `type` alias or `use` rename of a std heap type (`type V =
+//!   Vec<u8>;`, `use Vec as Seq;`, chained or behind a module path) is read as the
+//!   type, so `V::with_capacity(..)` is a site and `V::new()` (audited
+//!   non-allocating) is 0; generic `T::default()` stays `⊤` (decidable per
+//!   instantiation only: `fip-prelint`);
 //! - calls to functions of the scanned sources: the callee's summary, its parameter
 //!   terms instantiated with the arguments (a closure literal's or `fip_fn!`'s body
 //!   summary, a named function's summary, the caller's own parameter as a term,
