@@ -1218,6 +1218,19 @@ pub fn macros_only(tcx: TyCtxt<'_>, cnum: rustc_hir::def_id::CrateNum) -> bool {
     tcx.crate_dep_kind(cnum) == rustc_crate_store::CrateDepKind::MacrosOnly
 }
 
+/// The name of the check function a driver-mode `fip_fn!(prelint, N, ..)` expands
+/// to (`fip-macros`, `docs/decisions/2026-11-03-fip-fn-driver-mode.md`).
+pub const CHECKED_FN: &str = "__fip_prelint_checked";
+
+/// `true` for the check function of a driver-mode `fip_fn!` (a local function named
+/// [`CHECKED_FN`]).
+pub fn is_checked_fn(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+    def_id.is_local()
+        && tcx
+            .opt_item_name(def_id)
+            .is_some_and(|n| n.as_str() == CHECKED_FN)
+}
+
 /// `true` if the crate root of `root` carries `fip::export`.
 #[allow(
     deprecated,
@@ -1464,6 +1477,10 @@ struct ArgSite {
     /// argument must also respect what the mark forbids (a free or recursion under
     /// `fip`, a panic path under `strict = true, panic_macros = false`).
     indirect: Option<Mark>,
+    /// The check function of a driver-mode `fip_fn!(prelint, N, ..)`
+    /// (`__fip_prelint_checked`): its bound is a claim of the certificate for every
+    /// instantiation of the enclosing function, so terms left are `⊤` here.
+    certifying: bool,
 }
 
 /// The argument passed for a declared parameter: its type as shown, the callable
@@ -4103,6 +4120,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 arg,
                 items,
                 indirect,
+                certifying: is_checked_fn(self.tcx, def_id),
             });
         }
     }
@@ -4146,7 +4164,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let op = call_args.first().map(|a| &a.node);
         let (arg, items) = if p.is_fn_ptr() {
             self.indirect_argument(caller, body, op, "f", p)
-        } else if p.has_param() {
+        } else if p.has_param() && !matches!(p.kind(), ty::Closure(..) | ty::FnDef(..)) {
             // A generic callable type: instantiated with a function pointer, calls
             // would trust a bound no analysed site checked.
             let shown = with_no_visible_paths!(with_no_trimmed_paths!(p.to_string()));
@@ -4155,7 +4173,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             );
             (shown, vec![(what.clone(), Item::Ev(Ev::Unknown(what)))])
         } else {
-            // A closure or function item: its calls are analysed through its body.
+            // A closure or function item, also one generic only through the
+            // enclosing function's parameters (no instantiation makes it a function
+            // pointer): its calls are analysed through its body.
             return false;
         };
         let from_param = op.is_some_and(|o| self.unbound_param(caller, body, o));
@@ -4178,6 +4198,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 panic_macros: true,
                 params: vec![("f".to_string(), n)],
             }),
+            certifying: false,
         });
         true
     }
@@ -4599,6 +4620,23 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
             s.alloc = cost.clone();
             let bound = cost.instantiate(&self.owner_params, &self.param_types);
+            // A driver-mode `fip_fn!` in a generic function: the certificate claims
+            // its bound for every instantiation, which a term left does not show.
+            if site.certifying {
+                for k in bound.terms.keys() {
+                    let what = format!(
+                        "`{k}` depends on the type parameters of the enclosing function: `fip_fn!(prelint, {}, ..)` claims its bound for every instantiation, which is not checked here",
+                        site.declared
+                    );
+                    let w = Witness {
+                        steps: Vec::new(),
+                        what,
+                        span: DUMMY_SP,
+                        in_loop: false,
+                    };
+                    push_w(&mut s.unknown, w, MAX_UNKNOWN, key_what);
+                }
+            }
             // A call through a function pointer or trait object parameter is counted
             // by the declaration in the callee's body: the argument must not do what
             // the callee's mark forbids either.

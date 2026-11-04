@@ -240,13 +240,17 @@ runs on the generic body (`generic_lie::<T>`: "may allocate 1 time(s)"); both
 constructions in a generic function also get the existing `Certified::assume` check's
 `⊤` ("`Certified::assume` with the generic callable type `{closure..}`"), as the
 default `fip_fn!` does in a generic function (measured on a probe with both). So a
-driver-mode construction in a generic function does not pass today; never silently.
+driver-mode construction in a generic function does not pass today; never silently. (Since 2026-11-04 an allocation-free one passes and one with a call left
+generic, such as `T::make`, is `⊤` at the check function; see the open points.)
 
 Open points:
 
 - the `Certified::assume` check reports a closure type of a generic function as a
   generic callable type (`⊤`); a closure type is never a function pointer, so the
-  driver could resolve it (a separate driver change, affecting the default mode too);
+  driver could resolve it (a separate driver change, affecting the default mode too).
+  Resolved 2026-11-04: analysed through its body; a term left in a driver-mode
+  closure (`T::make`) is `⊤` (`TODOs/fip-prelint.md`, "Resolved 2026-11-04:
+  `fip_fn!` closures in generic functions");
 - parameter types naming type parameters of an enclosing generic function fail with
   E0401 (the check function is a nested item), and a closure returning a borrow of a
   parameter fails with "lifetime may not live long enough" (`R` is not higher-ranked);

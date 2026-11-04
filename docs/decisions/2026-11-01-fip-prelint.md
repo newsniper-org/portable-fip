@@ -822,6 +822,16 @@ every other dependency as encoded. Listing its functions was an ICE in
 `TODOs/fip-prelint.md`, "Resolved 2026-11-04: generation mode with a proc-macro
 dependency (ICE)".
 
+## Amendment 2026-11-04: closures generic through the enclosing function
+
+`Certified::assume` with a closure or function item type that has type parameters
+(built inside a generic function) is analysed through its body, like a monomorphic
+closure; `⊤` stays for a type that may be a function pointer. At the check function
+of a driver-mode `fip_fn!` (`__fip_prelint_checked`), an undeclared term left in the
+generic body is `⊤` (the certificate claims its bound for every instantiation).
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: `fip_fn!` closures in generic
+functions".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

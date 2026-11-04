@@ -208,7 +208,7 @@ workspaces, 1 self-check; deterministic (also with `CARGO_BUILD_JOBS=1`).
 | `clean` | `#[fip]`, `#[fip(1)]`, `#[fbip]` (recursive), `#[fip(strict = true, param(g = 0))]` from `fip-macros`: all pass, exit status 0 |
 | `param_bounds` | declared parameter bounds at call sites: the reproducer below (`non_root_caller`, `root_caller`, `root_caller_budget1` pass an allocating `fip_fn!` for `param(g = 0)`: three argument errors; `root_caller` also exceeds its own budget); allocation-free `fip_fn!` and closure (pass); allocating closure, named function (through its `Fn` shim), function pointer (`⊤`), all errors; generic non-root `forward` (term `alloc(h)`, not reported) instantiated from a `fip(1)` root with an allocating closure (error at the call in `forward::<{closure}>`, counted for that root); a root's own `param(h = 1)` forwarded to `param(g = 0)` (error), `param(h = 0)` forwarded (pass); a call inside a closure (error) |
 | `export_unencoded`, `nonmember_export` | exported dependencies without MIR (hard error) and outside the workspace (analysed): see the decision record |
-| `driver_checked` | the driver-checked `fip_fn!(prelint, N, ..)` (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`, 2026-11-03): a method call, an inferred local, two parameters and an honest `N = 1` pass; a lie (`*Box::new(x)` for `N = 0`), recursion, a freed argument and a box dropped inside the closure (`N = 1`) are errors at `__fip_prelint_checked`; in a generic function the allocating closure is an error, and both constructions there also get the existing `Certified::assume` check's `⊤` for a generic callable type (as the default `fip_fn!`); the non-member `drvdep` declaring `fip::export`, `--stack` (also with `FIP_PRELINT_CHECKS=1` inherited) and generation mode (`FIP_PRELINT_STD_SUMMARIES_OUT`) do not compile the mode (`fip-macros` error; the driver sets `FIP_PRELINT_CHECKS` only for a checked primary package) |
+| `driver_checked` | the driver-checked `fip_fn!(prelint, N, ..)` (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`, 2026-11-03): a method call, an inferred local, two parameters and an honest `N = 1` pass; a lie (`*Box::new(x)` for `N = 0`), recursion, a freed argument and a box dropped inside the closure (`N = 1`) are errors at `__fip_prelint_checked`; in a generic function the allocating closure is an error, and the allocation-free one and a default `fip_fn!` there pass and a closure calling `T::make` is `⊤` (since 2026-11-04; before, every construction there got the `Certified::assume` check's `⊤` for a generic callable type); the non-member `drvdep` declaring `fip::export`, `--stack` (also with `FIP_PRELINT_CHECKS=1` inherited) and generation mode (`FIP_PRELINT_STD_SUMMARIES_OUT`) do not compile the mode (`fip-macros` error; the driver sets `FIP_PRELINT_CHECKS` only for a checked primary package) |
 | `generate_deps` | std-summary generation (`FIP_PRELINT_STD_SUMMARIES_OUT`) of a crate depending on `fip-macros` (a proc-macro crate) and `fip-strict`: writes the summaries, exit 0 (was an ICE, 2026-11-04) |
 
 ### Self-check: the portable-fip workspace (`cargo fip-prelint`, all targets)
@@ -2482,4 +2482,53 @@ by the analysed code, so nothing is lost.
 | generation mode, crate depending on `fip-macros` and `fip-strict` | ICE (exit 101 per target, `lib` and `lib test`) | "std summaries: 0 functions from 1 seed roots", file written, exit 0 |
 | fixture `driver_checked`, variant `-generate` | `fip-macros` error at expansion | unchanged |
 | self-check dev / `--release`, other fixtures | — | unchanged |
+
+## Resolved 2026-11-04: `fip_fn!` closures in generic functions
+
+Open point of `docs/decisions/2026-11-03-fip-fn-driver-mode.md` (`63a2f03`).
+
+**Before.** `certified_construction` reported every `Certified::<N, F>::assume` whose
+`F` has a type parameter as "the generic callable type .. `⊤`": also a closure type
+`{closure}<T>` built inside a generic function, for the default `fip_fn!` and for
+driver mode. A closure type is never a function pointer, whatever `T` is. And the
+driver-mode check (`__fip_prelint_checked`) left a term of the generic body (a call of
+`T::make`) silent: an `ArgSite` with terms left is not a violation (that caller's
+instantiations are checked where analysed), but the certificate claims `N` for every
+instantiation, also those no root reaches. That hole was hidden only by the
+`Certified::assume` `⊤` of the same construction.
+
+**Change.**
+
+- `certified_construction`: a closure or function item type (`ty::Closure`,
+  `ty::FnDef`) with type parameters is analysed through its body, as a monomorphic
+  one; `⊤` stays for a type that may be a function pointer (a type parameter).
+- `ArgSite::certifying` (`analysis::is_checked_fn`, the local function named
+  `__fip_prelint_checked`): at such a site every undeclared term left is `⊤` with the
+  reason "`<T as Make>::make` depends on the type parameters of the enclosing
+  function: `fip_fn!(prelint, 0, ..)` claims its bound for every instantiation, which
+  is not checked here". A closure without terms is checked on the generic body (its
+  allocations, frees and recursion are the same for every instantiation).
+
+**Soundness.** A closure's calls through `Certified` are analysed through its body
+wherever they are analysed, as before for monomorphic closures; the bound `N` of a
+closure is never trusted by the driver. For driver mode, a bound proved on the generic
+body without terms holds for every instantiation; with a term it is `⊤`.
+
+**Measured** (fixture `driver_checked`, three new functions: `generic_default` a
+default `fip_fn!` in a generic function passed to `param(g = 0)`, `generic_term` a
+driver-mode closure calling `T::make` with an allocating and a free implementation,
+`term_instances`):
+
+| case | before | after |
+|---|---|---|
+| `generic_ok` (driver mode, allocation-free, generic) | `⊤` (`Certified::assume`, generic callable type) | passes |
+| `generic_lie` (driver mode, allocates under 0) | error (1 allocation) + `⊤` | error (1 allocation) |
+| `generic_default` (default `fip_fn!`) | `⊤` | passes |
+| `generic_term` (`T::make`) | `⊤` from `Certified::assume` only; the driver-mode site silent | `⊤` at the driver-mode site with the reason above |
+| crate `checked` | 11 roots, 11 passed, 9 errors | 11 roots, 11 passed, 6 errors |
+| self-check dev / `--release`, other fixtures | — | unchanged |
+
+**Left.** Instances are not enumerated: a driver-mode closure with a term is `⊤` even
+when every instantiation in the crate is allocation-free (a `pub` generic function
+can be instantiated downstream, which the driver never sees).
 

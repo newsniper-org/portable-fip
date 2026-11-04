@@ -616,9 +616,11 @@ const PRELINT_UNCHECKED: &str = "fip_fn!(prelint, ..) is checked only by `cargo 
 /// a method call, an inferred local, two parameters and an honest bound pass; a lie
 /// about the allocations, a recursion, a freed argument and a box dropped inside the
 /// closure are reported at the construction; in a generic function the allocating
-/// closure is reported by the same check, and both constructions there also get the
-/// existing `Certified::assume` check's `⊤` for a generic callable type (as the
-/// default `fip_fn!` does in a generic function). The three driver runs that
+/// closure is reported by the same check, the allocation-free one and a default
+/// `fip_fn!` there pass (a closure type generic through the enclosing function's
+/// parameters is analysed through its body, not a generic callable type), and a
+/// closure calling `T::make` is `⊤` (a term left: the certificate claims its bound
+/// for every instantiation). The three driver runs that
 /// compile without checking must not accept the mode (`FIP_PRELINT_CHECKS` unset by
 /// the driver): the non-member dependency `drvdep` declaring `fip::export`
 /// (`Role::ExportedDependency`, in the check run), stack mode (`-stack`) and

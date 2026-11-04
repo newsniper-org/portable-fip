@@ -65,9 +65,9 @@ pub fn honest() -> u32 {
 }
 
 /// A construction inside a generic function capturing a value of the type
-/// parameter: allocation-free, so its driver-mode check passes; the driver's
-/// `Certified::assume` check reports the closure type as a generic callable type
-/// (`⊤`), as it does for the default `fip_fn!` in a generic function.
+/// parameter: allocation-free, so its driver-mode check passes. The closure type is
+/// generic only through `T` and never a function pointer, so the `Certified::assume`
+/// check analyses it through its body (it was a generic callable type, `⊤`).
 pub fn generic_ok<T: Copy>(t: T) -> u32 {
     let f = fip_fn!(prelint, 0, move |x: u32| {
         let _keep = t;
@@ -88,4 +88,49 @@ pub fn generic_lie<T: Copy>(t: T) -> u32 {
 /// Instantiates both generic functions.
 pub fn generic_instances() -> u32 {
     generic_ok::<u8>(1) + generic_lie::<u16>(2)
+}
+
+/// A default `fip_fn!` inside a generic function, passed to a `param(g = 0)`
+/// callee: the closure type is generic only through `T`, never a function pointer,
+/// so the `Certified::assume` check analyses it through its body: passes.
+pub fn generic_default<T: Copy>(t: T) -> u32 {
+    apply0(fip_fn!(move |x: u32| {
+        let _keep = t;
+        x ^ 1
+    }))
+}
+
+/// A trait whose implementations differ in allocation.
+pub trait Make {
+    /// Makes a value.
+    fn make(x: u32) -> u32;
+}
+
+/// Allocation-free.
+pub struct Plain;
+impl Make for Plain {
+    fn make(x: u32) -> u32 {
+        x
+    }
+}
+
+/// Allocates.
+pub struct Heap;
+impl Make for Heap {
+    fn make(x: u32) -> u32 {
+        *Box::new(x)
+    }
+}
+
+/// A driver-mode construction calling a method of the type parameter: the generic
+/// body leaves the term `<T as Make>::make`, and the certificate claims bound 0 for
+/// every instantiation (`generic_term::<Heap>` allocates): `⊤` with that reason.
+pub fn generic_term<T: Make>() -> u32 {
+    let f = fip_fn!(prelint, 0, |x: u32| T::make(x));
+    f.call((1,))
+}
+
+/// Instantiates `generic_term` with both implementations and `generic_default`.
+pub fn term_instances() -> u32 {
+    generic_term::<Plain>() + generic_term::<Heap>() + generic_default::<u8>(1)
 }
