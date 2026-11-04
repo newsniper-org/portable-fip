@@ -106,25 +106,82 @@ pub fn is_non_allocating_constructor(ty: &str, ctor: &str) -> bool {
 /// Macros that allocate.
 pub const ALLOC_MACROS: &[&str] = &["vec", "format"];
 /// Method names that may allocate (by name; the receiver type is not known).
+///
+/// Audited against the methods of `alloc`/`std` on rustc 1.99.1 that may allocate or
+/// reallocate when called with method syntax: `String`, `Vec`, `VecDeque`,
+/// `BinaryHeap`, `LinkedList`, `BTreeMap`/`BTreeSet`, `HashMap`/`HashSet` (and their
+/// `Entry`), `str`, slices (stable sorts allocate a buffer, `to_ascii_uppercase` on
+/// `[u8]`/`str` returns a new buffer), `Cow`, `OsStr`/`Path`/`PathBuf`,
+/// `fmt::Write` on `String`, and the adaptors that call the element's `Clone`
+/// (`cloned`). Matching by name also rejects same-named methods that do not
+/// allocate (`Option::replace`, `u8::to_ascii_uppercase`, `char::to_uppercase`);
+/// call those by path (`Option::replace(&mut o, v)`). Not seen by name: methods of
+/// user types with other names, operators (`s += "x"` on a `String`), and macros
+/// such as `write!` into a `String`; `fip-prelint` sees those calls.
 pub const ALLOC_METHODS: &[&str] = &[
+    "append",
     "clone",
-    "to_vec",
-    "to_owned",
-    "to_string",
+    "clone_from",
+    "clone_into",
+    "cloned",
     "collect",
+    "concat",
+    "extend",
+    "extend_from_slice",
+    "extend_from_within",
+    "insert",
+    "insert_entry",
+    "insert_str",
+    "into_boxed_slice",
+    "into_boxed_str",
+    "into_owned",
+    "join",
+    "or_default",
+    "or_insert",
+    "or_insert_with",
+    "or_insert_with_key",
+    "partition",
     "push",
     "push_back",
     "push_front",
-    "insert",
-    "extend",
-    "extend_from_slice",
-    "reserve",
-    "resize",
-    "append",
+    "push_str",
     "repeat",
-    "concat",
-    "join",
-    "into_boxed_slice",
+    "replace",
+    "replace_range",
+    "replacen",
+    "reserve",
+    "reserve_exact",
+    "resize",
+    "resize_with",
+    "set_extension",
+    "set_file_name",
+    "shrink_to",
+    "shrink_to_fit",
+    "sort",
+    "sort_by",
+    "sort_by_cached_key",
+    "sort_by_key",
+    "splice",
+    "split_off",
+    "to_ascii_lowercase",
+    "to_ascii_uppercase",
+    "to_lowercase",
+    "to_mut",
+    "to_os_string",
+    "to_owned",
+    "to_path_buf",
+    "to_string",
+    "to_string_lossy",
+    "to_uppercase",
+    "to_vec",
+    "try_reserve",
+    "try_reserve_exact",
+    "unzip",
+    "with_extension",
+    "with_file_name",
+    "write_char",
+    "write_fmt",
+    "write_str",
 ];
 /// Verus ghost-code macros, erased in plain builds; their contents are skipped.
 pub const GHOST_MACROS: &[&str] = &["proof", "proof_decl", "proof_with"];
@@ -668,6 +725,26 @@ pub mod mir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The growth methods the 2026-11-04 audit found accepted by `#[fip]` (measured:
+    /// 2 allocations, 2 reallocs), and the list kept sorted for review.
+    #[test]
+    fn audited_growth_methods_are_listed() {
+        for m in [
+            "push_str",
+            "insert_str",
+            "reserve_exact",
+            "resize_with",
+            "extend_from_within",
+            "split_off",
+            "to_uppercase",
+            "replace",
+            "into_owned",
+        ] {
+            assert!(ALLOC_METHODS.contains(&m), "{m}");
+        }
+        assert!(ALLOC_METHODS.windows(2).all(|w| w[0] < w[1]));
+    }
 
     #[test]
     fn requires_grammar() {
