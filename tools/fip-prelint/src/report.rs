@@ -916,8 +916,18 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     let mut seen: HashSet<String> = HashSet::new();
     let mut passed = 0usize;
     let mut checked = 0usize;
+    // Driver-mode `fip_fn!` constructions (their check functions
+    // `__fip_prelint_checked`) are counted apart from the roots: a root is a function
+    // declared `#[fip]`, a construction checks a certificate's claim.
+    let mut fip_fns = 0usize;
+    let mut fip_fns_passed = 0usize;
     for (def_id, mark) in &roots {
-        checked += 1;
+        let construction = crate::analysis::is_checked_fn(tcx, *def_id);
+        if construction {
+            fip_fns += 1;
+        } else {
+            checked += 1;
+        }
         // The body of an allocation or free source is outside FIP and never analysed:
         // a verdict on it would be vacuous, and would contradict its callers, which
         // count it as an allocation or a free.
@@ -954,7 +964,11 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             }
         }
         if (out.errors, out.warnings) == before {
-            passed += 1;
+            if construction {
+                fip_fns_passed += 1;
+            } else {
+                passed += 1;
+            }
         }
     }
     let (c, p) = check_local_implementations(&mut out, &crates, &mut seen);
@@ -1010,6 +1024,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     let by_symbol = report_ffi_matches(tcx, &crates);
     if marked.is_empty()
         && checked == 0
+        && fip_fns == 0
         && outside_roots == 0
         && sources.is_empty()
         && local_certs.is_empty()
@@ -1040,12 +1055,17 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     } else {
         format!(", {by_symbol} foreign functions certified or excluded by symbol")
     };
+    let constructions = if fip_fns == 0 {
+        String::new()
+    } else {
+        format!(", {fip_fns} `fip_fn!` constructions, {fip_fns_passed} passed")
+    };
     // Verus as an oracle (top plan T13.4): the panic sites discharged by Verus, with
     // the sidecar's stamp, and sidecars consulted but not used.
     let verus = crates.verus.summary();
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
-        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}{certified}{excluded}{matched}{verus}",
+        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed{constructions}, {} errors, {} warnings, {} notes{declared}{certified}{excluded}{matched}{verus}",
         checked,
         out.errors,
         out.warnings,

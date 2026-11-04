@@ -256,6 +256,10 @@ Open points:
   parameter fails with "lifetime may not live long enough" (`R` is not higher-ranked);
   both measured, both compile errors, not silent passes;
 - no count of driver-mode constructions in the crate summary yet (they appear as
-  roots named `..::__fip_prelint_checked`);
+  roots named `..::__fip_prelint_checked`). Resolved 2026-11-04: counted apart from
+  the roots ("N roots, P passed, K `fip_fn!` constructions, Q passed, ..": a root is a
+  function declared `#[fip]`, a construction checks a certificate's claim; errors,
+  warnings and notes stay totals) (`TODOs/fip-prelint.md`, "Resolved 2026-11-04:
+  `fip_fn!` constructions in the crate summary");
 - `--warn-only` reports a wrong `N` as a warning (threat model: out of scope);
 - Verus is not the driver, so driver mode does not compile in verified crates.

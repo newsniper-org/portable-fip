@@ -71,7 +71,9 @@ computed bound exceeds `K`. Opt-in per use, `fip_fn!(prelint, N, |x: T| ..)` ski
 the token scan of the closure (method calls, `use` aliases and inferred types
 allowed) and leaves the declared `N` to `fip-prelint`, which checks it at the
 construction (allocations, frees, recursion; in a generic function a call left
-generic, such as `T::make`, is ⊤); it compiles only in a checking
+generic, such as `T::make`, is ⊤; the crate summary counts these constructions
+apart from the roots: "N roots, P passed, K `fip_fn!` constructions, Q passed"); it
+compiles only in a checking
 `cargo fip-prelint` run, never in a plain build
 (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`). `fip_strict::Stateless(f)` lifts
 a one-argument callable to a state-passing step for the `_st` combinators,

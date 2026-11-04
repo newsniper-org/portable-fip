@@ -2822,3 +2822,29 @@ but no plain item sits at their location, so they are never used). Path dependen
 are found by scanning manifests, not by `cargo metadata` (no subprocess, no network);
 git and registry dependencies are immutable per version and change their own
 fingerprint.
+
+## Resolved 2026-11-04: `fip_fn!` constructions in the crate summary
+
+Open point of `docs/decisions/2026-11-03-fip-fn-driver-mode.md`: driver-mode
+`fip_fn!(prelint, N, ..)` constructions were counted as roots (their check functions
+`..::__fip_prelint_checked` carry a mark).
+
+**Change.** `report::check_crate` counts a root whose function is a check function
+(`analysis::is_checked_fn`) as a construction: the summary reads "N roots, P passed,
+K `fip_fn!` constructions, Q passed, E errors, W warnings, X notes" (the
+construction part only when K > 0). A construction passes when checking it added no
+error or warning, as a root does.
+
+**Decision.** Out of the root count, not both: a root is a function the user declared
+`#[fip]`, a construction is a check of one certificate's claim; mixing them made "11
+roots" in a crate with one `#[fip]` function. Errors, warnings and notes stay totals
+(an argument error at a construction's call, e.g. "`lie` passes to
+`lie::__fip_prelint_checked` an argument .. that may allocate", is found by the scan of
+callers outside roots and is counted there, not against the construction).
+
+**Measured:**
+
+| run | before | after |
+|---|---|---|
+| fixture `driver_checked`, crate `checked` | "11 roots, 11 passed, 6 errors, 0 warnings, 0 notes" | "1 roots, 1 passed, 10 `fip_fn!` constructions, 10 passed, 6 errors, 0 warnings, 0 notes" |
+| every other fixture, `targets`, self-check dev and `--release` (no driver-mode construction in the workspace) | — | unchanged |
