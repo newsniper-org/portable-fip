@@ -434,7 +434,9 @@ fn std_summaries_cache_key() {
 /// checks and debug assertions of the profile, not those `-Copt-level=0` implies. In
 /// dev both crates have an overflow check and a `debug_assert!` panic path; under
 /// `--release` only `checked` (`[profile.release.package.checked] overflow-checks =
-/// true`) keeps its overflow check, and neither has the debug assertion.
+/// true`) keeps its overflow check, and neither has the debug assertion. The note texts
+/// do not name the profile (`TODOs/fip-prelint.md`, "Decision 2026-11-04: the note texts
+/// stay without the profile").
 #[test]
 fn profiles() {
     for (variant, extra) in [("-dev", &[][..]), ("-release", &["--release"][..])] {

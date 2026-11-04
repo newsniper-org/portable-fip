@@ -1566,6 +1566,21 @@ the analysed profile has that check, so the profile is implied by the run
 (`cargo fip-prelint` vs `--release`); adding it to every note would change every
 expected line without adding a fact.
 
+**Decision 2026-11-04: the note texts stay without the profile** (measured). The
+overflow and debug-assertion notes are 81 lines in 16 expected files. (1) An overflow
+note already names its check (`arithmetic overflow check (Add)`), which is in the MIR
+only when the analysed unit has overflow checks, so the note states the setting.
+(2) A panic path from `debug_assert!` cannot be told apart from one of `assert!` or
+`if .. { panic!() }` on MIR: the dev note of `profiles`' `positive` is
+`` `positive` -> `core::panicking::panic` ``, the same text an `assert!` gives, so a
+profile tag could not say which notes exist because of debug assertions. (3) The
+profile name is not the unit's setting: under `--release`, `checked` keeps its
+overflow check through `[profile.release.package.checked] overflow-checks = true`,
+so a tag would have to state each unit's `-C` settings; `cargo fip-prelint -v` already
+prints them (measured on `profiles --release`: `-C overflow-checks=on` on `checked`'s
+command line only). Reopen if a user needs the settings in the report itself; the
+place would be the crate summary line (one per crate), not every note.
+
 ## Resolved 2026-11-03: function pointers from constants, immutable statics and local aggregates (top plan T1.1–T1.3)
 
 Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, T1 candidates 1–3 (item 2
