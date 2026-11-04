@@ -2532,3 +2532,68 @@ driver-mode closure calling `T::make` with an allocating and a free implementati
 when every instantiation in the crate is allocation-free (a `pub` generic function
 can be instantiated downstream, which the driver never sees).
 
+## Resolved 2026-11-04: function-pointer residue (top plan T1–T3 open points)
+
+Open points of "function pointers from constants, immutable statics and local
+aggregates" (T1.1–T1.3) and "callable bindings across calls" (B).
+
+**Before.** `⊤`: local arrays of function pointers (only fields of local aggregates
+were followed); a pointer behind a reference stored in an immutable static
+(`static S: &[fn()]`, a dereference inside the data); an `FnMut`-bound generic
+instantiated with a function pointer (`&mut g` made `g` unstable in the
+must-analysis, so the `call_mut` shim had no binding); `&Rc<dyn Fn>` / `&Arc<dyn Fn>`
+parameters (the receiver is the result of `Deref::deref`, a call; the parameter type
+was not a callable trait object for `param(g = K)`).
+
+**Change.**
+
+- `Origin::Elems(l, idx)` (`OriginCx::elems`, `array_elems`): `l[i]` / `l[c]` of a
+  local array assigned only as a whole by array aggregates or repeats, never borrowed
+  mutably or written in part: every element of every assignment is a candidate (the
+  maximum counts), or the one at a constant index. Elements are resolved by their own
+  origin; arrays of arrays are `⊤`.
+- `data_targets` follows `Deref` inside the data: the pointer stored at the place
+  (and the length of a wide one) is read, its allocation must again be immutable (a
+  `static` of a `Freeze` type that is not `mut`, thread-local or foreign, or immutable
+  memory) and the reference a shared one to a `Freeze` type. `place_known` extends a
+  `Load` through a local read from data (`(*_13)[_2]`, `_13 = copy (*_7)`); at most 8
+  projections.
+- `OriginCx::new_fn_ptr` / `origin_of_fn_ptr`, used by `callable_of` when the
+  operand's type in the instance is a function pointer or a reference to one: a
+  borrow `_t = &mut l` of a local declared as a function pointer or a type parameter,
+  with `_t` used once, moved as the receiver of `FnMut::call_mut`, keeps `l` stable
+  and is `Origin::Ref(l)`. In such an instance that call is the function pointer's
+  shim, which reads `*self` and never writes it.
+- `shared_ptr_pointee` (`Rc`/`Arc` diagnostic items): `callable_dyn` accepts
+  `&Rc<dyn Fn*>` and `&Arc<dyn Fn*>` (so `param(g = K)` applies), the unsizing of
+  `Rc<F>`/`Arc<F>` is `Origin::Pointee(F)`, and `<Rc<..> as Deref>::deref(p)` of a
+  parameter `p` is `Origin::BoxPtr(p)`: bound at the call site to the concrete type,
+  unbound the parameter's declared bound. Through a shared reference the `Rc` cannot
+  be replaced and its pointee's type never changes.
+
+**Measured** (new crate `residue` in fixture `indirect_data`, 18 roots):
+
+| case | before | after |
+|---|---|---|
+| `local_array`, `local_array_const_index` (`[add_one, leaked]` at `0`), `local_array_repeat` | `⊤` | pass |
+| `local_array_alloc` (`[add_one, leaked]`, variable index) | `⊤` | error: 1 allocation (`leaked`) |
+| `local_array_written` (`t[1] = boxed_value`, control) | `⊤` | `⊤` |
+| `via_static_ref` (`&[fn]`, guard `i < SREF.len()`), `via_static_ref_field` (`ops: &'static Ops`), `via_static_ref_array` | `⊤` | pass |
+| `via_static_ref_mixed` | `⊤` | error: 1 allocation |
+| `via_static_ref_cell` (`&WithCell` with a `Cell`, control) | `⊤` | `⊤` |
+| `fnmut_ptr`, `fnmut_twice_ptr` (`G: FnMut` with a function pointer) | `⊤` (shim) | pass |
+| `fnmut_ptr_alloc` (call site) | error: 1 allocation | unchanged |
+| `fnmut_closure_swaps` (a closure replacing its captured pointer, control) | — | `⊤` |
+| `rc_declared`, `arc_declared` (`param(g = 0)`) | `⊤` | pass |
+| `rc_caller`, `arc_caller` / `rc_caller_alloc`, `arc_caller_alloc` | `⊤` ("neither of a generic type, ..") | pass / error: 1 allocation at the call site |
+| `rc_undeclared`, `rc_caller_clone` (`Rc::clone`, a call result; controls) | `⊤` | `⊤` |
+| crate `residue` | 17 roots, 1 passed, 21 errors, 1 warning | 18 roots, 11 passed, 10 errors, 1 warning |
+| self-check dev / `--release`, other fixtures (`indirect`'s `rc_dyn_fn` undeclared) | — | unchanged |
+
+**Left (`⊤`, measured above).** A static whose type is not `Freeze` (also for a field
+outside the `UnsafeCell`) and memory behind a reference to a non-`Freeze` type; a
+local array written in part or borrowed mutably; a captured pointer of an `FnMut`
+closure; an `Rc` that is a call result (`Rc::clone`); call results in general (T4.4).
+The `⊤` text of a pointer call stays "call through a function pointer `fn(..)`"
+(the origin analysis does not record why it gave up).
+

@@ -5,5 +5,5 @@
 # constants, immutable statics and tables, and fields of local aggregates (top plan T1).
 [workspace]
 resolver = "3"
-members = ["data", "certs"]
+members = ["data", "certs", "residue"]
 exclude = ["tables"]

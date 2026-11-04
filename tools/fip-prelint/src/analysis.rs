@@ -2950,6 +2950,25 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
                 _ => None,
             },
+            // An element of a local array: every candidate element (their maximum).
+            Origin::Elems(l, idx) => {
+                let mut items = Vec::new();
+                for e in array_elems(body, l, idx) {
+                    // No arrays of arrays: an element is resolved by its own origin.
+                    if matches!(origin_of(self.tcx, body, e), Some(Origin::Elems(..)) | None) {
+                        return None;
+                    }
+                    match self.pointer_target(inst, body, e)? {
+                        Item::Alt(v) => items.extend(v),
+                        i => items.push(i),
+                    }
+                }
+                match items.len() {
+                    0 => None,
+                    1 => items.pop(),
+                    _ => Some(Item::Alt(items)),
+                }
+            }
             Origin::Pointee(_) | Origin::BufOf(_) | Origin::Ref(_) | Origin::BoxPtr(_) => None,
         }
     }
@@ -3007,11 +3026,13 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// to. Else `c` is a constant reference (to a `static` or to constant memory) and
     /// the pointer is read at `proj` (fields of structs and tuples, array or slice
     /// elements) below it: every function pointer an index may select is a candidate
-    /// (top plan T1.1, T1.2). `None` (so `⊤`) if the memory may change after
-    /// initialisation (a `static mut`, a thread local, a foreign static, a static
-    /// whose type is not `Freeze`, a mutable allocation), for any other projection
-    /// (a dereference inside the data, an enum variant), or if a value read is not a
-    /// pointer to a function.
+    /// (top plan T1.1, T1.2), also through a shared reference stored in the data
+    /// (`static S: &[fn()]`, `S.ops.f` with `ops: &'static Ops`) when the memory it
+    /// points to is immutable and of a `Freeze` type. `None` (so `⊤`) if the memory
+    /// may change after initialisation (a `static mut`, a thread local, a foreign
+    /// static, a static whose type is not `Freeze`, a mutable allocation, memory
+    /// behind a reference to a type that is not `Freeze`), for any other projection
+    /// (an enum variant), or if a value read is not a pointer to a function.
     fn data_targets(
         &self,
         inst: Instance<'tcx>,
@@ -3044,6 +3065,30 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             return function(s).map(|f| vec![f]);
         };
         let pointee = c.ty().builtin_deref(true)?;
+        let ptr_size = tcx.data_layout.pointer_size();
+        // The allocation a pointer stored in data points to, if it never changes after
+        // initialisation.
+        let immutable = |alloc_id| {
+            let alloc = match tcx.global_alloc(alloc_id) {
+                GlobalAlloc::Static(def) => {
+                    if tcx.is_mutable_static(def)
+                        || tcx.is_thread_local_static(def)
+                        || tcx.is_foreign_item(def)
+                        || !tcx
+                            .type_of(def)
+                            .instantiate_identity()
+                            .skip_norm_wip()
+                            .is_freeze(tcx, self.env)
+                    {
+                        return None;
+                    }
+                    tcx.eval_static_initializer(def).ok()?
+                }
+                GlobalAlloc::Memory(a) => a,
+                _ => return None,
+            };
+            (alloc.inner().mutability == rustc_ast::Mutability::Not).then_some(alloc)
+        };
         let (alloc_id, start, slice_len) = match val {
             mir::ConstValue::Scalar(Scalar::Ptr(ptr, _)) => {
                 let (prov, off) = ptr.into_raw_parts();
@@ -3057,7 +3102,6 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     return None;
                 };
                 let holder = holder.inner();
-                let ptr_size = tcx.data_layout.pointer_size();
                 let Scalar::Ptr(ptr, _) = holder
                     .read_scalar(&tcx, alloc_range(offset, ptr_size), true)
                     .ok()?
@@ -3077,32 +3121,13 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
             _ => return None,
         };
-        let alloc = match tcx.global_alloc(alloc_id) {
-            GlobalAlloc::Static(def) => {
-                if tcx.is_mutable_static(def)
-                    || tcx.is_thread_local_static(def)
-                    || tcx.is_foreign_item(def)
-                    || !tcx
-                        .type_of(def)
-                        .instantiate_identity()
-                        .skip_norm_wip()
-                        .is_freeze(tcx, self.env)
-                {
-                    return None;
-                }
-                tcx.eval_static_initializer(def).ok()?
-            }
-            GlobalAlloc::Memory(a) => a,
-            _ => return None,
-        };
-        if alloc.inner().mutability != rustc_ast::Mutability::Not {
-            return None;
-        }
         let layout = |t: Ty<'tcx>| tcx.layout_of(self.env.as_query_input(t)).ok();
-        let mut places: Vec<(Ty<'tcx>, Size)> = vec![(pointee, start)];
+        // Each place: its type, the allocation holding it, its offset there, and the
+        // length of a slice reached through a wide reference.
+        let mut places = vec![(pointee, immutable(alloc_id)?, start, slice_len)];
         for elem in proj.iter() {
             let mut next = Vec::new();
-            for (t, off) in places {
+            for (t, alloc, off, len) in places {
                 match elem {
                     mir::ProjectionElem::Field(f, fty) => {
                         let is_struct = match t.kind() {
@@ -3114,12 +3139,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                             return None;
                         }
                         let fty = self.subst(inst, fty)?;
-                        next.push((fty, off + layout(t)?.fields.offset(f.as_usize())));
+                        next.push((
+                            fty,
+                            alloc,
+                            off + layout(t)?.fields.offset(f.as_usize()),
+                            None,
+                        ));
                     }
                     mir::ProjectionElem::Index(_) | mir::ProjectionElem::ConstantIndex { .. } => {
                         let (et, n) = match *t.kind() {
                             ty::Array(et, n) => (et, n.try_to_target_usize(tcx)?),
-                            ty::Slice(et) => (et, slice_len?),
+                            ty::Slice(et) => (et, len?),
                             _ => return None,
                         };
                         if n > MAX_CANDIDATES {
@@ -3143,17 +3173,43 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         };
                         let stride = layout(et)?.size;
                         for i in range.filter(|i| *i < n) {
-                            next.push((et, off + stride * i));
+                            next.push((et, alloc, off + stride * i, None));
                         }
+                    }
+                    // A shared reference stored in the data (top plan T1 residue): the
+                    // memory it points to, if that is immutable too and its type is
+                    // `Freeze` (else a `Cell` behind it could change it).
+                    mir::ProjectionElem::Deref => {
+                        let ty::Ref(_, inner, rustc_ast::Mutability::Not) = *t.kind() else {
+                            return None;
+                        };
+                        if !inner.is_freeze(tcx, self.env) {
+                            return None;
+                        }
+                        let a = alloc.inner();
+                        let Scalar::Ptr(ptr, _) =
+                            a.read_scalar(&tcx, alloc_range(off, ptr_size), true).ok()?
+                        else {
+                            return None;
+                        };
+                        let len = if inner.is_sized(tcx, self.env) {
+                            None
+                        } else {
+                            let len = a
+                                .read_scalar(&tcx, alloc_range(off + ptr_size, ptr_size), false)
+                                .ok()?;
+                            Some(len.to_target_usize(&tcx).discard_err()?)
+                        };
+                        let (prov, to) = ptr.into_raw_parts();
+                        next.push((inner, immutable(prov.alloc_id())?, to, len));
                     }
                     _ => return None,
                 }
             }
             places = next;
         }
-        let ptr_size = tcx.data_layout.pointer_size();
         let mut out = Vec::new();
-        for (t, off) in places {
+        for (t, alloc, off, _) in places {
             if !t.is_fn_ptr() {
                 return None;
             }
@@ -3240,15 +3296,24 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             },
             // The receiver `&**self` of `<Box<dyn Fn*> as Fn*>::call*`: what the
             // `&Box` parameter is bound to (top plan T2).
+            // Also the receiver `&**g` of `g: &Rc<dyn Fn*>` (`Deref::deref` of
+            // `Rc`/`Arc`): unbound, the parameter's declared bound.
             Origin::BoxPtr(l) => match self.bind_of(l) {
                 Some(Bind::Callable(c)) => self.callable_item(&c, Some(callee)),
+                _ if tcx
+                    .trait_of_assoc(def_id)
+                    .is_some_and(|t| self.is_callable_trait(t)) =>
+                {
+                    self.declared_param_call(inst, body, l)
+                }
                 _ => None,
             },
             Origin::Fn(_)
             | Origin::Const(_)
             | Origin::Load(..)
             | Origin::Ref(_)
-            | Origin::DerefArg(_) => None,
+            | Origin::DerefArg(_)
+            | Origin::Elems(..) => None,
         }
     }
 
@@ -3618,7 +3683,16 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         ty: Ty<'tcx>,
     ) -> Option<Callable<'tcx>> {
         let tcx = self.tcx;
-        match origin_of(tcx, body, op)? {
+        // `ty` is the operand's type in this instance: a function pointer there is
+        // read with `&mut` receivers of its `FnMut` shim allowed.
+        let fn_ptr =
+            ty.is_fn_ptr() || matches!(*ty.kind(), ty::Ref(_, inner, _) if inner.is_fn_ptr());
+        let origin = if fn_ptr {
+            origin_of_fn_ptr(tcx, body, op)
+        } else {
+            origin_of(tcx, body, op)
+        };
+        match origin? {
             Origin::Fn(t) if ty.is_fn_ptr() => {
                 let t = self.subst(inst, t)?;
                 let f = match *t.kind() {
@@ -3637,6 +3711,24 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
             Origin::Load(c, proj) if ty.is_fn_ptr() => {
                 Some(Callable::Fns(self.data_targets(inst, c, Some(proj))?))
+            }
+            // An element of a local array: the functions every candidate holds.
+            Origin::Elems(l, idx) if ty.is_fn_ptr() => {
+                let mut fns = Vec::new();
+                for e in array_elems(body, l, idx) {
+                    if matches!(origin_of(tcx, body, e), Some(Origin::Elems(..)) | None) {
+                        return None;
+                    }
+                    let Callable::Fns(fs) = self.callable_of(inst, body, e, ty)? else {
+                        return None;
+                    };
+                    for f in fs {
+                        if !fns.contains(&f) {
+                            fns.push(f);
+                        }
+                    }
+                }
+                (!fns.is_empty()).then_some(Callable::Fns(fns))
             }
             Origin::Pointee(t) if !ty.is_fn_ptr() => {
                 let t = self.subst(inst, t)?;
@@ -3733,7 +3825,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             | Origin::Load(..)
             | Origin::Ref(_)
             | Origin::DerefArg(_)
-            | Origin::BoxPtr(_) => None,
+            | Origin::BoxPtr(_)
+            | Origin::Elems(..) => None,
         }
     }
 
@@ -4346,9 +4439,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     fn callable_dyn(&self, t: Ty<'tcx>) -> Option<ty::Binder<'tcx, ty::ExistentialTraitRef<'tcx>>> {
         let inner = match *t.kind() {
             ty::Ref(_, inner, _) if inner.is_box() => inner.expect_boxed_ty(),
-            ty::Ref(_, inner, _) => inner,
+            ty::Ref(_, inner, _) => shared_ptr_pointee(self.tcx, inner).unwrap_or(inner),
             _ if t.is_box() => t.expect_boxed_ty(),
-            _ => return None,
+            _ => shared_ptr_pointee(self.tcx, t)?,
         };
         let ty::Dynamic(preds, ..) = *inner.kind() else {
             return None;
@@ -5290,6 +5383,50 @@ enum Origin<'tcx> {
     /// type, or audited fields of `core::fmt` that are never reassigned
     /// ([`AUDITED_FIELDS`]); top plan T7a/b.
     ArgAt(mir::Local, &'tcx ty::List<mir::PlaceElem<'tcx>>),
+    /// An element of the local array in this local ([`OriginCx::elems`]): the one at
+    /// the constant index, or any ([`array_elems`] lists the candidates).
+    Elems(mir::Local, Option<u64>),
+}
+
+/// `Rc<T, A>` or `Arc<T, A>`: its pointee type `T`.
+fn shared_ptr_pointee<'tcx>(tcx: TyCtxt<'tcx>, t: Ty<'tcx>) -> Option<Ty<'tcx>> {
+    let ty::Adt(def, args) = *t.kind() else {
+        return None;
+    };
+    let d = def.did();
+    let shared = tcx.is_diagnostic_item(rustc_span::sym::Rc, d)
+        || tcx.is_diagnostic_item(rustc_span::sym::Arc, d);
+    shared.then(|| args.type_at(0))
+}
+
+/// The operands a read of the local array `l` at `idx` (any element for `None`) may
+/// yield: the elements of every array aggregate or repeat assigned to `l`
+/// ([`OriginCx::elems`] checked that these are its only assignments).
+fn array_elems<'b, 'tcx>(
+    body: &'b Body<'tcx>,
+    l: mir::Local,
+    idx: Option<u64>,
+) -> Vec<&'b Operand<'tcx>> {
+    let mut out = Vec::new();
+    for data in body.basic_blocks.iter() {
+        for st in &data.statements {
+            let mir::StatementKind::Assign(assign) = &st.kind else {
+                continue;
+            };
+            if assign.0.local != l || !assign.0.projection.is_empty() {
+                continue;
+            }
+            match &assign.1 {
+                mir::Rvalue::Repeat(op, _) => out.push(op),
+                mir::Rvalue::Aggregate(_, ops) => match idx {
+                    Some(i) => out.extend(usize::try_from(i).ok().and_then(|i| ops.raw.get(i))),
+                    None => out.extend(ops.iter()),
+                },
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// The output of a formatting: a concrete type implementing `fmt::Write`, or
@@ -5742,11 +5879,25 @@ fn origin_of<'tcx>(
     OriginCx::new(tcx, body).operand(op, 0)
 }
 
+/// [`origin_of`] for an operand whose type in the instance being analysed is a
+/// function pointer (or a reference to one): a mutable borrow `&mut l` used only as
+/// the receiver of `FnMut::call_mut` does not change `l` ([`OriginCx::new_fn_ptr`]).
+fn origin_of_fn_ptr<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    op: &Operand<'tcx>,
+) -> Option<Origin<'tcx>> {
+    OriginCx::new_fn_ptr(tcx, body).operand(op, 0)
+}
+
 struct OriginCx<'b, 'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &'b Body<'tcx>,
     unstable: Vec<bool>,
     writes: Vec<Vec<Def<'b, 'tcx>>>,
+    /// `&mut l` used only as the receiver of `FnMut::call_mut` is `Origin::Ref(l)`
+    /// and does not make `l` unstable ([`OriginCx::new_fn_ptr`]).
+    fn_ptr: bool,
 }
 
 impl<'b, 'tcx> OriginCx<'b, 'tcx> {
@@ -5784,7 +5935,98 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             body,
             unstable: unstable.0,
             writes,
+            fn_ptr: false,
         }
+    }
+
+    /// [`OriginCx::new`] for reading a function pointer (top plan T1 residue): a
+    /// mutable borrow `_t = &mut l` of a whole local `l` declared as a function
+    /// pointer or a type parameter, where `_t` is used only once, moved as the
+    /// receiver of `<_ as FnMut<_>>::call_mut`, does not make `l` unstable. Sound only
+    /// where `l` holds a function pointer in the instance (the caller checks the
+    /// operand's type): then that call is the function pointer's `FnMut` shim, which
+    /// reads `*self` and never writes it.
+    fn new_fn_ptr(tcx: TyCtxt<'tcx>, body: &'b Body<'tcx>) -> OriginCx<'b, 'tcx> {
+        use mir::visit::Visitor;
+        let mut cx = OriginCx::new(tcx, body);
+        cx.fn_ptr = true;
+        let Some(fn_mut) = tcx.lang_items().fn_mut_trait() else {
+            return cx;
+        };
+        // Receivers moved into `FnMut::call_mut`.
+        let mut receivers = Vec::new();
+        for data in body.basic_blocks.iter() {
+            if let TerminatorKind::Call { func, args, .. } = &data.terminator().kind
+                && let ty::FnDef(d, _) = *func.ty(&body.local_decls, tcx).kind()
+                && tcx.trait_of_assoc(d) == Some(fn_mut)
+                && let Some(Operand::Move(r)) = args.first().map(|a| &a.node)
+                && r.projection.is_empty()
+            {
+                receivers.push(r.local);
+            }
+        }
+        // Uses of every local (a receiver must have exactly its assignment and the move).
+        struct Uses(Vec<u32>);
+        impl<'tcx> Visitor<'tcx> for Uses {
+            fn visit_local(
+                &mut self,
+                l: mir::Local,
+                _: mir::visit::PlaceContext,
+                _: mir::Location,
+            ) {
+                self.0[l.as_usize()] += 1;
+            }
+        }
+        let mut uses = Uses(vec![0; body.local_decls.len()]);
+        uses.visit_body(body);
+        let mut exempt = Vec::new();
+        for (bb, data) in body.basic_blocks.iter_enumerated() {
+            for (i, st) in data.statements.iter().enumerate() {
+                if let mir::StatementKind::Assign(assign) = &st.kind
+                    && assign.0.projection.is_empty()
+                    && let mir::Rvalue::Ref(_, mir::BorrowKind::Mut { .. }, q) = &assign.1
+                    && q.projection.is_empty()
+                    && receivers.iter().filter(|r| **r == assign.0.local).count() == 1
+                    && uses.0[assign.0.local.as_usize()] == 2
+                    && matches!(
+                        body.local_decls[q.local].ty.kind(),
+                        ty::FnPtr(..) | ty::Param(_)
+                    )
+                {
+                    exempt.push(mir::Location {
+                        block: bb,
+                        statement_index: i,
+                    });
+                }
+            }
+        }
+        if exempt.is_empty() {
+            return cx;
+        }
+        // Instability again, without the exempt borrows.
+        struct Except<'e> {
+            inner: Unstable,
+            exempt: &'e [mir::Location],
+        }
+        impl<'tcx> Visitor<'tcx> for Except<'_> {
+            fn visit_place(
+                &mut self,
+                place: &mir::Place<'tcx>,
+                ctx: mir::visit::PlaceContext,
+                loc: mir::Location,
+            ) {
+                if !self.exempt.contains(&loc) {
+                    self.inner.visit_place(place, ctx, loc);
+                }
+            }
+        }
+        let mut v = Except {
+            inner: Unstable(vec![false; body.local_decls.len()]),
+            exempt: &exempt,
+        };
+        v.visit_body(body);
+        cx.unstable = v.inner.0;
+        cx
     }
 
     /// `true` for a parameter local (`1..=arg_count`).
@@ -6221,28 +6463,72 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
                     Some(Origin::BoxPtr(l))
                 }
                 Origin::Const(c) => {
-                    // An index local holding one constant is that element only.
-                    let elems: Vec<mir::PlaceElem<'tcx>> = p.projection[1..]
-                        .iter()
-                        .map(|e| match *e {
-                            mir::ProjectionElem::Index(i) => match self.constant_index(i, depth) {
-                                Some(offset) => mir::ProjectionElem::ConstantIndex {
-                                    offset,
-                                    min_length: offset.saturating_add(1),
-                                    from_end: false,
-                                },
-                                None => *e,
-                            },
-                            e => e,
-                        })
-                        .collect();
+                    let elems = self.const_elems(&p.projection[1..], depth);
+                    Some(Origin::Load(c, self.tcx.mk_place_elems(&elems)))
+                }
+                // A load through a reference read from immutable data (`(*_13)[_2]`
+                // with `_13 = copy (*_7)`, `_7 = const {S: &&[fn()]}`): the
+                // dereference inside the data ([`Analysis::data_targets`] decides).
+                Origin::Load(c, pre) if pre.len() + p.projection.len() <= 8 => {
+                    let mut elems: Vec<mir::PlaceElem<'tcx>> = pre.to_vec();
+                    elems.push(mir::ProjectionElem::Deref);
+                    elems.extend(self.const_elems(&p.projection[1..], depth));
                     Some(Origin::Load(c, self.tcx.mk_place_elems(&elems)))
                 }
                 _ => None,
             },
             mir::ProjectionElem::Field(..) => self.field(p.local, p.projection, depth),
+            mir::ProjectionElem::Index(i) if p.projection.len() == 1 => {
+                self.elems(p.local, self.constant_index(*i, depth), depth)
+            }
+            mir::ProjectionElem::ConstantIndex {
+                offset,
+                from_end: false,
+                ..
+            } if p.projection.len() == 1 => self.elems(p.local, Some(*offset), depth),
             _ => None,
         }
+    }
+
+    /// `proj` with every index local holding one constant replaced by that
+    /// constant index (that element only).
+    fn const_elems(
+        &self,
+        proj: &[mir::PlaceElem<'tcx>],
+        depth: usize,
+    ) -> Vec<mir::PlaceElem<'tcx>> {
+        proj.iter()
+            .map(|e| match *e {
+                mir::ProjectionElem::Index(i) => match self.constant_index(i, depth) {
+                    Some(offset) => mir::ProjectionElem::ConstantIndex {
+                        offset,
+                        min_length: offset.saturating_add(1),
+                        from_end: false,
+                    },
+                    None => *e,
+                },
+                e => e,
+            })
+            .collect()
+    }
+
+    /// An element of the local array `l` (top plan T1 residue): `l` is a local of
+    /// the body (not a parameter) only ever assigned as a whole, each time by an
+    /// array aggregate or a repeat, and never borrowed mutably or written in part
+    /// ([`Unstable`]). [`Origin::Elems`]: every element of every assignment is a
+    /// candidate, or the one at the constant index `idx`.
+    fn elems(&self, l: mir::Local, idx: Option<u64>, depth: usize) -> Option<Origin<'tcx>> {
+        let li = l.as_usize();
+        if depth > Self::MAX_DEPTH || self.unstable[li] || self.is_arg(l) {
+            return None;
+        }
+        let writes = &self.writes[li];
+        let arrays = writes.iter().all(|w| match w {
+            Def::Rv(mir::Rvalue::Repeat(..)) => true,
+            Def::Rv(mir::Rvalue::Aggregate(k, _)) => matches!(**k, mir::AggregateKind::Array(_)),
+            _ => false,
+        });
+        (!writes.is_empty() && arrays).then_some(Origin::Elems(l, idx))
     }
 
     /// The value of an index local assigned exactly once, from an integer constant,
@@ -6324,16 +6610,44 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
         }
         let mut found = None;
         for w in writes {
-            let Def::Rv(rv) = w else {
-                return None;
+            let o = match w {
+                Def::Rv(rv) => self.rvalue(rv, depth + 1)?,
+                Def::Call(func, args) => self.shared_deref(func, args, depth)?,
             };
-            let o = self.rvalue(rv, depth + 1)?;
             if found.is_some_and(|f| f != o) {
                 return None;
             }
             found = Some(o);
         }
         found
+    }
+
+    /// `<Rc<T, A> as Deref>::deref(p)` or `Arc`'s, with `p` a parameter `&Rc<..>`
+    /// never reassigned: [`Origin::BoxPtr`] of `p` (the pointee of the `Rc` behind the
+    /// parameter; through a shared reference the `Rc` cannot be replaced, and the
+    /// type of its pointee never changes).
+    fn shared_deref(
+        &self,
+        func: &Operand<'tcx>,
+        args: &[Spanned<Operand<'tcx>>],
+        depth: usize,
+    ) -> Option<Origin<'tcx>> {
+        let tcx = self.tcx;
+        let ty::FnDef(d, fargs) = *func.ty(&self.body.local_decls, tcx).kind() else {
+            return None;
+        };
+        let deref = tcx.lang_items().deref_trait()?;
+        if tcx.trait_of_assoc(d) != Some(deref) {
+            return None;
+        }
+        shared_ptr_pointee(tcx, fargs.no_bound_vars()?.type_at(0))?;
+        let [a] = args else {
+            return None;
+        };
+        match self.operand(&a.node, depth + 1)? {
+            Origin::Arg(l) => Some(Origin::BoxPtr(l)),
+            _ => None,
+        }
     }
 
     fn rvalue(&self, rv: &mir::Rvalue<'tcx>, depth: usize) -> Option<Origin<'tcx>> {
@@ -6364,7 +6678,11 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
                 op,
                 _,
             ) => {
-                let pointee = ty_of(op).builtin_deref(true)?;
+                let from = ty_of(op);
+                // `Rc<F>` / `Arc<F>` unsized to `Rc<dyn ..>`: the pointee `F`.
+                let pointee = from
+                    .builtin_deref(true)
+                    .or_else(|| shared_ptr_pointee(self.tcx, from))?;
                 if matches!(pointee.kind(), ty::Dynamic(..)) {
                     // An upcast keeps the concrete type of the original pointer.
                     self.operand(op, depth)
@@ -6387,6 +6705,13 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
             }
             // `&l`: a shared borrow keeps `l` unchanged while it lives.
             mir::Rvalue::Ref(_, mir::BorrowKind::Shared, p) if p.projection.is_empty() => {
+                Some(Origin::Ref(p.local))
+            }
+            // `&mut l` reading a function pointer: only a `call_mut` receiver keeps
+            // `l` stable ([`OriginCx::new_fn_ptr`]), which `local` checks.
+            mir::Rvalue::Ref(_, mir::BorrowKind::Mut { .. }, p)
+                if self.fn_ptr && p.projection.is_empty() =>
+            {
                 Some(Origin::Ref(p.local))
             }
             // A `Box`'s pointer keeps its origin through the casts of its deref.

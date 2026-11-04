@@ -832,6 +832,17 @@ generic body is `⊤` (the certificate claims its bound for every instantiation)
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: `fip_fn!` closures in generic
 functions".
 
+## Amendment 2026-11-04: function-pointer residue (top plan T1–T3)
+
+Also resolved: an element of a local array of function pointers assigned only as a
+whole (every element a candidate, or the one at a constant index); a pointer behind a
+shared reference stored in immutable data, when the memory it points to is immutable
+and of a `Freeze` type; a function pointer through an `FnMut` bound (a `&mut g` used
+only as the receiver of `call_mut`, whose function-pointer shim never writes `*self`,
+keeps `g` stable); `&Rc<dyn Fn*>` / `&Arc<dyn Fn*>` parameters like `&Box<dyn Fn*>`
+(`param(g = K)`, bound to the concrete type at the call site). Everything else stays
+`⊤`. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: function-pointer residue".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
