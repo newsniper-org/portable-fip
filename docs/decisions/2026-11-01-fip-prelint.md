@@ -843,6 +843,15 @@ keeps `g` stable); `&Rc<dyn Fn*>` / `&Arc<dyn Fn*>` parameters like `&Box<dyn Fn
 (`param(g = K)`, bound to the concrete type at the call site). Everything else stays
 `⊤`. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: function-pointer residue".
 
+## Amendment 2026-11-04: elements at a variable index
+
+An access path may step to the element at the index held in a local `k` whose
+address is never taken, tracked while `k` is unchanged (every assignment to `k`
+forgets it); an index temporary copied from `k` right before its use (same block, or
+the bounds check's only successor) stands for `k`. Such paths stay inside one body
+(never in a summary or a precondition). Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-04: an element at a variable index read twice".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

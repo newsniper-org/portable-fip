@@ -575,7 +575,7 @@ pub fn requires_facts(
                             };
                             let c = u32::try_from(*c)
                                 .ok()
-                                .filter(|c| *c < crate::value::ELEM)
+                                .filter(|c| *c < crate::value::VAR_INDEX)
                                 .ok_or_else(|| format!("`{shown}`: index `{c}` out of range"))?;
                             fs.push(crate::value::ELEM | c);
                             t = e;

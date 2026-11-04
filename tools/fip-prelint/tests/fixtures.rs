@@ -684,6 +684,12 @@ fn driver_checked() {
 fn generate_deps() {
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("generate_deps-summaries.txt");
     let _ = std::fs::remove_file(&out);
+    // A fresh build: cargo would not rerun the driver on an unchanged crate.
+    let _ = std::fs::remove_dir_all(
+        Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join("fixtures")
+            .join("generate_deps-generate"),
+    );
     let got = run(
         "generate_deps",
         "-generate",

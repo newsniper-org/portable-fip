@@ -202,14 +202,47 @@ pub fn idx_array(xs: &[usize; 4], ys: &[u8]) -> u8 {
     if xs[2] < ys.len() { ys[xs[2]] } else { 0 }
 }
 
-/// Not covered: only elements at a constant index are tracked paths, so the guard on
-/// `xs[k]` is not related to the second read (a precision limit; sound): reported.
+/// An element at a variable index read twice, `k` unchanged in between: the guard on
+/// `xs[k]` covers the second read (tracked while `k` and `xs` are unchanged): passes
+/// (reported before 2026-11-04).
 #[cfg_attr(
     fip_prelint,
     fip::mark(kind = "fip", strict = true, panic_macros = false)
 )]
 pub fn idx_variable(xs: &[usize], ys: &[u8], k: usize) -> u8 {
     if k < xs.len() && xs[k] < ys.len() { ys[xs[k]] } else { 0 }
+}
+
+/// Control: the index changes between the guard and the use: reported.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn idx_variable_moved(xs: &[usize], ys: &[u8], mut k: usize) -> u8 {
+    if k < usize::MAX && k + 1 < xs.len() && xs[k] < ys.len() {
+        k += 1;
+        ys[xs[k]]
+    } else {
+        0
+    }
+}
+
+/// A variable index in a loop: the guard on `xs[k]` covers the read in the same
+/// iteration: passes.
+#[cfg_attr(
+    fip_prelint,
+    fip::mark(kind = "fip", strict = true, panic_macros = false)
+)]
+pub fn idx_variable_loop(xs: &[usize], ys: &[u8]) -> u32 {
+    let mut s = 0u32;
+    let mut k = 0;
+    while k < xs.len() {
+        if xs[k] < ys.len() {
+            s = s.wrapping_add(u32::from(ys[xs[k]]));
+        }
+        k += 1;
+    }
+    s
 }
 
 /// Control: a `Cell` element can change between the guard and the use (interior

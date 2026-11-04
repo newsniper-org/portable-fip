@@ -119,9 +119,14 @@ pub struct Fields {
 /// Longest access path tracked (fields after the dereference).
 const MAX_PATH: usize = 4;
 
-/// The flag of an element step `[c]` in [`Fields`] (`c < ELEM`; a field index is far
-/// below it).
+/// The flag of an element step `[c]` in [`Fields`] (`c < VAR_INDEX`; a field index is
+/// far below it).
 pub const ELEM: u32 = 1 << 31;
+
+/// With [`ELEM`]: the step `[k]` is the element at the index held in the local `k`
+/// (its number in the low bits), valid while `k` is unchanged (`Ctx::kill` of `k`
+/// forgets every path through it). Never part of a callee's interface.
+pub const VAR_INDEX: u32 = 1 << 30;
 
 impl Fields {
     const EMPTY: Fields = Fields {
@@ -146,6 +151,13 @@ impl Fields {
         let mut v = self.as_slice().to_vec();
         v.extend_from_slice(o.as_slice());
         Fields::new(&v)
+    }
+    /// The index locals of its variable-index steps ([`VAR_INDEX`]).
+    fn index_locals(&self) -> impl Iterator<Item = Local> + '_ {
+        self.as_slice()
+            .iter()
+            .filter(|f| *f & ELEM != 0 && *f & VAR_INDEX != 0)
+            .map(|f| Local::from_u32(f & !(ELEM | VAR_INDEX)))
     }
 }
 
@@ -1373,7 +1385,7 @@ fn path_of(p: &Place<'_>, consts: &HashMap<Local, u32>) -> Option<(Local, Fields
                 offset,
                 from_end: false,
                 ..
-            } => ELEM | u32::try_from(*offset).ok().filter(|c| *c < ELEM)?,
+            } => ELEM | u32::try_from(*offset).ok().filter(|c| *c < VAR_INDEX)?,
             ProjectionElem::Index(i) => ELEM | *consts.get(i)?,
             _ => return None,
         };
@@ -1427,9 +1439,102 @@ fn const_locals<'tcx>(
             }
             if let Some(v) = c.const_.try_eval_target_usize(tcx, env)
                 && let Ok(v) = u32::try_from(v)
-                && v < ELEM
+                && v < VAR_INDEX
             {
                 out.insert(l, v);
+            }
+        }
+    }
+    out
+}
+
+/// Index temporaries that stand for another local at every use (the `_14 = copy
+/// _4` that MIR building emits for `xs[k]`): a non-parameter local `i` assigned
+/// exactly once, by `i = copy r` of a local `r`, never otherwise written or borrowed,
+/// whose every use as an `Index` projection comes right after its definition: in the same
+/// block, or in the only successor of the definition's block (reached by a `goto` or
+/// the bounds check's `assert`, whose only predecessor it is), with no statement in
+/// between writing `r`. Then `(*xs)[i]` is `(*xs)[r]` at that use.
+fn index_aliases<'tcx>(body: &Body<'tcx>) -> HashMap<Local, Local> {
+    struct Uses {
+        writes: HashMap<Local, usize>,
+        index: HashMap<Local, Vec<mir::Location>>,
+    }
+    impl<'tcx> Visitor<'tcx> for Uses {
+        fn visit_place(&mut self, p: &Place<'tcx>, cx: PlaceContext, loc: mir::Location) {
+            for e in p.projection {
+                if let ProjectionElem::Index(i) = e {
+                    self.index.entry(i).or_default().push(loc);
+                }
+            }
+            let write = matches!(cx, PlaceContext::MutatingUse(_))
+                || matches!(
+                    cx,
+                    PlaceContext::NonMutatingUse(
+                        mir::visit::NonMutatingUseContext::RawBorrow
+                            | mir::visit::NonMutatingUseContext::SharedBorrow
+                            | mir::visit::NonMutatingUseContext::FakeBorrow
+                    )
+                );
+            if write {
+                *self.writes.entry(p.local).or_default() += 1;
+            }
+        }
+    }
+    let mut u = Uses {
+        writes: HashMap::new(),
+        index: HashMap::new(),
+    };
+    u.visit_body(body);
+    let preds = body.basic_blocks.predecessors();
+    // `true` if no statement of `bb` in `range` writes `r` (whole, in part or by
+    // storage markers).
+    let keeps = |bb: BasicBlock, range: std::ops::Range<usize>, r: Local| {
+        body.basic_blocks[bb].statements[range]
+            .iter()
+            .all(|s| match &s.kind {
+                StatementKind::Assign(a) => a.0.local != r,
+                StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => *l != r,
+                StatementKind::SetDiscriminant { place, .. } => place.local != r,
+                _ => true,
+            })
+    };
+    let mut out = HashMap::new();
+    for (bb, data) in body.basic_blocks.iter_enumerated() {
+        for (j, st) in data.statements.iter().enumerate() {
+            let StatementKind::Assign(assign) = &st.kind else {
+                continue;
+            };
+            let (place, rv) = &**assign;
+            let (Some(i), Rvalue::Use(Operand::Copy(q), ..)) = (place.as_local(), rv) else {
+                continue;
+            };
+            let Some(r) = q.as_local() else {
+                continue;
+            };
+            if i.as_usize() <= body.arg_count || r == i || u.writes.get(&i) != Some(&1) {
+                continue;
+            }
+            let Some(uses) = u.index.get(&i) else {
+                continue;
+            };
+            let ok = uses.iter().all(|loc| {
+                if loc.block == bb {
+                    return loc.statement_index > j && keeps(bb, j + 1..loc.statement_index, r);
+                }
+                let next = match &data.terminator().kind {
+                    TerminatorKind::Goto { target } => *target,
+                    TerminatorKind::Assert { target, .. } => *target,
+                    _ => return false,
+                };
+                loc.block == next
+                    && preds[next].len() == 1
+                    && loc.statement_index <= body.basic_blocks[next].statements.len()
+                    && keeps(bb, j + 1..data.statements.len(), r)
+                    && keeps(next, 0..loc.statement_index, r)
+            });
+            if ok {
+                out.insert(i, r);
             }
         }
     }
@@ -1609,7 +1714,29 @@ fn analyse_with<'a, 'tcx>(
             }
         }
     }
-    let consts = const_locals(tcx, env, body);
+    let mut consts = const_locals(tcx, env, body);
+    // Index locals of variable-index steps: `usize` locals whose address is never
+    // taken, so every change of them is an assignment the analysis sees (`kill`).
+    let eligible = |l: Local| {
+        body.local_decls[l].ty == tcx.types.usize && !taken.contains(&l) && l.as_u32() < VAR_INDEX
+    };
+    let aliases = index_aliases(body);
+    for (l, _) in body.local_decls.iter_enumerated() {
+        if consts.contains_key(&l) || !eligible(l) {
+            continue;
+        }
+        // An index temporary copied from `r` right before its use is `r` there.
+        let r = aliases
+            .get(&l)
+            .copied()
+            .filter(|r| eligible(*r))
+            .unwrap_or(l);
+        let r = consts
+            .get(&r)
+            .filter(|c| **c & VAR_INDEX == 0)
+            .map_or(VAR_INDEX | r.as_u32(), |c| *c);
+        consts.insert(l, r);
+    }
     let shared: HashSet<Local> = body
         .local_decls
         .iter_enumerated()
@@ -1641,6 +1768,12 @@ fn analyse_with<'a, 'tcx>(
             | Var::RangeEnd2(l)
             | Var::SomeFieldInt(l, _) => l,
         };
+        // A path through a variable index is also forgotten when the index changes.
+        if let Var::Path(_, fs) | Var::PathLen(_, fs) = v {
+            for k in fs.index_locals() {
+                of_local.entry(k).or_default().push(bounds.len());
+            }
+        }
         of_local.entry(l).or_default().push(bounds.len());
         index.insert(v, bounds.len());
         bounds.push(r);
@@ -2068,7 +2201,8 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         st.disc.remove(&l);
         st.disc.retain(|_, o| *o != l);
         st.refs.remove(&l);
-        st.refs.retain(|_, (b, _)| *b != l);
+        st.refs
+            .retain(|_, (b, fs)| *b != l && fs.index_locals().all(|k| k != l));
     }
 
     fn reset(&self, st: &mut State) {
@@ -3546,6 +3680,9 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 Var::Local(l) if l == mir::RETURN_PLACE => SVar::Ret,
                 Var::Len(l) if l == mir::RETURN_PLACE => SVar::RetLen,
                 Var::FieldLen(l, k) if l == mir::RETURN_PLACE => SVar::RetFieldLen(k),
+                Var::Path(_, fs) | Var::PathLen(_, fs) if fs.index_locals().next().is_some() => {
+                    continue;
+                }
                 Var::Local(l) | Var::Len(l) | Var::Path(l, _) | Var::PathLen(l, _)
                     if l != mir::RETURN_PLACE
                         && l.as_usize() <= self.body.arg_count

@@ -2597,3 +2597,50 @@ closure; an `Rc` that is a call result (`Rc::clone`); call results in general (T
 The `⊤` text of a pointer call stays "call through a function pointer `fn(..)`"
 (the origin analysis does not record why it gave up).
 
+## Resolved 2026-11-04: an element at a variable index read twice
+
+Open point of "element paths and access-path preconditions" (T13.1): `xs[k]` with
+the same `k` read twice, no write in between, was not tracked.
+
+**Before.** A path step was a field or `[c]` for a constant `c` (`ConstantIndex`, or
+an index local holding one constant for the whole body). `if k < xs.len() && xs[k] <
+ys.len() { ys[xs[k]] }` kept the bounds check of `ys[..]` (fixture `preconditions`,
+`idx_variable`).
+
+**Mechanism.**
+
+- `value::VAR_INDEX`: the step `ELEM | VAR_INDEX | k` is the element at the index held
+  in the local `k`. Index locals are `usize` locals whose address is never taken
+  (`address_taken`), so every change of them is an assignment the analysis sees.
+- `index_aliases`: MIR building copies the index into a fresh temporary at each read
+  (`_10 = copy _4; assert(_10 < len); _9 = copy (*_1)[_10]`). A temporary assigned
+  exactly once by `copy r`, never otherwise written or borrowed, whose every `Index`
+  use follows its definition in the same block or in the only successor of that block
+  (through `goto` or the bounds check's `assert`, the successor having no other
+  predecessor) with no statement in between writing `r`, stands for `r`: both reads
+  are the path `(*xs)[r]`.
+- A path var through `k` is registered under `k` too (`of_local`), so `kill(k)` (any
+  assignment, storage marker, call destination) forgets it; references to such a
+  place (`st.refs`) are dropped as well. Such paths never enter a callee's interface
+  (`interface`), so summaries and `fip::requires` see only constant steps.
+
+**Soundness.** As for constant indices: the memory behind a shared reference to a
+`Freeze` type does not change while the reference does not, and the place is the
+same while `k` is unchanged; every change of `k` is seen (its address is never
+taken) and forgets the path.
+
+**Measured** (fixture `preconditions`, 2 new roots):
+
+| case | before | after |
+|---|---|---|
+| `idx_variable` (`xs[k] < ys.len()`, then `ys[xs[k]]`) | bounds check reported | passes |
+| `idx_variable_loop` (the same in a `while k < xs.len()` loop, `k += 1` after) | — (new) | passes |
+| `idx_variable_moved` (`k += 1` between guard and use, control) | — (new) | reported |
+| `idx_cell` (`Cell` elements, control) | reported | reported |
+| crate `pre` | 25 roots, 13 passed, 17 errors | 27 roots, 15 passed, 17 errors |
+| self-check dev / `--release`, other fixtures | — | unchanged |
+
+Also in this commit: the `generate_deps` test (previous item) now removes its build
+directory first; on a second run cargo found the crate fresh, the driver did not run
+and no summaries were written (a test flake, measured).
+
