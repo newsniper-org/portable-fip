@@ -185,10 +185,22 @@ impl Callbacks for Prelint {
                     .and_then(|t| verus::declared_sidecar(&t))
                     && dir.join(&s).is_file()
                 {
-                    tcx.sess
-                        .file_depinfo
-                        .borrow_mut()
-                        .insert(Symbol::intern(&dir.join(s).to_string_lossy()));
+                    let side = dir.join(s);
+                    let mut files = tcx.sess.file_depinfo.borrow_mut();
+                    files.insert(Symbol::intern(&side.to_string_lossy()));
+                    // Its listed sources: a Verus-only file is in no other dep-info.
+                    if let Ok(sc) = std::fs::read_to_string(&side)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| verus::Sidecar::parse(&t))
+                    {
+                        let base = side.parent().unwrap_or(dir);
+                        for (src, _) in &sc.sources {
+                            let p = base.join(src);
+                            if p.is_file() {
+                                files.insert(Symbol::intern(&p.to_string_lossy()));
+                            }
+                        }
+                    }
                 }
             }
         }

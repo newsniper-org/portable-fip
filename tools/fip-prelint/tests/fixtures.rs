@@ -961,6 +961,142 @@ fn verus_sidecar_refused() {
     );
 }
 
+/// Appends `item` to `vside/src/lib.rs` of the copy `d` and lists it in the copy's
+/// sidecar as verified (`vside::<name>`, the hash of exactly `item`), with the forged
+/// source hash: a sidecar as a generator without the 2026-11-04 cfg checks wrote it.
+fn forge_listed(d: &Path, name: &str, item: &str) {
+    let lib = d.join("vside/src/lib.rs");
+    let old = sha256_file(&lib);
+    let mut text = std::fs::read_to_string(&lib).expect("read lib.rs");
+    text.push('\n');
+    let line = text.lines().count() + 1;
+    text.push_str(item);
+    text.push('\n');
+    std::fs::write(&lib, text).expect("write lib.rs");
+    let new = sha256_file(&lib);
+    let tmp = d.join("item.txt");
+    std::fs::write(&tmp, item).expect("write the item");
+    let hash = sha256_file(&tmp);
+    let sidecar = d.join("vside/verus-verified.txt");
+    edit(
+        &sidecar,
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}\nfn vside::{name} src/lib.rs:{line} {hash} -"),
+    );
+}
+
+/// Sidecars applied to code compiled under other cfgs than Verus's (the soundness
+/// audit, 2026-11-04). Before, each listed probe's site was discharged:
+/// - `-cfgitem`: an entry whose item text deletes a bounds check for Verus only
+///   (`cfg_attr(verus_keep_ghost, cfg(any()))`): its site is kept, the rest discharged;
+/// - `-cfgcrate`: the crate tests `fip_prelint` (`cfg!(fip_prelint)` in a listed
+///   function, the audit's division probe): the sidecar is refused;
+/// - `-target`: a sidecar of a run for another target: refused.
+#[test]
+fn verus_sidecar_cfg() {
+    let d = copy_fixture("verus_sidecar", "verus_cfgitem");
+    forge_listed(
+        &d,
+        "probe2",
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\npub fn probe2(xs: &[u8], i: usize) -> u8 {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    let _x = xs[i];\n    0\n}",
+    );
+    compare(
+        "verus_sidecar",
+        "-cfgitem",
+        &run_at(
+            &d,
+            "verus_sidecar-cfgitem",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_cfgcrate");
+    forge_listed(
+        &d,
+        "probe_cfg",
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\npub fn probe_cfg(a: u32, b: u32) -> u32 {\n    if cfg!(fip_prelint) { a / b } else { 0 }\n}",
+    );
+    compare(
+        "verus_sidecar",
+        "-cfgcrate",
+        &run_at(
+            &d,
+            "verus_sidecar-cfgcrate",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_target");
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        "\ncfg x86_64-unknown-linux-gnu -\n",
+        "\ncfg aarch64-unknown-linux-gnu -\n",
+    );
+    compare(
+        "verus_sidecar",
+        "-target",
+        &run_at(
+            &d,
+            "verus_sidecar-target",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+}
+
+/// The analysis cache follows every source a sidecar lists (the soundness audit,
+/// 2026-11-04): a Verus-only module (`#[cfg(verus_keep_ghost)] mod spec;`, in no
+/// dep-info of rustc's) edited after a passing run re-checks the crate, and the sidecar
+/// is refused. Before, the second run was a cargo no-op replaying the first verdicts.
+#[test]
+fn verus_sidecar_source_cache() {
+    let d = copy_fixture("verus_sidecar", "verus_spec_cache");
+    let spec = d.join("vside/src/spec.rs");
+    std::fs::write(&spec, "// Verus-only module.\n").expect("write spec.rs");
+    let lib = d.join("vside/src/lib.rs");
+    let old = sha256_file(&lib);
+    // At the end: the listed items keep their lines.
+    let mut text = std::fs::read_to_string(&lib).expect("read lib.rs");
+    text.push_str("\n#[cfg(verus_keep_ghost)]\nmod spec;\n");
+    std::fs::write(&lib, text).expect("write lib.rs");
+    let new = sha256_file(&lib);
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        &format!("source src/lib.rs {old}"),
+        &format!(
+            "source src/lib.rs {new}\nsource src/spec.rs {}",
+            sha256_file(&spec)
+        ),
+    );
+    let first = run_at(
+        &d,
+        "verus_sidecar-spec",
+        &[],
+        &["--message-format", "short"],
+    );
+    assert!(
+        first
+            .iter()
+            .any(|l| l.contains("panic sites discharged by Verus")),
+        "{first:?}"
+    );
+    std::fs::write(&spec, "// Verus-only module, edited.\n").expect("edit spec.rs");
+    let second = run_at(
+        &d,
+        "verus_sidecar-spec",
+        &[],
+        &["--message-format", "short"],
+    );
+    assert!(
+        second
+            .iter()
+            .any(|l| l.contains("source `src/spec.rs` changed since the verification run")),
+        "{second:?}"
+    );
+}
+
 /// SHA-256 of a file with `sha256sum` (the driver's own implementation is checked
 /// against the FIPS vectors in its unit tests).
 fn sha256_file(p: &Path) -> String {

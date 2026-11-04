@@ -17,5 +17,9 @@ fn main() {
     println!("cargo:rustc-env=FIP_PRELINT_BUILD_SYSROOT={sysroot}");
     // Lets the binaries find `librustc_driver-*.so` without `LD_LIBRARY_PATH`.
     println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{sysroot}/lib");
+    // The host triple: the target a Verus run compiles for unless it passes `--target`
+    // (recorded in a Verus sidecar's `cfg` line).
+    let host = std::env::var("TARGET").expect("TARGET");
+    println!("cargo:rustc-env=FIP_PRELINT_HOST={host}");
     println!("cargo:rerun-if-changed=build.rs");
 }

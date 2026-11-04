@@ -23,17 +23,23 @@
 //!
 //! ```text
 //! fip-prelint verus sidecar
-//! format 2
+//! format 3
 //! crate <crate name>
 //! verus <version> <commit>
 //! z3 <version>
 //! toolchain <rust toolchain of the Verus build>
 //! flags <verus flags relevant to trust, e.g. --no-cheating>
+//! cfg <target triple of the run> <its cargo features, comma-separated, or ->
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
 //! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | ->
 //! skip <crate>::<path> <reason>
 //! ```
+//!
+//! Format 3 (2026-11-04) added the `cfg` line: the driver uses a sidecar only for a
+//! build of the same target with the same features. The generator also refuses a crate
+//! whose sources test any other cfg ([`crate_cfg_conflict`]) and lists no item whose
+//! text holds a `cfg` other than the Verus-only attribute forms ([`cfg_conflict`]).
 //!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
@@ -46,7 +52,7 @@
 use std::fmt::Write as _;
 
 /// Version of the format.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
@@ -472,31 +478,212 @@ pub fn offset_of(src: &str, line: usize, col: usize) -> Option<usize> {
     (line == src.split_inclusive('\n').count() + 1 && col == 1).then_some(off)
 }
 
-/// Occurrences of `verus_keep_ghost` in an item text that may make the code Verus
-/// verified differ from the code the plain build compiles: anything but a Verus-only
-/// attribute (`cfg_attr(verus_keep_ghost, ..)`) or the plain-build `#[fip]` attribute
-/// (`cfg_attr(not(verus_keep_ghost), fip_macros::..)`, whose added code has
-/// macro-expansion spans, which the driver never drops). `None` if there is none.
-pub fn ghost_cfg_conflict(text: &str) -> Option<String> {
-    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut rest = compact.as_str();
-    while let Some(i) = rest.find("verus_keep_ghost") {
-        let before = &rest[..i];
-        let after = &rest[i + "verus_keep_ghost".len()..];
-        let ok = (before.ends_with("cfg_attr(") && after.starts_with(','))
-            || (before.ends_with("cfg_attr(not(")
-                && (after.starts_with("),fip_macros::") || after.starts_with("),::fip_macros::")));
-        if !ok {
-            let from = before.len().saturating_sub(24);
-            return Some(format!(
-                "`{}verus_keep_ghost{}`",
-                &before[before.floor_char_boundary(from)..],
-                &after[..after.floor_char_boundary(16.min(after.len()))]
-            ));
+/// One `cfg(..)`, `cfg!(..)` or `cfg_attr(..)` in a text: its kind and its top-level
+/// arguments, each as its tokens without whitespace, comments or doc comments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CfgUse {
+    /// `cfg`, `cfg!` or `cfg_attr`.
+    pub kind: &'static str,
+    pub args: Vec<String>,
+}
+
+impl CfgUse {
+    fn shown(&self) -> String {
+        let open = if self.kind == "cfg!" {
+            "cfg!("
+        } else if self.kind == "cfg" {
+            "cfg("
+        } else {
+            "cfg_attr("
+        };
+        let text = format!("{open}{})", self.args.join(", "));
+        let mut end = text.len().min(64);
+        while !text.is_char_boundary(end) {
+            end -= 1;
         }
-        rest = after;
+        if end < text.len() {
+            format!("`{}..`", &text[..end])
+        } else {
+            format!("`{text}`")
+        }
+    }
+}
+
+/// Every `cfg(..)`, `cfg!(..)` and `cfg_attr(..)` of `text`, nested ones included
+/// (outside comments and string literals).
+pub fn cfg_uses(text: &str) -> Vec<CfgUse> {
+    let toks: Vec<(Tok, usize, usize)> = lex(text)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let tx = |k: usize| &text[toks[k].1..toks[k].2];
+    let mut out = Vec::new();
+    for k in 0..toks.len() {
+        if toks[k].0 != Tok::Ident {
+            continue;
+        }
+        let (kind, open) = match tx(k) {
+            "cfg" if toks.get(k + 1).is_some_and(|t| t.0 == Tok::Punct(b'(')) => ("cfg", k + 1),
+            "cfg"
+                if toks.get(k + 1).is_some_and(|t| t.0 == Tok::Punct(b'!'))
+                    && toks.get(k + 2).is_some_and(|t| t.0 == Tok::Punct(b'(')) =>
+            {
+                ("cfg!", k + 2)
+            }
+            "cfg_attr" if toks.get(k + 1).is_some_and(|t| t.0 == Tok::Punct(b'(')) => {
+                ("cfg_attr", k + 1)
+            }
+            _ => continue,
+        };
+        let mut args = vec![String::new()];
+        let mut depth = 0usize;
+        let mut m = open;
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[' | b'{') => {
+                    depth += 1;
+                    if depth == 1 {
+                        m += 1;
+                        continue;
+                    }
+                }
+                Tok::Punct(b')' | b']' | b'}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Punct(b',') if depth == 1 => {
+                    args.push(String::new());
+                    m += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(a) = args.last_mut() {
+                a.push_str(tx(m));
+            }
+            m += 1;
+        }
+        if args.last().is_some_and(String::is_empty) {
+            args.pop();
+        }
+        out.push(CfgUse { kind, args });
+    }
+    out
+}
+
+/// `true` if every attribute of a `cfg_attr` payload starts with one of `prefixes` (an
+/// entry ending in `(` or `::` is a prefix, any other is the whole attribute or its
+/// name before `(`).
+fn payload_only(payload: &[String], prefixes: &[&str]) -> bool {
+    !payload.is_empty()
+        && payload.iter().all(|a| {
+            prefixes.iter().any(|p| {
+                if p.ends_with('(') || p.ends_with("::") {
+                    a.starts_with(p)
+                } else {
+                    a == p || a.starts_with(&format!("{p}("))
+                }
+            })
+        })
+}
+
+/// Why an item text may compile to other code for the driver than for Verus, if it
+/// may (top plan T13.4, tightened 2026-11-04). Verus compiles the crate without
+/// `--cfg fip_prelint`, without the cargo features and without `cfg(test)`; the driver
+/// compiles it with them. Every `cfg(..)`, `cfg!(..)` and `cfg_attr(..)` is refused
+/// except the attribute-only forms that cannot change the code either side compiles:
+///
+/// - `cfg_attr(verus_keep_ghost, A..)` with each `A` a `verus_spec(..)`,
+///   `verus_verify` or `verifier::..` attribute (Verus-only specifications; any other
+///   payload, such as `cfg(any())`, could delete code for Verus only);
+/// - `cfg_attr(not(verus_keep_ghost), fip_macros::..)` (the plain-build `#[fip]`, whose
+///   added code has macro-expansion spans, which the driver never drops);
+/// - `cfg_attr(fip_prelint, fip::..)` (the driver's inert tool attributes).
+///
+/// A `verus_keep_ghost` anywhere else is refused as well. `None` if there is nothing.
+pub fn cfg_conflict(text: &str) -> Option<String> {
+    let uses = cfg_uses(text);
+    let mut allowed_ghosts = 0usize;
+    for u in &uses {
+        let ok = u.kind == "cfg_attr"
+            && match u.args.first().map(String::as_str) {
+                Some("verus_keep_ghost") => {
+                    payload_only(&u.args[1..], &["verus_spec(", "verus_verify", "verifier::"])
+                }
+                Some("not(verus_keep_ghost)") => {
+                    payload_only(&u.args[1..], &["fip_macros::", "::fip_macros::"])
+                }
+                Some("fip_prelint") => payload_only(&u.args[1..], &["fip::"]),
+                _ => false,
+            };
+        if !ok {
+            return Some(u.shown());
+        }
+        if u.args
+            .first()
+            .is_some_and(|a| a.contains("verus_keep_ghost"))
+        {
+            allowed_ghosts += 1;
+        }
+    }
+    let ghosts = lex(text)
+        .into_iter()
+        .filter(|t| t.0 == Tok::Ident && &text[t.1..t.2] == "verus_keep_ghost")
+        .count();
+    (ghosts != allowed_ghosts)
+        .then(|| "`verus_keep_ghost` outside an allowed `cfg_attr`".to_string())
+}
+
+/// Cfg names a crate with a Verus sidecar may test anywhere in its sources:
+/// `verus_keep_ghost` (the two builds' split, checked per item by [`cfg_conflict`]) and
+/// `feature` (the run's features are in the stamp and compared by the driver).
+const CRATE_CFG_NAMES: &[&str] = &["verus_keep_ghost", "feature"];
+
+/// Why a source file of a crate with a Verus sidecar may make the driver's build
+/// differ from Verus's outside the listed item texts, if it may: a `cfg(..)`,
+/// `cfg!(..)` or `cfg_attr(..)` predicate that names anything but
+/// [`CRATE_CFG_NAMES`] (e.g. `test`, `fip_prelint`, `debug_assertions`,
+/// `target_arch`: a `#[cfg(test)] const` or an inherent method in a
+/// `#[cfg(test)] mod` would change what a listed item compiles to), except the inert
+/// `cfg_attr(fip_prelint, fip::..)`. `None` if there is none.
+pub fn crate_cfg_conflict(src: &str) -> Option<String> {
+    for u in cfg_uses(src) {
+        let pred = match u.kind {
+            "cfg_attr" => u.args.first().cloned().unwrap_or_default(),
+            _ => u.args.join(","),
+        };
+        if u.kind == "cfg_attr" && pred == "fip_prelint" && payload_only(&u.args[1..], &["fip::"]) {
+            continue;
+        }
+        let names = cfg_names(&pred);
+        if let Some(bad) = names
+            .iter()
+            .find(|n| !CRATE_CFG_NAMES.contains(&n.as_str()))
+        {
+            return Some(format!("{} tests `{bad}`", u.shown()));
+        }
     }
     None
+}
+
+/// The cfg names a compact predicate tests (`not(any(a,feature="x"))` → `a`,
+/// `feature`).
+fn cfg_names(pred: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in lex(pred) {
+        if t.0 != Tok::Ident {
+            continue;
+        }
+        let w = &pred[t.1..t.2];
+        let call = pred[t.2..].starts_with('(');
+        if call && matches!(w, "not" | "any" | "all") {
+            continue;
+        }
+        out.push(w.to_string());
+    }
+    out
 }
 
 /// A function path with every impl-block segment written `{impl}`: Verus's
@@ -613,6 +800,10 @@ pub struct Sidecar {
     pub z3: String,
     pub toolchain: String,
     pub flags: Vec<String>,
+    /// Target triple the Verus run compiled the crate for.
+    pub target: String,
+    /// Cargo features of the run (`--cfg feature="x"`), sorted.
+    pub features: Vec<String>,
     pub verified: u64,
     pub sources: Vec<(String, String)>,
     pub fns: Vec<Entry>,
@@ -642,6 +833,7 @@ impl Sidecar {
             return Err("not a fip-prelint Verus sidecar (missing header line)".to_string());
         }
         let mut have_format = false;
+        let mut have_cfg = false;
         for l in lines {
             let (key, rest) = l.split_once(' ').unwrap_or((l, ""));
             let words: Vec<&str> = rest.split_whitespace().collect();
@@ -660,6 +852,16 @@ impl Sidecar {
                 "z3" => s.z3 = rest.trim().to_string(),
                 "toolchain" => s.toolchain = rest.trim().to_string(),
                 "flags" => s.flags = words.iter().map(|w| (*w).to_string()).collect(),
+                "cfg" => {
+                    let [t, f] = words[..] else { return Err(bad()) };
+                    s.target = t.to_string();
+                    s.features = if f == "-" {
+                        Vec::new()
+                    } else {
+                        f.split(',').map(str::to_string).collect()
+                    };
+                    have_cfg = true;
+                }
                 "verified" => s.verified = rest.trim().parse().map_err(|_| bad())?,
                 "source" => {
                     let [p, h] = words[..] else { return Err(bad()) };
@@ -703,8 +905,8 @@ impl Sidecar {
                 s.format
             ));
         }
-        if s.krate.is_empty() || s.verus_version.is_empty() || s.z3.is_empty() {
-            return Err("incomplete stamp (crate, verus or z3 line missing)".to_string());
+        if s.krate.is_empty() || s.verus_version.is_empty() || s.z3.is_empty() || !have_cfg {
+            return Err("incomplete stamp (crate, verus, z3 or cfg line missing)".to_string());
         }
         Ok(s)
     }
@@ -723,6 +925,12 @@ impl Sidecar {
         let _ = writeln!(o, "z3 {}", self.z3);
         let _ = writeln!(o, "toolchain {}", self.toolchain);
         let _ = writeln!(o, "flags {}", self.flags.join(" "));
+        let features = if self.features.is_empty() {
+            "-".to_string()
+        } else {
+            self.features.join(",")
+        };
+        let _ = writeln!(o, "cfg {} {features}", self.target);
         let _ = writeln!(o, "verified {}", self.verified);
         for (p, h) in &self.sources {
             let _ = writeln!(o, "source {p} {h}");
@@ -985,17 +1193,56 @@ mod tests {
     #[test]
     fn ghost_cfg() {
         assert_eq!(
-            ghost_cfg_conflict("#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r))]"),
+            cfg_conflict("#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r))]"),
             None
         );
         assert_eq!(
-            ghost_cfg_conflict(
-                "#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true))]"
+            cfg_conflict("#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict = true))]"),
+            None
+        );
+        assert_eq!(
+            cfg_conflict(
+                "/// cfg(test) in a doc comment\n#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\"))]\n#[cfg_attr(verus_keep_ghost, verifier::nonlinear)]\nfn f() { g(\"cfg!(x)\") }"
             ),
             None
         );
-        assert!(ghost_cfg_conflict("{ #[cfg(not(verus_keep_ghost))] let x = a + 1; }").is_some());
-        assert!(ghost_cfg_conflict("{ if cfg!(verus_keep_ghost) { 1 } else { 2 } }").is_some());
+        assert!(cfg_conflict("{ #[cfg(not(verus_keep_ghost))] let x = a + 1; }").is_some());
+        assert!(cfg_conflict("{ if cfg!(verus_keep_ghost) { 1 } else { 2 } }").is_some());
+        // The audit's probes (2026-11-04): a cfg the driver sets and Verus does not,
+        // `cfg!` folded to a literal, and a Verus-only `cfg_attr` deleting code.
+        assert!(cfg_conflict("{ #[cfg(fip_prelint)] let _x = xs[i]; }").is_some());
+        assert!(cfg_conflict("{ if cfg!(fip_prelint) { a / b } else { 0 } }").is_some());
+        assert!(
+            cfg_conflict("{ #[cfg_attr(verus_keep_ghost, cfg(any()))] let _x = xs[i]; }").is_some()
+        );
+        assert!(cfg_conflict("{ #[cfg(feature = \"fast\")] let _x = xs[7]; }").is_some());
+        assert!(cfg_conflict("#[cfg_attr(test, inline)] fn f() {}").is_some());
+        assert!(cfg_conflict("#[cfg_attr(fip_prelint, inline)] fn f() {}").is_some());
+        assert!(
+            cfg_conflict("#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r), cfg(any()))]")
+                .is_some()
+        );
+        assert!(cfg_conflict("fn f() { m!(verus_keep_ghost) }").is_some());
+    }
+
+    #[test]
+    fn crate_cfg() {
+        assert_eq!(
+            crate_cfg_conflict(
+                "#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n#[cfg(not(verus_keep_ghost))]\nfn f() {}\n#[cfg(feature = \"x\")]\nfn g() {}\n#[cfg_attr(fip_prelint, fip::export)]\nmod m {}\n"
+            ),
+            None
+        );
+        for bad in [
+            "#[cfg(test)]\nmod tests {}\n",
+            "#[cfg(fip_prelint)]\nconst N: usize = 0;\n",
+            "#[cfg(not(fip_prelint))]\nconst N: usize = 4;\n",
+            "const D: bool = cfg!(debug_assertions);\n",
+            "#[cfg(target_arch = \"x86_64\")]\nconst N: usize = 1;\n",
+            "#[cfg_attr(fip_prelint, derive(Clone))]\nstruct S;\n",
+        ] {
+            assert!(crate_cfg_conflict(bad).is_some(), "{bad}");
+        }
     }
 
     #[test]
@@ -1031,6 +1278,8 @@ mod tests {
             z3: "4.16.0".to_string(),
             toolchain: "1.99.1".to_string(),
             flags: vec![NO_CHEATING.to_string()],
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: vec!["a".to_string(), "b".to_string()],
             verified: 3,
             sources: vec![("src/lib.rs".to_string(), "00".to_string())],
             fns: vec![Entry {
@@ -1064,7 +1313,17 @@ mod tests {
             ..s.clone()
         };
         assert!(cheat.check_stamp(&t).is_err());
-        assert!(Sidecar::parse(&s.render().replace("format 2", "format 3")).is_err());
+        assert!(Sidecar::parse(&s.render().replace("format 3", "format 2")).is_err());
+        // Format 3 requires the `cfg` line.
+        assert!(
+            Sidecar::parse(&s.render().replace("cfg x86_64-unknown-linux-gnu a,b\n", "")).is_err()
+        );
+        let none = Sidecar {
+            features: Vec::new(),
+            ..s.clone()
+        };
+        assert!(none.render().contains("cfg x86_64-unknown-linux-gnu -\n"));
+        assert_eq!(Sidecar::parse(&none.render()), Ok(none));
         assert!(Sidecar::parse(&s.render().replace("src/lib.rs:12", "src/lib.rs")).is_err());
     }
 

@@ -28,7 +28,13 @@
 //! -- <verus> <args..>` (top plan T13.4) runs Verus (`<verus> <args..> --output-json
 //! --log vir`), which must verify the entire crate with `--no-cheating` and without
 //! errors, and writes the sidecar of the exec functions Verus verified
-//! (`src/verus.rs`, `src/verusgen.rs`). `--no-verus` makes the driver ignore every
+//! (`src/verus.rs`, `src/verusgen.rs`). It refuses a crate whose sources test cfgs the
+//! driver's build sets differently (`test`, `fip_prelint`, the profile, the target),
+//! records the run's target and features, and requires `--import-sidecar
+//! <name>=<committed sidecar>` for every `--import <name>=<vir>`: the VIR file must come
+//! from a generator run (`<vir>.fip-run`, written for `--export`) and the committed
+//! sidecar must have the trusted stamp, `--no-cheating` and unchanged sources.
+//! `--no-verus` makes the driver ignore every
 //! Verus sidecar (the analysis as without the trust, for comparisons).
 //!
 //! `cargo fip-prelint --stack [--build-std] [cargo build args..]` (limits plan L9) runs
@@ -131,8 +137,11 @@ fn inputs_id() -> String {
 /// dependencies of those packages outside `root`, transitively (the driver reads a
 /// dependency's sidecar when it analyses a call into it), passed to the driver as
 /// `FIP_PRELINT_VERUS_ID` (recorded in the dep-info like `FIP_PRELINT_INPUTS_ID`): a
-/// regenerated or edited sidecar re-checks every crate. Directories named `target`
-/// and hidden ones are skipped by the walk under `root`.
+/// regenerated or edited sidecar re-checks every crate. The current content of every
+/// `source` file a sidecar lists is hashed too: a Verus-only source that rustc never
+/// compiles (`#[cfg(verus_keep_ghost)] mod spec;`) is in no dep-info, and its change
+/// must re-check the crate (the driver then refuses the sidecar). Directories named
+/// `target` and hidden ones are skipped by the walk under `root`.
 fn verus_id(root: &Path) -> String {
     let mut h = verus::sha256_hex(b"");
     let mut n = 0usize;
@@ -187,6 +196,14 @@ fn verus_id(root: &Path) -> String {
         h = verus::sha256_hex(
             format!("{h}{}{}", file.display(), verus::sha256_hex(&bytes)).as_bytes(),
         );
+        if let Ok(sc) = verus::Sidecar::parse(&String::from_utf8_lossy(&bytes)) {
+            let dir = file.parent().unwrap_or(Path::new("."));
+            for (src, _) in &sc.sources {
+                let now = std::fs::read(dir.join(src))
+                    .map_or_else(|_| "<missing>".to_string(), |b| verus::sha256_hex(&b));
+                h = verus::sha256_hex(format!("{h}{src}{now}").as_bytes());
+            }
+        }
         n += 1;
     }
     format!("verus-{n}-{}", &h[..16])
@@ -630,6 +647,16 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     ) else {
         return fail("`--crate-name`, `--crate-dir` and `--out` are required");
     };
+    // `--import-sidecar <name>=<committed sidecar>`, one per `--import` of the run.
+    let mut import_sidecars: Vec<(String, PathBuf)> = Vec::new();
+    while let Some(v) = take_value(&mut args, "--import-sidecar") {
+        let Some((n, p)) = v.split_once('=') else {
+            return fail(&format!(
+                "`--import-sidecar {v}`: expected `<crate>=<sidecar>`"
+            ));
+        };
+        import_sidecars.push((n.to_string(), PathBuf::from(p)));
+    }
     if !args.is_empty() {
         return fail(&format!("unexpected arguments {args:?}"));
     }
@@ -652,6 +679,33 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
             || f.starts_with("--log")
     }) {
         return fail(&format!("refused Verus flag `{f}`"));
+    }
+    // The driver compiles the crate with `--cfg fip_prelint`, the profile's settings,
+    // the cargo features and (for the test target) `cfg(test)`: a crate whose sources
+    // test such cfgs gets no sidecar, and the run's target and features are recorded.
+    if let Err(e) = verusgen::crate_cfg_check(Path::new(&dir)) {
+        return fail(&e);
+    }
+    let (target, features) = match verusgen::run_cfg(&flags, env!("FIP_PRELINT_HOST")) {
+        Ok(c) => c,
+        Err(e) => return fail(&e),
+    };
+    // Every imported Verus crate must come from a `--no-cheating` generator run and
+    // have its committed sidecar with the trusted stamp and unchanged sources.
+    let trusted = match verus::Trusted::parse(include_str!("../../verus-trusted.txt")) {
+        Ok(t) => t,
+        Err(e) => return fail(&format!("the trusted Verus pin is unusable: {e}")),
+    };
+    for (name, vir) in verusgen::imports(&flags) {
+        let Some((_, side)) = import_sidecars.iter().find(|(n, _)| *n == name) else {
+            return fail(&format!(
+                "`--import {name}=..` needs `--import-sidecar {name}=<its committed sidecar>`: an imported crate must be verified with `{}`",
+                verus::NO_CHEATING
+            ));
+        };
+        if let Err(e) = verusgen::check_import(&name, &vir, side, &trusted) {
+            return fail(&format!("import `{name}` refused: {e}"));
+        }
     }
     let out = PathBuf::from(out);
     let log_dir = PathBuf::from(format!("{}.vir-log", out.display()));
@@ -690,10 +744,13 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
         }
         return fail("Verus failed: no sidecar written");
     }
-    let info = match verusgen::parse_json(json_text.trim()).and_then(|j| verusgen::run_info(&j)) {
+    let mut info = match verusgen::parse_json(json_text.trim()).and_then(|j| verusgen::run_info(&j))
+    {
         Ok(i) => i,
         Err(e) => return fail(&format!("Verus result not usable: {e}")),
     };
+    info.target = target;
+    info.features = features;
     println!(
         "verification results:: {} verified, 0 errors",
         info.verified
@@ -735,6 +792,16 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
         return fail(&format!("{}: {e}", out.display()));
     }
     let _ = std::fs::remove_dir_all(&log_dir);
+    // The exported VIR file, for importing runs ([`verusgen::check_import`]).
+    if let Some(vir) = verusgen::export(&flags) {
+        let record = PathBuf::from(format!("{}.fip-run", vir.display()));
+        let written = std::fs::read(&vir)
+            .map(|b| verusgen::export_record(&krate, &b))
+            .and_then(|r| std::fs::write(&record, r));
+        if let Err(e) = written {
+            return fail(&format!("{}: {e}", record.display()));
+        }
+    }
     eprintln!(
         "verus sidecar: {} functions listed, {} skipped, {} ({}) -> {}",
         sidecar.fns.len(),

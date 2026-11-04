@@ -18,9 +18,16 @@
 //! - the file exists and parses; its stamp is the trusted Verus build and Z3
 //!   (`verus-trusted.txt`, compiled into the driver) with `--no-cheating`;
 //! - every source file it lists has the recorded SHA-256 (a callee's spec, a spec
-//!   function or an imported crate's source that changed invalidates every entry);
+//!   function or an imported crate's source that changed invalidates every entry), and
+//!   none of the crate's own tests a cfg other than `verus_keep_ghost` and `feature`
+//!   (`verus::crate_cfg_conflict`);
+//! - the build has the sidecar's target and cargo features (its `cfg` line): Verus
+//!   compiled the crate for those;
 //! - the function's path is listed, in the same file, and the SHA-256 of its item text
-//!   (outer attributes and doc comments through the body) equals the entry's.
+//!   (outer attributes and doc comments through the body) equals the entry's, and the
+//!   item text holds no `cfg` other than the Verus-only attribute forms
+//!   (`verus::cfg_conflict`): the driver compiles with `--cfg fip_prelint`, Verus
+//!   without.
 //!
 //! Then an `Assert` panic site (overflow, bounds, division checks) of the function
 //! whose span lies inside the item text and does not come from a macro expansion is
@@ -189,6 +196,14 @@ impl VerusTrust {
                     "source `{file}` changed since the verification run (regenerate with `just verify`)"
                 ));
             }
+            // The crate's own sources (an imported crate's are covered by its sidecar).
+            if !file.starts_with("../")
+                && let Some(c) = verus::crate_cfg_conflict(&String::from_utf8_lossy(&bytes))
+            {
+                return Err(format!(
+                    "source `{file}` has {c}: the driver's build and Verus's may differ"
+                ));
+            }
         }
         Ok(Loaded { sidecar, dir })
     }
@@ -236,6 +251,39 @@ impl VerusTrust {
                 "Verus sidecar `{}` is for crate `{}`",
                 shown(&sidecar_path),
                 loaded.sidecar.krate
+            ));
+        }
+        // Verus compiled the crate for one target with one set of features.
+        let target = tcx.sess.opts.target_triple.tuple().to_string();
+        let mut features: Vec<String> = tcx
+            .sess
+            .config
+            .iter()
+            .filter(|(k, _)| *k == rustc_span::sym::feature)
+            .filter_map(|(_, v)| v.map(|v| v.to_string()))
+            .collect();
+        features.sort();
+        features.dedup();
+        if loaded.sidecar.target != target || loaded.sidecar.features != features {
+            let show = |f: &[String]| {
+                if f.is_empty() {
+                    "none".to_string()
+                } else {
+                    f.join(", ")
+                }
+            };
+            let why = format!(
+                "verified for target `{}` with features {}, this build is `{target}` with features {}",
+                loaded.sidecar.target,
+                show(&loaded.sidecar.features),
+                show(&features)
+            );
+            self.refused
+                .borrow_mut()
+                .insert(shown(&sidecar_path), why.clone());
+            return Verdict::NotListed(format!(
+                "Verus sidecar `{}` not used: {why}",
+                shown(&sidecar_path)
             ));
         }
         if !matches!(tcx.def_kind(d), DefKind::Fn | DefKind::AssocFn) {
@@ -295,6 +343,11 @@ impl VerusTrust {
                 "the item text of `{path}` differs from the one Verus verified (regenerate with `just verify`)"
             ));
         }
+        if let Some(c) = verus::cfg_conflict(&src[lo..hi]) {
+            return Verdict::NotListed(format!(
+                "the item text of `{path}` has {c}: the driver's build and Verus's may differ"
+            ));
+        }
         // An impl method also depends on its impl block's header (generics, `Self`,
         // the trait): it must not be configured differently for Verus.
         if let Some(imp) = tcx.opt_parent(d)
@@ -314,9 +367,9 @@ impl VerusTrust {
                     "the impl block's header is not found in the item's file".to_string(),
                 );
             };
-            if let Some(c) = verus::ghost_cfg_conflict(header) {
+            if let Some(c) = verus::cfg_conflict(header) {
                 return Verdict::NotListed(format!(
-                    "the impl block's header mentions {c}: plain and Verus code may differ"
+                    "the impl block's header has {c}: the driver's build and Verus's may differ"
                 ));
             }
         }

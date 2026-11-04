@@ -941,6 +941,41 @@ recurses or panics:
 Details and measurements: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: soundness
 audit of the driver".
 
+## Amendment 2026-11-04: Verus sidecars bound to the build configuration and to verified imports
+
+**A narrowing of the Verus trust (amendment "Verus as an oracle for panic freedom").**
+Two audit probes had sites discharged in code Verus never compiled, and a third
+imported a crate verified with cheating:
+
+- **Configuration.** Verus compiles a crate without `--cfg fip_prelint`, the cargo
+  features, `cfg(test)` and the profile's settings; the driver with them. An item
+  whose text holds any `cfg(..)`/`cfg!(..)`/`cfg_attr(..)` other than
+  `cfg_attr(verus_keep_ghost, verus_spec(..)|verus_verify|verifier::..)`,
+  `cfg_attr(not(verus_keep_ghost), fip_macros::..)` and `cfg_attr(fip_prelint, fip::..)`
+  is not listed by the generator and not used by the driver
+  (`verus::cfg_conflict`; `cfg_attr(verus_keep_ghost, cfg(any()))` deleted a bounds
+  check for Verus only). A crate whose sources test any cfg but `verus_keep_ghost`
+  and `feature` outside those forms gets no sidecar and an existing one is refused
+  (`verus::crate_cfg_conflict`: a `#[cfg(test)]` constant or inherent method changes
+  a listed item without changing its text). The stamp records the run's target and
+  features (sidecar format 3, line `cfg`); the driver uses a sidecar only for a build
+  with both equal. Consequence, measured: on the eight other installed targets the
+  self-check names the refused sidecars; no verdict changes (no site was discharged in
+  dev).
+- **Imports.** The generator accepts `--import <name>=<vir>` only with
+  `--import-sidecar <name>=<committed sidecar>`: that sidecar must have the trusted
+  stamp with `--no-cheating` and unchanged sources, and the VIR file must carry the
+  record (`<vir>.fip-run`: crate, `--no-cheating`, SHA-256 of the file) that a
+  generator run writes for its `--export`. A VIR file from a plain Verus run (which
+  may have used `assume`) is refused.
+- **Cache.** The analysis cache key (`FIP_PRELINT_VERUS_ID`) and the dep-info of a
+  crate with a sidecar include the current content of every `source` file the sidecar
+  lists, so a Verus-only module (`#[cfg(verus_keep_ghost)] mod spec;`) edited after a
+  run re-checks the crate.
+
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: Verus sidecar trust after the
+audit".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

@@ -72,9 +72,12 @@ sidecar-gen:
 # and exports fip-core's for `verify/compose_state.rs`. The run goes through the
 # sidecar generator, which writes the verified bodies (top plan T13.4) to
 # target/verus-core/verus-verified.txt; it must equal crates/fip-core/verus-verified.txt.
+# The import is accepted only with fip-strict's committed sidecar (trusted stamp,
+# --no-cheating, unchanged sources) and a VIR file exported by the generator run of
+# `verify-strict` (its `.fip-run` record).
 verify-core: verify-strict
     rm -rf target/verus-core && mkdir -p target/verus-core
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
     just verus-sidecar-check target/verus-core/verus-verified.txt crates/fip-core/verus-verified.txt
 
 # A regenerated Verus sidecar must equal the committed one, so a stale sidecar fails
@@ -280,8 +283,12 @@ verify-negative: verify-strict verify-core
 # The Verus sidecar of the driver fixture (tools/fip-prelint/tests/fixtures/verus_sidecar)
 # is regenerated and compared like fip-core's; the generator refuses a run without
 # `--no-cheating`; an `external_body` function makes the `--no-cheating` run fail, so no
-# sidecar lists it (the VIR filter is unit-tested in src/verusgen.rs).
-verify-sidecar:
+# sidecar lists it (the VIR filter is unit-tested in src/verusgen.rs). The soundness
+# audit's probes (2026-11-04): an item whose text deletes code for Verus only is
+# skipped; a crate testing `fip_prelint` gets no sidecar; an `--import` without the
+# imported crate's committed sidecar, or of a VIR file no generator run exported, is
+# refused.
+verify-sidecar: verify-strict
     #!/usr/bin/env bash
     set -euo pipefail
     (cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint)
@@ -304,6 +311,33 @@ verify-sidecar:
     fi
     grep -q "Verus failed: no sidecar written" "$out/ext.log"
     test ! -e "$out/ext.txt"
+    # A Verus-only `cfg_attr` deleting a bounds check: verified, but not listed.
+    cp -r "$fx" "$out/cfgitem"
+    printf '\n#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(\n    requires\n        i < xs@.len(),\n))]\npub fn probe2(xs: &[u8], i: usize) -> u8 {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    let _x = xs[i + 1];\n    xs[i]\n}\n' >> "$out/cfgitem/vside/src/lib.rs"
+    (cd "$out/cfgitem" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/cfgitem.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/cfgitem.log" 2>&1
+    if grep -q "^fn vside::probe2 " "$out/cfgitem.txt"; then echo "FAIL: an item with a Verus-only cfg was listed"; exit 1; fi
+    grep -q "^skip vside::probe2 the item text has \`cfg_attr(verus_keep_ghost, cfg(any()))\`" "$out/cfgitem.txt"
+    # A crate whose code tests `fip_prelint` (set by the driver, not by Verus): refused.
+    cp -r "$fx" "$out/cfgcrate"
+    printf '\npub fn probe_cfg(a: u32, b: u32) -> u32 {\n    if cfg!(fip_prelint) { a / b } else { 0 }\n}\n' >> "$out/cfgcrate/vside/src/lib.rs"
+    if (cd "$out/cfgcrate" && $gen --crate-name vside --crate-dir vside --out "$out/cfgcrate.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) 2> "$out/cfgcrate.err"; then
+      echo "FAIL: a sidecar was generated for a crate testing fip_prelint"; exit 1
+    fi
+    grep -q "tests \`fip_prelint\`.*no sidecar is written" "$out/cfgcrate.err"
+    test ! -e "$out/cfgcrate.txt"
+    # Imports: the imported crate's committed sidecar is required, and the VIR file must
+    # come from a generator run (fip-strict's, copied without its `.fip-run` record).
+    root="$PWD"; vir="$root/target/verus-strict/fip_strict.vir"
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/imp.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs --import fip_strict="$vir") 2> "$out/imp.err"; then
+      echo "FAIL: an import without its committed sidecar was accepted"; exit 1
+    fi
+    grep -q "needs \`--import-sidecar fip_strict=" "$out/imp.err"
+    cp "$vir" "$out/plain.vir"
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/imp.txt" --import-sidecar fip_strict="$root/crates/fip-strict/verus-verified.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs --import fip_strict="$out/plain.vir") 2> "$out/imp.err"; then
+      echo "FAIL: an import of a VIR file no generator run exported was accepted"; exit 1
+    fi
+    grep -q "was not exported by a generator run" "$out/imp.err"
+    test ! -e "$out/imp.txt"
     echo "verify-sidecar: ok"
 
 # `fip-arch`'s unit tests on riscv64 under qemu-user, with and without Zicbop

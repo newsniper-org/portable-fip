@@ -437,6 +437,9 @@ pub struct RunInfo {
     pub commit: String,
     pub toolchain: String,
     pub verified: u64,
+    /// Target triple and cargo features of the run ([`run_cfg`]).
+    pub target: String,
+    pub features: Vec<String>,
 }
 
 /// Checks the `--output-json` result: success, no errors, the entire crate.
@@ -466,7 +469,176 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         commit: s("commit")?,
         toolchain: s("toolchain")?,
         verified: r("verified").and_then(Json::as_u64).unwrap_or(0),
+        target: String::new(),
+        features: Vec::new(),
     })
+}
+
+/// The target and the cargo features of a Verus command line: `--target <t>` (else
+/// `host`) and every `--cfg feature="x"`. Any other `--cfg` is refused: the driver
+/// could not compare it with its own build.
+pub fn run_cfg(flags: &[String], host: &str) -> Result<(String, Vec<String>), String> {
+    let mut target = host.to_string();
+    let mut features = Vec::new();
+    let mut k = 0;
+    while k < flags.len() {
+        let f = &flags[k];
+        let mut value = |name: &str| -> Option<String> {
+            if f == name {
+                k += 1;
+                flags.get(k).cloned()
+            } else {
+                f.strip_prefix(&format!("{name}=")).map(str::to_string)
+            }
+        };
+        if let Some(t) = value("--target") {
+            target = t;
+        } else if let Some(c) = value("--cfg") {
+            let feature = c
+                .strip_prefix("feature=\"")
+                .and_then(|r| r.strip_suffix('"'))
+                .filter(|v| !v.is_empty() && !v.contains([',', ' ', '"']));
+            match feature {
+                Some(v) => features.push(v.to_string()),
+                None => {
+                    return Err(format!(
+                        "refused `--cfg {c}`: only cargo features (`feature=\"x\"`) are recorded and compared by the driver"
+                    ));
+                }
+            }
+        }
+        k += 1;
+    }
+    features.sort();
+    features.dedup();
+    Ok((target, features))
+}
+
+/// `Err` naming the first source file under `crate_dir/src` whose `cfg` predicates
+/// test anything the driver could not compare ([`verus::crate_cfg_conflict`]).
+pub fn crate_cfg_check(crate_dir: &Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    let mut stack = vec![crate_dir.join("src")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    for f in files {
+        let src = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+        if let Some(c) = verus::crate_cfg_conflict(&src) {
+            return Err(format!(
+                "{}: {c}: the driver compiles the crate with other cfgs than Verus (`fip_prelint`, the profile, `test`), so no sidecar is written",
+                relative(&f, crate_dir)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `--import <name>=<file.vir>` arguments of a Verus command line.
+pub fn imports(flags: &[String]) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for (k, f) in flags.iter().enumerate() {
+        let v = if f == "--import" {
+            flags.get(k + 1).map(String::as_str)
+        } else {
+            f.strip_prefix("--import=")
+        };
+        if let Some((name, path)) = v.and_then(|v| v.split_once('=')) {
+            out.push((name.to_string(), PathBuf::from(path)));
+        }
+    }
+    out
+}
+
+/// The `--export <file.vir>` of a Verus command line.
+pub fn export(flags: &[String]) -> Option<PathBuf> {
+    flags.iter().enumerate().find_map(|(k, f)| {
+        if f == "--export" {
+            flags.get(k + 1).map(PathBuf::from)
+        } else {
+            f.strip_prefix("--export=").map(PathBuf::from)
+        }
+    })
+}
+
+/// The record written next to an exported VIR file (`<file.vir>.fip-run`) by a
+/// generator run, which only succeeds with `--no-cheating`: the crate and the
+/// SHA-256 of the VIR file.
+pub fn export_record(krate: &str, vir: &[u8]) -> String {
+    format!(
+        "fip-prelint verus export\ncrate {krate}\nflags {NO_CHEATING}\nvir {}\n",
+        verus::sha256_hex(vir)
+    )
+}
+
+/// Checks an `--import name=vir` of a generator run (2026-11-04): the VIR file was
+/// exported by a generator run (`--no-cheating`) of crate `name` (its
+/// `<vir>.fip-run` record matches the file), and `sidecar`, that crate's committed
+/// sidecar, has the trusted stamp with `--no-cheating` and every source file it lists
+/// has its recorded SHA-256. Else the importing run proves its callers' panic freedom
+/// on top of specifications nobody verified, and no sidecar is written.
+pub fn check_import(
+    name: &str,
+    vir: &Path,
+    sidecar: &Path,
+    trusted: &verus::Trusted,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(sidecar)
+        .map_err(|e| format!("sidecar `{}` of `{name}`: {e}", sidecar.display()))?;
+    let sc = Sidecar::parse(&text)
+        .map_err(|e| format!("sidecar `{}` of `{name}`: {e}", sidecar.display()))?;
+    if sc.krate != name {
+        return Err(format!(
+            "sidecar `{}` is for crate `{}`, not `{name}`",
+            sidecar.display(),
+            sc.krate
+        ));
+    }
+    sc.check_stamp(trusted)
+        .map_err(|e| format!("sidecar `{}` of `{name}`: {e}", sidecar.display()))?;
+    let dir = sidecar.parent().unwrap_or(Path::new("."));
+    for (file, hash) in &sc.sources {
+        let bytes = std::fs::read(dir.join(file)).map_err(|_| {
+            format!(
+                "sidecar `{}`: source `{file}` is missing",
+                sidecar.display()
+            )
+        })?;
+        if verus::sha256_hex(&bytes) != *hash {
+            return Err(format!(
+                "sidecar `{}`: source `{file}` changed since its verification run",
+                sidecar.display()
+            ));
+        }
+    }
+    let record_path = PathBuf::from(format!("{}.fip-run", vir.display()));
+    let record = std::fs::read_to_string(&record_path).map_err(|_| {
+        format!(
+            "`{}` was not exported by a generator run (`cargo fip-prelint --verus-sidecar`, which requires `{NO_CHEATING}`): no `{}`",
+            vir.display(),
+            record_path.display()
+        )
+    })?;
+    let bytes = std::fs::read(vir).map_err(|e| format!("`{}`: {e}", vir.display()))?;
+    if record != export_record(name, &bytes) {
+        return Err(format!(
+            "`{}` does not match its record `{}` (another crate, or exported by another run)",
+            vir.display(),
+            record_path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Builds the sidecar of crate `krate` (its directory `crate_dir`, where the sidecar
@@ -568,10 +740,10 @@ pub fn build(
             ));
             continue;
         }
-        if let Some(c) = verus::ghost_cfg_conflict(&src[lo..hi]) {
+        if let Some(c) = verus::cfg_conflict(&src[lo..hi]) {
             skipped.push((
                 f.path.clone(),
-                format!("the item text mentions {c}: plain and Verus code may differ"),
+                format!("the item text has {c}: the driver's build and Verus's may differ"),
             ));
             continue;
         }
@@ -612,6 +784,8 @@ pub fn build(
         z3: z3.to_string(),
         toolchain: info.toolchain.clone(),
         flags: flags_kept,
+        target: info.target.clone(),
+        features: info.features.clone(),
         verified: info.verified,
         sources: source_hashes,
         fns: entries,
@@ -708,6 +882,8 @@ mod tests {
             commit: "c".to_string(),
             toolchain: "t".to_string(),
             verified: 2,
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: Vec::new(),
         };
         let fns = vir_functions(VIR).unwrap();
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
@@ -752,6 +928,8 @@ mod tests {
             commit: "c".to_string(),
             toolchain: "t".to_string(),
             verified: 3,
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: Vec::new(),
         };
         let fns = vir_functions(vir).unwrap();
         assert!(!fns[0].expanded && fns[2].expanded);
@@ -805,5 +983,125 @@ mod tests {
             relative(Path::new("/a/b/c.rs"), Path::new("/a/d")),
             "../b/c.rs"
         );
+    }
+
+    #[test]
+    fn run_cfg_and_imports() {
+        let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            run_cfg(&v(&["--crate-type=lib", "--no-cheating"]), "h"),
+            Ok(("h".to_string(), Vec::new()))
+        );
+        assert_eq!(
+            run_cfg(
+                &v(&[
+                    "--target",
+                    "t",
+                    "--cfg",
+                    "feature=\"b\"",
+                    "--cfg=feature=\"a\""
+                ]),
+                "h"
+            ),
+            Ok(("t".to_string(), vec!["a".to_string(), "b".to_string()]))
+        );
+        assert!(run_cfg(&v(&["--cfg", "fip_prelint"]), "h").is_err());
+        assert!(run_cfg(&v(&["--cfg=test"]), "h").is_err());
+        assert_eq!(
+            imports(&v(&[
+                "--import",
+                "a=x/a.vir",
+                "--import=b=b.vir",
+                "--extern",
+                "c=c.rlib"
+            ])),
+            vec![
+                ("a".to_string(), PathBuf::from("x/a.vir")),
+                ("b".to_string(), PathBuf::from("b.vir"))
+            ]
+        );
+        assert_eq!(
+            export(&v(&["--export", "o.vir"])),
+            Some(PathBuf::from("o.vir"))
+        );
+        assert_eq!(export(&v(&["--compile"])), None);
+    }
+
+    /// The audit's import probe (2026-11-04): a VIR file exported by a run without
+    /// `--no-cheating` (no generator record), a record for another crate or another
+    /// file, a committed sidecar with a changed source or without `--no-cheating`: each
+    /// refused; the record and sidecar of a generator run: accepted.
+    #[test]
+    fn imports_need_a_no_cheating_generator_run() {
+        let dir = std::env::temp_dir().join(format!("fip-verusgen-imp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn hint() -> usize { 1 }\n").unwrap();
+        let trusted = verus::Trusted {
+            verus_version: "v".to_string(),
+            verus_commit: "c".to_string(),
+            z3: "4.16.0".to_string(),
+        };
+        let sc = Sidecar {
+            format: verus::FORMAT,
+            krate: "dep".to_string(),
+            verus_version: "v".to_string(),
+            verus_commit: "c".to_string(),
+            z3: "4.16.0".to_string(),
+            toolchain: "t".to_string(),
+            flags: vec![NO_CHEATING.to_string()],
+            target: "x".to_string(),
+            features: Vec::new(),
+            verified: 1,
+            sources: vec![(
+                "src/lib.rs".to_string(),
+                verus::sha256_hex(b"pub fn hint() -> usize { 1 }\n"),
+            )],
+            fns: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let side = dir.join("verus-verified.txt");
+        std::fs::write(&side, sc.render()).unwrap();
+        let vir = dir.join("dep.vir");
+        std::fs::write(&vir, b"(vir)").unwrap();
+        // Exported by a plain Verus run: no record.
+        let e = check_import("dep", &vir, &side, &trusted).unwrap_err();
+        assert!(e.contains("not exported by a generator run"), "{e}");
+        // A record of another crate, or of other contents.
+        std::fs::write(
+            format!("{}.fip-run", vir.display()),
+            export_record("other", b"(vir)"),
+        )
+        .unwrap();
+        assert!(check_import("dep", &vir, &side, &trusted).is_err());
+        std::fs::write(
+            format!("{}.fip-run", vir.display()),
+            export_record("dep", b"(old)"),
+        )
+        .unwrap();
+        assert!(check_import("dep", &vir, &side, &trusted).is_err());
+        std::fs::write(
+            format!("{}.fip-run", vir.display()),
+            export_record("dep", b"(vir)"),
+        )
+        .unwrap();
+        assert_eq!(check_import("dep", &vir, &side, &trusted), Ok(()));
+        // The committed sidecar: another crate, without --no-cheating, a changed source.
+        assert!(check_import("dap", &vir, &side, &trusted).is_err());
+        let cheat = Sidecar {
+            flags: Vec::new(),
+            ..sc.clone()
+        };
+        std::fs::write(&side, cheat.render()).unwrap();
+        assert!(check_import("dep", &vir, &side, &trusted).is_err());
+        std::fs::write(&side, sc.render()).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn hint() -> usize { proof! { assume(false); } 99 }\n",
+        )
+        .unwrap();
+        let e = check_import("dep", &vir, &side, &trusted).unwrap_err();
+        assert!(e.contains("changed"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

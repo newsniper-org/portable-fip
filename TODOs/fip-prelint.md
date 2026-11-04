@@ -3008,3 +3008,52 @@ roots, 4 passed → 0 passed, 7 errors; `tail` 2 roots, 2 passed → 0 passed, 3
 
 Unchanged: every other fixture, the self-checks and `targets.expected` (no workspace
 item is affected).
+
+## Resolved 2026-11-04: Verus sidecar trust after the audit
+
+Two audits of the Verus sidecar path (probes `/tmp/vprobe`, `/tmp/vfx`, `/tmp/vimp`)
+found discharged sites in code Verus never compiled, an import verified with
+cheating, and a cache that replayed a pass after a Verus-only source changed.
+
+1. **Configuration** (driver audit 4, Verus audit 1). Verus runs without `--cfg
+   fip_prelint`, the features and `cfg(test)`. Before: `if cfg!(fip_prelint) { a / b }
+   else { 0 }` was listed and its division site discharged (`13 passed .. 6 panic
+   sites discharged`); `#[cfg(fip_prelint)] let _x = xs[i];` and
+   `#[cfg_attr(verus_keep_ghost, cfg(any()))] let _x = xs[i];` were listed (14 passed,
+   7 discharged). Now:
+   - item level (`verus::cfg_conflict`, generator and driver): only the Verus-only
+     attribute forms; `probe2` (the `cfg(any())` form) is skipped by the generator
+     ("the item text has `cfg_attr(verus_keep_ghost, cfg(any()))`") and, forged into a
+     sidecar, kept by the driver (fixture `verus_sidecar`, variant `-cfgitem`);
+   - crate level (`verus::crate_cfg_conflict`): any cfg predicate naming anything but
+     `verus_keep_ghost` and `feature` (outside `cfg_attr(fip_prelint, fip::..)`): the
+     generator writes nothing (`just verify-sidecar`, `cfgcrate`: "`cfg!(fip_prelint)`
+     tests `fip_prelint` .. no sidecar is written"), the driver refuses the sidecar
+     (variant `-cfgcrate`: the division note is back);
+   - stamp (format 3): `cfg <target> <features>`, compared with the build (variant
+     `-target`: a sidecar for `aarch64-unknown-linux-gnu` refused). `targets.expected`
+     re-blessed: the eight non-host targets name the refused sidecars; counts unchanged
+     (checked by removing the suffix: only `fip_core`'s summary line, now non-empty,
+     is added).
+   The committed sidecars of `fip-strict`, `fip-core`, `fip-alloc` and the fixture
+   changed only in `format 3` and `cfg x86_64-unknown-linux-gnu -` (same entries).
+2. **Imports** (Verus audit 2). Before: a dependency exported by a plain Verus run with
+   `proof! { assume(false); }` behind `ensures r < 3` let the importing crate's
+   `xs[dep::hint()]` be listed. Now the generator requires `--import-sidecar
+   <name>=<committed sidecar>` (trusted stamp, `--no-cheating`, unchanged sources) and
+   the VIR file's `.fip-run` record written by the generator run that exported it.
+   `just verify-sidecar`: an import without `--import-sidecar`, and fip-strict's VIR
+   copied without its record, are refused before Verus runs; unit test
+   `imports_need_a_no_cheating_generator_run` (no record, another crate's or another
+   file's record, a sidecar without `--no-cheating`, a changed source). `verify-core`
+   passes `--import-sidecar fip_strict=crates/fip-strict/verus-verified.txt`.
+3. **Cache** (driver audit 5). Before: after `echo '// edited' >> spec.rs` (a
+   `#[cfg(verus_keep_ghost)] mod spec;` listed as `source src/spec.rs`), cargo replayed
+   the old pass. Now `verus_id` hashes every listed source's current content and the
+   driver adds them to the dep-info: test `verus_sidecar_source_cache` (second run:
+   "source `src/spec.rs` changed since the verification run").
+
+Left: the importing run trusts that the `.fip-run` record was written by the
+generator (a hand-written record with the right hash is accepted, as a hand-written
+sidecar with the trusted stamp is); the record binds the VIR file to a generator run,
+not to the sources of the committed sidecar.
