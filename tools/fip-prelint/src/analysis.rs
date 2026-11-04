@@ -1440,6 +1440,23 @@ pub struct Analysis<'a, 'tcx> {
     /// Verus-verified functions: Verus checked the callee's `requires` there (top
     /// plan T13.4). Value: the caller's path and whether it has a `requires`.
     verus_direct: HashMap<(usize, usize, Span), (String, bool)>,
+    /// Nodes of private functions entered from a call in the body that
+    /// [`Analysis::arguments_in`] scans (top plan T4.3): that call.
+    entries: HashMap<usize, Via>,
+}
+
+/// A call, in a body scanned by [`Analysis::arguments_in`], of a private function
+/// checked at its call sites (top plan T4.3): a call site inside that function (or
+/// below it) is reported here, for this caller.
+#[derive(Clone, Debug)]
+pub struct Via {
+    /// The call of the private function.
+    pub span: Span,
+    /// The private function called.
+    pub private: String,
+    /// For each of its callable parameters that this call passes an unbound,
+    /// undeclared parameter of the caller: `(its parameter, the caller's)`.
+    pub unknown: Vec<(String, String)>,
 }
 
 /// Result for one root.
@@ -1481,6 +1498,8 @@ struct ArgSite {
     /// (`__fip_prelint_checked`): its bound is a claim of the certificate for every
     /// instantiation of the enclosing function, so terms left are `⊤` here.
     certifying: bool,
+    /// The node whose body contains the call (`usize::MAX`: the scanned body).
+    node: usize,
 }
 
 /// The argument passed for a declared parameter: its type as shown, the callable
@@ -1514,14 +1533,21 @@ pub struct ArgViolation {
     /// argument that the callee's mark forbids (`may free`, `recurses`, `may panic`)
     /// and its witness.
     pub forbidden: Option<(String, Witness)>,
+    /// The call site lies in a private function checked at its call sites, entered
+    /// through this call of the scanned body (top plan T4.3): reported there.
+    pub via: Option<Via>,
 }
 
 impl ArgViolation {
     /// Identifies the same violation found from several roots or bodies.
     pub fn key(&self) -> String {
         format!(
-            "{:?}|{}|{}|{}",
-            self.span, self.callee, self.param, self.arg
+            "{:?}|{:?}|{}|{}|{}",
+            self.span,
+            self.via.as_ref().map(|v| v.span),
+            self.callee,
+            self.param,
+            self.arg
         )
     }
 }
@@ -1612,6 +1638,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             param_types: Vec::new(),
             owner_params: Vec::new(),
             arg_sites: Vec::new(),
+            entries: HashMap::new(),
             vsums: crate::value::Summaries::new(crates),
             verus_direct: HashMap::new(),
         };
@@ -1868,7 +1895,13 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     && matches!(callee.def, InstanceKind::Item(d) if inferable.contains(&d))
                 {
                     let binds = a.call_binds(inst, body, callee, call_args);
-                    a.node_bound(callee, Vec::new(), 0, binds);
+                    let i = a.node_bound(callee, Vec::new(), 0, binds);
+                    let unknown = a.unknown_params(inst, body, callee, call_args);
+                    a.entries.entry(i).or_insert_with(|| Via {
+                        span: term.source_info.span,
+                        private: def_path(tcx, callee.def_id()),
+                        unknown,
+                    });
                 }
             } else if tcx.trait_of_assoc(def_id).is_some()
                 && a.crates.contract_of(tcx, def_id).is_some()
@@ -1889,6 +1922,45 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let sums = a.evaluate();
         a.dump_args(&sums);
         a.arg_violations(&sums)
+    }
+
+    /// The parameters of `callee` for which a call in `inst`'s body passes an
+    /// unbound, undeclared parameter of the caller: `(callee's name, caller's name)`.
+    fn unknown_params(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+        callee: Instance<'tcx>,
+        call_args: &[Spanned<Operand<'tcx>>],
+    ) -> Vec<(String, String)> {
+        let tcx = self.tcx;
+        let name = |d: DefId, k: usize| {
+            tcx.fn_arg_idents(d)
+                .get(k)
+                .copied()
+                .flatten()
+                .map_or_else(|| format!("#{k}"), |i| i.name.to_string())
+        };
+        let mut out = Vec::new();
+        for (k, a) in call_args.iter().enumerate() {
+            let callable = self
+                .subst(inst, a.node.ty(&body.local_decls, tcx))
+                .is_some_and(|t| self.is_callable_value(t));
+            if !callable || !self.unbound_param(inst, body, &a.node) {
+                continue;
+            }
+            let mut origin = origin_of(tcx, body, &a.node);
+            if let Some(Origin::Ref(l)) = origin {
+                origin = origin_of(tcx, body, &Operand::Copy(mir::Place::from(l)));
+            }
+            if let Some(Origin::Arg(l)) = origin {
+                out.push((
+                    name(callee.def_id(), k),
+                    name(inst.def_id(), l.as_usize() - 1),
+                ));
+            }
+        }
+        out
     }
 
     /// Value-parameter names of the root's parameters whose type is a generic
@@ -4214,6 +4286,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 items,
                 indirect,
                 certifying: is_checked_fn(self.tcx, def_id),
+                node: self.current,
             });
         }
     }
@@ -4292,6 +4365,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 params: vec![("f".to_string(), n)],
             }),
             certifying: false,
+            node: self.current,
         });
         true
     }
@@ -4615,7 +4689,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         (
                             label,
                             unknown(format!(
-                                "the function passed for `{g}` is the parameter `{name}` of the caller, which declares no `param({name} = ..)`"
+                                "the function passed for `{g}` is the parameter `{name}` of `{}`, which declares no `param({name} = ..)`",
+                                def_path(tcx, caller.def_id())
                             )),
                         )
                     }
@@ -4753,6 +4828,19 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             let violated = !s.unknown.is_empty()
                 || (bound.terms.is_empty() && bound.c.exceeds(site.declared))
                 || forbidden.is_some();
+            // The entry of the scanned body's call this site was reached through.
+            let mut at = site.node;
+            let mut via = None;
+            while let Some(n) = self.nodes.get(at) {
+                if let Some(v) = self.entries.get(&at) {
+                    via = Some(v.clone());
+                    break;
+                }
+                let Some(p) = n.parent else {
+                    break;
+                };
+                at = p;
+            }
             if violated {
                 out.push(ArgViolation {
                     caller: site.caller.clone(),
@@ -4767,6 +4855,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     bound,
                     summary: s,
                     forbidden,
+                    via,
                 });
             }
         }

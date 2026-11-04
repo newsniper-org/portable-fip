@@ -244,14 +244,15 @@ pub fn via_mid_private(x: u32) -> u32 {
     mid_private(plus_one, x)
 }
 
-/// Passes an allocating function to `mid_private`: reported at `mid_private`'s call
-/// of `apply_ptr` (checked with this binding).
+/// Passes an allocating function to `mid_private`: `mid_private`'s call of
+/// `apply_ptr` (checked with this binding) is reported here, at this call.
 pub fn via_mid_private_alloc(x: u32) -> u32 {
     mid_private(boxed_value, x)
 }
 
 /// Passes an unknown pointer (its own undeclared parameter, exported): `mid_private`
-/// is checked without a binding, its call of `apply_ptr` is `⊤`.
+/// is checked without a binding, its call of `apply_ptr` is `⊤`, reported here (for
+/// this function and its parameter `r`).
 pub fn via_mid_private_unknown(x: u32, r: fn(u32) -> u32) -> u32 {
     mid_private(r, x)
 }
@@ -283,7 +284,8 @@ pub fn via_mid_outer(x: u32) -> u32 {
     mid_outer(plus_one, x)
 }
 
-/// Passes an allocating one: reported at `mid_private`'s call of `apply_ptr`.
+/// Passes an allocating one: `mid_private`'s call of `apply_ptr` is reported here, at
+/// the call of `mid_outer`.
 pub fn via_mid_outer_alloc(x: u32) -> u32 {
     mid_outer(boxed_value, x)
 }

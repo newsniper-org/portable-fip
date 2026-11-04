@@ -852,6 +852,13 @@ the bounds check's only successor) stands for `k`. Such paths stay inside one bo
 (never in a summary or a precondition). Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-04: an element at a variable index read twice".
 
+## Amendment 2026-11-04: T4.3 reports at the caller
+
+A call site inside a private function checked at its call sites (T4.3) is reported
+at the call of that function in the caller whose binding found it, for that caller
+(and, for an unknown pointer, naming the caller's parameter), once per such call.
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: T4.3 reports at the caller".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

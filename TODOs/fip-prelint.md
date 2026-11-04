@@ -2644,3 +2644,29 @@ Also in this commit: the `generate_deps` test (previous item) now removes its bu
 directory first; on a second run cargo found the crate fresh, the driver did not run
 and no summaries were written (a test flake, measured).
 
+## Resolved 2026-11-04: T4.3 reports at the caller
+
+Deviation of "private functions checked at their call sites" (T4.3): the `⊤` text
+named the private function's parameter (`the parameter q of the caller`), and every
+report sat in the private function's body, deduplicated across callers.
+
+**Change.** `Analysis::arguments_in` records, for each node of a private function it
+enters from the scanned body, that call (`Via`: span, the private function, and the
+callable parameters to which the call passes an unbound, undeclared parameter of the
+caller). An `ArgSite` records its node; `arg_violations` walks the node's parents to
+the entry and attaches the `Via`, which is part of the deduplication key. The report
+then sits at the caller's call of the private function and starts with "`caller`
+calls `private`, which is checked at its call sites; for `q` it passes its parameter
+`r`, which declares no `param(r = ..)`: ..". The unknown-parameter text names the
+function ("the parameter `q` of `mid_private`") instead of "the caller".
+
+**Measured** (fixture `param_bounds`, crate `callers`):
+
+| case | before | after |
+|---|---|---|
+| `via_mid_private_unknown` | `⊤` at `mid_private`'s call of `apply_ptr` (line 238), "the parameter `q` of the caller" | at its own call (line 257), naming `via_mid_private_unknown` and its parameter `r` |
+| `via_mid_private_alloc`, `via_mid_outer_alloc` | one report at line 238 (deduplicated; `via_mid_outer_alloc` not visible) | one each, at the call of `mid_private` (250) / `mid_outer` (290) |
+| `ptr_param`, `mid_public`, `mid_reified`, `indirect_data::make_unknown` | "the parameter `q` of the caller" | "the parameter `q` of `ptr_param`" (etc.) |
+| crate `callers` | 19 roots, 12 passed, 27 errors | 19 roots, 12 passed, 28 errors (the second caller) |
+| self-check dev / `--release`, other fixtures | — | unchanged |
+

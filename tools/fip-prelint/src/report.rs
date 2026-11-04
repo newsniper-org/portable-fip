@@ -680,13 +680,41 @@ fn is_alloc_failure(what: &str) -> bool {
         || what.starts_with("`std::alloc::handle_alloc_error` ")
 }
 
-/// A call site whose argument violates the callee's `param(g = K)`.
-fn report_argument(out: &mut Out<'_>, fallback: Span, v: &ArgViolation) {
+/// A call site whose argument violates the callee's `param(g = K)`. With `owner`
+/// (the body scanned for call sites) and a site inside a private function entered
+/// from it ([`ArgViolation::via`], top plan T4.3): reported at that call of the
+/// private function, for `owner`.
+fn report_argument(out: &mut Out<'_>, fallback: Span, owner: Option<DefId>, v: &ArgViolation) {
     let tcx = out.tcx;
     let sp = if v.local && !v.span.is_dummy() {
         v.span.source_callsite()
     } else {
         fallback
+    };
+    let (sp, lead) = match (&v.via, owner) {
+        (Some(via), Some(owner)) if v.caller_def != owner && !via.span.is_dummy() => {
+            let unknown: Vec<String> = via
+                .unknown
+                .iter()
+                .map(|(p, c)| {
+                    format!("for `{p}` it passes its parameter `{c}`, which declares no `param({c} = ..)`")
+                })
+                .collect();
+            let what = if unknown.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", unknown.join("; "))
+            };
+            (
+                via.span.source_callsite(),
+                format!(
+                    "`{}` calls `{}`, which is checked at its call sites{what}: ",
+                    crate::analysis::def_path_pub(tcx, owner),
+                    via.private
+                ),
+            )
+        }
+        _ => (sp, String::new()),
     };
     let declared = format!("`param({} = {})`", v.param, v.declared);
     let mut chains: Vec<String> = Vec::new();
@@ -700,7 +728,7 @@ fn report_argument(out: &mut Out<'_>, fallback: Span, v: &ArgViolation) {
         out.error(
             sp,
             &format!(
-                "cannot check the argument for `{}` that `{}` passes to `{}` (declared {declared}): unresolved: {}",
+                "{lead}cannot check the argument for `{}` that `{}` passes to `{}` (declared {declared}): unresolved: {}",
                 v.param,
                 v.caller,
                 v.callee,
@@ -717,7 +745,7 @@ fn report_argument(out: &mut Out<'_>, fallback: Span, v: &ArgViolation) {
         out.error(
             sp,
             &format!(
-                "`{}` passes to `{}` an argument for `{}` that {what}, but `{}` counts calls of `{}` by its declaration {declared} and its mark forbids that: {}",
+                "{lead}`{}` passes to `{}` an argument for `{}` that {what}, but `{}` counts calls of `{}` by its declaration {declared} and its mark forbids that: {}",
                 v.caller,
                 v.callee,
                 v.param,
@@ -746,7 +774,7 @@ fn report_argument(out: &mut Out<'_>, fallback: Span, v: &ArgViolation) {
     out.error(
         sp,
         &format!(
-            "`{}` passes to `{}` an argument for `{}` that may allocate {} time(s) per call, but `{}` declares {declared}: {}",
+            "{lead}`{}` passes to `{}` an argument for `{}` that may allocate {} time(s) per call, but `{}` declares {declared}: {}",
             v.caller,
             v.callee,
             v.param,
@@ -922,7 +950,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         );
         for v in &r.args {
             if seen.insert(v.key()) {
-                report_argument(&mut out, tcx.def_span(*def_id), v);
+                report_argument(&mut out, tcx.def_span(*def_id), None, v);
             }
         }
         if (out.errors, out.warnings) == before {
@@ -973,7 +1001,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
                     continue;
                 }
                 if seen.insert(v.key()) {
-                    report_argument(&mut out, tcx.def_span(owner), &v);
+                    report_argument(&mut out, tcx.def_span(owner), Some(owner), &v);
                     outside_roots += 1;
                 }
             }
@@ -1045,7 +1073,7 @@ fn check_local_implementations(
             if let Some(r) = check_implementation(out, crates, impl_def, method, &mark) {
                 for v in &r.args {
                     if seen.insert(v.key()) {
-                        report_argument(out, tcx.def_span(impl_def), v);
+                        report_argument(out, tcx.def_span(impl_def), None, v);
                     }
                 }
             }
