@@ -45,17 +45,22 @@ fn pairs(src: &str) -> Vec<(String, String, String)> {
         };
         let fip = group(args, r + "requires".len()).to_string();
         let rest = &src[open + args.len()..];
-        let fn_at = rest
-            .find("\nfn ")
-            .or_else(|| rest.find(" fn "))
+        // The item's own `fn`: the first of `\nfn ` and ` fn ` (not a later item's).
+        let fn_at = [rest.find("\nfn "), rest.find(" fn ")]
+            .into_iter()
+            .flatten()
+            .min()
             .unwrap_or(rest.len());
         let spec = rest[..fn_at]
             .find("verus_spec(")
             .map(|v| group(rest, v + "verus_spec".len()).to_string())
             .unwrap_or_default();
-        let head = rest[fn_at..]
+        let line_start = rest[..=fn_at.min(rest.len().saturating_sub(1))]
+            .rfind('\n')
+            .map_or(0, |k| k + 1);
+        let head = rest[line_start..]
             .lines()
-            .nth(1)
+            .find(|l| l.contains("fn "))
             .unwrap_or("")
             .trim()
             .to_string();
@@ -74,7 +79,7 @@ fn drift(fip: &str, spec: &str) -> Vec<String> {
 #[test]
 fn fip_core_requires_match_verus() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fip-core/src");
-    let mut checked = 0;
+    let mut checked = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("fip-core/src") {
         let path = entry.expect("entry").path();
         if path.extension().is_none_or(|e| e != "rs") {
@@ -93,11 +98,15 @@ fn fip_core_requires_match_verus() {
                 "{}: `{head}`: `requires(..)` conjuncts not in the verus_spec requires: {missing:?}",
                 path.display()
             );
-            checked += 1;
+            checked.push(head);
         }
     }
-    // `slice::swap_lt` at least.
-    assert!(checked >= 1, "no `requires(..)` found in fip-core");
+    // `slice::swap_lt` at least (its `#[fip]` is compiled out under Verus, so only
+    // this test compares its `requires(..)` with its `verus_spec`).
+    assert!(
+        checked.iter().any(|h| h.contains("fn swap_lt")),
+        "`swap_lt`'s `requires(..)` was not checked; checked: {checked:?}"
+    );
 }
 
 /// The guard fails on a drifted copy (negative control).

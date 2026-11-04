@@ -9,9 +9,10 @@
 //! `Box::new` may or may not return the same block. This crate makes the reuse
 //! explicit instead: the matched `Box` is kept and refilled.
 //!
-//! - `#![no_std]`, links `alloc` (it handles `Box`), no `unsafe` operation
-//!   (`#![forbid(unsafe_code)]`; the only `unsafe` token is the hand-written strict
-//!   certificate `__fip_strict_refill`). Depends only on `fip-strict`.
+//! - `#![no_std]`, links `alloc` (it handles `Box`), no `unsafe` token
+//!   (`#![forbid(unsafe_code)]`); the strict certificate `__fip_strict_refill` is
+//!   re-exported from `fip_strict::certs`, where it is made without `unsafe`.
+//!   Depends only on `fip-strict`.
 //! - The functions here never allocate or free; that is checked by allocation-count
 //!   tests (`fip-testkit`), not by proof.
 //! - Every function carries a Verus specification and is verified with
