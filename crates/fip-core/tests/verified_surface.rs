@@ -5,12 +5,16 @@
 //!
 //! 1. every `fn` carries a `verus_spec` attribute, so none is silently unverified;
 //! 2. no function-level spec has `decreases`, so Verus has accepted no recursion
-//!    among this crate's functions and the call graph is acyclic.
+//!    among this crate's functions and the call graph is acyclic;
+//! 3. no `verifier::..` attribute outside `fip_testkit::surface::VERIFIER_ALLOWED`
+//!    (`exec_allows_no_decreases_clause` admits recursion without `decreases`).
 //!
 //! `FIP_SURFACE_SRC` overrides the scanned directory; the `verify-negative` recipe
-//! uses it to show both gates fail on mutated copies.
+//! uses it to show the gates fail on mutated copies.
 
-use fip_testkit::surface::{scan_dir, unspecified, with_fn_decreases};
+use fip_testkit::surface::{
+    scan_dir, unlisted_verifier_attributes, unspecified, with_fn_decreases,
+};
 use std::path::PathBuf;
 
 fn src() -> PathBuf {
@@ -41,5 +45,14 @@ fn no_function_may_recurse() {
     assert!(
         rec.is_empty(),
         "function-level `decreases` (recursion allowed):\n{rec:#?}"
+    );
+}
+
+#[test]
+fn no_unlisted_verifier_attribute() {
+    let attrs = unlisted_verifier_attributes(&src());
+    assert!(
+        attrs.is_empty(),
+        "`verifier::..` attributes outside the allowlist:\n{attrs:#?}"
     );
 }

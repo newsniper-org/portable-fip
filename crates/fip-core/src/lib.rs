@@ -30,9 +30,11 @@
 //!   no build-time dependency on Verus or `vstd`.
 //!
 //! - **Bounded stack, by acyclic call graph.** Verus rejects any recursion among
-//!   verified functions that lacks a `decreases` clause; no function here has one
-//!   (checked by `tests/verified_surface.rs`, and a recursive mutant is rejected by
-//!   `just verify-negative`). With no recursion and fixed-size frames, stack depth is
+//!   verified functions that lacks a `decreases` clause; no function here has one,
+//!   and none carries `verifier::exec_allows_no_decreases_clause` or another
+//!   `verifier::` attribute outside the gate's allowlist (checked by
+//!   `tests/verified_surface.rs`; a recursive mutant and one with that attribute are
+//!   rejected by `just verify-negative`). With no recursion and fixed-size frames, stack depth is
 //!   bounded by the longest call chain. Every loop has a proved `decreases` measure.
 //!
 //! ## What it does not guarantee

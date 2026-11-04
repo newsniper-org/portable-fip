@@ -173,38 +173,60 @@ verify-negative: verify-strict verify-core
     # `--multiple-errors 8`: report up to 8 failing checks per function (default 2), so the
     # regex finds the intended failure even when an earlier check fails too (e.g. a
     # reversed loop now fails `f`'s indexed precondition before the state chain).
-    expect_verus_fail() {  # name, crate, file, sed script, expected log regex
+    # A mutant that hits the resource limit fails the gate: a timeout says nothing
+    # about the spec. Optional sixth argument: extra Verus flags (e.g. `--rlimit 100`).
+    expect_verus_fail() {  # name, crate, file, sed script, expected log regex[, verus flags]
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --multiple-errors 8 "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --multiple-errors 8 ${6:-} "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
+      if grep -q "rlimit" "$d/log"; then echo "FAIL: mutant $1 hit the resource limit (rlimit)"; cat "$d/log"; exit 1; fi
       grep -Eq "$5" "$d/log" || { echo "FAIL: mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
       echo "mutant $1 rejected by Verus"
     }
     errs='verification results:: .* [1-9][0-9]* errors'
+    # Functional mutants must break a loop invariant or the postcondition (the spec),
+    # not a proof step left behind: where the mutation strands a proof assertion about
+    # the removed code, the sed script deletes that assertion too (the unmutated
+    # function verifies without it, measured 2026-11-04 for `dedup_by`). The `dedup_by`
+    # mutants hit the default resource limit on the loop before the invariant fails, so
+    # they run with a larger one (plain 100, strict 1000: measured at 100 and 300 still
+    # rlimit for the strict one).
+    spec='postcondition not satisfied|invariant not satisfied'
+    # `compact_map` without the swap: the kept element at `w` is not the mapped value,
+    # which `lemma_prefix_push` requires (`new_s[w] == ys[r]`); its asserts about the
+    # swap are deleted. Measured: the unmutated function with the same asserts deleted
+    # fails only a loop invariant, never this precondition.
+    cmap_order='new_s\[w\] == ys\[r\]'
+    no_swap_asserts='/^                    assert(xs@.subrange(0, r as int + 1) =~= p.update(w as int, p\[r as int\]).update(r as int, p\[w as int\]));$/d; /^                assert(xs@\[w as int\] == mapped);$/d'
     # Functional specs.
-    expect_verus_fail compact-no-swap      fip-core  slice.rs '/^pub fn compact</,/^}/ s/^                swap_lt(xs, w, r);$//' "$errs"
-    expect_verus_fail compact-order        fip-core  slice.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$errs"
-    expect_verus_fail map-skips-store      fip-core  slice.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$errs"
-    expect_verus_fail update-keeps-old     fip-core  slot.rs  's/^    let next = f(prev);$/    let next = prev; let _ = f;/' "$errs"
-    expect_verus_fail dedup-no-swap        fip-core  slice.rs '/^pub fn dedup_by</,/^}/ s/^                swap_lt(xs, w, r);$//' "$errs"
-    expect_verus_fail dedup-wrong-compare  fip-core  slice.rs '/^pub fn dedup_by</,/^}/ s/same(&xs\[w - 1\], &xs\[r\])/same(\&xs[r - 1], \&xs[r])/' "$errs"
-    expect_verus_fail compact-map-no-swap  fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^                swap_lt(xs, w, r);$//' "$errs"
-    expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$errs"
-    expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$//' "$errs"
+    expect_verus_fail compact-no-swap      fip-core  slice.rs '/^pub fn compact</,/^}/ s/^                swap_lt(xs, w, r);$//' "$spec"
+    expect_verus_fail compact-order        fip-core  slice.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
+    expect_verus_fail map-skips-store      fip-core  slice.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$spec"
+    expect_verus_fail update-keeps-old     fip-core  slot.rs  's/^    let next = f(prev);$/    let next = prev; let _ = f;/' "$spec"
+    expect_verus_fail dedup-no-swap        fip-core  slice.rs '/^pub fn dedup_by</,/^}/ { s/^                swap_lt(xs, w, r);$//; /^                assert(xs@\[ow\] == old(xs)@\[r as int\]);$/d }' "$spec" "--rlimit 100"
+    expect_verus_fail dedup-wrong-compare  fip-core  slice.rs '/^pub fn dedup_by</,/^}/ s/same(&xs\[w - 1\], &xs\[r\])/same(\&xs[r - 1], \&xs[r])/' "$spec"
+    expect_verus_fail compact-map-no-swap  fip-core  slice.rs "/^pub fn compact_map</,/^}/ { s/^                swap_lt(xs, w, r);\$//; $no_swap_asserts }" "$cmap_order"
+    expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$spec"
+    expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$//' "$spec"
     # Strict variants (`FipFn` callables), same mutations.
-    expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$errs"
-    expect_verus_fail strict-map-skips-store     fip-core strict.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$errs"
-    expect_verus_fail strict-update-keeps-old    fip-core strict.rs '/^pub fn update</,/^}/ s/^    let next = f.call((prev,));$/    let next = prev; let _ = \&f;/' "$errs"
-    expect_verus_fail strict-dedup-wrong-compare fip-core strict.rs '/^pub fn dedup_by</,/^}/ s/same.call((&xs\[w - 1\], &xs\[r\]))/same.call((\&xs[r - 1], \&xs[r]))/' "$errs"
-    expect_verus_fail strict-compact-map-invert  fip-core strict.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$errs"
+    expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$spec"
+    expect_verus_fail strict-compact-order       fip-core strict.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
+    expect_verus_fail strict-map-skips-store     fip-core strict.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$spec"
+    expect_verus_fail strict-update-keeps-old    fip-core strict.rs '/^pub fn update</,/^}/ s/^    let next = f.call((prev,));$/    let next = prev; let _ = \&f;/' "$spec"
+    expect_verus_fail strict-dedup-no-swap       fip-core strict.rs '/^pub fn dedup_by</,/^}/ { s/^                crate::slice::swap_lt(xs, w, r);$//; /^                assert(xs@\[ow\] == old(xs)@\[r as int\]);$/d }' "$spec" "--rlimit 1000"
+    expect_verus_fail strict-dedup-wrong-compare fip-core strict.rs '/^pub fn dedup_by</,/^}/ s/same.call((&xs\[w - 1\], &xs\[r\]))/same.call((\&xs[r - 1], \&xs[r]))/' "$spec"
+    expect_verus_fail strict-compact-map-no-swap fip-core strict.rs "/^pub fn compact_map</,/^}/ { s/^                crate::slice::swap_lt(xs, w, r);\$//; $no_swap_asserts }" "$cmap_order"
+    expect_verus_fail strict-compact-map-invert  fip-core strict.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$spec"
     # State-passing variants: the state must be threaded once per element, in index
     # order. Each must fail on the state-chain invariant or assertion, not elsewhere.
     chain='\(ss\[[jk]\], old\(xs\)@\[[jk]\]\), \(ss\[[jk] \+ 1\]'
     expect_verus_fail map-st-reverse-order              fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
     expect_verus_fail map-st-not-threaded               fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { s/^pub fn map_in_place_st<S, /pub fn map_in_place_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     expect_verus_fail compact-map-st-not-threaded       fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ { s/^pub fn compact_map_st<S, /pub fn compact_map_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail compact-map-st-reverse-order      fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ s/&mut xs\[r\]/\&mut xs[len - 1 - r]/g' "$chain"
     expect_verus_fail strict-map-st-reverse-order       fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
+    expect_verus_fail strict-map-st-not-threaded        fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ { s/^pub fn map_in_place_st<S, /pub fn map_in_place_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     expect_verus_fail strict-compact-map-st-not-threaded fip-core strict.rs '/^pub fn compact_map_st</,/^}/ { s/^pub fn compact_map_st<S, /pub fn compact_map_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     # Pre-verified state spec: without the state chain, the rejecting lemmas fail.
     expect_verus_fail spec-st-no-chain fip-core spec.rs '/^    pub open spec fn map_st_post</,/^    }/ s/^        &&& forall|k: int| 0 <= k < old.len() ==> step(.*$/        \&\&\& true/' "$errs"
@@ -232,6 +254,7 @@ verify-negative: verify-strict verify-core
       if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$f" > "$out/state_$1.log" 2>&1; then
         echo "FAIL: control $1 verified"; exit 1
       fi
+      if grep -q "rlimit" "$out/state_$1.log"; then echo "FAIL: control $1 hit the resource limit (rlimit)"; cat "$out/state_$1.log"; exit 1; fi
       grep -Eq "$3" "$out/state_$1.log" || { echo "FAIL: control $1 failed for another reason"; cat "$out/state_$1.log"; exit 1; }
       echo "control $1 rejected by Verus"
     }
@@ -271,6 +294,7 @@ verify-negative: verify-strict verify-core
     }
     expect_test_fail surface-unspecified fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/{/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/,/^))\]$/d}' every_function_is_specified
     expect_test_fail surface-decreases   fip-core slot.rs '0,/^    ensures$/ s/^    ensures$/    decreases 0nat,\n    ensures/' no_function_may_recurse
+    expect_test_fail surface-no-decreases-attr fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/ s/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/#[cfg_attr(verus_keep_ghost, verifier::exec_allows_no_decreases_clause)]\n&/' no_unlisted_verifier_attribute
     # Drift gate (fip-strict): the Verus `FipFn::call` must match the plain one.
     d=$(mutate drift-call fip-strict lib.rs 's/^    fn call(&self, args: Args) -> (r: Self::Output)$/    fn call(\&self, args: Args, extra: u8) -> (r: Self::Output)/')
     if FIP_DRIFT_SRC="$PWD/$d/src/lib.rs" cargo test -q -p fip-strict --test verus_drift > "$d/log" 2>&1; then

@@ -3057,3 +3057,32 @@ Left: the importing run trusts that the `.fip-run` record was written by the
 generator (a hand-written record with the right hash is accepted, as a hand-written
 sidecar with the trusted stamp is); the record binds the VIR file to a generator run,
 not to the sources of the committed sidecar.
+
+## Resolved 2026-11-04: Verus gates after the audit (surface allowlist, functional mutants)
+
+1. **`verifier::exec_allows_no_decreases_clause`** (Verus audit 3). Before: `fn spin(n) {
+   if n == 0 { 0 } else { spin(n) } }` with that attribute verified with
+   `--no-cheating`, and `FIP_SURFACE_SRC=/tmp/vrec/d cargo test -p fip-core --test
+   verified_surface` reported "2 passed". Now `fip_testkit::surface` lists every
+   `verifier::..` attribute (also inside `verus!` blocks) outside `VERIFIER_ALLOWED`
+   (`nonlinear`, `spinoff_prover`, `rlimit`, `loop_isolation`), and the
+   `verified_surface` tests of `fip-core` and `fip-alloc` fail on one: the same probe
+   now fails `no_unlisted_verifier_attribute`. Mutant `surface-no-decreases-attr` in
+   `just verify-negative`.
+2. **Functional mutants accepted any failure** (Verus audit 4). Before: `dedup-no-swap`
+   was rejected by "while loop: Resource limit (rlimit) exceeded" and a leftover proof
+   assertion; `compact-map-no-swap` only by the leftover `assert(xs@.subrange..)`. Now
+   `expect_verus_fail` (and the verified-caller controls) fail on any `rlimit` in the
+   log, and the functional mutants must break a loop invariant or the postcondition:
+   - `dedup-no-swap` / `strict-dedup-no-swap` also delete `assert(xs@[ow] ==
+     old(xs)@[r as int])` (the unmutated function verifies without it, measured for
+     both) and run with `--rlimit 100` / `--rlimit 1000` (measured: the strict one still
+     hits the limit at 100 and 300); both now fail only loop invariants;
+   - `compact-map-no-swap` / `strict-compact-map-no-swap` delete the two asserts about
+     the swap and must fail `lemma_prefix_push`'s precondition `new_s[w] == ys[r]` (the
+     kept element at `w` is the mapped value); the unmutated functions with the same
+     asserts deleted fail only a loop invariant, never this precondition (measured);
+   - added the strict mutants missing from the plain list: `strict-compact-order`,
+     `strict-dedup-no-swap`, `strict-compact-map-no-swap`, `strict-map-st-not-threaded`,
+     and the plain `compact-map-st-reverse-order` (state chain regex). All rejected for
+     the intended reason; `just verify-negative` passes.

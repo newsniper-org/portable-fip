@@ -13,6 +13,11 @@
 //! lacks a `decreases` clause, so a crate whose functions have none contains no
 //! recursion among its verified functions (see `docs/decisions/` on stack bounds).
 //!
+//! [`unlisted_verifier_attributes`] lists every `verifier::..` attribute outside
+//! [`VERIFIER_ALLOWED`]: `verifier::exec_allows_no_decreases_clause` lets an exec
+//! function recurse without `decreases`, which the bounded-stack claim relies on, and
+//! the other unlisted ones (`external_body`, `external`, ..) change what is verified.
+//!
 //! Conventions this line-based scanner relies on (rustfmt output satisfies them):
 //! - `verus! {` opens a block on its own line; the block is skipped by brace count;
 //! - attributes start a line with `#[` and are balanced by `[`/`]`;
@@ -188,6 +193,82 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `verifier::..` attributes that only steer the solver (nonlinear arithmetic, a
+/// separate prover process, a resource limit, loop isolation): they cannot make Verus
+/// accept recursion or skip a body.
+pub const VERIFIER_ALLOWED: &[&str] = &["nonlinear", "spinoff_prover", "rlimit", "loop_isolation"];
+
+/// One `verifier::<name>` (or `verifier(<name>)`) in code, outside comments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifierAttr {
+    /// File the attribute is in.
+    pub file: PathBuf,
+    /// 1-based line.
+    pub line: usize,
+    /// The attribute's name (`exec_allows_no_decreases_clause`).
+    pub name: String,
+}
+
+/// Every `verifier::<name>` / `verifier(<name>` of `text` outside `//` comments,
+/// inside `verus! { .. }` blocks as well.
+#[must_use]
+pub fn verifier_attributes(file: &Path, text: &str) -> Vec<VerifierAttr> {
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        let mut rest = code;
+        while let Some(i) = rest.find("verifier") {
+            let before = &rest[..i];
+            let after = &rest[i + "verifier".len()..];
+            rest = after;
+            if before
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
+            let Some(tail) = after
+                .trim_start()
+                .strip_prefix("::")
+                .or_else(|| after.trim_start().strip_prefix('('))
+            else {
+                continue;
+            };
+            let name: String = tail
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                out.push(VerifierAttr {
+                    file: file.to_path_buf(),
+                    line: n + 1,
+                    name,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The `verifier::..` attributes under `dir` not in [`VERIFIER_ALLOWED`].
+///
+/// # Panics
+///
+/// Panics if `dir` or a file in it cannot be read.
+#[must_use]
+pub fn unlisted_verifier_attributes(dir: &Path) -> Vec<VerifierAttr> {
+    let mut files = Vec::new();
+    collect(dir, &mut files);
+    files.sort();
+    files
+        .iter()
+        .flat_map(|p| verifier_attributes(p, &fs::read_to_string(p).expect("read source file")))
+        .filter(|a| !VERIFIER_ALLOWED.contains(&a.name.as_str()))
+        .collect()
+}
+
 /// Items with no `verus_spec` attribute.
 #[must_use]
 pub fn unspecified(items: &[FnItem]) -> Vec<FnItem> {
@@ -211,6 +292,38 @@ mod tests {
 
     fn scan(s: &str) -> Vec<FnItem> {
         scan_text(Path::new("x.rs"), s)
+    }
+
+    #[test]
+    fn verifier_attributes_are_found() {
+        let names = |s: &str| -> Vec<String> {
+            verifier_attributes(Path::new("x.rs"), s)
+                .into_iter()
+                .map(|a| a.name)
+                .collect()
+        };
+        assert_eq!(
+            names(
+                "#[cfg_attr(verus_keep_ghost, verifier::exec_allows_no_decreases_clause)]\nfn spin() {}\n"
+            ),
+            vec!["exec_allows_no_decreases_clause"]
+        );
+        assert_eq!(
+            names(
+                "verus! {\n#[verifier::external_body]\nfn f() {}\n#[verifier(external)]\nfn g() {}\n}\n"
+            ),
+            vec!["external_body", "external"]
+        );
+        assert_eq!(
+            names(
+                "/// hid by `verifier::spinoff_prover`\nfn f() {} // verifier::external\nlet my_verifier = 1;\n"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            names("#[cfg_attr(verus_keep_ghost, verifier::nonlinear)]\n"),
+            vec!["nonlinear"]
+        );
     }
 
     #[test]
