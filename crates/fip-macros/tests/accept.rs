@@ -12,7 +12,7 @@ use fip_macros::{fbip, fip};
 /// not self-recursion.
 #[fip]
 fn swap(a: &mut u32, b: &mut u32) {
-    core::mem::swap(a, b);
+    ::core::mem::swap(a, b);
 }
 
 #[fip]

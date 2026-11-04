@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 /// Replaces `*slot` with `new` and returns the previous value.
 ///
-/// Same behaviour as `core::mem::replace`, written with `core::mem::swap` because
+/// Same behaviour as `::core::mem::replace`, written with `::core::mem::swap` because
 /// `vstd` specifies `swap` but not `replace`; this keeps the crate verifiable with
 /// `--no-cheating` and no trusted specifications of its own.
 ///
@@ -25,7 +25,7 @@ use vstd::prelude::*;
 #[inline]
 pub fn replace<T>(slot: &mut T, new: T) -> T {
     let mut v = new;
-    core::mem::swap(slot, &mut v);
+    ::core::mem::swap(slot, &mut v);
     v
 }
 

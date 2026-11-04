@@ -26,6 +26,8 @@ pub(crate) enum Enclosing {
     Trait,
     /// `[unsafe] extern ["abi"] {`
     Extern,
+    /// `[unsafe] impl ..` (an inherent or trait `impl` block)
+    Impl,
     /// Anything else, or not determined.
     Unknown,
 }
@@ -274,6 +276,13 @@ fn classify(header: &str) -> Enclosing {
     if rest.get(u + a) == Some(&"trait") && rest.len() > u + a + 1 {
         return Enclosing::Trait;
     }
+    if k == 0
+        && rest
+            .get(u)
+            .is_some_and(|w| *w == "impl" || w.starts_with("impl<"))
+    {
+        return Enclosing::Impl;
+    }
     if k == 0 && rest.get(u) == Some(&"extern") {
         match &rest[u + 1..] {
             [] => return Enclosing::Extern,
@@ -313,6 +322,13 @@ mod tests {
     }
 
     #[test]
+    fn impl_blocks_are_recognised() {
+        assert_eq!(at("impl T for S { @@ }"), Enclosing::Impl);
+        assert_eq!(at("unsafe impl<T> S<T> { fn a() {} @@ }"), Enclosing::Impl);
+        assert_eq!(at("impl S { fn a() { @@ } }"), Enclosing::Unknown);
+    }
+
+    #[test]
     fn the_position_must_hold_the_function() {
         assert!(super::is_fn_named("fn f() {}", "f"));
         assert!(super::is_fn_named("fn  f<T>();", "f"));
@@ -325,7 +341,6 @@ mod tests {
     fn everything_else_is_unknown() {
         assert_eq!(at("@@"), Enclosing::Unknown);
         assert_eq!(at("mod m { @@ }"), Enclosing::Unknown);
-        assert_eq!(at("impl T for S { @@ }"), Enclosing::Unknown);
         assert_eq!(at("trait T { fn d() { @@ } }"), Enclosing::Unknown);
         assert_eq!(at("extern \"C\" fn f() { @@ }"), Enclosing::Unknown);
         assert_eq!(at("trait T {} fn f() { @@ }"), Enclosing::Unknown);

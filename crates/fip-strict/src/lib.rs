@@ -37,6 +37,23 @@
 //! review and to `grep -n "Cert::assume\|unsafe impl.*FipBound"`. `fip_testkit::certs`
 //! lists them so a test can pin the expected set.
 //!
+//! Two `fip-macros` attributes turn a written claim into a certificate, and each
+//! requires a visible `unsafe` from the user:
+//!
+//! - `#[fip_extern]` certifies foreign functions (`#[fip_cert(evidence = "..",
+//!   allocs = N)]`) and requires an `unsafe extern` block, also in edition 2021
+//!   where rustc accepts a plain `extern` block (`unsafe_code` lints `unsafe extern`,
+//!   so a crate with `#![forbid(unsafe_code)]` cannot certify foreign functions;
+//!   measured, rustc 1.99.1). A foreign function certified to free
+//!   (`frees = true`, `kind = "fbip"`) gets no `Cert`: a `Cert` promises no
+//!   deallocation.
+//! - `#[fip_trait]` makes a strict contract of a trait method a `Cert` that strict
+//!   callers pay for any implementation, so the trait must be an `unsafe trait`:
+//!   each implementation is either an `unsafe impl` (the user's claim) or written
+//!   under `#[fip_impl(contract)]`, which checks it against every contract and emits
+//!   the `unsafe` itself. A crate with `#![forbid(unsafe_code)]` can implement such a
+//!   trait that way but cannot declare one.
+//!
 //! ## Adapters
 //!
 //! [`Stateless`]`(f)` turns a one-argument callable into a state-passing step for
@@ -195,6 +212,31 @@ impl Cert {
         );
         self.allocs
     }
+}
+
+/// `true` if every name in `contracted` is in `implemented`: the check of
+/// `#[fip_impl(contract)]` that every strict contract of the trait
+/// (`<dyn Trait>::__FIP_CONTRACTED`, emitted by `#[fip_trait]`) is implemented by a
+/// strict method of the block, whose certificate is compared with the contract.
+#[doc(hidden)]
+#[must_use]
+pub const fn contracted_covered(contracted: &[&str], implemented: &[&str]) -> bool {
+    let mut i = 0;
+    while i < contracted.len() {
+        let mut j = 0;
+        let mut found = false;
+        while j < implemented.len() {
+            if str_eq(contracted[i], implemented[j]) {
+                found = true;
+            }
+            j += 1;
+        }
+        if !found {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 const fn str_eq(a: &str, b: &str) -> bool {

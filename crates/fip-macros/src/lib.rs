@@ -19,7 +19,11 @@
 //! `Rc`, `Arc`, the std collections) such as `Box::new` or `Vec::with_capacity`; the
 //! macros `vec!` and `format!`; and the methods `.clone()`, `.to_vec()`,
 //! `.to_owned()`, `.to_string()`, `.collect()` and the growth methods (`.push`,
-//! `.insert`, `.extend`, `.reserve`, `.resize`, …), which may allocate.
+//! `.push_str`, `.insert`, `.extend`, `.reserve`, `.resize`, `.split_off`, …), which
+//! may allocate: `fip_lint_rules::ALLOC_METHODS`, matched by name and audited against
+//! `std` (rustc 1.99.1). An allocation site inside a closure body counts as inside a
+//! loop (an iterator adaptor may call the closure any number of times), and so does
+//! one in a `while` condition.
 //!
 //! Not allocation sites: the constructors of empty collections that never allocate,
 //! `fip_lint_rules::NON_ALLOCATING_CONSTRUCTORS` (`new` and `default` of `Vec`,
@@ -48,8 +52,11 @@
 //! across a crate. Keep allocation-free code in `fip-core`-style crates that do not
 //! link `alloc`, where the compiler rules allocation out.
 //!
-//! Contents of `proof!`, `proof_decl!`, `proof_with!` and of attributes inside the
-//! body are skipped: they are Verus ghost code and erased in normal builds. Write
+//! Contents of `proof!`, `proof_decl!`, `proof_with!` (written without a path) and
+//! of attributes inside the body are skipped: they are Verus ghost code. Outside
+//! Verus's driver the macro emits such an invocation as `const { proof! {} };`, so the
+//! skipped contents are not compiled whichever `proof!` is in scope (a `proof!` that
+//! kept its contents used to run them unchecked). Write
 //! `#[fip]` **above** `#[cfg_attr(verus_keep_ghost, verus_spec(..))]` so it runs on
 //! the unexpanded body; written below it, the item it receives under `verus` is
 //! already rewritten, and the macro reports a compile error instead of guessing.
@@ -109,7 +116,7 @@
 //! /// Takes the vector out, leaving an empty one (`Vec::new` does not allocate).
 //! #[fip]
 //! pub fn take(v: &mut Vec<u8>) -> Vec<u8> {
-//!     core::mem::replace(v, Vec::new())
+//!     ::core::mem::replace(v, Vec::new())
 //! }
 //! # fn main() { let mut v = 3; double(&mut v); assert_eq!(v, 6); }
 //! ```
@@ -249,6 +256,47 @@
 //! fn f(i: usize) -> usize { i }
 //! # fn main() {}
 //! ```
+//! An allocation in a closure body counts as in a loop (an iterator adaptor may call
+//! it any number of times; before: accepted by `#[fip(1)]`, measured 100 allocations
+//! for `n = 100`):
+//! ```compile_fail
+//! # // expect: #[fip(1)]: allocation site `Box::new` inside a loop body
+//! #[fip_macros::fip(1)]
+//! fn f(n: u64) -> u64 { let mut s = 0; (0..n).for_each(|i| { let b = Box::new(i); s += *b; }); s }
+//! # fn main() {}
+//! ```
+//! A `while` condition runs on every iteration:
+//! ```compile_fail
+//! # // expect: #[fip(1)]: allocation site `Box::new` inside a loop body
+//! #[fip_macros::fip(1)]
+//! fn f(n: u64) -> u64 { let mut i = 0; while *Box::new(i) < n { i += 1; } i }
+//! # fn main() {}
+//! ```
+//! The body of a loop whose header contains a block (before: the block was taken for
+//! the body, measured 50 allocations at `#[fip(1)]`):
+//! ```compile_fail
+//! # // expect: #[fip(1)]: allocation site `Box::new` inside a loop body
+//! #[fip_macros::fip(1)]
+//! #[allow(unused_braces)]
+//! fn f(n: u64) -> u64 { let mut s = 0; for i in { 0..n } { s += *Box::new(i); } s }
+//! # fn main() {}
+//! ```
+//! The contents of a ghost-code macro are not compiled, whatever `proof!` is in scope
+//! (before: a `proof!` that keeps them allocated unseen):
+//! ```compile_fail
+//! # // expect: cannot find value `b` in this scope
+//! macro_rules! proof { ($($t:tt)*) => { $($t)* } }
+//! #[fip_macros::fip]
+//! fn f() -> usize { proof! { let b = [1_u8, 2]; } b.len() }
+//! # fn main() {}
+//! ```
+//! A growth method (`fip_lint_rules::ALLOC_METHODS`, audited against `std`):
+//! ```compile_fail
+//! # // expect: #[fip]: allocation site `.push_str()` in the body
+//! #[fip_macros::fip]
+//! fn f(s: &mut String) { s.push_str("abc") }
+//! # fn main() {}
+//! ```
 //!
 //! ## Trait methods
 //!
@@ -265,11 +313,23 @@
 //! is an error. Plain builds check no implementation: use `fip-prelint`
 //! (`docs/decisions/2026-11-01-fip-prelint.md`).
 //! Strict contracts on trait methods are declared as `#[fip(strict = true)]`
-//! (or `#[fip(N, strict = true)]`) under `#[fip_trait]` on the trait. `#[fip_trait]`
-//! emits `<dyn Trait>::__fip_strict_<m>` and `__fip_strict_<Trait>__<m>`, which
-//! strict callers use for `x.m()`, `Trait::m(x)` and `<dyn Trait>::m(x)`. Implementations
-//! under `#[fip_impl]` are checked against the contract at compile time (impl
-//! certificate bound ≤ contract bound).
+//! (or `#[fip(N, strict = true)]`) under `#[fip_trait]` on the trait, which must be
+//! an **`unsafe trait`**. `#[fip_trait]` emits `<dyn Trait>::__fip_strict_<m>`,
+//! `__fip_strict_<Trait>__<m>` and the list `<dyn Trait>::__FIP_CONTRACTED`; strict
+//! callers use the contract for `x.m()` and `T::m(x)` on a parameter of that trait
+//! (`x: &dyn Trait`, `x: &T` with `T: Trait`), `<T as Trait>::m(x)` and
+//! `<dyn Trait>::m(x)`. A strict caller pays the contract whatever implementation
+//! runs, so the trust rule is: an implementation is either written `unsafe impl`
+//! (a visible claim that it keeps the contracts) or is an `impl` under
+//! `#[fip_impl(contract)]`, which checks every contracted method against its contract
+//! at compile time (each must be implemented with `strict = true`, its certificate's
+//! bound at most the contract's, `panic_macros = false` if the contract says so) and
+//! writes the `unsafe` of the `impl` itself. A strict implementation in an `unsafe
+//! impl` under `#[fip_impl]` is compared the same way. `#[fip_impl]` on a plain
+//! `impl Trait for Type` (a trait without strict contracts, possibly not
+//! dyn-compatible) compares nothing. Contracts without `strict = true` are driver
+//! contracts and need no `unsafe trait`. A crate with `#![forbid(unsafe_code)]`
+//! can implement such a trait with `#[fip_impl(contract)]` but not declare one.
 //!
 //! With a **default body**, the body gets the usual checks (above), and the mark is
 //! still the contract of every implementation (a kept default body is checked for
@@ -409,31 +469,75 @@
 //! # fn main() {}
 //! ```
 //! What `#[fip_impl]` compares at compile time for a strict implementation of a
-//! strict contract, mirroring the driver's `Mark::weaker_than` as far as a
-//! certificate (`fip_strict::Cert`, made only by `unsafe` constructors) carries it:
-//! the allocation bound (impl ≤ contract) and panic strictness (a contract with
-//! `panic_macros = false` needs an implementation with `panic_macros = false`). The
-//! kind needs no comparison: every certificate is `fip` (`#[fbip]` has no strict
-//! mode). Not compared by the macro, only by `fip-prelint`: an implementation that is
-//! not strict (`#[fbip]`, `#[fip]` without `strict = true`, or no attribute) has no
-//! certificate, and the impl block cannot see whether the trait method has a contract
-//! (a probe through `<dyn Trait>` would break impls of traits that are not
-//! dyn-compatible); the driver reports it (measured: an `#[fbip]` implementation of a
-//! strict contract compiles and is a `fip-prelint` error, "the declaration is weaker
-//! than the contract").
+//! strict contract (in an `unsafe impl` or under `#[fip_impl(contract)]`), mirroring
+//! the driver's `Mark::weaker_than` as far as a certificate (`fip_strict::Cert`,
+//! made only by `unsafe` constructors) carries it: the allocation bound (impl ≤
+//! contract) and panic strictness (a contract with `panic_macros = false` needs an
+//! implementation with `panic_macros = false`). The kind needs no comparison: every
+//! certificate is `fip` (`#[fbip]` has no strict mode). An implementation that is not
+//! strict (`#[fbip]`, `#[fip]` without `strict = true`, or no attribute) has no
+//! certificate: `#[fip_impl(contract)]` rejects it for a contracted method, and in a
+//! hand-written `unsafe impl` it is the user's claim, which `fip-prelint` checks
+//! (measured: an `#[fbip]` implementation of a strict contract is a `fip-prelint`
+//! error, "the declaration is weaker than the contract").
 //!
+//! A strict contract on a trait that is not an `unsafe trait`:
+//! ```compile_fail
+//! # // expect: a trait with a strict contract must be an `unsafe trait`
+//! #[fip_macros::fip_trait]
+//! pub trait Shape {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn area(&self) -> u32;
+//! }
+//! # fn main() {}
+//! ```
+//! A plain `impl` of a trait with strict contracts (neither `unsafe impl` nor
+//! `#[fip_impl(contract)]`):
+//! ```compile_fail
+//! # // expect: requires an `unsafe impl` declaration
+//! #[fip_macros::fip_trait]
+//! pub unsafe trait Shape {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn area(&self) -> u32;
+//! }
+//! pub struct Square(pub u32);
+//! impl Shape for Square {
+//!     fn area(&self) -> u32 { *Box::new(self.0) }
+//! }
+//! # fn main() {}
+//! ```
+//! `#[fip_impl(contract)]` without a strict implementation of a contracted method:
+//! ```compile_fail
+//! # // expect: #[fip_impl(contract)]: a method with a strict contract in the trait is not implemented in this block
+//! use fip_macros::{fip, fip_impl, fip_trait};
+//! #[fip_trait]
+//! pub unsafe trait Shape {
+//!     #[fip(strict = true)]
+//!     fn area(&self) -> u32;
+//!     #[fip(strict = true)]
+//!     fn side(&self) -> u32;
+//! }
+//! pub struct Square(pub u32);
+//! #[fip_impl(contract)]
+//! impl Shape for Square {
+//!     #[fip(strict = true)]
+//!     fn area(&self) -> u32 { self.0 }
+//!     fn side(&self) -> u32 { self.0 }
+//! }
+//! # fn main() {}
+//! ```
 //! Implementation with a certificate weaker than the trait's contract (more
 //! allocations):
 //! ```compile_fail
 //! # // expect: #[fip_impl]: impl certificate is weaker than contract (more allocations)
 //! use fip_macros::{fip, fip_impl, fip_trait};
 //! #[fip_trait]
-//! pub trait Shape {
+//! pub unsafe trait Shape {
 //!     #[fip(strict = true)]
 //!     fn area(&self) -> u32;
 //! }
 //! pub struct Square(pub u32);
-//! #[fip_impl]
+//! #[fip_impl(contract)]
 //! impl Shape for Square {
 //!     #[fip(1, strict = true)]
 //!     fn area(&self) -> u32 { *Box::new(self.0) }
@@ -446,17 +550,37 @@
 //! # // expect: #[fip_impl]: impl certificate is weaker than contract (the contract has `panic_macros = false`, the implementation does not)
 //! use fip_macros::{fip, fip_impl, fip_trait};
 //! #[fip_trait]
-//! pub trait Step {
+//! pub unsafe trait Step {
 //!     #[fip(strict = true, panic_macros = false)]
 //!     fn step(&self, x: u8) -> u8;
 //! }
 //! pub struct Id;
-//! #[fip_impl]
+//! #[fip_impl(contract)]
 //! impl Step for Id {
 //!     #[fip(strict = true)]
 //!     fn step(&self, x: u8) -> u8 { x }
 //! }
 //! # fn main() {}
+//! ```
+//! A checked implementation, and a strict caller through the contract:
+//! ```
+//! use fip_macros::{fip, fip_impl, fip_trait};
+//! /// # Safety
+//! /// Implementations keep the strict contract of `area`.
+//! #[fip_trait]
+//! pub unsafe trait Shape {
+//!     #[fip(strict = true)]
+//!     fn area(&self) -> u32;
+//! }
+//! pub struct Square(pub u32);
+//! #[fip_impl(contract)]
+//! impl Shape for Square {
+//!     #[fip(strict = true)]
+//!     fn area(&self) -> u32 { self.0 ^ 1 }
+//! }
+//! #[fip(strict = true)]
+//! fn area_of(s: &dyn Shape) -> u32 { s.area() }
+//! # fn main() { assert_eq!(area_of(&Square(3)), 2); }
 //! ```
 //! `strict = true` on a declaration without `#[fip_trait]`:
 //! ```compile_fail
@@ -484,7 +608,7 @@
 //! ```compile_fail
 //! # // expect: `param(..)` with `strict = true` is not supported on a trait method declaration
 //! #[fip_macros::fip_trait]
-//! trait T {
+//! unsafe trait T {
 //!     #[fip_macros::fip(strict = true, param(g = 0))]
 //!     fn f(&self, g: fn(u8) -> u8) -> u8;
 //! }
@@ -541,8 +665,9 @@
 //! ## Strict mode
 //!
 //! `#[fip(strict = true)]` / `#[fip(N, strict = true)]`: the function may call only
-//! functions in the audited `core` table (by full `core::`/`std::` path, or
-//! `<[T]>::method` for slice methods) and functions with a certificate
+//! functions in the audited `core` table (by absolute `::core::`/`::std::` path, so a
+//! local module named `core` cannot stand in, or `<[T]>::method` for slice methods)
+//! and functions with a certificate
 //! (`fip_strict::Cert` constant `__fip_strict_<fn>`, generated by strict functions;
 //! for methods `__fip_strict_<Type>__<m>` / `__fip_strict_<Type>__<Trait>__<m>`,
 //! generated by [`macro@fip_impl`]). Every certificate names its function, and a
@@ -558,6 +683,65 @@
 //! overflow or callees remain. Not seen: implicit calls (`Drop`, overloaded
 //! operators, `Deref`, `Index`); `fip_testkit::assert_fip!` counts what they free or
 //! allocate. Details and limits: `docs/decisions/2026-11-01-strict-core-table.md`.
+//!
+//! Name resolution the tokens cannot see is either made irrelevant by rewriting the
+//! emitted body (outside Verus's driver, which gets the body as written) or rejected:
+//!
+//! - **Constructors.** A call of a capitalised name, `Name(a, b)` / `E::V(a)`, is
+//!   emitted as `(Name { 0: a, 1: b })`, which rustc accepts only for a tuple struct
+//!   or tuple variant (in patterns too), so a function, `static`, `const` or
+//!   parameter named like one does not compile instead of being called unchecked.
+//!   `Self(..)` is kept. `fip_fn!(Name)` of a capitalised path is rejected.
+//! - **Shadowing.** A bare call `f(..)` is rejected when `f` is also bound in the
+//!   function (a parameter, `let`, pattern or closure parameter, or a value named
+//!   `f`), and item declarations and `use` inside a strict body are rejected: the
+//!   certificate is read at module level. `g.call(..)` on a `param(g = ..)` parameter
+//!   is emitted as `(&g as &G).call(..)`, and `x.m(..)` on a parameter of a trait with
+//!   strict contracts as `Trait::m(x, ..)`, so a rebound `g` / `x` is a type error.
+//! - **Macros.** The panicking macros are emitted as `::core::assert!` etc. (a
+//!   local `macro_rules! assert` is not what runs); written with a path they must be
+//!   `::core::..` or `::std::..`. `vec![a, b]` must be written `::std::vec!` or
+//!   `::alloc::vec!`; `vec![e; n]` (clones `e`) and `format!` (runs `Display` code,
+//!   grows its buffer) are rejected. A bare ghost-code macro (`proof!`,
+//!   `proof_decl!`, `proof_with!`) is not scanned and is emitted as
+//!   `const { proof! {} };`: its contents are dropped, and whatever macro of that
+//!   name is in scope runs with no input in a const block (the same in `#[fip]`
+//!   without `strict`). `fip_fn!` is recognised by its last segment: a `macro_rules!
+//!   fip_fn` or `use .. as fip_fn` is trusted, and `fip_testkit::certs` lists it.
+//! - **Calls through values.** `(f)(x)`, `a[i](x)`, `{ f }(x)` and `s.0(x)` are
+//!   rejected (a block that ends a statement, `if c { .. } (a, b)`, is not a call).
+//! - **Loops.** The header and body of `while` count as in the loop (the condition
+//!   runs on every iteration), and so does a closure body; a `for` loop must iterate
+//!   over a range (`a..b`): any other iterable calls a user `Iterator::next`.
+//! - **Generic parameters.** `T::m(..)` / `<T as Tr>::m(..)` for a type parameter
+//!   `T` read the contract of its trait (`#[fip_trait]`), never a type named `T`.
+//! - **Certificate names.** Parts are joined with `__`, so a strict function name
+//!   containing `__`, or a type, trait or method part containing `__` or starting or
+//!   ending with `_`, is rejected (`fn Foo__new` would certify `Foo::new`).
+//! - **Trait paths.** `<Type as a::Trait>::m(..)` reads `__fip_strict_Type__Trait__m`
+//!   and checks that `a::Trait` is the trait of the `#[fip_impl]` block that made it
+//!   (generic functions that require each trait to imply the other). In a trait impl,
+//!   `self.m()` is rejected: write `<Self as Trait>::m(self)`, which reads the impl's
+//!   own certificate (so recursion through the impl's methods is a cycle) and cannot
+//!   pick an inherent method of the same name.
+//!
+//! A local `assert!` that allocates is not what a strict body runs (measured):
+//!
+//! ```
+//! fip_testkit::install!();
+//! #[allow(unused_macros)]
+//! macro_rules! assert { ($e:expr) => {{ let _b = Box::new($e); }} }
+//! #[fip_macros::fip(strict = true)]
+//! fn checked(x: u8) -> u8 { assert!(x < 200); x + 1 }
+//! fn main() {
+//!     let (r, s) = fip_testkit::measure(|| checked(3));
+//!     assert_eq!((r, s.allocs), (4, 0));
+//! }
+//! ```
+//!
+//! Not covered (driver only): a local type named like a std heap type (`struct Vec`
+//! with an allocating `new` is counted as the std constructor; `fip-prelint` resolves
+//! it). Measured and recorded in `TODOs/strict-open-items.md`.
 //!
 //! A strict body starts with a statement re-checking the bound after
 //! monomorphisation (`let () = const { .. };`). Verus does not support inline `const`
@@ -921,7 +1105,7 @@
 //! it (a `core` table function):
 //! ```compile_fail
 //! # // expect: fip_fn!(panic_macros = false, path) takes a function with a certificate
-//! fn main() { let _w = fip_macros::fip_fn!(panic_macros = false, core::mem::swap::<u8>); }
+//! fn main() { let _w = fip_macros::fip_fn!(panic_macros = false, ::core::mem::swap::<u8>); }
 //! ```
 //! `panic_macros = false` with the driver-checked mode:
 //! ```compile_fail
@@ -956,12 +1140,231 @@
 //! fn f(x: u8) -> u8 { assert!(x > 0); x - 1 }
 //! # fn main() {}
 //! ```
+//! a function named like a constructor (before: accepted with bound 0, measured 1
+//! allocation):
+//! ```compile_fail
+//! # // expect: cannot find struct, variant or union type `Evil`
+//! #[allow(non_snake_case)]
+//! fn Evil() -> Box<u64> { Box::new(1) }
+//! #[fip_macros::fip(strict = true)]
+//! fn f() -> Box<u64> { Evil() }
+//! # fn main() {}
+//! ```
+//! a capitalised function-pointer parameter:
+//! ```compile_fail
+//! # // expect: cannot find struct, variant or union type `G`
+//! #[fip_macros::fip(strict = true)]
+//! #[allow(non_snake_case)]
+//! fn f(G: fn() -> Box<u64>) -> Box<u64> { G() }
+//! # fn main() {}
+//! ```
+//! `fip_fn!` of a capitalised path:
+//! ```compile_fail
+//! # // expect: fip_fn!: a capitalised path
+//! #[allow(non_snake_case)]
+//! fn Evil(x: u8) -> Box<u8> { Box::new(x) }
+//! fn main() { let _w = fip_macros::fip_fn!(Evil); }
+//! ```
+//! a call through a block (before: bound 0, measured 1 allocation):
+//! ```compile_fail
+//! # // expect: call through an expression
+//! fn helper(x: u8) -> Box<u8> { Box::new(x) }
+//! #[fip_macros::fip(strict = true)]
+//! fn f(c: bool, x: u8) -> Box<u8> { let r = if c { helper } else { helper }(x); r }
+//! # fn main() {}
+//! ```
+//! a call through a tuple field:
+//! ```compile_fail
+//! # // expect: call through a tuple field or literal
+//! pub struct S(pub fn(u8) -> Box<u8>);
+//! #[fip_macros::fip(strict = true)]
+//! fn f(s: &S, x: u8) -> Box<u8> { s.0(x) }
+//! # fn main() {}
+//! ```
+//! a `core` table function by a relative path (a local `mod core` would be called):
+//! ```compile_fail
+//! # // expect: write the `core` table function with an absolute path, `::core::mem::swap`
+//! #[fip_macros::fip(strict = true)]
+//! fn f(a: &mut u8, b: &mut u8) { core::mem::swap(a, b) }
+//! # fn main() {}
+//! ```
+//! a panicking macro under another path:
+//! ```compile_fail
+//! # // expect: macro `my::assert!` is not the `core` macro
+//! mod my { macro_rules! assert { ($e:expr) => {{ let _b = Box::new($e); }} } pub(crate) use assert; }
+//! #[fip_macros::fip(strict = true)]
+//! fn f(x: bool) { my::assert!(x) }
+//! # fn main() {}
+//! ```
+//! `vec![e; n]` (before: bound 1, measured 10 allocations with an allocating `Clone`):
+//! ```compile_fail
+//! # // expect: `vec![e; n]` clones `e` n - 1 times
+//! #[fip_macros::fip(1, strict = true)]
+//! fn f(e: u8) -> Vec<u8> { ::std::vec![e; 10] }
+//! # fn main() {}
+//! ```
+//! `vec!` without an absolute path:
+//! ```compile_fail
+//! # // expect: write `vec!` as `::std::vec!` or `::alloc::vec!`
+//! #[fip_macros::fip(1, strict = true)]
+//! fn f(e: u8) -> Vec<u8> { vec![e, e] }
+//! # fn main() {}
+//! ```
+//! `format!` (before: bound 1, measured 51 allocations with an allocating `Display`):
+//! ```compile_fail
+//! # // expect: `format!` calls the arguments' `Display` / `Debug` code
+//! #[fip_macros::fip(1, strict = true)]
+//! fn f(e: u8) -> String { format!("{e}") }
+//! # fn main() {}
+//! ```
+//! the contents of a ghost macro are not compiled (before: a `proof!` that keeps its
+//! contents ran them unchecked, measured 2 allocations at bound 0):
+//! ```compile_fail
+//! # // expect: cannot find value `b` in this scope
+//! macro_rules! proof { ($($t:tt)*) => { $($t)* } }
+//! #[fip_macros::fip(strict = true)]
+//! fn f() -> u64 { proof! { let b = 1_u64; } b }
+//! # fn main() {}
+//! ```
+//! a `param(..)` parameter rebound in the body (before: bound 0, measured 1
+//! allocation through `Evil::call`):
+//! ```compile_fail
+//! # // expect: non-primitive cast
+//! use fip_strict::FipFn;
+//! struct Evil;
+//! impl Evil { fn call(&self, _: (u8,)) -> u8 { let _b = Box::new(1_u8); 1 } }
+//! #[fip_macros::fip(strict = true, param(g = 0))]
+//! fn f<F: FipFn<(u8,), Output = u8>>(g: F) -> u8 { let _ = g; let g = Evil; g.call((1,)) }
+//! # fn main() {}
+//! ```
+//! a contract-typed parameter rebound in the body:
+//! ```compile_fail
+//! # // expect: mismatched types
+//! /// # Safety
+//! /// Implementations keep the contract.
+//! #[fip_macros::fip_trait]
+//! pub unsafe trait Tr { #[fip_macros::fip(strict = true)] fn m(&self) -> u8; }
+//! struct Evil;
+//! impl Evil { fn m(&self) -> u8 { let _b = Box::new(1_u8); 1 } }
+//! #[fip_macros::fip(strict = true)]
+//! fn f(x: &dyn Tr) -> u8 { let x = Evil; x.m() }
+//! # fn main() {}
+//! ```
+//! a local binding named like a strict function:
+//! ```compile_fail
+//! # // expect: `helper` is also bound in this function
+//! #[fip_macros::fip(strict = true)]
+//! fn helper() -> u8 { 0 }
+//! #[fip_macros::fip(strict = true)]
+//! fn f(e: fn() -> u8) -> u8 { let helper = e; helper() }
+//! # fn main() {}
+//! ```
+//! a `use` inside a strict body (it could shadow a certified function):
+//! ```compile_fail
+//! # // expect: `use` declares an item inside a strict body
+//! mod evil { pub fn helper() -> u8 { 0 } }
+//! #[fip_macros::fip(strict = true)]
+//! fn helper() -> u8 { 0 }
+//! #[fip_macros::fip(strict = true)]
+//! fn f() -> u8 { use evil::*; helper() }
+//! # fn main() {}
+//! ```
+//! a `for` loop over something other than a range:
+//! ```compile_fail
+//! # // expect: a strict `for` loop must iterate over a range
+//! #[fip_macros::fip(strict = true)]
+//! fn f(xs: &[u8]) -> u8 { let mut s = 0; for x in xs { s ^= *x; } s }
+//! # fn main() {}
+//! ```
+//! a `for` loop whose body follows a block in its header (before: the block was taken
+//! for the body, measured 50 allocations at bound 1):
+//! ```compile_fail
+//! # // expect: a strict `for` loop must iterate over a range
+//! #[fip_macros::fip(1, strict = true)]
+//! fn one(i: u64) -> Box<u64> { Box::new(i) }
+//! #[fip_macros::fip(1, strict = true)]
+//! fn f(n: u64) -> u64 { let mut s = 0; #[allow(unused_braces)] for i in { 0..n } { s += *one(i); } s }
+//! # fn main() {}
+//! ```
+//! a free function whose certificate name equals a method's (`Evil::new`):
+//! ```compile_fail
+//! # // expect: `Evil__new` cannot be the name of a strict function
+//! #[allow(non_snake_case)]
+//! #[fip_macros::fip(strict = true)]
+//! fn Evil__new() -> u8 { 0 }
+//! # fn main() {}
+//! ```
+//! a method through a generic parameter without a contracted bound (before: the
+//! certificate of a type named `T` was read):
+//! ```compile_fail
+//! # // expect: `T` is a generic parameter, so no certificate names the function this calls
+//! pub trait Mk { fn m() -> u8; }
+//! #[fip_macros::fip(strict = true)]
+//! fn g<T>() -> u8 where T: Mk { T::m() }
+//! # fn main() {}
+//! ```
+//! `<Type as a::Tr>::m` where the certificate is for another trait of the same name
+//! (before: bound 0, measured 1 allocation):
+//! ```compile_fail
+//! # // expect: the trait bound `__FipT:
+//! pub struct Foo;
+//! mod a { pub trait Tr { fn m(&self) -> Box<u8>; } }
+//! mod b { pub trait Tr { fn m(&self) -> Box<u8>; } }
+//! impl a::Tr for Foo { fn m(&self) -> Box<u8> { Box::new(1) } }
+//! #[fip_macros::fip_impl]
+//! impl b::Tr for Foo { #[fip_macros::fip(1, strict = true)] fn m(&self) -> Box<u8> { Box::new(2) } }
+//! #[fip_macros::fip(1, strict = true)]
+//! fn f(x: &Foo) -> Box<u8> { <Foo as a::Tr>::m(x) }
+//! # fn main() {}
+//! ```
+//! recursion through the methods of a trait impl (before: both certified 0):
+//! ```compile_fail
+//! # // expect: cycle detected
+//! /// # Safety
+//! /// Implementations keep the contracts.
+//! #[fip_macros::fip_trait]
+//! pub unsafe trait Tr {
+//!     #[fip_macros::fip(strict = true)] fn m(&self, n: u8) -> u8;
+//!     #[fip_macros::fip(strict = true)] fn k(&self) -> u8;
+//! }
+//! pub struct Foo;
+//! #[fip_macros::fip_impl(contract)]
+//! impl Tr for Foo {
+//!     #[fip_macros::fip(strict = true)] fn m(&self, n: u8) -> u8 { <Self as Tr>::k(self) + n }
+//!     #[fip_macros::fip(strict = true)] fn k(&self) -> u8 { <Self as Tr>::m(self, 1) }
+//! }
+//! # fn main() {}
+//! ```
+//! `self.m()` in a trait impl:
+//! ```compile_fail
+//! # // expect: write `<Self as Tr>::k(self, ..)`
+//! pub trait Tr { fn m(&self) -> u8; fn k(&self) -> u8; }
+//! pub struct Foo;
+//! #[fip_macros::fip_impl]
+//! impl Tr for Foo {
+//!     #[fip_macros::fip(strict = true)] fn m(&self) -> u8 { self.k() }
+//!     #[fip_macros::fip(strict = true)] fn k(&self) -> u8 { 0 }
+//! }
+//! # fn main() {}
+//! ```
 //!
 //! Methods (`#[fip_impl]`, see [`macro@fip_impl`]):
 //!
+//! strict associated function in a plain `impl` block (checked on a real file:
+//! rustdoc's doctests have no source position to read the block from; before:
+//! accepted, and its bound checked only by `cargo build`):
+//! ```compile_fail,ignore
+//! # // expect: an associated function needs `#[fip_macros::fip_impl]` on its `impl` block
+//! struct S;
+//! impl S {
+//!     #[fip_macros::fip(strict = true)]
+//!     fn n() -> u8 { 0 }
+//! }
+//! # fn main() {}
+//! ```
 //! an argument other than `crate = ..`:
 //! ```compile_fail
-//! # // expect: the only argument is `crate = path::to::fip_strict`
+//! # // expect: the arguments are `crate = path::to::fip_strict` and `contract`
 //! struct S;
 //! #[fip_macros::fip_impl(strict = true)]
 //! impl S {}
@@ -977,9 +1380,12 @@
 //! }
 //! # fn main() {}
 //! ```
-//! `Self::m` outside `#[fip_impl]`:
+//! an associated function and `Self::m` outside `#[fip_impl]` ("an associated
+//! function needs `#[fip_macros::fip_impl]` on its `impl` block" where the macro can
+//! read the item's source file, "`Self` in a strict function needs `#[fip_impl]` on
+//! the `impl` block" everywhere):
 //! ```compile_fail
-//! # // expect: `Self` in a strict function needs `#[fip_impl]`
+//! # // expect: fip_impl]` on
 //! struct S;
 //! impl S {
 //!     #[fip_macros::fip(strict = true)]
@@ -993,9 +1399,9 @@
 //! ```compile_fail
 //! # // expect: cannot find value `__fip_strict_S__m`
 //! #[fip_macros::fip_trait]
-//! trait Tr { #[fip_macros::fip(strict = true)] fn m(&self) -> u8; }
+//! unsafe trait Tr { #[fip_macros::fip(strict = true)] fn m(&self) -> u8; }
 //! struct S;
-//! #[fip_macros::fip_impl]
+//! #[fip_macros::fip_impl(contract)]
 //! impl Tr for S {
 //!     #[fip_macros::fip(strict = true)]
 //!     fn m(&self) -> u8 { 1 }
@@ -1064,7 +1470,7 @@
 //! ```compile_fail
 //! # // expect: generic trait methods (`fn m<..>(..)`) are not supported for strict contracts under `#[fip_trait]`
 //! #[fip_macros::fip_trait]
-//! trait Tr {
+//! unsafe trait Tr {
 //!     #[fip_macros::fip(strict = true)]
 //!     fn m<T>(&self, x: T) -> u8;
 //! }
@@ -1090,6 +1496,33 @@
 //! # fn main() {}
 //! ```
 //! `#[fip_cert]` missing `evidence = ".."`:
+//! an `extern` block without `unsafe` (the block's certificates are trusted claims;
+//! before: accepted in edition 2021 under `#![forbid(unsafe_code)]`):
+//! ```compile_fail
+//! # // expect: #[fip_extern]: write `unsafe extern`
+//! #[fip_macros::fip_extern]
+//! extern "C" {
+//!     #[fip_cert(evidence = "trust me", allocs = 0)]
+//!     pub fn helper();
+//! }
+//! # fn main() {}
+//! ```
+//! a strict call of a foreign function certified to free (`frees = true` or
+//! `kind = "fbip"`: no `fip_strict::Cert`, which promises no deallocation; before: a
+//! `Cert` with bound 0):
+//! ```compile_fail
+//! # // expect: cannot find value `__fip_strict_free`
+//! mod sys {
+//!     #[fip_macros::fip_extern]
+//!     unsafe extern "C" {
+//!         #[fip_cert(evidence = "C11 7.22.3.3: deallocates", kind = "fbip", frees = true)]
+//!         pub fn free(p: *mut core::ffi::c_void);
+//!     }
+//! }
+//! #[fip_macros::fip(strict = true)]
+//! fn f(p: *mut core::ffi::c_void) { unsafe { sys::free(p) } }
+//! # fn main() {}
+//! ```
 //! ```compile_fail
 //! # // expect: `evidence = ".."` is required to certify a foreign function
 //! #[fip_macros::fip_extern]
@@ -1186,6 +1619,7 @@
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
 mod context;
+mod flow;
 mod strict;
 
 use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, callee};
@@ -1216,14 +1650,6 @@ impl Mode {
 /// documentation for exactly what is checked.
 #[proc_macro_attribute]
 pub fn fip(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Left by `#[fip_impl]` on a method it has already checked and rewritten; keeps
-    // the attribute's path (and so the user's `use fip_macros::fip`) in use.
-    let marker: Vec<TokenTree> = attr.clone().into_iter().collect();
-    if let [TokenTree::Ident(m)] = marker.as_slice()
-        && m.to_string() == IMPL_CHECKED
-    {
-        return item;
-    }
     match parse_fip_args(attr) {
         Ok(args) => expand(args.mode, Some(&args), item),
         Err((span, msg)) => {
@@ -1725,34 +2151,58 @@ struct Scan<'a> {
 }
 
 impl Scan<'_> {
-    fn stream(&mut self, ts: TokenStream, in_loop: bool) {
+    /// Scans `ts` and returns it as emitted: the same tokens, except that ghost-code
+    /// macros (`proof!`, ..; [`GHOST_MACROS`], written without a path) are removed
+    /// outside Verus's driver, so their contents, which this scan skips, are not
+    /// compiled whichever macro of that name is in scope.
+    fn stream(&mut self, ts: TokenStream, in_loop: bool) -> TokenStream {
         let toks: Vec<TokenTree> = ts.into_iter().collect();
         let texts = path_texts(&toks);
         let ptoks = path_toks(&toks, &texts);
-        let mut loop_body_pending = false;
+        let loops = flow::loop_regions(&toks);
+        let erase = !strict::under_verus();
+        let mut out: Vec<TokenTree> = Vec::with_capacity(toks.len());
         let mut i = 0;
         while i < toks.len() {
             let t = &toks[i];
+            let in_loop_here = in_loop || loops[i];
             // Attributes inside the body (e.g. Verus loop invariants): skip.
             if is_punct(t, '#')
                 && toks
                     .get(i + 1)
                     .is_some_and(|n| is_group(n, Delimiter::Bracket))
             {
+                out.extend(toks[i..i + 2].iter().cloned());
                 i += 2;
                 continue;
             }
             if let TokenTree::Ident(id) = t {
                 let s = id.to_string();
-                let bang_next = toks.get(i + 1).is_some_and(|n| is_punct(n, '!'));
-                // Ghost code is erased; a `fip_fn!` closure is checked by `fip_fn!` and
-                // counted through the declared bound of the parameter it is passed to.
-                if bang_next && (GHOST_MACROS.contains(&s.as_str()) || s == "fip_fn") {
-                    i += 3; // name ! group
+                let bang_next = toks.get(i + 1).is_some_and(|n| is_punct(n, '!'))
+                    && toks
+                        .get(i + 2)
+                        .is_some_and(|n| matches!(n, TokenTree::Group(_)));
+                let prev_path = i > 0 && is_punct(&toks[i - 1], ':');
+                // Ghost code (a bare `proof!` etc.) is skipped, and removed from the
+                // emitted body outside Verus; a `fip_fn!` closure is checked by
+                // `fip_fn!` and counted through the declared bound of the parameter it
+                // is passed to.
+                if bang_next && !prev_path && GHOST_MACROS.contains(&s.as_str()) {
+                    if erase {
+                        out.extend(strict::ghost_stub(&toks, i));
+                    } else {
+                        out.extend(toks[i..i + 3].iter().cloned());
+                    }
+                    i += 3;
+                    continue;
+                }
+                if bang_next && s == "fip_fn" {
+                    out.extend(toks[i..i + 3].iter().cloned());
+                    i += 3;
                     continue;
                 }
                 if bang_next && ALLOC_MACROS.contains(&s.as_str()) {
-                    self.site(id.span(), format!("`{s}!`"), in_loop);
+                    self.site(id.span(), format!("`{s}!`"), in_loop_here);
                 }
                 let prev_dot = i > 0 && is_punct(&toks[i - 1], '.');
                 // The last segment of a path (any spelling: `Box::new`,
@@ -1765,7 +2215,7 @@ impl Scan<'_> {
                     let start = callee::path_start(&ptoks, i);
                     let c = callee::classify(&ptoks[start..=i]);
                     if let callee::Callee::Alloc { .. } = c {
-                        self.site(toks[start].span(), c.shown(), in_loop);
+                        self.site(toks[start].span(), c.shown(), in_loop_here);
                     }
                 }
                 let call_next = toks
@@ -1775,14 +2225,13 @@ impl Scan<'_> {
                         && toks.get(i + 2).is_some_and(|n| is_punct(n, ':'))
                         && toks.get(i + 3).is_some_and(|n| is_punct(n, '<')));
                 if prev_dot && call_next && ALLOC_METHODS.contains(&s.as_str()) {
-                    self.site(id.span(), format!("`.{s}()`"), in_loop);
+                    self.site(id.span(), format!("`.{s}()`"), in_loop_here);
                 }
                 if s == self.fn_name
                     && toks
                         .get(i + 1)
                         .is_some_and(|n| is_group(n, Delimiter::Parenthesis))
                 {
-                    let prev_path = i > 0 && is_punct(&toks[i - 1], ':');
                     let via_self_path = i >= 3
                         && is_punct(&toks[i - 1], ':')
                         && is_punct(&toks[i - 2], ':')
@@ -1792,19 +2241,18 @@ impl Scan<'_> {
                         self.recursion.push(id.span());
                     }
                 }
-                if s == "loop" || s == "while" || s == "for" {
-                    loop_body_pending = true;
-                }
             }
             if let TokenTree::Group(g) = t {
-                let body_of_loop = loop_body_pending && g.delimiter() == Delimiter::Brace;
-                if body_of_loop {
-                    loop_body_pending = false;
-                }
-                self.stream(g.stream(), in_loop || body_of_loop);
+                let inner = self.stream(g.stream(), in_loop_here);
+                let mut ng = Group::new(g.delimiter(), inner);
+                ng.set_span(g.span());
+                out.push(TokenTree::Group(ng));
+            } else {
+                out.push(t.clone());
             }
             i += 1;
         }
+        out.into_iter().collect()
     }
 
     fn site(&mut self, span: Span, what: String, in_loop: bool) {
@@ -1873,15 +2321,26 @@ struct ImplCtx {
     self_ty: String,
     trait_name: Option<String>,
     trait_toks: Vec<TokenTree>,
+    /// Parameter names of `impl<..>` (lifetimes as `'a`).
+    params: Vec<String>,
 }
 
+/// A parameter (or generic type parameter) mapped to its trait: `(name, (trait
+/// module prefix, trait name))`.
+type TraitOf = (String, (Vec<TokenTree>, String));
+
+/// Parameters whose type names a trait (`x: &dyn Tr`, `s: &S` with `S: Tr`), and
+/// the first trait bound of each generic type parameter. A `self` receiver is not
+/// mapped: inside `impl Tr for Ty`, `self.m()` would also call an inherent method
+/// `Ty::m` and would read the contract instead of the impl's own certificate (which
+/// keeps recursion through the impl's methods a constant-evaluation cycle), so a
+/// strict trait-impl method writes `<Self as Tr>::m(self, ..)`.
 fn extract_param_traits(
     params: Option<&Group>,
     generics: &[TokenTree],
-    ctx: Option<&ImplCtx>,
-) -> Vec<(String, (Vec<TokenTree>, String))> {
+) -> (Vec<TraitOf>, Vec<TraitOf>) {
     let mut out = Vec::new();
-    let mut type_bounds: Vec<(String, (Vec<TokenTree>, String))> = Vec::new();
+    let mut type_bounds: Vec<TraitOf> = Vec::new();
 
     if generics.first().is_some_and(|t| is_punct(t, '<')) && generics.len() >= 2 {
         let inner: TokenStream = generics[1..generics.len() - 1].iter().cloned().collect();
@@ -1912,11 +2371,6 @@ fn extract_param_traits(
                 || (toks.first().is_some_and(|t| is_punct(t, '&'))
                     && toks.get(1).is_some_and(|t| is_ident(t, "self")))
             {
-                if let Some(c) = ctx
-                    && let Some(ref t) = c.trait_name
-                {
-                    out.push(("self".to_string(), (Vec::new(), t.clone())));
-                }
                 continue;
             }
             if let Some(colon_pos) = toks.iter().position(|t| is_punct(t, ':'))
@@ -1948,24 +2402,31 @@ fn extract_param_traits(
             }
         }
     }
-    out
+    (out, type_bounds)
 }
 
-/// Certificate name of a strict function: `f`, `Type__m` or `Type__Trait__m`.
-fn cert_name(fn_name: &str, ctx: Option<&ImplCtx>) -> String {
+/// Certificate name of a strict function: `f`, `Type__m` or `Type__Trait__m`, or
+/// why its parts cannot form one unambiguously (`strict::segment_error`).
+fn cert_name(fn_name: &str, ctx: Option<&ImplCtx>) -> Result<String, String> {
     let f = strict::bare(fn_name);
-    match ctx {
-        None => f.to_string(),
+    let parts: Vec<&str> = match ctx {
+        None => {
+            return strict::fn_name_error(f).map_or_else(|| Ok(f.to_string()), Err);
+        }
         Some(ImplCtx {
             self_ty,
             trait_name: None,
             ..
-        }) => format!("{self_ty}__{f}"),
+        }) => vec![self_ty, f],
         Some(ImplCtx {
             self_ty,
             trait_name: Some(t),
             ..
-        }) => format!("{self_ty}__{t}__{f}"),
+        }) => vec![self_ty, t, f],
+    };
+    match parts.iter().find_map(|p| strict::segment_error(p)) {
+        Some(e) => Err(e),
+        None => Ok(parts.join("__")),
     }
 }
 
@@ -1977,6 +2438,46 @@ fn has_receiver(params: Option<&Group>) -> bool {
             .take_while(|t| !is_punct(t, ','))
             .any(|t| is_ident(&t, "self"))
     })
+}
+
+/// Errors of a strict function outside `#[fip_impl]` that is not a free function: a
+/// trait method's default body, a method, or an associated function of a plain
+/// `impl` block (located through the source file, `context::enclosing`).
+fn strict_placement_errors(
+    tag: &str,
+    toks: &[TokenTree],
+    shape: &FnShape,
+    body: &Group,
+) -> TokenStream {
+    let mut errors = TokenStream::new();
+    let in_trait = shape.vis.is_empty()
+        && fn_keyword_span(toks, shape)
+            .is_some_and(|sp| context::enclosing(sp, &shape.name) == context::Enclosing::Trait);
+    if in_trait {
+        errors.extend(compile_error(body.span(), &strict_default_body_error(tag)));
+    } else if has_receiver(shape.params.as_ref()) {
+        errors.extend(compile_error(
+        body.span(),
+        &format!(
+            "{tag} strict: a method needs `#[fip_macros::fip_impl]` on its `impl` block, which names its certificate `__fip_strict_<Type>__{}` (strict mode is not available on trait method declarations, see the crate documentation)",
+            shape.name
+        ),
+    ));
+    } else if fn_keyword_span(toks, shape)
+        .is_some_and(|sp| context::enclosing(sp, &shape.name) == context::Enclosing::Impl)
+    {
+        // An associated function in a plain `impl` block: its certificate would be an
+        // associated constant that no strict caller names and that `cargo check`
+        // does not evaluate.
+        errors.extend(compile_error(
+        body.span(),
+        &format!(
+            "{tag} strict: an associated function needs `#[fip_macros::fip_impl]` on its `impl` block, which names its certificate `__fip_strict_<Type>__{}`",
+            shape.name
+        ),
+    ));
+    }
+    errors
 }
 
 /// Checks and rewrites one function. `Ok((items, function))`: the items go before
@@ -2003,7 +2504,7 @@ fn expand_parts(
         sites: Vec::new(),
         recursion: Vec::new(),
     };
-    scan.stream(body.stream(), false);
+    let base_body = scan.stream(body.stream(), false);
 
     let tag = mode.name();
     // Mark-only mode (`fip-prelint`'s behaviour check of rejected examples): no
@@ -2015,20 +2516,14 @@ fn expand_parts(
         base_errors(mode, &tag, &scan, &shape.name)
     };
     let strict_args = args.filter(|a| a.strict && !mark_only);
-    let in_trait = strict_args.is_some()
-        && ctx.is_none()
-        && shape.vis.is_empty()
-        && fn_keyword_span(&toks, &shape)
-            .is_some_and(|sp| context::enclosing(sp, &shape.name) == context::Enclosing::Trait);
-    if in_trait {
-        errors.extend(compile_error(body.span(), &strict_default_body_error(&tag)));
-    } else if strict_args.is_some() && ctx.is_none() && has_receiver(shape.params.as_ref()) {
+    if strict_args.is_some() && ctx.is_none() {
+        errors.extend(strict_placement_errors(&tag, &toks, &shape, &body));
+    }
+    let cert = strict_args.map(|_| cert_name(&shape.name, ctx));
+    if let Some(Err(e)) = &cert {
         errors.extend(compile_error(
-            body.span(),
-            &format!(
-                "{tag} strict: a method needs `#[fip_macros::fip_impl]` on its `impl` block, which names its certificate `__fip_strict_<Type>__{}` (strict mode is not available on trait method declarations, see the crate documentation)",
-                shape.name
-            ),
+            fn_keyword_span(&toks, &shape).unwrap_or_else(|| body.span()),
+            &format!("{tag} strict: {e}"),
         ));
     }
     let strict_scan =
@@ -2047,7 +2542,14 @@ fn expand_parts(
     let mark = prelint_mark(mode, args);
     let mut items = TokenStream::new();
     let mut toks = toks;
-    if let Some(ss) = &strict_scan {
+    if strict_scan.is_none() && !mark_only {
+        let mut g = Group::new(Delimiter::Brace, base_body);
+        g.set_span(body.span());
+        if let Some(last) = toks.last_mut() {
+            *last = TokenTree::Group(g);
+        }
+    }
+    if let Some((ss, emitted)) = &strict_scan {
         let n = match mode {
             Mode::FipN(n) => n,
             Mode::Fip | Mode::Fbip => 0,
@@ -2068,13 +2570,17 @@ fn expand_parts(
                 .map_or_else(|_| Vec::new(), |ts| ts.into_iter().collect()),
             Some(_) | None => shape.vis.clone(),
         };
-        let (cert_items, stmt) = ss.emit_fn(&tag, &cert_name(&shape.name, ctx), &vis, n, local);
+        let name = match &cert {
+            Some(Ok(name)) => name.clone(),
+            _ => String::new(),
+        };
+        let (cert_items, stmt) = ss.emit_fn(&tag, &name, &vis, n, local);
         items.extend(cert_items);
         let mut new_body = stmt;
         if std::env::var_os(PRELINT_ENV).is_some() {
             new_body.extend(ss.emit_ffi_checks());
         }
-        new_body.extend(body.stream());
+        new_body.extend(emitted.clone());
         let mut g = Group::new(Delimiter::Brace, new_body);
         g.set_span(body.span());
         if let Some(last) = toks.last_mut() {
@@ -2589,7 +3095,41 @@ fn fip_doc(mode: Mode, strict: bool) -> TokenStream {
     doc
 }
 
+/// Names of the type parameters in a generic parameter list `<..>` (lifetimes and
+/// const parameters left out), split at top-level commas only.
+fn generic_type_params(generics: &[TokenTree]) -> Vec<String> {
+    let mut names = Vec::new();
+    if generics.len() < 2 {
+        return names;
+    }
+    let inner = &generics[1..generics.len() - 1];
+    let mut depth = 0_i32;
+    let mut at_start = true;
+    for (k, t) in inner.iter().enumerate() {
+        let arrow = k > 0 && is_punct(&inner[k - 1], '-');
+        if is_punct(t, '<') {
+            depth += 1;
+        } else if is_punct(t, '>') && !arrow {
+            depth -= 1;
+        } else if is_punct(t, ',') && depth == 0 {
+            at_start = true;
+            continue;
+        }
+        if at_start {
+            if let TokenTree::Ident(id) = t
+                && id.to_string() != "const"
+                && !(k > 0 && is_punct(&inner[k - 1], '\''))
+            {
+                names.push(id.to_string());
+            }
+            at_start = false;
+        }
+    }
+    names
+}
+
 /// Runs the strict checks on a function body; errors are appended to `errors`.
+/// Returns the scan and the body as emitted (see `strict::StrictScan::stream`).
 fn run_strict_scan(
     args: &FipArgs,
     shape: &FnShape,
@@ -2597,14 +3137,36 @@ fn run_strict_scan(
     tag: &str,
     ctx: Option<&ImplCtx>,
     errors: &mut TokenStream,
-) -> strict::StrictScan {
+) -> (strict::StrictScan, TokenStream) {
+    let (param_traits, type_bounds) = extract_param_traits(shape.params.as_ref(), &shape.generics);
+    let mut generic_params = generic_type_params(&shape.generics);
+    if let Some(c) = ctx {
+        generic_params.extend(c.params.iter().filter(|p| !p.starts_with('\'')).cloned());
+    }
+    let mut shadowed = Vec::new();
+    if let Some(g) = &shape.params {
+        for part in split_commas(g.stream()) {
+            let pat: TokenStream = part
+                .iter()
+                .take_while(|t| !is_punct(t, ':'))
+                .cloned()
+                .collect();
+            strict::bound_names(pat, &mut shadowed);
+        }
+    }
+    strict::bound_names(body.stream(), &mut shadowed);
     let mut ss = strict::StrictScan {
         self_ty: ctx.map(|c| c.self_ty.clone()),
+        impl_trait: ctx.and_then(|c| c.trait_name.clone()),
         no_panic_macros: !args.panic_macros,
         krate: args.krate.clone(),
-        param_traits: extract_param_traits(shape.params.as_ref(), &shape.generics, ctx),
+        param_traits,
+        type_bounds,
+        generic_params,
+        shadowed,
         ffi: args.ffi.clone(),
         ffi_used: vec![false; args.ffi.len()],
+        keep_tokens: strict::under_verus(),
         ..strict::StrictScan::default()
     };
     let types = param_types(shape.params.as_ref());
@@ -2629,7 +3191,7 @@ fn run_strict_scan(
             bound: Some(*k),
         });
     }
-    ss.stream(body.stream(), false);
+    let emitted = ss.stream(body.stream(), false);
     ss.check_params();
     for (m, used) in ss.ffi.iter().zip(&ss.ffi_used) {
         if !used {
@@ -2645,7 +3207,7 @@ fn run_strict_scan(
     for (sp, msg) in &ss.errors {
         errors.extend(compile_error(*sp, &format!("{tag} strict: {msg}")));
     }
-    ss
+    (ss, emitted)
 }
 
 /// Certificates for the strict methods of an `impl` block.
@@ -2681,7 +3243,20 @@ fn run_strict_scan(
 /// `#[fip_impl(crate = path::to::fip_strict)]` sets the path of the `fip_strict` crate
 /// (see `crate = ..` in the crate documentation) for every strict method of the block
 /// that does not set its own. Strict methods are recognised by any attribute path
-/// ending in `fip` (`#[fip(..)]`, `#[fip_macros::fip(..)]`, `#[my_facade::fip(..)]`).
+/// ending in `fip` (`#[fip(..)]`, `#[fip_macros::fip(..)]`, `#[my_facade::fip(..)]`);
+/// the attribute is consumed (not re-emitted on the method).
+///
+/// **Traits with strict contracts** (`#[fip_trait]` on an `unsafe trait`):
+/// `#[fip_impl(contract)]` on `impl Trait for Type` checks every contracted method of
+/// `<dyn Trait>::__FIP_CONTRACTED` is a strict method of the block whose certificate
+/// is at most as weak as the contract (allocations, `panic_macros = false`), and emits
+/// the block as `unsafe impl`; on a hand-written `unsafe impl`, its strict methods are
+/// compared the same way. A plain `impl` is not compared (the trait may have no
+/// contract or not be dyn-compatible). For every trait impl with a strict method the
+/// block also emits `__fip_traitid_<Type>__<Trait>` / `__fip_traitsup_<Type>__<Trait>`,
+/// against which a strict caller of `<Type as path::Trait>::m` checks that its trait
+/// is this block's. Inside a trait impl, call another method of the trait as
+/// `<Self as Trait>::m(self, ..)` (not `self.m()`).
 ///
 /// ```
 /// use fip_macros::{fip, fip_impl};
@@ -2689,7 +3264,7 @@ fn run_strict_scan(
 /// #[fip_impl]
 /// impl<T> Cell<T> {
 ///     #[fip(strict = true)]
-///     pub fn put(&mut self, v: T) -> T { core::mem::replace(&mut self.v, v) }
+///     pub fn put(&mut self, v: T) -> T { ::core::mem::replace(&mut self.v, v) }
 /// }
 /// #[fip(strict = true)]
 /// fn put_twice(c: &mut Cell<u8>) -> u8 { Cell::put(c, 1); Cell::put(c, 2) }
@@ -2697,33 +3272,36 @@ fn run_strict_scan(
 /// ```
 #[proc_macro_attribute]
 pub fn fip_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let krate = match split_commas(attr).as_slice() {
-        [] => Ok(None),
-        [part] => match part.as_slice() {
+    let mut krate = None;
+    let mut contract = false;
+    for part in split_commas(attr) {
+        match part.as_slice() {
             [TokenTree::Ident(key), eq, rest @ ..]
-                if key.to_string() == "crate" && is_punct(eq, '=') =>
+                if key.to_string() == "crate" && is_punct(eq, '=') && krate.is_none() =>
             {
-                parse_krate(key.span(), rest).map(Some)
+                match parse_krate(key.span(), rest) {
+                    Ok(k) => krate = Some(k),
+                    Err((span, msg)) => {
+                        let mut out = compile_error(span, &format!("#[fip_impl]: {msg}"));
+                        out.extend(strip_fip_attrs(item));
+                        return out;
+                    }
+                }
             }
-            _ => Err((
-                part.first().map_or_else(Span::call_site, TokenTree::span),
-                FIP_IMPL_ARGS.to_string(),
-            )),
-        },
-        [_, second, ..] => Err((
-            second.first().map_or_else(Span::call_site, TokenTree::span),
-            FIP_IMPL_ARGS.to_string(),
-        )),
-    };
-    let krate = match krate {
-        Ok(k) => k,
-        Err((span, msg)) => {
-            let mut out = compile_error(span, &format!("#[fip_impl]: {msg}"));
-            out.extend(strip_fip_attrs(item));
-            return out;
+            [TokenTree::Ident(key)] if key.to_string() == "contract" && !contract => {
+                contract = true;
+            }
+            _ => {
+                let mut out = compile_error(
+                    part.first().map_or_else(Span::call_site, TokenTree::span),
+                    &format!("#[fip_impl]: {FIP_IMPL_ARGS_IMPL}"),
+                );
+                out.extend(strip_fip_attrs(item));
+                return out;
+            }
         }
-    };
-    match fip_impl_inner(&item, krate.as_ref()) {
+    }
+    match fip_impl_inner(&item, krate.as_ref(), contract) {
         Ok(out) => out,
         Err((span, msg)) => {
             let mut out = compile_error(span, &format!("#[fip_impl]: {msg}"));
@@ -2736,11 +3314,18 @@ pub fn fip_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Inside `#[fip_trait]`, every method declaration marked `#[fip(strict = true)]`
 /// (or `#[fip(N, strict = true)]`) declares a strict contract, and its certificate
-/// is emitted as `<dyn Trait>::__fip_strict_<m>` and `__fip_strict_<Trait>__<m>`:
+/// is emitted as `<dyn Trait>::__fip_strict_<m>` and `__fip_strict_<Trait>__<m>`, with
+/// the list of contracted methods `<dyn Trait>::__FIP_CONTRACTED` (one inherent
+/// `impl dyn Trait` block):
 ///
 /// | item | certificate | strict callers write |
 /// |---|---|---|
-/// | `trait Trait { fn m }` | `__fip_strict_Trait__m` | `x.m()`, `Trait::m(x)`, `<dyn Trait>::m(x)` |
+/// | `unsafe trait Trait { fn m }` | `__fip_strict_Trait__m` | `x.m()` on `x: &dyn Trait` or `x: &T` with `T: Trait`, `T::m(x)`, `<T as Trait>::m(x)`, `<dyn Trait>::m(x)` |
+///
+/// A trait with a strict contract must be an `unsafe trait`: a strict caller pays the
+/// contract whatever implementation runs, so each implementation is an `unsafe impl`
+/// (the user's claim) or is checked by `#[fip_impl(contract)]`. Methods without
+/// `strict = true` (driver contracts) need no `unsafe trait`.
 ///
 /// `#[fip_trait(crate = path::to::fip_strict)]` sets the path of the `fip_strict` crate.
 #[proc_macro_attribute]
@@ -2778,6 +3363,8 @@ pub fn fip_trait(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct TraitHeader {
     vis: Vec<TokenTree>,
     trait_name: Ident,
+    /// `unsafe trait`: required when the trait declares a strict contract.
+    is_unsafe: bool,
 }
 
 fn parse_trait_header(toks: &[TokenTree]) -> Result<TraitHeader, (Span, String)> {
@@ -2798,7 +3385,8 @@ fn parse_trait_header(toks: &[TokenTree]) -> Result<TraitHeader, (Span, String)>
         }
     }
     let vis = toks[after_attrs..pos].to_vec();
-    if toks.get(pos).is_some_and(|t| is_ident(t, "unsafe")) {
+    let is_unsafe = toks.get(pos).is_some_and(|t| is_ident(t, "unsafe"));
+    if is_unsafe {
         pos += 1;
     }
     if !toks.get(pos).is_some_and(|t| is_ident(t, "trait")) {
@@ -2818,15 +3406,19 @@ fn parse_trait_header(toks: &[TokenTree]) -> Result<TraitHeader, (Span, String)>
     Ok(TraitHeader {
         vis,
         trait_name: trait_name.clone(),
+        is_unsafe,
     })
 }
 
+/// The contract certificate of one strict method declaration: the constant of the
+/// `impl dyn Trait` block (`__fip_strict_<m>`, without the block) and the
+/// module-level `__fip_strict_<Trait>__<m>`.
 fn emit_trait_method_cert(
     trait_name: &Ident,
     vis: &[TokenTree],
     shape: &FnShape,
     args: &FipArgs,
-) -> Result<TokenStream, (Span, String)> {
+) -> Result<(TokenStream, TokenStream), (Span, String)> {
     if !shape.generics.is_empty() {
         let sp = shape
             .generics
@@ -2837,37 +3429,39 @@ fn emit_trait_method_cert(
             "generic trait methods (`fn m<..>(..)`) are not supported for strict contracts under `#[fip_trait]`".to_string(),
         ));
     }
-    let m = &shape.name;
+    let t = strict::bare(&trait_name.to_string()).to_string();
+    let m = strict::bare(&shape.name).to_string();
+    for seg in [&t, &m] {
+        if let Some(e) = strict::segment_error(seg) {
+            return Err((trait_name.span(), e));
+        }
+    }
     let n = match args.mode {
         Mode::FipN(n) => n,
         Mode::Fip | Mode::Fbip => 0,
     };
-    let krate_path = args.krate.clone().unwrap_or_else(strict::default_krate);
-    let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
-    let cert_ty = format!("{krate_str}::Cert");
-    let assume_fn = if args.panic_macros {
-        format!("{krate_str}::Cert::assume")
+    let krate = args.krate.clone().unwrap_or_else(strict::default_krate);
+    let assume = if args.panic_macros {
+        "assume"
     } else {
-        format!("{krate_str}::Cert::assume_no_panic_macros")
+        "assume_no_panic_macros"
     };
-    let vis_str: String = vis.iter().map(ToString::to_string).collect();
-    let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] ";
-
-    let impl_dyn_str = format!(
-        "{attrs} impl dyn {trait_name} {{ pub const __fip_strict_{m}: {cert_ty} = unsafe {{ {assume_fn}({:?}, {n}u64) }}; }}",
-        format!("{trait_name}__{m}")
+    let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)]";
+    let in_dyn = format!(
+        "{attrs} pub const __fip_strict_{m}: __FIP_KRATE__::Cert = unsafe {{ __FIP_KRATE__::Cert::{assume}({:?}, {n}u64) }};",
+        format!("{t}__{m}")
     );
-    let const_str = format!(
-        "{attrs} {vis_str} const __fip_strict_{trait_name}__{m}: {cert_ty} = <dyn {trait_name}>::__fip_strict_{m};"
+    let tr = TokenStream::from(TokenTree::Ident(trait_name.clone()));
+    let vis: TokenStream = vis.iter().cloned().collect();
+    let module = format!(
+        "{attrs} __FIP_VIS__ const __fip_strict_{t}__{m}: __FIP_KRATE__::Cert = <dyn __FIP_TRAIT__>::__fip_strict_{m};"
     );
-    let mut out = TokenStream::new();
-    if let Ok(ts) = impl_dyn_str.parse::<TokenStream>() {
-        out.extend(ts);
-    }
-    if let Ok(ts) = const_str.parse::<TokenStream>() {
-        out.extend(ts);
-    }
-    Ok(out)
+    let sub = [
+        ("__FIP_KRATE__", &krate),
+        ("__FIP_TRAIT__", &tr),
+        ("__FIP_VIS__", &vis),
+    ];
+    Ok((subst(ts_of(&in_dyn), &sub), subst(ts_of(&module), &sub)))
 }
 
 fn mark_trait_method(item_toks: &[TokenTree], at: usize) -> Vec<TokenTree> {
@@ -2910,6 +3504,8 @@ fn fip_trait_inner(
         return Err(not_trait());
     }
     let mut module_items = TokenStream::new();
+    let mut dyn_items = TokenStream::new();
+    let mut contracted: Vec<String> = Vec::new();
     let mut new_body = TokenStream::new();
     let body_toks: Vec<TokenTree> = body.stream().into_iter().collect();
     let mut next = 0;
@@ -2958,9 +3554,38 @@ fn fip_trait_inner(
         if let Some(body) = &shape.body {
             return Err((body.span(), strict_default_body_error(&args.mode.name())));
         }
-        let certs = emit_trait_method_cert(&header.trait_name, &header.vis, &shape, &args)?;
-        module_items.extend(certs);
+        if !header.is_unsafe {
+            return Err((
+                header.trait_name.span(),
+                format!(
+                    "a trait with a strict contract must be an `unsafe trait`: strict callers of `{}` pay the contract, and an implementation the macros do not check (one without `#[fip_impl(contract)]`) is trusted to keep it, so it must be written `unsafe impl`",
+                    shape.name
+                ),
+            ));
+        }
+        let (in_dyn, module) =
+            emit_trait_method_cert(&header.trait_name, &header.vis, &shape, &args)?;
+        dyn_items.extend(in_dyn);
+        module_items.extend(module);
+        contracted.push(strict::bare(&shape.name).to_string());
         new_body.extend(mark_trait_method(item_toks, at));
+    }
+    if !contracted.is_empty() {
+        // One inherent block on `dyn Trait`: the contracts and the list of contracted
+        // methods `#[fip_impl(contract)]` checks an implementation against.
+        let names: Vec<String> = contracted.iter().map(|m| format!("{m:?}")).collect();
+        let list = format!(
+            "#[doc(hidden)] #[allow(non_upper_case_globals, clippy::all, clippy::pedantic)] pub const __FIP_CONTRACTED: &'static [&'static str] = &[{}];",
+            names.join(", ")
+        );
+        dyn_items.extend(ts_of(&list));
+        let tr = TokenStream::from(TokenTree::Ident(header.trait_name.clone()));
+        let mut block = subst(
+            ts_of("#[doc(hidden)] #[allow(clippy::all, clippy::pedantic)] impl dyn __FIP_TRAIT__"),
+            &[("__FIP_TRAIT__", &tr)],
+        );
+        block.extend([TokenTree::Group(Group::new(Delimiter::Brace, dyn_items))]);
+        module_items.extend(block);
     }
     let mut new_trait_toks = toks[..toks.len() - 1].to_vec();
     let mut g = Group::new(Delimiter::Brace, new_body);
@@ -2991,16 +3616,9 @@ pub fn fip_exclude(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(r) => r,
         Err((sp, msg)) => return compile_error(sp, &format!("#[fip_exclude]: {msg}")),
     };
-    let mark = if let Some(r) = reason {
-        format!("#[cfg_attr(fip_prelint, fip::exclude(reason = {r:?}))]")
-    } else {
-        "#[cfg_attr(fip_prelint, fip::exclude)]".to_string()
-    };
     let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"] #[allow(dead_code)]";
     let mut out = doc.parse::<TokenStream>().unwrap_or_default();
-    if let Ok(m) = mark.parse::<TokenStream>() {
-        out.extend(m);
-    }
+    out.extend(exclude_mark(reason.as_ref()));
     out.extend(item);
     out
 }
@@ -3024,10 +3642,17 @@ pub fn fip_cert(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Certifies and excludes foreign functions in an `extern` block.
 ///
+/// The block must be `unsafe extern` (also in edition 2021): its certificates are
+/// trusted claims about foreign code, so it carries a visible `unsafe`. The driver
+/// marks (`fip::cert`, `fip::exclude`) are emitted only under `fip-prelint`, with the
+/// `evidence` / `reason` literal as written.
+///
 /// Inside `#[fip_extern]`, foreign function declarations can be:
 /// - certified: `#[fip_cert(evidence = "..", allocs = N)]` or `#[fip(evidence = "..")]`
 ///   (requires non-empty `evidence = ".."`, emits `<vis> const __fip_strict_<name>: Cert`
-///   outside the block for strict callers and a driver mark for `fip-prelint`);
+///   outside the block for strict callers and a driver mark for `fip-prelint`); with
+///   `frees = true` or `kind = "fbip"` only the driver mark (a `Cert` promises no
+///   deallocation, so strict code cannot call it);
 /// - excluded: `#[fip_exclude]` (optionally with `reason = ".."`), removing calls
 ///   from FIP aggregation (counted and listed in the crate summary);
 /// - allocator sources: `#[fip::alloc_source]` / `#[fip::free_source]` (or in the foreign
@@ -3122,10 +3747,31 @@ struct FfiCertArgs {
     allocs: u64,
     frees: bool,
     evidence: String,
+    /// The `evidence = ".."` literal as written, re-emitted unchanged in the driver
+    /// mark (so its escapes are not escaped again).
+    evidence_lit: Literal,
     krate: Option<TokenStream>,
 }
 
-fn parse_exclude_attr(attr: TokenStream) -> Result<Option<String>, (Span, String)> {
+/// `#[cfg_attr(fip_prelint, fip::exclude(..))]`, emitted only under the driver
+/// (like [`prelint_mark`]: elsewhere `fip_prelint` is an undeclared cfg, an
+/// `unexpected_cfgs` warning in every consumer). `reason` is the literal as written.
+fn exclude_mark(reason: Option<&Literal>) -> TokenStream {
+    if std::env::var_os(PRELINT_ENV).is_none() {
+        return TokenStream::new();
+    }
+    let src = if reason.is_some() {
+        "#[cfg_attr(fip_prelint, fip::exclude(reason = __FIP_REASON__))]"
+    } else {
+        "#[cfg_attr(fip_prelint, fip::exclude)]"
+    };
+    let lit = reason.map_or_else(TokenStream::new, |l| {
+        TokenStream::from(TokenTree::Literal(l.clone()))
+    });
+    subst(ts_of(src), &[("__FIP_REASON__", &lit)])
+}
+
+fn parse_exclude_attr(attr: TokenStream) -> Result<Option<Literal>, (Span, String)> {
     let parts = split_commas(attr);
     if parts.is_empty() {
         return Ok(None);
@@ -3134,14 +3780,11 @@ fn parse_exclude_attr(attr: TokenStream) -> Result<Option<String>, (Span, String
         [] => Ok(None),
         [part] => match part.as_slice() {
             [TokenTree::Ident(key), eq, TokenTree::Literal(l)]
-                if key.to_string() == "reason" && is_punct(eq, '=') =>
+                if key.to_string() == "reason"
+                    && is_punct(eq, '=')
+                    && l.to_string().starts_with('"') =>
             {
-                let s = l.to_string();
-                let reason = s
-                    .strip_prefix('"')
-                    .and_then(|x| x.strip_suffix('"'))
-                    .unwrap_or(&s);
-                Ok(Some(reason.to_string()))
+                Ok(Some(l.clone()))
             }
             _ => Err((
                 part.first().map_or_else(Span::call_site, TokenTree::span),
@@ -3174,6 +3817,7 @@ fn parse_ffi_cert_args(attr_name: &str, attr: TokenStream) -> Result<FfiCertArgs
     let mut allocs = 0u64;
     let mut frees = kind == "fbip";
     let mut evidence = None;
+    let mut evidence_lit = None;
     let mut krate = None;
     for (k, part) in split_commas(attr).into_iter().enumerate() {
         let sp = part.first().map_or_else(Span::call_site, TokenTree::span);
@@ -3196,7 +3840,14 @@ fn parse_ffi_cert_args(attr_name: &str, attr: TokenStream) -> Result<FfiCertArgs
                             .to_string(),
                     ));
                 }
+                if !s.starts_with('"') {
+                    return Err((
+                        l.span(),
+                        "`evidence` must be a plain string literal `\"..\"`".to_string(),
+                    ));
+                }
                 evidence = Some(ev.to_string());
+                evidence_lit = Some(l.clone());
             }
             [TokenTree::Ident(key), eq, lit]
                 if (key.to_string() == "allocs" || key.to_string() == "n")
@@ -3234,7 +3885,7 @@ fn parse_ffi_cert_args(attr_name: &str, attr: TokenStream) -> Result<FfiCertArgs
             }
         }
     }
-    let Some(evidence) = evidence else {
+    let (Some(evidence), Some(evidence_lit)) = (evidence, evidence_lit) else {
         return Err((
             Span::call_site(),
             "`evidence = \"..\"` is required to certify a foreign function (reference the proof or audit)".to_string(),
@@ -3245,6 +3896,7 @@ fn parse_ffi_cert_args(attr_name: &str, attr: TokenStream) -> Result<FfiCertArgs
         allocs,
         frees,
         evidence,
+        evidence_lit,
         krate,
     })
 }
@@ -3259,9 +3911,19 @@ fn parse_extern_header(toks: &[TokenTree]) -> Result<usize, (Span, String)> {
     {
         pos += 2;
     }
-    if toks.get(pos).is_some_and(|t| is_ident(t, "unsafe")) {
-        pos += 1;
+    // `unsafe extern`: the certificates are claims about foreign code, so the block
+    // carries the `unsafe` the user wrote (in edition 2021 a plain `extern` block is
+    // accepted by rustc and not linted by `unsafe_code`).
+    if !toks.get(pos).is_some_and(|t| is_ident(t, "unsafe")) {
+        if toks.get(pos).is_some_and(|t| is_ident(t, "extern")) {
+            return Err((
+                toks[pos].span(),
+                "write `unsafe extern`: the certificates of a `#[fip_extern]` block are trusted claims about foreign code, so the block must carry a visible `unsafe`".to_string(),
+            ));
+        }
+        return Err(not_extern());
     }
+    pos += 1;
     if !toks.get(pos).is_some_and(|t| is_ident(t, "extern")) {
         return Err(not_extern());
     }
@@ -3353,14 +4015,9 @@ fn process_extern_item(
 
     if let Some((_, excl)) = exclude_attr {
         let shape = shape?;
-        let mark = if let Some(r) = excl {
-            format!("#[cfg_attr(fip_prelint, fip::exclude(reason = {r:?}))]")
-        } else {
-            "#[cfg_attr(fip_prelint, fip::exclude)]".to_string()
-        };
         let doc = "#[doc = \"\"] #[doc = \"# FIP\"] #[doc = \"\"] #[doc = \"Excluded from FIP aggregation (`fip-prelint`). Calls contribute no events (user assumption).\"] #[allow(dead_code)]";
         let mut mark_ts = doc.parse::<TokenStream>().unwrap_or_default();
-        mark_ts.extend(mark.parse::<TokenStream>().unwrap_or_default());
+        mark_ts.extend(exclude_mark(excl.as_ref()));
         let mut final_item = TokenStream::new();
         final_item.extend(filter_fip_attrs(
             &item_toks[..shape.after_attrs],
@@ -3401,30 +4058,51 @@ fn emit_ffi_cert_item(
     }
     let cert_krate = cert.krate.as_ref().or(krate);
     let krate_path = cert_krate.cloned().unwrap_or_else(strict::default_krate);
-    let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
-    let cert_ty = format!("{krate_str}::Cert");
-    let assume_fn = format!("{krate_str}::Cert::assume");
-    let vis_str: String = shape.vis.iter().map(ToString::to_string).collect();
-    let attrs = "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] ";
-    let cert_str = format!(
-        "{attrs} {vis_str} const __fip_strict_{fn_name}: {cert_ty} = unsafe {{ {assume_fn}({fn_name:?}, {}u64) }};",
-        cert.allocs
-    );
-    let module_items = cert_str.parse::<TokenStream>().unwrap_or_default();
-
+    let vis: TokenStream = shape.vis.iter().cloned().collect();
+    let name = strict::bare(fn_name);
+    // A certificate is of kind `fip` (no deallocation, see `fip_strict::Cert`): a
+    // foreign function that frees (`frees = true`, `kind = "fbip"`) gets only the
+    // driver mark, so a strict body cannot call it.
+    let frees = cert.frees || cert.kind == "fbip";
+    let module_items = if frees {
+        TokenStream::new()
+    } else {
+        let src = format!(
+            "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] __FIP_VIS__ const __fip_strict_{name}: __FIP_KRATE__::Cert = unsafe {{ __FIP_KRATE__::Cert::assume({name:?}, {}u64) }};",
+            cert.allocs
+        );
+        subst(
+            ts_of(&src),
+            &[("__FIP_KRATE__", &krate_path), ("__FIP_VIS__", &vis)],
+        )
+    };
     let free_part = if cert.frees { ", frees = true" } else { "" };
-    let mark = format!(
-        "#[cfg_attr(fip_prelint, fip::cert(kind = {:?}, n = {}, evidence = {:?}{free_part}))]",
-        cert.kind, cert.allocs, cert.evidence
-    );
+    let mark = if std::env::var_os(PRELINT_ENV).is_some() {
+        let src = format!(
+            "#[cfg_attr(fip_prelint, fip::cert(kind = {:?}, n = {}, evidence = __FIP_EVIDENCE__{free_part}))]",
+            cert.kind, cert.allocs
+        );
+        let lit = TokenStream::from(TokenTree::Literal(cert.evidence_lit.clone()));
+        subst(ts_of(&src), &[("__FIP_EVIDENCE__", &lit)])
+    } else {
+        TokenStream::new()
+    };
+    let evidence = cert.evidence.replace("\\\"", "\"").replace("\\\\", "\\");
     let doc = format!(
         "#[doc = \"\"] #[doc = \"# FIP Certificate\"] #[doc = \"\"] \
          #[doc = {:?}] #[doc = \"\"] #[doc = {:?}]",
-        format!(
-            "Certified {}: at most {} allocation(s).",
-            cert.kind, cert.allocs
-        ),
-        format!("Evidence: {}", cert.evidence)
+        if frees {
+            format!(
+                "Certified {} (frees): at most {} allocation(s); no `__fip_strict_` certificate, so strict code cannot call it.",
+                cert.kind, cert.allocs
+            )
+        } else {
+            format!(
+                "Certified {}: at most {} allocation(s).",
+                cert.kind, cert.allocs
+            )
+        },
+        format!("Evidence: {evidence}")
     );
     // The mark applies to every declaration of the symbol (`fip-prelint` matches by
     // link symbol), so a declaration made only to carry it is not dead code.
@@ -3432,7 +4110,7 @@ fn emit_ffi_cert_item(
         .parse::<TokenStream>()
         .unwrap_or_default();
     mark_ts.extend(doc.parse::<TokenStream>().unwrap_or_default());
-    mark_ts.extend(mark.parse::<TokenStream>().unwrap_or_default());
+    mark_ts.extend(mark);
 
     let mut final_item = TokenStream::new();
     final_item.extend(filter_fip_attrs(
@@ -3519,6 +4197,9 @@ fn attr_name_and_args(g: &Group) -> Option<(String, TokenStream)> {
 
 const FIP_IMPL_ARGS: &str = "the only argument is `crate = path::to::fip_strict`";
 
+/// The arguments of `#[fip_impl]`.
+const FIP_IMPL_ARGS_IMPL: &str = "the arguments are `crate = path::to::fip_strict` and `contract`";
+
 /// The item with the `#[fip(..)]` attributes of its body removed, so a rejected
 /// `#[fip_impl]` reports one error rather than one per method.
 fn strip_fip_attrs(item: TokenStream) -> TokenStream {
@@ -3549,9 +4230,6 @@ fn strip_fip_attrs(item: TokenStream) -> TokenStream {
     }
     toks.into_iter().collect()
 }
-
-/// Argument `#[fip_impl]` leaves on a strict method it has expanded.
-const IMPL_CHECKED: &str = "__fip_impl_checked";
 
 const IMPL_BOUNDS: &str = "bounds on the impl's parameters and `where` clauses are rejected: a bounded impl does not cover every instantiation, so another impl could define a method of the same name; put the bounds on the methods";
 
@@ -3670,6 +4348,7 @@ fn fip_attr_args(g: &Group) -> Option<TokenStream> {
 fn fip_impl_inner(
     item: &TokenStream,
     krate: Option<&TokenStream>,
+    contract: bool,
 ) -> Result<TokenStream, (Span, String)> {
     let toks: Vec<TokenTree> = item.clone().into_iter().collect();
     let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
@@ -3681,12 +4360,14 @@ fn fip_impl_inner(
     {
         pos += 2;
     }
-    if toks.get(pos).is_some_and(|t| is_ident(t, "unsafe")) {
+    let unsafe_impl = toks.get(pos).is_some_and(|t| is_ident(t, "unsafe"));
+    if unsafe_impl {
         pos += 1;
     }
     if !toks.get(pos).is_some_and(|t| is_ident(t, "impl")) {
         return Err(not_impl());
     }
+    let impl_at = pos;
     pos += 1;
     let mut params = Vec::new();
     if toks.get(pos).is_some_and(|t| is_punct(t, '<')) {
@@ -3700,21 +4381,78 @@ fn fip_impl_inner(
     if body.delimiter() != Delimiter::Brace {
         return Err(not_impl());
     }
-    let ctx = impl_ctx(&toks[pos..toks.len() - 1], &params, first)?;
-    let (module_items, new_body) = rewrite_impl_body(body, &ctx, krate)?;
+    let ctx = impl_ctx(&toks[pos..toks.len() - 1], params, first)?;
+    if contract && ctx.trait_name.is_none() {
+        return Err((
+            toks[impl_at].span(),
+            "`contract` applies to an `impl Trait for Type` block of a trait with strict contracts"
+                .to_string(),
+        ));
+    }
+    let check = ImplCheck {
+        compare: ctx.trait_name.is_some() && (unsafe_impl || contract),
+        complete: contract,
+    };
+    let (module_items, new_body) = rewrite_impl_body(body, &ctx, krate, check)?;
     let mut g = Group::new(Delimiter::Brace, new_body);
     g.set_span(body.span());
     let mut out = module_items;
-    out.extend(toks[..toks.len() - 1].iter().cloned());
+    out.extend(toks[..impl_at].iter().cloned());
+    if contract && !unsafe_impl {
+        // Every strict contract of the trait is implemented by a strict method whose
+        // certificate is checked against it (`ImplCheck::complete`), which is the
+        // claim the `unsafe trait` asks of an implementation.
+        out.extend([TokenTree::Ident(Ident::new("unsafe", Span::call_site()))]);
+    }
+    out.extend(toks[impl_at..toks.len() - 1].iter().cloned());
     out.extend([TokenTree::Group(g)]);
     Ok(out)
+}
+
+/// What `#[fip_impl]` checks of a trait impl against the trait's strict contracts
+/// (`#[fip_trait]`, `<dyn Trait>::__fip_strict_<m>`).
+#[derive(Clone, Copy)]
+struct ImplCheck {
+    /// Compare every strict method's certificate with the contract of its method:
+    /// for `unsafe impl` (a trait with strict contracts is an `unsafe trait`) and for
+    /// `#[fip_impl(contract)]`. A plain `impl` is not compared: the trait may have no
+    /// contract, or not be dyn-compatible.
+    compare: bool,
+    /// `#[fip_impl(contract)]`: every method of `<dyn Trait>::__FIP_CONTRACTED` must
+    /// be a strict method of this block.
+    complete: bool,
+}
+
+/// `tokens` with every identifier `__FIP_<NAME>__` replaced by the tokens bound to
+/// it in `subst` (in nested groups too), so paths such as `crate = $crate::x` are
+/// emitted as tokens rather than re-parsed from text.
+fn subst(tokens: TokenStream, subst: &[(&str, &TokenStream)]) -> TokenStream {
+    let mut out = TokenStream::new();
+    for t in tokens {
+        match &t {
+            TokenTree::Ident(id) => {
+                let s = id.to_string();
+                match subst.iter().find(|(k, _)| *k == s) {
+                    Some((_, v)) => out.extend((*v).clone()),
+                    None => out.extend([t]),
+                }
+            }
+            TokenTree::Group(g) => {
+                let mut ng = Group::new(g.delimiter(), self::subst(g.stream(), subst));
+                ng.set_span(g.span());
+                out.extend([TokenTree::Group(ng)]);
+            }
+            _ => out.extend([t]),
+        }
+    }
+    out
 }
 
 /// Self type and trait of an impl header (`Trait for Type` / `Type`, after the
 /// generics).
 fn impl_ctx(
     header: &[TokenTree],
-    params: &[String],
+    params: Vec<String>,
     first: Span,
 ) -> Result<ImplCtx, (Span, String)> {
     if let Some(w) = header.iter().find(|t| is_ident(t, "where")) {
@@ -3736,7 +4474,7 @@ fn impl_ctx(
         Some(k) => (Some(&header[..k]), &header[k + 1..]),
         None => (None, header),
     };
-    let self_ty = impl_self_ty(ty_toks, params)?;
+    let self_ty = impl_self_ty(ty_toks, &params)?;
     let trait_name = match trait_toks {
         None => None,
         Some(t) => {
@@ -3759,6 +4497,7 @@ fn impl_ctx(
         self_ty,
         trait_name,
         trait_toks,
+        params,
     })
 }
 /// Expands the strict methods of an impl body: `(module-level items, new body)`.
@@ -3767,9 +4506,12 @@ fn rewrite_impl_body(
     body: &Group,
     ctx: &ImplCtx,
     krate: Option<&TokenStream>,
+    check: ImplCheck,
 ) -> Result<(TokenStream, TokenStream), (Span, String)> {
     let mut module_items = TokenStream::new();
     let mut new_body = TokenStream::new();
+    let mut strict_methods: Vec<String> = Vec::new();
+    let mut first_krate: Option<TokenStream> = None;
     let body_toks: Vec<TokenTree> = body.stream().into_iter().collect();
     let mut next = 0;
     while next < body_toks.len() {
@@ -3820,40 +4562,26 @@ fn rewrite_impl_body(
             .chain(&item_toks[at + 2..])
             .cloned()
             .collect();
+        // The attribute is consumed here; `use <its path> as _;` keeps the user's
+        // import of it in use (it is not re-emitted, so no marker on the method can
+        // be written by hand to skip the checks).
+        module_items.extend(attr_path_use(&item_toks[at + 1]));
         match expand_parts(args.mode, Some(&args), &rest, Some(ctx)) {
             Ok((items, f)) => {
                 module_items.extend(items);
                 if let Some(t) = &ctx.trait_name
                     && let Ok(shape) = parse_fn(&rest.clone().into_iter().collect::<Vec<_>>())
                 {
-                    let m = &shape.name;
-                    let self_ty = &ctx.self_ty;
-                    let tr_path: String = ctx.trait_toks.iter().map(ToString::to_string).collect();
+                    let m = strict::bare(&shape.name).to_string();
+                    strict_methods.push(m.clone());
                     let krate_path = args.krate.clone().unwrap_or_else(strict::default_krate);
-                    let krate_str: String = krate_path.into_iter().map(|t| t.to_string()).collect();
-                    // Mirrors the driver's `Mark::weaker_than` as far as a certificate
-                    // carries it: the allocation bound and panic strictness. The kind
-                    // is always `fip` (no strict `#[fbip]`), so there is nothing to
-                    // compare; `param(..)` is not compared by the driver either.
-                    let impl_name = format!("{self_ty}__{t}__{m}");
-                    let contract_name = format!("{t}__{m}");
-                    let check_str = format!(
-                        "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, dead_code, clippy::all, clippy::pedantic)] \
-                         const _: () = {{ let impl_cert = __fip_strict_{self_ty}__{t}__{m}; \
-                         let contract_cert = <dyn {tr_path}>::__fip_strict_{m}; \
-                         let impl_allocs = {krate_str}::Cert::allocs_for(impl_cert, {impl_name:?}); \
-                         let contract_allocs = {krate_str}::Cert::allocs_for(contract_cert, {contract_name:?}); \
-                         ::core::assert!(impl_allocs <= contract_allocs, {:?}); \
-                         ::core::assert!(!{krate_str}::Cert::no_panic_macros_for(contract_cert, {contract_name:?}) \
-                         || {krate_str}::Cert::no_panic_macros_for(impl_cert, {impl_name:?}), {:?}); }};",
-                        "#[fip_impl]: impl certificate is weaker than contract (more allocations)",
-                        "#[fip_impl]: impl certificate is weaker than contract (the contract has `panic_macros = false`, the implementation does not)"
-                    );
-                    if let Ok(ts) = check_str.parse::<TokenStream>() {
-                        module_items.extend(ts);
+                    if first_krate.is_none() {
+                        first_krate = Some(krate_path.clone());
+                    }
+                    if check.compare {
+                        module_items.extend(contract_comparison(ctx, t, &m, &krate_path));
                     }
                 }
-                new_body.extend(checked_marker(&item_toks[at], &item_toks[at + 1]));
                 new_body.extend(f);
             }
             Err(errors) => {
@@ -3862,12 +4590,86 @@ fn rewrite_impl_body(
             }
         }
     }
+    if let Some(t) = &ctx.trait_name {
+        let krate_path = first_krate
+            .or_else(|| krate.cloned())
+            .unwrap_or_else(strict::default_krate);
+        let tr: TokenStream = ctx.trait_toks.iter().cloned().collect();
+        if !strict_methods.is_empty() {
+            module_items.extend(trait_identity_items(&ctx.self_ty, t, &tr));
+        }
+        if check.complete {
+            let names: Vec<String> = strict_methods.iter().map(|m| format!("{m:?}")).collect();
+            let src = format!(
+                "#[doc(hidden)] #[allow(clippy::all, clippy::pedantic)] const _: () = ::core::assert!(__FIP_KRATE__::contracted_covered(<dyn __FIP_TRAIT__>::__FIP_CONTRACTED, &[{}]), {:?});",
+                names.join(", "),
+                "#[fip_impl(contract)]: a method with a strict contract in the trait is not implemented in this block with `#[fip(strict = true)]`, so its contract is not checked"
+            );
+            module_items.extend(subst(
+                ts_of(&src),
+                &[("__FIP_KRATE__", &krate_path), ("__FIP_TRAIT__", &tr)],
+            ));
+        }
+    }
     Ok((module_items, new_body))
 }
 
-/// `#[<path>(__fip_impl_checked)]` with the original attribute path, so the user's
-/// `use fip_macros::fip` stays in use and `#[fip]` passes the method through.
-fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
+fn ts_of(s: &str) -> TokenStream {
+    s.parse().unwrap_or_default()
+}
+
+/// The compile-time comparison of the impl certificate of `m` with its contract,
+/// mirroring the driver's `Mark::weaker_than` as far as a certificate carries it:
+/// the allocation bound and panic strictness. The kind is always `fip` (no strict
+/// `#[fbip]`), so there is nothing to compare; `param(..)` is not compared by the
+/// driver either. A method of the trait without a strict contract reads the local
+/// fallback constant instead (an inherent associated constant of `dyn Trait`, the
+/// contract, takes precedence over a trait's), which any certificate satisfies.
+fn contract_comparison(ctx: &ImplCtx, t: &str, m: &str, krate: &TokenStream) -> TokenStream {
+    let self_ty = &ctx.self_ty;
+    let impl_name = format!("{self_ty}__{t}__{m}");
+    let contract_name = format!("{t}__{m}");
+    let src = format!(
+        "#[doc(hidden)] #[allow(non_upper_case_globals, non_snake_case, non_camel_case_types, dead_code, clippy::all, clippy::pedantic)] \
+         const _: () = {{ \
+         trait __FipNoContract {{ const __fip_strict_{m}: __FIP_KRATE__::Cert = unsafe {{ __FIP_KRATE__::Cert::assume({contract_name:?}, u64::MAX) }}; }} \
+         impl<__FipT: ?Sized> __FipNoContract for __FipT {{}} \
+         let impl_cert = __fip_strict_{impl_name}; \
+         let contract_cert = <dyn __FIP_TRAIT__>::__fip_strict_{m}; \
+         let impl_allocs = __FIP_KRATE__::Cert::allocs_for(impl_cert, {impl_name:?}); \
+         let contract_allocs = __FIP_KRATE__::Cert::allocs_for(contract_cert, {contract_name:?}); \
+         ::core::assert!(impl_allocs <= contract_allocs, {:?}); \
+         ::core::assert!(!__FIP_KRATE__::Cert::no_panic_macros_for(contract_cert, {contract_name:?}) \
+         || __FIP_KRATE__::Cert::no_panic_macros_for(impl_cert, {impl_name:?}), {:?}); }};",
+        "#[fip_impl]: impl certificate is weaker than contract (more allocations)",
+        "#[fip_impl]: impl certificate is weaker than contract (the contract has `panic_macros = false`, the implementation does not)"
+    );
+    let tr: TokenStream = ctx.trait_toks.iter().cloned().collect();
+    subst(
+        ts_of(&src),
+        &[("__FIP_KRATE__", krate), ("__FIP_TRAIT__", &tr)],
+    )
+}
+
+/// Items a strict caller of `<Type as path::Trait>::m` checks its trait path
+/// against (`strict::TraitCheck`): `__fip_traitid_<Type>__<Trait>::<T>()` requires
+/// `T:` the impl's trait, and `__fip_traitsup_<Type>__<Trait>` has it as supertrait.
+fn trait_identity_items(self_ty: &str, t: &str, tr: &TokenStream) -> TokenStream {
+    let key = format!("{self_ty}__{t}");
+    let src = format!(
+        "#[doc(hidden)] #[allow(non_snake_case, dead_code, private_bounds, private_interfaces, clippy::all, clippy::pedantic)] \
+         pub fn __fip_traitid_{key}<__FipT: ?Sized + __FIP_TRAIT__>() {{}} \
+         #[doc(hidden)] #[allow(non_camel_case_types, dead_code, private_bounds, clippy::all, clippy::pedantic)] \
+         pub trait __fip_traitsup_{key}: __FIP_TRAIT__ {{}} \
+         #[allow(clippy::all, clippy::pedantic)] \
+         impl<__FipT: ?Sized + __FIP_TRAIT__> __fip_traitsup_{key} for __FipT {{}}"
+    );
+    subst(ts_of(&src), &[("__FIP_TRAIT__", tr)])
+}
+
+/// `const _: () = { use <path> as _; };` for the path of the attribute `#[path(..)]`,
+/// so an import of the attribute macro used only inside `#[fip_impl]` stays used.
+fn attr_path_use(attr: &TokenTree) -> TokenStream {
     let mut path: Vec<TokenTree> = match attr {
         TokenTree::Group(g) => g.stream().into_iter().collect(),
         _ => Vec::new(),
@@ -3878,16 +4680,12 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
     {
         path.pop();
     }
-    let mut inner: TokenStream = path.into_iter().collect();
-    inner.extend([TokenTree::Group(Group::new(
-        Delimiter::Parenthesis,
-        TokenStream::from(TokenTree::Ident(Ident::new(
-            IMPL_CHECKED,
-            Span::call_site(),
-        ))),
-    ))]);
-    let mut out = TokenStream::from(hash.clone());
-    out.extend([TokenTree::Group(Group::new(Delimiter::Bracket, inner))]);
+    let mut inner = ts_of("#[allow(unused_imports)] use");
+    inner.extend(path);
+    inner.extend(ts_of("as _;"));
+    let mut out = ts_of("const _: () =");
+    out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
+    out.extend(ts_of(";"));
     out
 }
 
@@ -4055,12 +4853,17 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         recursion: Vec::new(),
     };
     scan.stream(body.clone(), false);
+    let mut shadowed = Vec::new();
+    strict::bound_names(toks[..body_start].iter().cloned().collect(), &mut shadowed);
+    strict::bound_names(body.clone(), &mut shadowed);
     let mut strict_scan = strict::StrictScan {
         krate,
         no_panic_macros: no_panic,
+        shadowed,
+        keep_tokens: strict::under_verus(),
         ..strict::StrictScan::default()
     };
-    strict_scan.stream(body, false);
+    let emitted = strict_scan.stream_expr(body);
     let mut errors = TokenStream::new();
     for s in scan.sites.iter().filter(|s| s.in_loop) {
         errors.extend(compile_error(
@@ -4083,7 +4886,8 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         );
     }
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
-    let closure: TokenStream = toks.into_iter().collect();
+    let mut closure: TokenStream = toks[..body_start].iter().cloned().collect();
+    closure.extend(emitted);
     fip_fn_wrapper(
         &strict_scan.krate(),
         limited(strict_scan.emit_fip_fn_bound(local), limit),
@@ -4556,11 +5360,21 @@ fn fip_fn_path(
     scan.stream(as_call.clone(), false);
     let mut strict_scan = strict::StrictScan {
         krate,
+        keep_tokens: true,
         ..strict::StrictScan::default()
     };
     strict_scan.stream(as_call, false);
     if let Some((sp, msg)) = strict_scan.errors.first() {
         return compile_error(*sp, &format!("fip_fn! strict: {msg}"));
+    }
+    if strict_scan.ctor_calls > 0 {
+        // A capitalised path is accepted in a strict call only as a constructor,
+        // which the rewritten call `Name { 0: .. }` proves; a path has no call to
+        // rewrite, so it could name a function, `static` or `const`.
+        return compile_error(
+            toks.first().map_or_else(Span::call_site, TokenTree::span),
+            "fip_fn!: a capitalised path (a constructor, or a function, `static` or `const` named like one) cannot be certified; wrap a constructor in a closure, e.g. `fip_fn!(|x: T| Name(x))`",
+        );
     }
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
     let mut bound = TokenStream::new();

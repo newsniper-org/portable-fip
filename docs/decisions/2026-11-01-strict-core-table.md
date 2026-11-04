@@ -114,6 +114,36 @@ it, are compile errors. Residual: a type with **defaulted** parameters
 (`struct Foo<T = u8>`) written as `impl Foo` covers only the default; the macro
 cannot see the definition. Trait default methods get no certificate.
 
+**Strict contracts (amended 2026-11-04).** A `#[fip_trait]` contract is a `Cert`
+that strict callers pay for whatever implementation runs (`x.m()` on `&dyn Tr` or a
+`T: Tr`). Before, the trait was an ordinary trait and a plain `impl Tr for Evil`
+with an allocating `m` made a strict caller certify 0 with no `unsafe` anywhere
+(measured: cert 0, 1 allocation). Now a trait with a strict contract must be an
+`unsafe trait`, so every implementation either is a visible `unsafe impl` or is
+written under `#[fip_impl(contract)]`, which checks every method of
+`<dyn Tr>::__FIP_CONTRACTED` (emitted by `#[fip_trait]`) is a strict method of the
+block whose certificate is at most the contract (allocations, `panic_macros`), and
+emits the `unsafe` itself. `#[fip_impl]` on a plain `impl Tr for Type` compares
+nothing, as on `main` (the stack had made it always read `<dyn Tr>::__fip_strict_m`,
+which broke plain traits with E0599 and non-dyn-compatible ones such as `Clone` with
+E0038, measured). A strict method that the trait does not contract reads a local
+fallback constant (an inherent associated constant of `dyn Tr` takes precedence over
+a trait's), so a contracted trait may have strict implementations of other methods.
+A crate with `#![forbid(unsafe_code)]` can implement but not declare such a trait.
+
+**Trait identity (2026-11-04).** `<Foo as a::Tr>::m` used to read the certificate
+named by the trait's last segment, so a strict `impl b::Tr for Foo` certified an
+allocating `impl a::Tr for Foo` (measured: cert 0, 1 allocation). A trait impl with a
+strict method now also emits `__fip_traitid_Foo__Tr<T: ?Sized + b::Tr>()` and `trait
+__fip_traitsup_Foo__Tr: b::Tr`; the caller's checks require its trait to imply the
+impl's and the impl's to imply its own, which for two distinct traits needs mutual
+supertraits (a cycle) or blanket impls. Residual: `trait a::Tr: b::Tr` plus a blanket
+`impl<T: b::Tr> a::Tr for T`, both named `Tr` with a method `m`, passes the check
+while `<Foo as a::Tr>::m` runs the blanket impl; not reachable without writing both.
+In a trait impl `self.m()` is rejected (it may pick an inherent method, and it read
+the contract instead of the impl's certificate, so `m -> k -> m` through `self`
+compiled with certificates 0, measured): write `<Self as Tr>::m(self)`.
+
 ### Certified closures: `fip_strict::Certified`
 
 `fip_fn!(|x: T| ..)` expands to
@@ -263,7 +293,15 @@ A certificate is a claim. Writing one by hand needs `unsafe`
   `unsafe impl FipBound`);
 - elsewhere it is visible, and `fip_testkit::certs::hand_written` lists every
   occurrence (`Cert::assume` — which also matches `Certified::assume` —,
-  `unsafe impl … FipBound`, and any `__fip_strict_` identifier in source).
+  `unsafe impl … FipBound`, and any `__fip_strict_` identifier in source);
+- two attributes turn a written claim into a certificate, and each needs a visible
+  `unsafe` since 2026-11-04: `#[fip_extern]` (foreign-function certificates) requires
+  an `unsafe extern` block, also in edition 2021 where a plain `extern` block was
+  accepted and not linted (before: a `Cert` with a chosen bound under
+  `#![forbid(unsafe_code)]`, measured; `fip_testkit::certs` now lists `fip_cert(`),
+  and a `#[fip_trait]` strict contract requires an `unsafe trait` (above). A foreign
+  function certified with `frees = true` / `kind = "fbip"` gets no `Cert` (before: a
+  `Cert` with bound 0, so a strict caller could free).
 
 The hand-written certificates in this repository live in `fip_strict::certs` and are
 re-exported by `fip-core` and `fip-alloc` next to the functions, so those crates keep
@@ -279,6 +317,32 @@ re-exports in each crate):
 
 `fip_core::strict::*` and the internal `swap_lt` carry generated certificates
 (`#[fip(strict = true)]` in plain builds).
+
+## Name resolution the tokens cannot see (audit 2026-11-04)
+
+Each of these made a strict certificate lower than what the function allocates,
+without `unsafe` (probes and measured counts in the commit messages):
+
+| gap | before | now |
+|---|---|---|
+| capitalised callee (`Evil()`, `G()` for a `fn` parameter, `fip_fn!(Evil)`) | taken for a constructor: cert 0, 1 allocation | `Name(a, b)` is emitted as `(Name { 0: a, 1: b })`, which rustc accepts only for a tuple struct or variant (also in patterns); `fip_fn!` of a capitalised path is rejected |
+| call through a block or field (`{ f }(x)`, `if c { f } else { g }(x)`, `s.0(x)`) | cert 0, 1 allocation | rejected, except a block that ends a statement |
+| `core::mem::swap` with a local `mod core` | cert 0, 1 allocation | table functions only by absolute `::core::` / `::std::` path |
+| local `macro_rules! assert`, `my::assert!`, a `proof!` that keeps its contents (strict and `#[fip]`) | cert 0, 1-2 allocations | bare panicking macros are emitted as `::core::assert!` etc.; a path must be `::core::` / `::std::`; a bare ghost macro is emitted as `const { proof! {} };` (contents dropped, the macro still used, no run-time code) |
+| `vec![e; n]`, `format!` | cert 1, 10 / 51 allocations | rejected; `vec![a, b]` only as `::std::vec!` / `::alloc::vec!` |
+| `param(g)` or contract parameter rebound (`let g = Evil; g.call(..)`) | cert 0, 1 allocation | emitted as `(&g as &G).call(..)` / `Tr::m(x, ..)`: a type error |
+| a local binding, nested `fn` or block-level `use` named like a strict function | cert 0, 1 allocation | bare calls of locally bound names and items in strict bodies are rejected |
+| `for i in { 0..n } { .. }`, `while { c } { .. }`, allocation in a `while` condition (strict and `#[fip(N)]`) | body taken as outside the loop: 50 allocations at bound 1 | header parsed as an expression without struct literals; the `while` header and every closure body count as in the loop |
+| `for x in user_iterator` | cert 0, 6 allocations in `next` | a strict `for` iterates over a range only |
+| `T::m()` for a generic `T`, `fn Evil__new` | the certificate of a type named `T`, of `Evil::new`: cert 0 | a generic parameter reads its trait's contract; name parts containing `__` or starting or ending with `_` are rejected |
+| `fn f` and `fn check_f` | E0428 on `__fip_strict_check_f` | the check constant is `__fip_check_<name>` |
+| strict associated function in a plain `impl` | accepted, bound checked only by `cargo build` | rejected where the source file shows the `impl` block |
+
+`fip_testkit::certs::hand_written` now also lists `fip_cert(`, `#[fip(evidence ..)]`,
+`macro_rules! fip_fn` and `use .. as fip_fn` (`fip_fn!` is recognised by its last
+segment). Measured cost: valid code changes only for `core` table calls (relative
+paths: 6 in `fip-core`/`fip-alloc`, 18 in tests, all rewritten), `vec!` spellings,
+and `self.m()` in trait impls.
 
 ## What strict does not cover
 
@@ -298,6 +362,11 @@ Measured in `fip-macros/tests/strict_gaps.rs`; each is accepted with bound 0:
   bound `ALLOCS <= K` needs `generic_const_exprs` (unstable).
 - **`use` aliases** of table functions are rejected by design (the macro does not
   resolve names).
+- **Local types named like std heap types** (CAUGHT by `fip-prelint`): `struct Vec`
+  with an allocating `Vec::new` is counted as the std constructor (cert 0, 1
+  allocation, measured); the driver reports it ("may allocate 1 time(s)", measured).
+- **A user macro named `fip_fn`**: its arguments are skipped as `fip_fn!`'s are;
+  `fip_testkit::certs` lists its definition or rename.
 
 ## What would reopen this
 

@@ -109,7 +109,7 @@ and `fip_strict`) passes the path instead of depending on `fip-strict` directly:
 
 ```rust
 #[fip(strict = true, crate = my_facade::fip_strict)]
-fn f(a: &mut u8, b: &mut u8) { core::mem::swap(a, b) }
+fn f(a: &mut u8, b: &mut u8) { ::core::mem::swap(a, b) }
 
 #[fip_impl(crate = my_facade::fip_strict)] // inherited by the strict methods
 impl Slot { /* … */ }

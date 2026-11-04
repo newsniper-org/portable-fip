@@ -188,7 +188,7 @@ verify-negative: verify-strict verify-core
     expect_verus_fail dedup-wrong-compare  fip-core  slice.rs '/^pub fn dedup_by</,/^}/ s/same(&xs\[w - 1\], &xs\[r\])/same(\&xs[r - 1], \&xs[r])/' "$errs"
     expect_verus_fail compact-map-no-swap  fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^                swap_lt(xs, w, r);$//' "$errs"
     expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$errs"
-    expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    core::mem::swap(&mut \*cell, &mut prev);$//' "$errs"
+    expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$//' "$errs"
     # Strict variants (`FipFn` callables), same mutations.
     expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$errs"
     expect_verus_fail strict-map-skips-store     fip-core strict.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$errs"

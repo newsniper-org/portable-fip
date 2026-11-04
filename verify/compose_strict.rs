@@ -17,7 +17,7 @@ use fip_strict::FipFn;
     ensures *final(a) == *old(b), *final(b) == *old(a),
 ))]
 pub fn swap2(a: &mut u32, b: &mut u32) {
-    core::mem::swap(a, b);
+    ::core::mem::swap(a, b);
 }
 
 #[fip(strict = true)]

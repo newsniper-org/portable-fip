@@ -20,7 +20,7 @@ use fip_testkit::{assert_fip, assert_fip_n};
 fip_testkit::install!();
 
 mod shapes {
-    use fip_macros::{fip, fip_impl, fip_trait};
+    use fip_macros::{fip, fip_impl};
 
     pub struct Slot<T> {
         pub v: T,
@@ -40,9 +40,7 @@ mod shapes {
         }
     }
 
-    #[fip_trait]
     pub trait Step {
-        #[fip(strict = true)]
         fn step(&self, x: u32) -> u32;
     }
 
@@ -166,7 +164,7 @@ fn certified_function_pointers() {
 #[test]
 fn std_and_core_paths() {
     // Audited `core` table: bound 0; a std heap constructor: an allocation site.
-    let sw = fip_fn!(core::mem::swap::<u8>);
+    let sw = fip_fn!(::core::mem::swap::<u8>);
     let (mut a, mut b) = (1_u8, 2_u8);
     sw.call((&mut a, &mut b));
     assert_eq!((a, b), (2, 1));

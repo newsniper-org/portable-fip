@@ -19,12 +19,12 @@ fip_testkit::install!();
 /// Calls only the audited `core` table and certified `fip-core` / `fip-alloc` functions.
 #[fip(strict = true)]
 fn rotate3(a: &mut u32, b: &mut u32, c: &mut u32) -> u32 {
-    core::mem::swap(a, b);
-    std::mem::swap(b, c);
+    ::core::mem::swap(a, b);
+    ::std::mem::swap(b, c);
     let old = fip_core::replace(a, 0);
     let mut xs = [1_u8, 2];
     fip_core::swap(&mut xs, 0, 1);
-    core::hint::black_box(old)
+    ::core::hint::black_box(old)
 }
 
 /// One allocation site, certified with bound 1.
@@ -67,7 +67,7 @@ impl Counter {
     /// the `impl` block by `#[fip_impl]`.
     #[fip(strict = true)]
     pub fn bump(&mut self) -> u32 {
-        let old = core::mem::replace(&mut self.n, 0);
+        let old = ::core::mem::replace(&mut self.n, 0);
         self.n = old + 1;
         old
     }

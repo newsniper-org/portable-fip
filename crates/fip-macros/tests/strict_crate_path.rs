@@ -37,7 +37,7 @@ macro_rules! my_fip_fn {
 
 #[fip(strict = true, crate = shim)]
 fn swap2(a: &mut u8, b: &mut u8) {
-    core::mem::swap(a, b);
+    ::core::mem::swap(a, b);
 }
 
 #[fip(1, strict = true, crate = "facade::fip_strict")]
@@ -69,7 +69,7 @@ impl<T> Slot<T> {
     /// Inherits the block's path.
     #[fip(strict = true)]
     pub fn put(s: &mut Slot<T>, v: T) -> T {
-        core::mem::replace(&mut s.v, v)
+        ::core::mem::replace(&mut s.v, v)
     }
 
     /// Its own path wins over the block's. Returns both old values (dropping a `T`

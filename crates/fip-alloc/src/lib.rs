@@ -51,7 +51,7 @@ use vstd::prelude::*;
 pub fn refill<T>(cell: Box<T>, value: T) -> (Box<T>, T) {
     let mut cell = cell;
     let mut prev = value;
-    core::mem::swap(&mut *cell, &mut prev);
+    ::core::mem::swap(&mut *cell, &mut prev);
     (cell, prev)
 }
 

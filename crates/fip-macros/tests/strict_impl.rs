@@ -4,7 +4,10 @@
 //! `#[fip_impl]`: certificates for methods of generic types and for trait-impl
 //! methods, called from strict code; allocation behaviour measured.
 
-#![forbid(unsafe_code)] // generated certificates still compile
+// `deny`, not `forbid`: the traits with strict contracts below are `unsafe trait`s
+// (allowed there); every other `unsafe` is generated (certificates, the `unsafe` of
+// `#[fip_impl(contract)]` impls) and still compiles.
+#![deny(unsafe_code)]
 #![allow(clippy::unnecessary_box_returns)]
 
 use fip_macros::fip;
@@ -25,7 +28,7 @@ mod shapes {
         /// Generic method on a generic type: certificate `__fip_strict_Slot__put`.
         #[fip(strict = true)]
         pub fn put(&mut self, v: T) -> T {
-            core::mem::replace(&mut self.v, v)
+            ::core::mem::replace(&mut self.v, v)
         }
 
         /// Calls another method through `Self`.
@@ -47,12 +50,30 @@ mod shapes {
         }
     }
 
-    /// A trait with an in-place step.
-    #[fip_trait]
+    /// A trait with an in-place step (no strict contract: `#[fip_impl]` only
+    /// certifies its implementations).
     pub trait Step {
         /// Advances in place, returns the previous state.
-        #[fip(strict = true)]
         fn step(&mut self) -> u32;
+    }
+
+    /// A trait with a strict contract: an `unsafe trait`, implemented under
+    /// `#[fip_impl(contract)]`, which checks the implementation against the contract
+    /// and writes the `unsafe` of the `impl`.
+    ///
+    /// # Safety
+    ///
+    /// An implementation keeps the strict contracts of its methods
+    /// (`#[fip_impl(contract)]` checks it).
+    #[fip_trait]
+    #[allow(
+        unsafe_code,
+        reason = "a trait with a strict contract is an `unsafe trait`"
+    )]
+    pub unsafe trait Walk {
+        /// Advances in place, returns the new state.
+        #[fip(strict = true)]
+        fn walk(&mut self) -> u32;
     }
 
     /// A non-generic type.
@@ -65,7 +86,7 @@ mod shapes {
         /// Trait-impl method: certificate `__fip_strict_Ticker__Step__step`.
         #[fip(strict = true)]
         fn step(&mut self) -> u32 {
-            let old = core::mem::replace(&mut self.n, 0);
+            let old = ::core::mem::replace(&mut self.n, 0);
             self.n = old + 1;
             old
         }
@@ -80,18 +101,60 @@ mod shapes {
         }
     }
 
+    #[fip_impl(contract)]
+    impl Walk for Ticker {
+        #[fip(strict = true)]
+        fn walk(&mut self) -> u32 {
+            self.n += 1;
+            self.n
+        }
+    }
+
     /// A contract with `panic_macros = false`: an implementation must be checked
     /// with `panic_macros = false` too (`#[fip_impl]` compares the certificates).
+    ///
+    /// # Safety
+    ///
+    /// An implementation keeps the strict contracts of its methods
+    /// (`#[fip_impl(contract)]` checks it).
     #[fip_trait]
-    pub trait Peek {
+    #[allow(
+        unsafe_code,
+        reason = "a trait with a strict contract is an `unsafe trait`"
+    )]
+    pub unsafe trait Peek {
         #[fip(strict = true, panic_macros = false)]
         fn peek_n(&self) -> u32;
     }
 
-    #[fip_impl]
+    #[fip_impl(contract)]
     impl Peek for Ticker {
         #[fip(strict = true, panic_macros = false)]
         fn peek_n(&self) -> u32 {
+            self.n
+        }
+    }
+
+    /// A contract on a raw-identifier method (before: "prefix `__fip_strict_r` is
+    /// unknown").
+    ///
+    /// # Safety
+    ///
+    /// An implementation keeps the strict contract of `type`.
+    #[fip_trait]
+    #[allow(
+        unsafe_code,
+        reason = "a trait with a strict contract is an `unsafe trait`"
+    )]
+    pub unsafe trait Typed {
+        #[fip(strict = true)]
+        fn r#type(&self) -> u32;
+    }
+
+    #[fip_impl(contract)]
+    impl Typed for Ticker {
+        #[fip(strict = true)]
+        fn r#type(&self) -> u32 {
             self.n
         }
     }
@@ -115,7 +178,13 @@ mod shapes {
     }
 }
 
-use shapes::{Slot, Step, Ticker};
+use shapes::{Slot, Step, Ticker, Typed, Walk};
+
+/// Through the raw-identifier contract.
+#[fip(strict = true)]
+fn typed(t: &dyn Typed) -> u32 {
+    t.r#type()
+}
 
 /// Calls generic methods by a module path; the certificate is read from
 /// `shapes::__fip_strict_Slot__put`.
@@ -151,16 +220,18 @@ fn slot_step(s: &mut Slot<u8>) -> u32 {
     <shapes::Slot<u8> as Step>::step(s)
 }
 
-/// Strict caller through `dyn Step`.
+/// Strict caller through `dyn Walk` (the contract's bound).
 #[fip(strict = true)]
-fn step_dyn(s: &mut dyn Step) -> u32 {
-    s.step()
+fn walk_dyn(s: &mut dyn Walk) -> u32 {
+    s.walk()
 }
 
-/// Strict caller through generic `S: Step`.
+/// Strict caller through generic `S: Walk`, by method and by path.
 #[fip(strict = true)]
-fn step_gen<S: Step>(s: &mut S) -> u32 {
-    s.step()
+fn walk_gen<S: Walk>(s: &mut S) -> u32 {
+    s.walk();
+    S::walk(s);
+    <S as Walk>::walk(s)
 }
 
 #[test]
@@ -175,10 +246,12 @@ fn generic_and_trait_methods_are_callable_from_strict_code() {
     assert_eq!(assert_fip!(both_steps(&mut t)), (5, 16));
     assert_eq!(assert_fip!(t.trait_step()), 16);
     assert_eq!(Step::step(&mut t), 17);
-    assert_eq!(assert_fip!(step_dyn(&mut t)), 18);
-    assert_eq!(assert_fip!(step_gen(&mut t)), 19);
+    assert_eq!(assert_fip!(walk_dyn(&mut t)), 19);
+    assert_eq!(assert_fip!(walk_gen(&mut t)), 22);
     assert_eq!(assert_fip!(slot_step(&mut s)), 7);
-    assert_eq!(assert_fip!(shapes::Peek::peek_n(&t)), 20);
+    assert_eq!(assert_fip!(shapes::Peek::peek_n(&t)), 22);
+    assert_eq!(assert_fip!(typed(&t)), 22);
+    assert_eq!(<dyn Typed>::__fip_strict_type.name(), "Typed__type");
 }
 
 #[test]
@@ -192,10 +265,11 @@ fn certificates_are_named_after_type_trait_and_method() {
     assert_eq!(shapes::__fip_strict_Ticker__step.name(), "Ticker__step");
     assert_eq!(shapes::__fip_strict_Slot__Step__step.allocs(), 0);
     assert_eq!(__fip_strict_box_it.allocs_for("box_it"), 1);
-    assert_eq!(shapes::__fip_strict_Step__step.name(), "Step__step");
-    assert_eq!(<dyn Step>::__fip_strict_step.allocs(), 0);
+    assert_eq!(shapes::__fip_strict_Walk__walk.name(), "Walk__walk");
+    assert_eq!(<dyn Walk>::__fip_strict_walk.allocs(), 0);
+    assert_eq!(<dyn Walk>::__FIP_CONTRACTED, &["walk"]);
     // Panic strictness is part of the certificate.
-    assert!(!<dyn Step>::__fip_strict_step.no_panic_macros());
+    assert!(!<dyn Walk>::__fip_strict_walk.no_panic_macros());
     assert!(<dyn shapes::Peek>::__fip_strict_peek_n.no_panic_macros());
     assert!(shapes::__fip_strict_Ticker__Peek__peek_n.no_panic_macros_for("Ticker__Peek__peek_n"));
     assert!(!shapes::__fip_strict_Ticker__step.no_panic_macros());

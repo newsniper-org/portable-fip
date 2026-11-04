@@ -24,7 +24,7 @@ fip_testkit::install!();
 /// The motivating case: take a vector out, leaving an empty one.
 #[fip]
 fn take(v: &mut Vec<u8>) -> Vec<u8> {
-    core::mem::replace(v, Vec::new())
+    ::core::mem::replace(v, Vec::new())
 }
 
 #[fip]
@@ -100,8 +100,8 @@ fn binary_heap_default() -> BinaryHeap<u8> {
 /// Strict mode accepts them without a certificate, with bound 0, also by full path.
 #[fip(strict = true)]
 fn strict_take(v: &mut Vec<u8>, s: &mut String) -> (Vec<u8>, String) {
-    let old = core::mem::replace(v, std::vec::Vec::new());
-    (old, core::mem::replace(s, alloc_string()))
+    let old = ::core::mem::replace(v, std::vec::Vec::new());
+    (old, ::core::mem::replace(s, alloc_string()))
 }
 
 /// `alloc::` path, as `no_std` code writes it.

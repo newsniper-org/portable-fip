@@ -9,7 +9,16 @@
 //! - `Cert::assume` (a hand-made `fip_strict::Cert`);
 //! - `unsafe impl` of `FipBound` (a hand-made value certificate);
 //! - any identifier starting with `__fip_strict_` (a certificate defined or
-//!   re-exported by hand, including `use a::__fip_strict_g as __fip_strict_f;`).
+//!   re-exported by hand, including `use a::__fip_strict_g as __fip_strict_f;`);
+//! - a foreign-function certificate: `#[fip_cert(..)]`, or `#[fip(..)]` / `#[fbip(..)]`
+//!   with `evidence = ".."` (inside `#[fip_extern]`, which emits the `Cert` itself;
+//!   its `unsafe extern` block is the visible `unsafe`);
+//! - a macro that strict mode trusts by name: `macro_rules! fip_fn` or a `use .. as
+//!   fip_fn` (strict bodies skip the arguments of `fip_fn!`, which `fip_fn!` checks
+//!   itself).
+//!
+//! Not listed: an `unsafe impl` of a trait with strict contracts (`#[fip_trait]`
+//! requires an `unsafe trait`); it is visible as `unsafe impl` in review.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,7 +44,11 @@ pub fn hand_written(dir: &Path) -> Vec<Occurrence> {
             let code = line.split("//").next().unwrap_or("");
             let hit = code.contains("Cert::assume")
                 || (code.contains("unsafe impl") && code.contains("FipBound"))
-                || code.contains("__fip_strict_");
+                || code.contains("__fip_strict_")
+                || code.contains("fip_cert(")
+                || (code.contains("evidence") && (code.contains("fip(") || code.contains("fbip(")))
+                || code.contains("macro_rules! fip_fn")
+                || code.contains("as fip_fn");
             if hit {
                 out.push((f.clone(), n + 1, line.trim().to_string()));
             }
@@ -69,12 +82,16 @@ mod tests {
              pub const __fip_strict_f: fip_strict::Cert = unsafe { fip_strict::Cert::assume(0) };\n\
              unsafe impl fip_strict::FipBound for W { const ALLOCS: u64 = 0; }\n\
              pub use m::__fip_strict_g as __fip_strict_h;\n\
-             fn clean() {}\n",
+             fn clean() {}\n\
+             #[fip_cert(evidence = \"C standard\", allocs = 0)]\n\
+             #[fip(evidence = \"audit\")]\n\
+             macro_rules! fip_fn { () => {} }\n\
+             use m::f as fip_fn;\n",
         )
         .expect("write");
         let found = hand_written(&dir);
         fs::remove_dir_all(&dir).expect("cleanup");
         let lines: Vec<usize> = found.iter().map(|o| o.1).collect();
-        assert_eq!(lines, vec![2, 3, 4]);
+        assert_eq!(lines, vec![2, 3, 4, 6, 7, 8, 9]);
     }
 }

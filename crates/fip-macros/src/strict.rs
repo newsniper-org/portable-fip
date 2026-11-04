@@ -22,20 +22,29 @@
 //! Certificates are named after the callee as written: `f(..)` / `a::f(..)` use
 //! `__fip_strict_f`; `Type::m(..)` / `a::Type::m(..)` / `<Type<..>>::m(..)` use
 //! `__fip_strict_Type__m` (module-level, emitted by `#[fip_impl]`); `<Type as Tr>::m(..)`
-//! uses `__fip_strict_Type__Tr__m`; `Self` stands for the `#[fip_impl]` type. The bound
-//! is read through `Cert::allocs_for("<name>")`, so a certificate imported under
+//! uses `__fip_strict_Type__Tr__m` (and checks that `Tr` is the impl's trait, see
+//! [`TraitCheck`]); `Self` stands for the `#[fip_impl]` type; a generic parameter `T`
+//! in `T::m(..)` stands for its trait's contract. Name parts must not contain `__` or
+//! start or end with `_` ([`segment_error`]), so two callees never share a name. The
+//! bound is read through `Cert::allocs_for("<name>")`, so a certificate imported under
 //! another function's name fails constant evaluation.
 //!
-//! What a token-level macro cannot resolve is rejected rather than trusted: method
-//! calls (`x.m()`), calls through expressions (`(f)(x)`, `a[i](x)`), generic arguments
-//! inside a callee path (`Foo::<u8>::m`; write `<Foo<u8>>::m`), generic traits in a
-//! qualified path, the `?` operator, and macros outside a small allowlist. A
+//! What a token-level macro cannot resolve is rejected rather than trusted, or made
+//! irrelevant by rewriting the emitted body ([`StrictScan::stream`]): method calls
+//! (`x.m()`, except `param(..)` and contract parameters, emitted as type-checked path
+//! calls), calls through expressions (`(f)(x)`, `a[i](x)`, `{ f }(x)`, `s.0(x)`),
+//! capitalised callees other than constructors (`Name(..)` is emitted as
+//! `(Name { 0: .. })`), relative `core` table paths, bare calls of names bound
+//! locally, item declarations in the body, `for` loops over non-ranges, generic
+//! arguments inside a callee path (`Foo::<u8>::m` is read as `<Foo<u8>>::m`), generic
+//! traits in a qualified path, the `?` operator, and macros outside a small allowlist
+//! (panicking macros are emitted as `::core::..`; ghost-code macros are emptied). A
 //! `fip_fn!(..)` argument is skipped: `fip_fn!` checks its closure itself, and a call
 //! of it is bounded by the `param(..)` of the function it is passed to.
 
-use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
+use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
-use crate::{GHOST_MACROS, is_group, is_ident, is_punct};
+use crate::{GHOST_MACROS, flow, is_group, is_ident, is_punct};
 use fip_lint_rules::CORE_TABLE;
 use fip_lint_rules::callee::{self, Callee as Callee2};
 
@@ -106,11 +115,26 @@ enum Callee {
     /// `a::b::name` / `name`: the path tokens before the name, with the trailing `::`.
     Path(Vec<TokenTree>),
     /// `<Ty as Tr>::name` / `<Ty>::name`: the type path without generic arguments,
-    /// and the trait's last segment.
+    /// and the trait path as written (its last segment is the trait's name).
     Qualified {
         ty: Vec<TokenTree>,
-        tr: Option<Ident>,
+        tr: Option<Vec<TokenTree>>,
     },
+}
+
+/// A strict call `<Type as path::Trait>::m(..)` of a trait-impl certificate
+/// `__fip_strict_Type__Trait__m`: the certificate names the trait by its last
+/// segment only, so the generated code also checks that the caller's trait is the
+/// trait of the `#[fip_impl]` block that made the certificate.
+pub(crate) struct TraitCheck {
+    /// The trait path as the caller wrote it.
+    caller: Vec<TokenTree>,
+    /// The module path of the certificate (the type's), with the trailing `::`.
+    prefix: Vec<TokenTree>,
+    /// `Type__Trait`: the suffix of the impl's `__fip_traitid_` / `__fip_traitsup_`
+    /// items.
+    key: String,
+    span: Span,
 }
 
 #[derive(Default)]
@@ -121,6 +145,8 @@ pub(crate) struct StrictScan {
     pub(crate) errors: Vec<(Span, String)>,
     /// Name of `Self` inside a `#[fip_impl]` block.
     pub(crate) self_ty: Option<String>,
+    /// The trait of the `#[fip_impl]` block (`impl Trait for Type`), for messages.
+    pub(crate) impl_trait: Option<String>,
     /// `panic_macros = false`: reject the panicking macros of [`ALLOWED_MACROS`].
     pub(crate) no_panic_macros: bool,
     /// Path of the `fip_strict` crate in generated code (`crate = ..`); `None` is
@@ -128,10 +154,65 @@ pub(crate) struct StrictScan {
     pub(crate) krate: Option<TokenStream>,
     /// Mapping of parameter name to its trait path and trait name: `(prefix, trait_name)`.
     pub(crate) param_traits: Vec<(String, (Vec<TokenTree>, String))>,
+    /// Generic type parameters of the function and of its `impl` block.
+    pub(crate) generic_params: Vec<String>,
+    /// The first trait bound of a generic type parameter: `(param, (prefix, trait))`.
+    pub(crate) type_bounds: Vec<(String, (Vec<TokenTree>, String))>,
+    /// Names bound in the parameter list or the body (`let`, patterns, closure
+    /// parameters), or used as values: a bare call of such a name may call the local
+    /// binding, not the function whose certificate `__fip_strict_<name>` is read.
+    pub(crate) shadowed: Vec<String>,
     /// `ffi(dep::sym = local::sym, ..)`.
     pub(crate) ffi: Vec<FfiMap>,
     /// Which pairs of `ffi` a call used.
     pub(crate) ffi_used: Vec<bool>,
+    /// Trait identity checks of qualified calls.
+    pub(crate) trait_checks: Vec<TraitCheck>,
+    /// `true` under Verus's driver: the body is emitted as written (see
+    /// [`StrictScan::stream`]).
+    pub(crate) keep_tokens: bool,
+    /// Calls of a capitalised name accepted as constructors.
+    pub(crate) ctor_calls: usize,
+    /// `FipFn::call(&g, ..)`: the index of its argument group in the current list and
+    /// the type of `g`, whose first argument is rewritten to `(&g as &G)`.
+    pub(crate) fipfn_arg: Option<(usize, Option<Ident>)>,
+}
+
+/// `&g, rest..` with the leading `&g` replaced by `(&g as &ty)`.
+fn rewrite_first_ref_arg(args: TokenStream, ty: &Ident) -> TokenStream {
+    let toks: Vec<TokenTree> = args.into_iter().collect();
+    match toks.as_slice() {
+        [amp, TokenTree::Ident(r), rest @ ..] if is_punct(amp, '&') => {
+            let mut out = TokenStream::from(as_param_ref(r, ty));
+            out.extend(rest.iter().cloned());
+            out
+        }
+        _ => toks.into_iter().collect(),
+    }
+}
+
+/// `(&r as &ty)`.
+fn as_param_ref(r: &Ident, ty: &Ident) -> TokenTree {
+    let sp = r.span();
+    let mut inner: TokenStream = [
+        TokenTree::Punct(Punct::new('&', Spacing::Alone)),
+        TokenTree::Ident(r.clone()),
+        ident("as", sp),
+        TokenTree::Punct(Punct::new('&', Spacing::Alone)),
+        TokenTree::Ident(ty.clone()),
+    ]
+    .into_iter()
+    .collect();
+    inner = inner
+        .into_iter()
+        .map(|mut t| {
+            t.set_span(sp);
+            t
+        })
+        .collect();
+    let mut g = Group::new(Delimiter::Parenthesis, inner);
+    g.set_span(sp);
+    TokenTree::Group(g)
 }
 
 fn param_index(params: &[Param], name: &str) -> Option<usize> {
@@ -147,18 +228,235 @@ pub(crate) fn bare(id: &str) -> &str {
     id.strip_prefix("r#").unwrap_or(id)
 }
 
+/// An identifier token for `s` (`r#..` as a raw identifier).
+pub(crate) fn ident(s: &str, span: Span) -> TokenTree {
+    TokenTree::Ident(match s.strip_prefix("r#") {
+        Some(raw) => Ident::new_raw(raw, span),
+        None => Ident::new(s, span),
+    })
+}
+
+/// Why `seg` cannot be a segment of a multi-part certificate name (`Type__m`,
+/// `Type__Trait__m`, `Trait__m`): parts are joined by `__`, so a part containing
+/// `__` or starting or ending with `_` would make two different callees share one
+/// name (`fn Foo__new` and `Foo::new`).
+pub(crate) fn segment_error(seg: &str) -> Option<String> {
+    let s = bare(seg);
+    (s.contains("__") || s.starts_with('_') || s.ends_with('_')).then(|| {
+        format!(
+            "`{s}` cannot be part of a certificate name: names are joined with `__` (`Type__method`), so a type, trait or method name used by strict code must not contain `__` or start or end with `_`"
+        )
+    })
+}
+
+/// [`segment_error`] for the name of a free function (one part, `__fip_strict_f`):
+/// it must not contain `__` after its leading underscores, or it would equal a
+/// multi-part name (`fn Foo__new` and `Foo::new`).
+pub(crate) fn fn_name_error(name: &str) -> Option<String> {
+    let s = bare(name);
+    s.trim_start_matches('_').contains("__").then(|| {
+        format!(
+            "`{s}` cannot be the name of a strict function: certificate names join a type and a method with `__` (`__fip_strict_Type__method`), so a function name containing `__` would share one"
+        )
+    })
+}
+
+/// `::a::b::` / `a::b::` before `toks[i]`: the segment names, whether the path is
+/// absolute (leading `::`), and how many tokens it takes.
+fn path_prefix(toks: &[TokenTree], i: usize) -> (Vec<String>, bool, usize) {
+    let mut segs = Vec::new();
+    let mut k = i;
+    loop {
+        if k >= 2 && is_punct(&toks[k - 1], ':') && is_punct(&toks[k - 2], ':') {
+            if let Some(TokenTree::Ident(id)) = k.checked_sub(3).map(|j| &toks[j]) {
+                segs.push(id.to_string());
+                k -= 3;
+                continue;
+            }
+            segs.reverse();
+            return (segs, true, i - (k - 2));
+        }
+        segs.reverse();
+        return (segs, false, i - k);
+    }
+}
+
+/// What a ghost-code macro invocation `name!(..)` at `toks[i]` becomes outside
+/// Verus: `const { name! {} };`. The contents are not scanned, so they are dropped;
+/// the macro is still invoked (an import or definition of it stays used), with no
+/// input and in a const block, so whatever macro of that name is in scope cannot add
+/// run-time code (code that is not const-evaluable is a compile error there).
+pub(crate) fn ghost_stub(toks: &[TokenTree], i: usize) -> Vec<TokenTree> {
+    let sp = toks[i].span();
+    let mut inner: TokenStream = [toks[i].clone(), toks[i + 1].clone()].into_iter().collect();
+    let mut empty = Group::new(Delimiter::Brace, TokenStream::new());
+    empty.set_span(sp);
+    inner.extend([TokenTree::Group(empty)]);
+    let mut block = Group::new(Delimiter::Brace, inner);
+    block.set_span(sp);
+    let mut out = vec![ident("const", sp), TokenTree::Group(block)];
+    if !toks.get(i + 3).is_some_and(|t| is_punct(t, ';')) {
+        let mut semi = Punct::new(';', Spacing::Alone);
+        semi.set_span(sp);
+        out.push(TokenTree::Punct(semi));
+    }
+    out
+}
+
+/// `::` with `span`.
+fn colons(span: Span) -> [TokenTree; 2] {
+    let mut a = Punct::new(':', Spacing::Joint);
+    a.set_span(span);
+    let mut b = Punct::new(':', Spacing::Alone);
+    b.set_span(span);
+    [TokenTree::Punct(a), TokenTree::Punct(b)]
+}
+
+/// `::<root>::` tokens with `span`.
+fn abs_root(root: &str, span: Span) -> Vec<TokenTree> {
+    let mut out = Vec::new();
+    out.extend(colons(span));
+    out.push(ident(root, span));
+    out.extend(colons(span));
+    out
+}
+
+/// Splits call arguments at top-level commas, keeping commas inside turbofish and
+/// qualified-path angle brackets (`HashMap::<u8, u8>::new()`, `<T as Tr<A, B>>::f`)
+/// and closure parameter lists (`|a, b| a + b`) in their argument. A wrong split is
+/// a compile error in the rewritten constructor (a field that does not parse), never
+/// a different program.
+fn split_args(ts: TokenStream) -> Vec<Vec<TokenTree>> {
+    let toks: Vec<TokenTree> = ts.into_iter().collect();
+    let mut parts: Vec<Vec<TokenTree>> = vec![Vec::new()];
+    let mut angle = 0_i32;
+    let mut in_closure_params = false;
+    for (k, t) in toks.iter().enumerate() {
+        let prev = k.checked_sub(1).map(|j| &toks[j]);
+        let operand_pos = match prev {
+            None => true,
+            Some(TokenTree::Punct(p)) => p.as_char() != '?',
+            Some(TokenTree::Ident(id)) => matches!(id.to_string().as_str(), "move" | "return"),
+            Some(_) => false,
+        };
+        if is_punct(t, '|') && angle == 0 {
+            if in_closure_params {
+                in_closure_params = false;
+            } else if operand_pos
+                && !(matches!(t, TokenTree::Punct(p) if p.spacing() == Spacing::Joint)
+                    && toks.get(k + 1).is_some_and(|n| is_punct(n, '|')))
+            {
+                in_closure_params = true;
+            }
+        } else if is_punct(t, '<') {
+            let turbofish = prev.is_some_and(|p| is_punct(p, ':'));
+            if angle > 0 || turbofish || operand_pos {
+                angle += 1;
+            }
+        } else if is_punct(t, '>') && angle > 0 && !prev.is_some_and(|p| is_punct(p, '-')) {
+            angle -= 1;
+        } else if is_punct(t, ',') && angle == 0 && !in_closure_params {
+            parts.push(Vec::new());
+            continue;
+        }
+        if let Some(last) = parts.last_mut() {
+            last.push(t.clone());
+        }
+    }
+    if parts.last().is_some_and(Vec::is_empty) {
+        parts.pop();
+    }
+    parts
+}
+
+/// Names bound in, or used as values by, `ts`: every identifier that is not
+/// called (`f(..)`), not a macro (`m!`), not a path segment before `::`, not a
+/// method or field (`.f`), and not a keyword; contents of `fip_fn!` and of the ghost
+/// macros are skipped, as the scan skips them.
+pub(crate) fn bound_names(ts: TokenStream, out: &mut Vec<String>) {
+    let toks: Vec<TokenTree> = ts.into_iter().collect();
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i] {
+            TokenTree::Ident(id) => {
+                let s = id.to_string();
+                let next = toks.get(i + 1);
+                if next.is_some_and(|n| is_punct(n, '!'))
+                    && (s == "fip_fn" || GHOST_MACROS.contains(&s.as_str()))
+                {
+                    i += 3;
+                    continue;
+                }
+                let called = next.is_some_and(|n| {
+                    is_group(n, Delimiter::Parenthesis) || is_punct(n, '!') || is_punct(n, ':')
+                });
+                let member = i > 0 && is_punct(&toks[i - 1], '.');
+                if !called && !member && !KEYWORDS.contains(&s.as_str()) && !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            TokenTree::Group(g) => bound_names(g.stream(), out),
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Item keywords rejected in a strict body: an item or `use` inside the body can
+/// shadow the name of a certified callee for the body while the certificate is read
+/// at module level.
+const ITEM_KEYWORDS: &[&str] = &[
+    "enum", "extern", "impl", "mod", "static", "struct", "trait", "type", "use",
+];
+
 impl StrictScan {
-    pub(crate) fn stream(&mut self, ts: TokenStream, in_loop: bool) {
+    /// Scans a strict body and returns it as emitted. Outside Verus's driver
+    /// (`keep_tokens` false) the body is rewritten so that what compiles is what was
+    /// checked:
+    ///
+    /// - a call of a capitalised name `Name(a, b)` (a tuple struct or tuple variant
+    ///   constructor) becomes `(Name { 0: a, 1: b })`, which rustc accepts only for a
+    ///   constructor: a function, `static`, `const` or local named `Name` is a compile
+    ///   error instead of an unchecked call (also in patterns, where both forms mean
+    ///   the same);
+    /// - a bare panicking macro (`assert!`) becomes `::core::assert!`, so a local
+    ///   `macro_rules! assert` is not what runs;
+    /// - a bare ghost-code macro (`proof!`, ..) is removed: its contents are not
+    ///   scanned, so they must not be compiled;
+    /// - `g.call(args)` / `FipFn::call(&g, args)` on a `param(g = K)` parameter become
+    ///   `<G as FipFn<_>>::call(&g, args)`, and `x.m(args)` on a parameter of a
+    ///   contracted trait `Tr` becomes `Tr::m(x, args)`: if `g` / `x` is rebound in the
+    ///   body, the call no longer type-checks instead of calling the new binding.
+    pub(crate) fn stream(&mut self, ts: TokenStream, in_loop: bool) -> TokenStream {
+        self.stream_list(ts, in_loop, true)
+    }
+
+    /// [`StrictScan::stream`] for an expression (a closure body): no token starts a
+    /// statement, so `{ f }(x)` is a call through an expression.
+    pub(crate) fn stream_expr(&mut self, ts: TokenStream) -> TokenStream {
+        self.stream_list(ts, false, false)
+    }
+
+    fn stream_list(&mut self, ts: TokenStream, in_loop: bool, stmts: bool) -> TokenStream {
         let toks: Vec<TokenTree> = ts.into_iter().collect();
-        let mut loop_body_pending = false;
+        let loops = flow::loop_regions(&toks);
+        let ends = if stmts {
+            flow::stmt_block_ends(&toks)
+        } else {
+            vec![false; toks.len()]
+        };
+        self.check_for_loops(&toks);
+        let mut out: Vec<TokenTree> = Vec::with_capacity(toks.len());
         let mut i = 0;
         while i < toks.len() {
             let t = &toks[i];
+            let here = in_loop || loops[i];
             if is_punct(t, '#')
                 && toks
                     .get(i + 1)
                     .is_some_and(|n| is_group(n, Delimiter::Bracket))
             {
+                out.extend(toks[i..i + 2].iter().cloned());
                 i += 2;
                 continue;
             }
@@ -168,75 +466,147 @@ impl StrictScan {
                     "the `?` operator may call `From::from`, which cannot be checked; match explicitly",
                 );
             }
-            if let TokenTree::Group(g) = t {
-                if matches!(g.delimiter(), Delimiter::Parenthesis | Delimiter::Bracket)
-                    && toks
-                        .get(i + 1)
-                        .is_some_and(|n| is_group(n, Delimiter::Parenthesis))
-                {
-                    self.err(
-                        g.span(),
-                        "call through an expression cannot be checked; call a named function",
-                    );
+            let call_next = toks
+                .get(i + 1)
+                .is_some_and(|n| is_group(n, Delimiter::Parenthesis));
+            match t {
+                TokenTree::Group(g) => {
+                    let through_expr = match g.delimiter() {
+                        Delimiter::Brace => !ends[i],
+                        _ => true,
+                    };
+                    if call_next && through_expr {
+                        self.err(
+                            g.span(),
+                            "call through an expression cannot be checked; call a named function",
+                        );
+                    }
+                    let mut inner =
+                        self.stream_list(g.stream(), here, g.delimiter() == Delimiter::Brace);
+                    if let Some((at, ty)) = self.fipfn_arg.take() {
+                        if at == i
+                            && !self.keep_tokens
+                            && let Some(ty) = ty
+                        {
+                            inner = rewrite_first_ref_arg(inner, &ty);
+                        } else if at != i {
+                            self.fipfn_arg = Some((at, ty));
+                        }
+                    }
+                    let mut ng = Group::new(g.delimiter(), inner);
+                    ng.set_span(g.span());
+                    out.push(TokenTree::Group(ng));
+                    i += 1;
                 }
-                let body_of_loop = loop_body_pending && g.delimiter() == Delimiter::Brace;
-                if body_of_loop {
-                    loop_body_pending = false;
+                TokenTree::Literal(l) => {
+                    if call_next {
+                        self.err(
+                            l.span(),
+                            "call through a tuple field or literal cannot be checked; call a named function",
+                        );
+                    }
+                    out.push(t.clone());
+                    i += 1;
                 }
-                self.stream(g.stream(), in_loop || body_of_loop);
-            } else if let TokenTree::Ident(id) = t {
-                let s = id.to_string();
-                if s == "loop" || s == "while" || s == "for" {
-                    loop_body_pending = true;
+                TokenTree::Ident(id) => {
+                    self.check_item(&toks, i, id);
+                    i += self.on_ident(&toks, i, id, here, &mut out);
                 }
-                i += self.on_ident(&toks, i, id, in_loop);
-                continue;
+                TokenTree::Punct(_) => {
+                    out.push(t.clone());
+                    i += 1;
+                }
             }
-            i += 1;
+        }
+        out.into_iter().collect()
+    }
+
+    /// Rejects item declarations (see [`ITEM_KEYWORDS`]), nested `fn` items and
+    /// `const` items.
+    fn check_item(&mut self, toks: &[TokenTree], i: usize, id: &Ident) {
+        let s = id.to_string();
+        let next_ident = matches!(toks.get(i + 1), Some(TokenTree::Ident(_)));
+        let item = ITEM_KEYWORDS.contains(&s.as_str())
+            || (s == "fn" && next_ident)
+            || (s == "const"
+                && next_ident
+                && !toks.get(i + 1).is_some_and(|t| is_ident(t, "fn"))
+                && toks.get(i + 2).is_some_and(|t| is_punct(t, ':')))
+            || (s == "macro_rules" && toks.get(i + 1).is_some_and(|t| is_punct(t, '!')));
+        if item {
+            self.err(
+                id.span(),
+                &format!(
+                    "`{s}` declares an item inside a strict body, which is rejected: an item or `use` there can shadow the name of a certified function for the body, while its certificate is read at module level; move it out of the function"
+                ),
+            );
         }
     }
 
-    /// Handles the identifier at `toks[i]`; returns how many tokens to advance.
-    fn on_ident(&mut self, toks: &[TokenTree], i: usize, id: &Ident, in_loop: bool) -> usize {
+    /// A strict `for` loop must iterate over a range (`a..b`, `a..=b`): any other
+    /// iterable calls `IntoIterator::into_iter` and `Iterator::next` of a type the
+    /// token-level check cannot see (a user iterator's `next` may allocate). A range of
+    /// integers steps through `core`'s `Step`, which user types cannot implement on
+    /// stable Rust.
+    fn check_for_loops(&mut self, toks: &[TokenTree]) {
+        for (i, t) in toks.iter().enumerate() {
+            let prev_dot = i > 0 && is_punct(&toks[i - 1], '.');
+            if !is_ident(t, "for") || prev_dot || toks.get(i + 1).is_some_and(|n| is_punct(n, '<'))
+            {
+                continue;
+            }
+            let in_at = (i + 1..toks.len()).find(|&k| is_ident(&toks[k], "in"));
+            let body = in_at.and_then(|k| flow::body_index(toks, k + 1));
+            let range = match (in_at, body) {
+                (Some(k), Some(b)) => (k + 1..b).any(|j| {
+                    matches!(&toks[j], TokenTree::Punct(p) if p.as_char() == '.' && p.spacing() == Spacing::Joint)
+                        && toks.get(j + 1).is_some_and(|n| is_punct(n, '.'))
+                }),
+                _ => false,
+            };
+            if !range {
+                self.err(
+                    t.span(),
+                    "a strict `for` loop must iterate over a range (`a..b`, `a..=b`): another iterable calls `IntoIterator::into_iter` and `Iterator::next` of a type the check cannot see; use a `while` loop over indices",
+                );
+            }
+        }
+    }
+
+    /// Handles the identifier at `toks[i]`, pushing what it consumed (possibly
+    /// rewritten) to `out`; returns how many tokens it consumed.
+    fn on_ident(
+        &mut self,
+        toks: &[TokenTree],
+        i: usize,
+        id: &Ident,
+        in_loop: bool,
+        out: &mut Vec<TokenTree>,
+    ) -> usize {
         let s = id.to_string();
         // Macro invocation `name!(..)` / `name![..]` / `name!{..}`.
         if toks.get(i + 1).is_some_and(|n| is_punct(n, '!'))
-            && toks
-                .get(i + 2)
-                .is_some_and(|n| matches!(n, TokenTree::Group(_)))
+            && let Some(TokenTree::Group(mg)) = toks.get(i + 2)
         {
-            // Ghost code, and `fip_fn!` closures: those are checked by `fip_fn!` itself
-            // and their calls are bounded through the callee's `param(..)`.
-            if GHOST_MACROS.contains(&s.as_str()) || s == "fip_fn" {
-                return 3;
-            }
-            let panicking = ALLOWED_MACROS.contains(&s.as_str());
-            if !panicking && s != "vec" && s != "format" {
-                self.err(
-                    id.span(),
-                    &format!("macro `{s}!` cannot be checked (its expansion is not visible)"),
-                );
-            } else if panicking && self.no_panic_macros {
-                self.err(
-                    id.span(),
-                    &format!(
-                        "`{s}!` may panic, and `panic_macros = false` rejects panicking macros"
-                    ),
-                );
-            }
-            // Arguments are scanned when the group is reached.
-            return 2;
+            return self.on_macro(toks, i, id, mg, out);
         }
         let Some(paren) = call_position(toks, i) else {
+            out.push(toks[i].clone());
             return 1;
         };
         if i > 0 && is_punct(&toks[i - 1], '.') {
-            self.on_method_call(toks, i, id, in_loop);
-        } else if self.on_std_callee(toks, i, in_loop) {
-            // A std heap constructor or trait function, in any spelling.
-        } else if KEYWORDS.contains(&s.as_str()) || upper_initial(&s) {
-            // Control flow, or a tuple-struct / enum-variant constructor.
-        } else if slice_qualified(toks, i) {
+            return self.on_method_call(toks, i, id, in_loop, out);
+        }
+        if self.on_std_callee(toks, i, in_loop) || KEYWORDS.contains(&s.as_str()) || s == "Self" {
+            // A std heap constructor or trait function (any spelling), control flow,
+            // or the `Self(..)` constructor of a tuple struct.
+            out.push(toks[i].clone());
+            return 1;
+        }
+        if upper_initial(&s) {
+            return self.on_ctor(toks, i, paren, id, in_loop, out);
+        }
+        if slice_qualified(toks, i) {
             if !CORE_TABLE.contains(&format!("slice::{s}").as_str()) {
                 self.err(
                     id.span(),
@@ -246,13 +616,202 @@ impl StrictScan {
         } else {
             match callee_path(toks, i) {
                 Err((sp, msg)) => self.err(sp, &msg),
-                Ok(Callee::Path(prefix)) => self.on_path_call(toks, paren, prefix, id, in_loop),
+                Ok(Callee::Path(prefix)) => {
+                    self.on_path_call(toks, paren, prefix, id, in_loop);
+                }
                 Ok(Callee::Qualified { ty, tr }) => {
-                    self.on_qualified_call(&ty, tr.as_ref(), id, in_loop);
+                    self.on_qualified_call(&ty, tr.as_deref(), id, in_loop);
                 }
             }
         }
+        out.push(toks[i].clone());
         1
+    }
+
+    /// A macro invocation at `toks[i]` (`name!` followed by `mg`); see
+    /// [`StrictScan::stream`] for what is accepted and how it is rewritten.
+    fn on_macro(
+        &mut self,
+        toks: &[TokenTree],
+        i: usize,
+        id: &Ident,
+        mg: &Group,
+        out: &mut Vec<TokenTree>,
+    ) -> usize {
+        let s = id.to_string();
+        let (segs, absolute, _) = path_prefix(toks, i);
+        let bare_name = segs.is_empty();
+        // `fip_fn!` closures are checked by `fip_fn!` itself and their calls are
+        // bounded through the callee's `param(..)`.
+        if s == "fip_fn" {
+            out.extend(toks[i..i + 3].iter().cloned());
+            return 3;
+        }
+        // Ghost code: skipped, and emptied outside Verus (`ghost_stub`).
+        if bare_name && GHOST_MACROS.contains(&s.as_str()) {
+            if self.keep_tokens {
+                out.extend(toks[i..i + 3].iter().cloned());
+            } else {
+                out.extend(ghost_stub(toks, i));
+            }
+            return 3;
+        }
+        let mut shown = String::new();
+        for x in &segs {
+            shown.push_str(x);
+            shown.push_str("::");
+        }
+        shown.push_str(&s);
+        let std_root =
+            |roots: &[&str]| absolute && segs.len() == 1 && roots.contains(&segs[0].as_str());
+        if ALLOWED_MACROS.contains(&s.as_str()) {
+            if self.no_panic_macros {
+                self.err(
+                    id.span(),
+                    &format!(
+                        "`{s}!` may panic, and `panic_macros = false` rejects panicking macros"
+                    ),
+                );
+            }
+            if bare_name {
+                if !self.keep_tokens {
+                    out.extend(abs_root("core", id.span()));
+                }
+            } else if !std_root(&["core", "std"]) {
+                self.err(
+                    id.span(),
+                    &format!(
+                        "macro `{shown}!` is not the `core` macro: write `{s}!` or `::core::{s}!`"
+                    ),
+                );
+            }
+        } else if s == "vec" {
+            if !std_root(&["std", "alloc"]) {
+                self.err(
+                    id.span(),
+                    "write `vec!` as `::std::vec!` or `::alloc::vec!` in a strict body: a local `vec!` macro could shadow the standard one",
+                );
+            }
+            if mg.stream().into_iter().any(|t| is_punct(&t, ';')) {
+                self.err(
+                    id.span(),
+                    "`vec![e; n]` clones `e` n - 1 times, which may call user code (the element's `Clone`); strict mode cannot bound it: list the elements",
+                );
+            }
+        } else if s == "format" {
+            self.err(
+                id.span(),
+                "`format!` calls the arguments' `Display` / `Debug` code and may grow its buffer any number of times; strict mode cannot bound it",
+            );
+        } else {
+            self.err(
+                id.span(),
+                &format!("macro `{shown}!` cannot be checked (its expansion is not visible)"),
+            );
+        }
+        // `!` and the arguments are scanned when they are reached.
+        out.push(toks[i].clone());
+        1
+    }
+
+    /// `Name(..)` with a capitalised `Name`: accepted only as a tuple struct or tuple
+    /// variant constructor, rewritten to `(Name { 0: .., 1: .. })` (see
+    /// [`StrictScan::stream`]). The `Fn*` traits in type position (`dyn Fn(u8)`) are
+    /// left alone.
+    fn on_ctor(
+        &mut self,
+        toks: &[TokenTree],
+        i: usize,
+        paren: usize,
+        id: &Ident,
+        in_loop: bool,
+        out: &mut Vec<TokenTree>,
+    ) -> usize {
+        let s = id.to_string();
+        let prev = i.checked_sub(1).map(|k| &toks[k]);
+        let type_position = matches!(s.as_str(), "Fn" | "FnMut" | "FnOnce")
+            && prev.is_some_and(|p| is_ident(p, "dyn") || is_ident(p, "impl") || is_punct(p, '+'));
+        if type_position {
+            out.push(toks[i].clone());
+            return 1;
+        }
+        self.ctor_calls += 1;
+        if paren != i + 1 {
+            self.err(
+                id.span(),
+                &format!(
+                    "`{s}::<..>(..)`: generic arguments on a capitalised callee are rejected; strict mode accepts it only as a constructor, written without them"
+                ),
+            );
+            out.push(toks[i].clone());
+            return 1;
+        }
+        let Ok(Callee::Path(prefix)) = callee_path(toks, i) else {
+            self.err(
+                id.span(),
+                &format!(
+                    "`{s}(..)` through a qualified path: strict mode accepts a capitalised callee only as a constructor written by path (`Name(..)`, `Enum::Variant(..)`)"
+                ),
+            );
+            out.push(toks[i].clone());
+            return 1;
+        };
+        let TokenTree::Group(args) = &toks[paren] else {
+            out.push(toks[i].clone());
+            return 1;
+        };
+        let scanned = self.stream_list(args.stream(), in_loop, false);
+        if self.keep_tokens {
+            out.push(toks[i].clone());
+            let mut g = Group::new(Delimiter::Parenthesis, scanned);
+            g.set_span(args.span());
+            out.push(TokenTree::Group(g));
+            return 2;
+        }
+        let n = prefix.len().min(out.len());
+        let mut path = out.split_off(out.len() - n);
+        path.push(toks[i].clone());
+        let parts = split_args(scanned);
+        let last = parts.len().saturating_sub(1);
+        let mut fields = TokenStream::new();
+        for (k, part) in parts.into_iter().enumerate() {
+            let rest = part.len() == 2
+                && matches!(&part[0], TokenTree::Punct(p) if p.as_char() == '.' && p.spacing() == Spacing::Joint)
+                && is_punct(&part[1], '.');
+            if rest {
+                if k != last {
+                    self.err(
+                        part[0].span(),
+                        "`..` before the last field of a capitalised call: strict mode rewrites `Name(a, ..)` to `Name { 0: a, .. }`; write the pattern with numbered fields, e.g. `Name { 0: a, 2: c, .. }`",
+                    );
+                }
+                fields.extend(part);
+                continue;
+            }
+            // Generated tokens: the macro's context at the user's location, so lints
+            // on hand-written code (`clippy::init_numbered_fields`) skip them.
+            let sp = Span::call_site()
+                .located_at(part.first().map_or_else(|| args.span(), TokenTree::span));
+            let mut lit = Literal::usize_unsuffixed(k);
+            lit.set_span(sp);
+            fields.extend([TokenTree::Literal(lit)]);
+            let mut colon = Punct::new(':', Spacing::Alone);
+            colon.set_span(sp);
+            fields.extend([TokenTree::Punct(colon)]);
+            fields.extend(part);
+            let mut comma = Punct::new(',', Spacing::Alone);
+            comma.set_span(sp);
+            fields.extend([TokenTree::Punct(comma)]);
+        }
+        let mut body = Group::new(Delimiter::Brace, fields);
+        body.set_span(Span::call_site().located_at(args.span()));
+        let mut inner: TokenStream = path.into_iter().collect();
+        inner.extend([TokenTree::Group(body)]);
+        let mut wrapped = Group::new(Delimiter::Parenthesis, inner);
+        // The macro's context: `unused_parens` does not fire on macro output.
+        wrapped.set_span(Span::call_site().located_at(id.span()));
+        out.push(TokenTree::Group(wrapped));
+        2
     }
 
     /// A call whose callee path (any spelling, normalised by
@@ -297,49 +856,119 @@ impl StrictScan {
         }
     }
 
+    /// The receiver of `recv.name(..)` at `toks[i]`: a plain identifier (not a field
+    /// `a.b.name()`, not a path).
+    fn plain_receiver(toks: &[TokenTree], i: usize) -> Option<Ident> {
+        match toks.get(i.checked_sub(2)?) {
+            Some(TokenTree::Ident(r))
+                if !(i >= 3 && (is_punct(&toks[i - 3], '.') || is_punct(&toks[i - 3], ':'))) =>
+            {
+                Some(r.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// `recv.name(..)`: allowed as `param.call(..)` on a declared `FipFn` parameter
-    /// or on a parameter whose type implements a contracted trait.
-    fn on_method_call(&mut self, toks: &[TokenTree], i: usize, id: &Ident, in_loop: bool) {
+    /// or on a parameter whose type implements a contracted trait; rewritten to a
+    /// path call that only type-checks for that parameter's type.
+    fn on_method_call(
+        &mut self,
+        toks: &[TokenTree],
+        i: usize,
+        id: &Ident,
+        in_loop: bool,
+        out: &mut Vec<TokenTree>,
+    ) -> usize {
         let s = id.to_string();
+        let recv = Self::plain_receiver(toks, i);
+        let direct = toks
+            .get(i + 1)
+            .is_some_and(|n| is_group(n, Delimiter::Parenthesis));
         if s == "call"
-            && i >= 2
-            && let TokenTree::Ident(recv) = &toks[i - 2]
-            && !(i >= 3 && is_punct(&toks[i - 3], '.'))
-            && let Some(p) = param_index(&self.params, &recv.to_string())
+            && let Some(r) = &recv
+            && let Some(p) = param_index(&self.params, &r.to_string())
         {
             self.param_calls.push(ParamCall {
                 param: p,
                 span: id.span(),
                 in_loop,
             });
-            return;
+            if !self.keep_tokens
+                && let Some(ty) = self.params[p].ty.clone()
+            {
+                // `(&g as &G).call(..)`: a rebinding of `g` to another type is a type
+                // error instead of a call of its own `call`.
+                out.truncate(out.len().saturating_sub(2));
+                out.push(as_param_ref(r, &ty));
+                out.push(toks[i - 1].clone());
+            }
+            out.push(toks[i].clone());
+            return 1;
         }
-        if i >= 2
-            && let TokenTree::Ident(recv) = &toks[i - 2]
-            && !(i >= 3 && is_punct(&toks[i - 3], '.'))
-        {
-            let recv_str = recv.to_string();
+        if let Some(r) = &recv {
+            let recv_str = r.to_string();
             if let Some((_, (prefix, trait_name))) =
                 self.param_traits.iter().find(|(name, _)| name == &recv_str)
             {
-                let cert_name = format!("{trait_name}__{s}");
+                let (prefix, trait_name) = (prefix.clone(), trait_name.clone());
+                for seg in [trait_name.as_str(), s.as_str()] {
+                    if let Some(e) = segment_error(seg) {
+                        self.err(id.span(), &e);
+                    }
+                }
                 self.calls.push(Call {
                     cert_prefix: prefix.clone(),
-                    cert_name,
+                    cert_name: format!("{}__{}", bare(&trait_name), bare(&s)),
                     trait_target: Some((trait_name.clone(), s.clone())),
                     shown: format!("{recv_str}.{s}"),
                     span: id.span(),
                     in_loop,
                 });
-                return;
+                if !self.keep_tokens
+                    && direct
+                    && let Some(TokenTree::Group(args)) = toks.get(i + 1)
+                {
+                    // `Tr::m(x, args)`.
+                    out.truncate(out.len().saturating_sub(2));
+                    out.extend(prefix);
+                    out.push(ident(&trait_name, id.span()));
+                    out.extend(colons(id.span()));
+                    out.push(toks[i].clone());
+                    let mut new_args: TokenStream = TokenStream::from(TokenTree::Ident(r.clone()));
+                    let scanned = self.stream_list(args.stream(), in_loop, false);
+                    if !scanned.is_empty() {
+                        new_args.extend([TokenTree::Punct(Punct::new(',', Spacing::Alone))]);
+                        new_args.extend(scanned);
+                    }
+                    let mut g = Group::new(Delimiter::Parenthesis, new_args);
+                    g.set_span(args.span());
+                    out.push(TokenTree::Group(g));
+                    return 2;
+                }
+                out.push(toks[i].clone());
+                return 1;
             }
         }
-        self.err(
-            id.span(),
-            &format!(
-                "method call `.{s}(..)` cannot be resolved; call it by path, e.g. `Type::{s}(x, ..)`"
-            ),
-        );
+        if recv.as_ref().is_some_and(|r| r.to_string() == "self")
+            && let Some(t) = &self.impl_trait
+        {
+            self.err(
+                id.span(),
+                &format!(
+                    "method call `self.{s}(..)` in a trait impl cannot be resolved (an inherent method `{s}` would be called first): write `<Self as {t}>::{s}(self, ..)`"
+                ),
+            );
+        } else {
+            self.err(
+                id.span(),
+                &format!(
+                    "method call `.{s}(..)` cannot be resolved; call it by path, e.g. `Type::{s}(x, ..)`"
+                ),
+            );
+        }
+        out.push(toks[i].clone());
+        1
     }
 
     /// The name of the type `ty` (the last path segment), with `Self` resolved.
@@ -359,11 +988,74 @@ impl StrictScan {
         self.self_ty.clone()
     }
 
+    /// A call through the contract of `trait_name` (at `prefix`) for `m`.
+    fn contract_call(
+        &mut self,
+        prefix: Vec<TokenTree>,
+        trait_name: &str,
+        m: &str,
+        shown: String,
+        id: &Ident,
+        in_loop: bool,
+    ) {
+        for seg in [trait_name, m] {
+            if let Some(e) = segment_error(seg) {
+                self.err(id.span(), &e);
+            }
+        }
+        self.calls.push(Call {
+            cert_prefix: prefix,
+            cert_name: format!("{}__{}", bare(trait_name), bare(m)),
+            trait_target: Some((trait_name.to_string(), m.to_string())),
+            shown,
+            span: id.span(),
+            in_loop,
+        });
+    }
+
+    /// A type segment naming a generic parameter of the function or `impl`: its
+    /// first trait bound's contract, or an error (the certificate `T__m` would be
+    /// read from whatever type is named `T` in scope).
+    fn generic_param_call(
+        &mut self,
+        t: &str,
+        tr: Option<&[TokenTree]>,
+        id: &Ident,
+        shown: &str,
+        in_loop: bool,
+    ) {
+        let m = id.to_string();
+        if let Some(tr) = tr
+            && let Some((TokenTree::Ident(last), module)) = tr.split_last()
+        {
+            self.contract_call(
+                module.to_vec(),
+                &last.to_string(),
+                &m,
+                shown.to_string(),
+                id,
+                in_loop,
+            );
+            return;
+        }
+        if let Some((_, (prefix, trait_name))) = self.type_bounds.iter().find(|(p, _)| p == t) {
+            let (prefix, trait_name) = (prefix.clone(), trait_name.clone());
+            self.contract_call(prefix, &trait_name, &m, shown.to_string(), id, in_loop);
+            return;
+        }
+        self.err(
+            id.span(),
+            &format!(
+                "`{shown}`: `{t}` is a generic parameter, so no certificate names the function this calls; bound `{t}` by a trait with a strict contract (`#[fip_trait]`)"
+            ),
+        );
+    }
+
     /// `<Ty as Tr>::name(..)` / `<Ty>::name(..)`.
     fn on_qualified_call(
         &mut self,
         ty: &[TokenTree],
-        tr: Option<&Ident>,
+        tr: Option<&[TokenTree]>,
         id: &Ident,
         in_loop: bool,
     ) {
@@ -374,52 +1066,50 @@ impl StrictScan {
                 self.err(id.span(), "expected a trait path in `<dyn Trait>::f`");
                 return;
             };
-            let cert_name = format!("{last}__{s}");
-            self.calls.push(Call {
-                cert_prefix: module.to_vec(),
-                cert_name,
-                trait_target: Some((last.to_string(), s.clone())),
-                shown: format!("<dyn {last}>::{s}"),
-                span: id.span(),
-                in_loop,
-            });
+            let shown = format!("<dyn {last}>::{s}");
+            self.contract_call(module.to_vec(), &last.to_string(), &s, shown, id, in_loop);
             return;
         }
         let Some((TokenTree::Ident(last), module)) = ty.split_last() else {
             self.err(id.span(), "expected a type path in `<Type as Trait>::f`");
             return;
         };
-        let shown = match tr {
+        let tr_last = tr.and_then(|t| match t.last() {
+            Some(TokenTree::Ident(x)) => Some(x.clone()),
+            _ => None,
+        });
+        let shown = match &tr_last {
             Some(t) => format!("<{last} as {t}>::{s}"),
             None => format!("<{last}>::{s}"),
         };
-        if let Some(t) = tr
-            && self.param_traits.iter().any(|(name, (_, tr_name))| {
-                (name == &last.to_string() || tr_name == &last.to_string())
-                    && tr_name == &t.to_string()
-            })
-        {
-            let cert_name = format!("{t}__{s}");
-            self.calls.push(Call {
-                cert_prefix: Vec::new(),
-                cert_name,
-                trait_target: Some((t.to_string(), s.clone())),
-                shown,
-                span: id.span(),
-                in_loop,
-            });
+        if module.is_empty() && self.generic_params.contains(&last.to_string()) {
+            self.generic_param_call(&last.to_string(), tr, id, &shown, in_loop);
             return;
         }
         let Some(ty_name) = self.type_name(last, &shown) else {
             return;
         };
-        let cert_name = match tr {
-            Some(t) => format!("{ty_name}__{}__{}", bare(&t.to_string()), bare(&s)),
-            None => format!("{ty_name}__{}", bare(&s)),
-        };
+        let mut parts = vec![ty_name.clone()];
+        if let Some(t) = &tr_last {
+            parts.push(bare(&t.to_string()).to_string());
+        }
+        parts.push(bare(&s).to_string());
+        for seg in &parts {
+            if let Some(e) = segment_error(seg) {
+                self.err(id.span(), &e);
+            }
+        }
+        if let (Some(t), Some(tr)) = (&tr_last, tr) {
+            self.trait_checks.push(TraitCheck {
+                caller: tr.to_vec(),
+                prefix: module.to_vec(),
+                key: format!("{ty_name}__{}", bare(&t.to_string())),
+                span: id.span(),
+            });
+        }
         self.calls.push(Call {
             cert_prefix: module.to_vec(),
-            cert_name,
+            cert_name: parts.join("__"),
             trait_target: None,
             shown,
             span: id.span(),
@@ -456,6 +1146,15 @@ impl StrictScan {
             self.on_fipfn_call(toks, paren, id, in_loop);
             return;
         }
+        if prefix.is_empty() && self.shadowed.contains(&s) {
+            self.err(
+                id.span(),
+                &format!(
+                    "`{s}` is also bound in this function (a parameter, `let`, pattern or closure parameter, or a value named `{s}`), so `{s}(..)` may call that binding rather than the function whose certificate is read; rename the binding"
+                ),
+            );
+            return;
+        }
         let segs: Vec<String> = prefix
             .iter()
             .filter_map(|t| match t {
@@ -463,15 +1162,24 @@ impl StrictScan {
                 _ => None,
             })
             .collect();
-        // Std heap constructors were decided before (`on_std_callee`).
-        if in_core_table(&segs, &s) {
-            return;
-        }
         let shown: String = prefix
             .iter()
             .map(ToString::to_string)
             .chain([s.clone()])
             .collect();
+        // Std heap constructors were decided before (`on_std_callee`).
+        if in_core_table(&segs, &s) {
+            if !prefix.first().is_some_and(|t| is_punct(t, ':')) {
+                self.err(
+                    id.span(),
+                    &format!(
+                        "write the `core` table function with an absolute path, `::{shown}`: a local module named `{}` (or `use .. as {0}`) would be called instead of the audited function",
+                        segs[0]
+                    ),
+                );
+            }
+            return;
+        }
         // `ffi(dep::sym = local::sym)`: a call of `dep::sym` reads `local::sym`'s
         // certificate (the driver checks that both name one foreign function).
         let key = segs
@@ -495,22 +1203,42 @@ impl StrictScan {
             });
             return;
         }
-        // `Type::m` / `Self::m`: the certificate sits next to the type's module path.
+        self.path_cert(prefix, id, shown, in_loop);
+    }
+
+    /// The certificate of `prefix::name(..)`: `Type::m` / `Self::m` read
+    /// `__fip_strict_Type__m` next to the type's module path, `a::f` reads
+    /// `a::__fip_strict_f`.
+    fn path_cert(&mut self, prefix: Vec<TokenTree>, id: &Ident, shown: String, in_loop: bool) {
+        let s = id.to_string();
         let type_seg = match prefix.len().checked_sub(3).map(|k| &prefix[k]) {
             Some(TokenTree::Ident(t)) if upper_initial(&t.to_string()) => Some(t.clone()),
             _ => None,
         };
-        let (cert_prefix, cert_name) = match type_seg {
-            Some(t) => {
+        let (cert_prefix, cert_name) = if let Some(t) = type_seg {
+            {
+                if prefix.len() == 3 && self.generic_params.contains(&t.to_string()) {
+                    self.generic_param_call(&t.to_string(), None, id, &shown, in_loop);
+                    return;
+                }
                 let Some(ty_name) = self.type_name(&t, &shown) else {
                     return;
                 };
+                for seg in [ty_name.as_str(), s.as_str()] {
+                    if let Some(e) = segment_error(seg) {
+                        self.err(id.span(), &e);
+                    }
+                }
                 (
                     prefix[..prefix.len() - 3].to_vec(),
                     format!("{ty_name}__{}", bare(&s)),
                 )
             }
-            None => (prefix, bare(&s).to_string()),
+        } else {
+            if let Some(e) = fn_name_error(&s) {
+                self.err(id.span(), &e);
+            }
+            (prefix, bare(&s).to_string())
         };
         self.calls.push(Call {
             cert_prefix,
@@ -522,7 +1250,7 @@ impl StrictScan {
         });
     }
 
-    /// `FipFn::call(&param, (..))`.
+    /// `FipFn::call(&param, (..))`, rewritten to `<G as FipFn<_>>::call(&param, (..))`.
     fn on_fipfn_call(&mut self, toks: &[TokenTree], paren: usize, id: &Ident, in_loop: bool) {
         let arg0: Vec<TokenTree> = match toks.get(paren) {
             Some(TokenTree::Group(g)) => g.stream().into_iter().take(2).collect(),
@@ -535,11 +1263,14 @@ impl StrictScan {
             _ => None,
         };
         match param {
-            Some(p) => self.param_calls.push(ParamCall {
-                param: p,
-                span: id.span(),
-                in_loop,
-            }),
+            Some(p) => {
+                self.param_calls.push(ParamCall {
+                    param: p,
+                    span: id.span(),
+                    in_loop,
+                });
+                self.fipfn_arg = Some((paren, self.params[p].ty.clone()));
+            }
             None => self.err(
                 id.span(),
                 "`FipFn::call` must be applied to `&param` of a parameter declared with `param(name = K)`",
@@ -703,10 +1434,7 @@ fn qualified(toks: &[TokenTree], gt: usize) -> Result<Callee, (Span, String)> {
     }
     let tr = match trait_part {
         None => None,
-        Some(t) if plain_path(t) => match t.last() {
-            Some(TokenTree::Ident(id)) => Some(id.clone()),
-            _ => None,
-        },
+        Some(t) if plain_path(t) => Some(t.to_vec()),
         Some(_) => {
             return Err((
                 gt_span,
@@ -786,10 +1514,19 @@ fn term(c: &Call, krate: &TokenStream) -> TokenStream {
 /// `<krate>::<read>(<the callee's certificate>, "name")`.
 fn cert_read(c: &Call, krate: &TokenStream, read: &str) -> TokenStream {
     let mut arg: TokenStream = if let Some((tr_path, m)) = &c.trait_target {
-        let tr_prefix: String = c.cert_prefix.iter().map(ToString::to_string).collect();
-        format!("<dyn {tr_prefix}{tr_path}>::__fip_strict_{m}")
-            .parse::<TokenStream>()
-            .unwrap()
+        // `<dyn prefix::Trait>::__fip_strict_<m>`, from tokens (a raw identifier
+        // `r#type` names the constant `__fip_strict_type`).
+        let mut a = TokenStream::from(TokenTree::Punct(Punct::new('<', Spacing::Alone)));
+        a.extend([ident("dyn", c.span)]);
+        a.extend(c.cert_prefix.iter().cloned());
+        a.extend([ident(tr_path, c.span)]);
+        a.extend([TokenTree::Punct(Punct::new('>', Spacing::Alone))]);
+        a.extend(colons(c.span));
+        a.extend([TokenTree::Ident(Ident::new(
+            &format!("__fip_strict_{}", bare(m)),
+            c.span,
+        ))]);
+        a
     } else {
         let mut a: TokenStream = c.cert_prefix.iter().cloned().collect();
         a.extend([TokenTree::Ident(Ident::new(
@@ -909,9 +1646,49 @@ impl StrictScan {
         out
     }
 
+    /// Items checking each [`TraitCheck`]: the caller's trait implies the impl's
+    /// (`__fip_traitid_<Type>__<Trait>::<T>()` for `T: CallerTrait`) and the impl's
+    /// implies the caller's (a `T: __fip_traitsup_<Type>__<Trait>` satisfies
+    /// `CallerTrait`). Two distinct traits cannot imply each other both ways through
+    /// supertraits (a cycle), so the two traits are one.
+    fn trait_check_items(&self) -> TokenStream {
+        let mut out = TokenStream::new();
+        for (k, tc) in self.trait_checks.iter().enumerate() {
+            let respan = |t: TokenStream| -> TokenStream {
+                t.into_iter()
+                    .map(|mut t| {
+                        t.set_span(tc.span);
+                        t
+                    })
+                    .collect()
+            };
+            let caller: TokenStream = tc.caller.iter().cloned().collect();
+            let prefix: TokenStream = tc.prefix.iter().cloned().collect();
+            let key = &tc.key;
+            out.extend(respan(ts(&format!(
+                "#[allow(non_snake_case, dead_code)] fn __fip_trait_check_{k}<__FipT: ?Sized +"
+            ))));
+            out.extend(caller.clone());
+            out.extend(respan(ts(">()")));
+            let mut b = prefix.clone();
+            b.extend(respan(ts(&format!("__fip_traitid_{key}::<__FipT>();"))));
+            out.extend([brace(b)]);
+            out.extend(respan(ts(&format!(
+                "#[allow(non_snake_case, dead_code)] fn __fip_trait_check_back_{k}<__FipT: ?Sized +"
+            ))));
+            out.extend(prefix);
+            out.extend(respan(ts(&format!("__fip_traitsup_{key}>()"))));
+            let mut b = respan(ts("fn __fip_need<__FipX: ?Sized +"));
+            b.extend(caller);
+            b.extend(respan(ts(">() {} __fip_need::<__FipT>();")));
+            out.extend([brace(b)]);
+        }
+        out
+    }
+
     /// Statements asserting the bound and the loop rule.
     fn checks(&self, tag: &str, n: u64, local: u64, with_params: bool) -> TokenStream {
-        let mut body = TokenStream::new();
+        let mut body = self.trait_check_items();
         // `n == u64::MAX` (a `fip_fn!` closure): no total to check.
         if n < u64::MAX {
             let mut a = self.sum_expr(local);
@@ -1008,7 +1785,7 @@ impl StrictScan {
         // Evaluated eagerly at module level (also by `cargo check`); the checks on
         // generic parameters are in the body (post-monomorphisation).
         items.extend(ts(attrs));
-        items.extend(ts(&format!("const __fip_strict_check_{cert_name}: () = ")));
+        items.extend(ts(&format!("const __fip_check_{cert_name}: () = ")));
         items.extend([brace(self.checks(tag, n, local, false))]);
         items.extend(ts(";"));
 
@@ -1070,7 +1847,7 @@ impl StrictScan {
 /// compiler's process, whose executable is `rust_verify` for the upstream `verus`
 /// launcher and for a source build (measured: `argv[0]` of both). Verus passes
 /// `--cfg verus_keep_ghost` to rustc through its driver API, not in `argv`.
-fn under_verus() -> bool {
+pub(crate) fn under_verus() -> bool {
     std::env::args_os().next().is_some_and(|a| {
         std::path::Path::new(&a)
             .file_stem()

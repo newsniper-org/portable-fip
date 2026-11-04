@@ -11,15 +11,60 @@
 //! - `extern crate facade as fip_strict;` once in the consumer: the default
 //!   `::fip_strict` then names the facade, whose root re-exports `Cert`, `Certified`
 //!   and `FipBound`, and no argument is needed;
-//! - control: neither, and the build fails because `fip_strict` is not found.
+//! - control: neither, and the build fails because `fip_strict` is not found;
+//! - `crate = $crate::fip_strict` from the facade's `macro_rules!` on `#[fip_trait]`,
+//!   `#[fip_impl]` of a trait and `#[fip_extern]` (before: "expected type, found `$`"),
+//!   and no `unexpected_cfgs` warning from `#[fip_extern]`'s driver marks in a
+//!   consumer without `check-cfg` (before: one per mark).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const FACADE: &str = r"
-pub use fip_macros::{fbip, fip, fip_impl};
+const FACADE: &str = r#"
+pub use fip_macros::{fbip, fip, fip_extern, fip_impl, fip_trait};
 pub use fip_strict;
+
+/// A trait with a strict contract, declared with this crate's `fip_strict` path.
+#[macro_export]
+macro_rules! contract_trait {
+    ($name:ident) => {
+        /// # Safety
+        ///
+        /// Implementations keep the contract of `get`.
+        #[$crate::fip_trait(crate = $crate::fip_strict)]
+        pub unsafe trait $name {
+            #[$crate::fip(strict = true)]
+            fn get(&self) -> u8;
+        }
+    };
+}
+
+/// A checked implementation of such a trait.
+#[macro_export]
+macro_rules! contract_impl {
+    ($tr:ident for $ty:ident) => {
+        #[$crate::fip_impl(crate = $crate::fip_strict, contract)]
+        impl $tr for $ty {
+            #[$crate::fip(strict = true)]
+            fn get(&self) -> u8 { self.0 }
+        }
+    };
+}
+
+/// Foreign declarations with a certificate and an exclusion.
+#[macro_export]
+macro_rules! libc_decls {
+    () => {
+        #[$crate::fip_extern(crate = $crate::fip_strict)]
+        unsafe extern "C" {
+            #[fip_cert(evidence = "C standard 7.24.6.1: computes a value", allocs = 0)]
+            pub fn labs(x: core::ffi::c_long) -> core::ffi::c_long;
+            #[fip_exclude(reason = "returns |x|, as C does")]
+            pub fn abs(x: core::ffi::c_int) -> core::ffi::c_int;
+        }
+    };
+}
 
 /// What generated strict code names under `::fip_strict` / `crate = facade`.
 #[doc(hidden)]
@@ -33,7 +78,20 @@ pub use fip_macros::fip_fn as __fip_fn;
 macro_rules! fip_fn {
     ($($t:tt)*) => { $crate::__fip_fn!(crate = $crate::fip_strict, $($t)*) };
 }
-";
+"#;
+
+/// Consumer of the facade's `macro_rules!` that pass `crate = $crate::fip_strict`.
+const DOLLAR_CRATE: &str = r#"
+mod sys { facade::libc_decls!(); }
+facade::contract_trait!(Get);
+pub struct S(u8);
+facade::contract_impl!(Get for S);
+#[facade::fip(strict = true, crate = facade::fip_strict)]
+fn get_dyn(x: &dyn Get) -> u8 { x.get() }
+#[facade::fip(strict = true, crate = facade::fip_strict)]
+fn abs_of(x: core::ffi::c_long) -> core::ffi::c_long { unsafe { sys::labs(x) } }
+fn main() { println!("{} {} {}", get_dyn(&S(4)), abs_of(-3), unsafe { sys::abs(-2) }); }
+"#;
 
 /// Consumer with explicit `crate = ..` arguments.
 const EXPLICIT: &str = r#"
@@ -46,11 +104,11 @@ pub struct Slot { v: u8 }
 #[fip_impl(crate = facade::fip_strict)]
 impl Slot {
     #[facade::fip(strict = true)]
-    pub fn put(s: &mut Slot, v: u8) -> u8 { core::mem::replace(&mut s.v, v) }
+    pub fn put(s: &mut Slot, v: u8) -> u8 { ::core::mem::replace(&mut s.v, v) }
 }
 
 #[fip(strict = true, crate = facade::fip_strict)]
-fn swap2(a: &mut u8, b: &mut u8) { core::mem::swap(a, b) }
+fn swap2(a: &mut u8, b: &mut u8) { ::core::mem::swap(a, b) }
 
 #[fip(1, strict = true, crate = "facade::fip_strict")]
 fn boxed(x: u8) -> Box<u8> { Box::new(x) }
@@ -82,11 +140,11 @@ pub struct Slot { v: u8 }
 #[fip_impl]
 impl Slot {
     #[fip(strict = true)]
-    pub fn put(s: &mut Slot, v: u8) -> u8 { core::mem::replace(&mut s.v, v) }
+    pub fn put(s: &mut Slot, v: u8) -> u8 { ::core::mem::replace(&mut s.v, v) }
 }
 
 #[fip(strict = true)]
-fn swap2(a: &mut u8, b: &mut u8) { core::mem::swap(a, b) }
+fn swap2(a: &mut u8, b: &mut u8) { ::core::mem::swap(a, b) }
 
 #[fip(1, strict = true)]
 fn boxed(x: u8) -> Box<u8> { Box::new(x) }
@@ -113,7 +171,7 @@ fn main() {
 const NEITHER: &str = r"
 use facade::fip;
 #[fip(strict = true)]
-fn swap2(a: &mut u8, b: &mut u8) { core::mem::swap(a, b) }
+fn swap2(a: &mut u8, b: &mut u8) { ::core::mem::swap(a, b) }
 fn main() { let (mut a, mut b) = (1, 2); swap2(&mut a, &mut b); }
 ";
 
@@ -196,6 +254,16 @@ fn extern_crate_alias() {
     let o = cargo(&dir, "run");
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "2 1 1 5 2 2");
+}
+
+#[test]
+fn dollar_crate_paths_and_no_cfg_warnings() {
+    let dir = fixture("dollar", DOLLAR_CRATE);
+    assert_only_facade(&dir);
+    let o = cargo(&dir, "run");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "4 3 2");
+    assert!(!stderr(&o).contains("warning"), "{}", stderr(&o));
 }
 
 #[test]
