@@ -209,6 +209,7 @@ workspaces, 1 self-check; deterministic (also with `CARGO_BUILD_JOBS=1`).
 | `param_bounds` | declared parameter bounds at call sites: the reproducer below (`non_root_caller`, `root_caller`, `root_caller_budget1` pass an allocating `fip_fn!` for `param(g = 0)`: three argument errors; `root_caller` also exceeds its own budget); allocation-free `fip_fn!` and closure (pass); allocating closure, named function (through its `Fn` shim), function pointer (`⊤`), all errors; generic non-root `forward` (term `alloc(h)`, not reported) instantiated from a `fip(1)` root with an allocating closure (error at the call in `forward::<{closure}>`, counted for that root); a root's own `param(h = 1)` forwarded to `param(g = 0)` (error), `param(h = 0)` forwarded (pass); a call inside a closure (error) |
 | `export_unencoded`, `nonmember_export` | exported dependencies without MIR (hard error) and outside the workspace (analysed): see the decision record |
 | `driver_checked` | the driver-checked `fip_fn!(prelint, N, ..)` (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`, 2026-11-03): a method call, an inferred local, two parameters and an honest `N = 1` pass; a lie (`*Box::new(x)` for `N = 0`), recursion, a freed argument and a box dropped inside the closure (`N = 1`) are errors at `__fip_prelint_checked`; in a generic function the allocating closure is an error, and both constructions there also get the existing `Certified::assume` check's `⊤` for a generic callable type (as the default `fip_fn!`); the non-member `drvdep` declaring `fip::export`, `--stack` (also with `FIP_PRELINT_CHECKS=1` inherited) and generation mode (`FIP_PRELINT_STD_SUMMARIES_OUT`) do not compile the mode (`fip-macros` error; the driver sets `FIP_PRELINT_CHECKS` only for a checked primary package) |
+| `generate_deps` | std-summary generation (`FIP_PRELINT_STD_SUMMARIES_OUT`) of a crate depending on `fip-macros` (a proc-macro crate) and `fip-strict`: writes the summaries, exit 0 (was an ICE, 2026-11-04) |
 
 ### Self-check: the portable-fip workspace (`cargo fip-prelint`, all targets)
 
@@ -2454,3 +2455,31 @@ sidecar yet (no driver note depends on them).
 replace the caller note by the driver's own check (needs the two to be equal, not
 only `fip::requires ⊆ requires` as `fip-macros` checks). `assert!` / `panic!` calls are
 not `Assert` terminators and are never dropped.
+
+## Resolved 2026-11-04: generation mode with a proc-macro dependency (ICE)
+
+**Before** (found in `63a2f03`). `cargo fip-prelint` in std-summary generation mode
+(`FIP_PRELINT_STD_SUMMARIES_OUT` set) of any crate depending on `fip-strict` panicked
+in `rustc_metadata` (`CrateMetadata::def_key`, `Option::unwrap` on `None`), with or
+without `fip_fn!`. Not a flag mismatch between dependency and dependent (the guess of
+the open point): the backtrace is `Crates::new` → `rustc_public::Crate::fn_defs` →
+`crate_functions` → `CrateMetadata::missing` → `bug!` → `def_path`. Generation mode
+treats every dependency as encoded and lists its functions; for `fip-macros`, a
+proc-macro crate, the metadata has no definition tables, so listing them hit `bug!`,
+whose message formatting panicked again. The seed crate has no proc-macro dependency,
+so `just prelint-std-summaries` never met it.
+
+**Change.** `analysis::macros_only` (`crate_dep_kind == MacrosOnly`): such a crate is
+never listed, in generation mode and also in check mode (a proc-macro crate declaring
+`fip::export` would have hit the same `bug!`). Nothing of a proc-macro crate is called
+by the analysed code, so nothing is lost.
+
+**Measured** (minimal crate `user` with `#[fip]` and a default `fip_fn!`, fixture
+`generate_deps`, new):
+
+| case | before | after |
+|---|---|---|
+| generation mode, crate depending on `fip-macros` and `fip-strict` | ICE (exit 101 per target, `lib` and `lib test`) | "std summaries: 0 functions from 1 seed roots", file written, exit 0 |
+| fixture `driver_checked`, variant `-generate` | `fip-macros` error at expansion | unchanged |
+| self-check dev / `--release`, other fixtures | — | unchanged |
+

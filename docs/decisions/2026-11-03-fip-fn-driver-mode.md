@@ -231,7 +231,9 @@ Generation mode of a crate depending on `fip-strict` ICEs in the driver
 (`rustc_metadata` decoder, `Option::unwrap` on `None`), with or without driver-mode
 constructions and also for the default `fip_fn!`; generation is meant for the seed
 crate only, and with this change a driver-mode construction fails earlier, at
-expansion.
+expansion. (Fixed 2026-11-04: the cause was listing the functions of the
+proc-macro crate `fip-macros`, not a flag mismatch; `TODOs/fip-prelint.md`, "Resolved
+2026-11-04: generation mode with a proc-macro dependency (ICE)".)
 
 Generic enclosing functions (soundness argument, point 4): the driver-mode check
 runs on the generic body (`generic_lie::<T>`: "may allocate 1 time(s)"); both

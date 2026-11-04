@@ -813,6 +813,15 @@ instead of 16 notes (the `strict::dedup_by` bounds check discharged; `pipeline`'
 becomes the precondition note). Details: `TODOs/fip-prelint.md`, "Resolved
 2026-11-04: Verus as an oracle for panic freedom".
 
+## Amendment 2026-11-04: proc-macro crates are never listed
+
+A dependency loaded only for its macros (`crate_dep_kind == MacrosOnly`, a proc-macro
+crate) is never treated as encoded, also in std-summary generation mode, which treats
+every other dependency as encoded. Listing its functions was an ICE in
+`rustc_metadata` (generation mode of any crate depending on `fip-macros`). Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-04: generation mode with a proc-macro
+dependency (ICE)".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

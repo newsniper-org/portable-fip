@@ -673,6 +673,33 @@ fn driver_checked() {
     );
 }
 
+/// Std-summary generation (`FIP_PRELINT_STD_SUMMARIES_OUT` set) of a crate that
+/// depends on a proc-macro crate (`fip-macros`) and on `fip-strict` writes the
+/// summaries. It was an ICE (`rustc_metadata` `def_key`, `Option::unwrap` on `None`):
+/// generation listed the functions of every dependency, the proc-macro crate
+/// included, whose metadata has none.
+#[test]
+fn generate_deps() {
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("generate_deps-summaries.txt");
+    let _ = std::fs::remove_file(&out);
+    let got = run(
+        "generate_deps",
+        "-generate",
+        &[(
+            "FIP_PRELINT_STD_SUMMARIES_OUT",
+            out.clone().into_os_string(),
+        )],
+    );
+    assert_eq!(got[0], "exit: success", "generation failed: {got:#?}");
+    assert!(
+        got.iter()
+            .any(|l| l.contains("std summaries: 0 functions from 1 seed roots")),
+        "no summary note: {got:#?}"
+    );
+    let text = std::fs::read_to_string(&out).expect("the summaries were written");
+    assert!(text.starts_with("fip-prelint std summaries\n"), "{text}");
+}
+
 /// Copies the fixture `name` to a fresh directory under the test's temporary
 /// directory (without `target`), for mutations.
 fn copy_fixture(name: &str, to: &str) -> PathBuf {

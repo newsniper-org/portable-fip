@@ -840,15 +840,20 @@ impl Crates {
     pub fn new(tcx: TyCtxt<'_>) -> Crates {
         let mut exported = HashMap::new();
         for &cnum in tcx.crates(()) {
-            exported.insert(cnum, declares_export(tcx, cnum.as_def_id()));
+            exported.insert(
+                cnum,
+                !macros_only(tcx, cnum) && declares_export(tcx, cnum.as_def_id()),
+            );
         }
         exported.insert(LOCAL_CRATE, true);
         let generate = std::env::var_os(crate::GENERATE_ENV).is_some();
         if generate {
             // The standard library of a `-Zbuild-std` build and its dependencies,
-            // all compiled with their MIR encoded.
-            for v in exported.values_mut() {
-                *v = true;
+            // all compiled with their MIR encoded. Not proc-macro crates: their
+            // metadata has no definitions to list (listing them was an ICE in
+            // `rustc_metadata`, `def_key` on `None`) and nothing of them is called.
+            for (cnum, v) in &mut exported {
+                *v = *cnum == LOCAL_CRATE || !macros_only(tcx, *cnum);
             }
         }
         let std_summaries = if generate {
@@ -1204,6 +1209,13 @@ fn has_source_body(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         DefKind::AssocFn => tcx.defaultness(def_id).has_value(),
         _ => false,
     }
+}
+
+/// `true` for a dependency loaded only for its macros (a proc-macro crate): its
+/// metadata lists no functions that code of this crate can call, and listing its
+/// definitions through `rustc_public` panics in `rustc_metadata`.
+pub fn macros_only(tcx: TyCtxt<'_>, cnum: rustc_hir::def_id::CrateNum) -> bool {
+    tcx.crate_dep_kind(cnum) == rustc_crate_store::CrateDepKind::MacrosOnly
 }
 
 /// `true` if the crate root of `root` carries `fip::export`.
