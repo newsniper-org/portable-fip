@@ -859,6 +859,15 @@ at the call of that function in the caller whose binding found it, for that call
 (and, for an unknown pointer, naming the caller's parameter), once per such call.
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: T4.3 reports at the caller".
 
+## Amendment 2026-11-04: stack mode on ELF32 (i386, ARM)
+
+Stack mode reads ELF32 i386 and ARM objects (`REL` relocations): return address 4
+bytes on i386, plus 4 for a function without callees (a PC-reading `call` below the
+frame, measured), and 0 on ARM (the saved `lr` is inside the measured frame). Thumb
+branch relocations make the object unreadable (`⊤`). Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-04: stack mode on ELF32 (i386, ARM) and
+the allocator shim's name".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

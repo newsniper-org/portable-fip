@@ -2670,3 +2670,43 @@ function ("the parameter `q` of `mid_private`") instead of "the caller".
 | crate `callers` | 19 roots, 12 passed, 27 errors | 19 roots, 12 passed, 28 errors (the second caller) |
 | self-check dev / `--release`, other fixtures | — | unchanged |
 
+## Resolved 2026-11-04: stack mode on ELF32 (i386, ARM) and the allocator shim's name
+
+Open points of "stack mode gaps" (T8): i686 and ARMv7 objects (ELF32, `REL`) were not
+read ("not an ELF64 little-endian object", every root `⊤`); in `--tests` the
+allocator shim was shown as its mangled symbol.
+
+**Change.**
+
+- `stackbound::read_object` reads both classes: ELF32 header, section header and
+  symbol layouts; `REL` relocations (8 bytes, addend in the relocated data,
+  `implicit_addend`: a 32-bit word, or `imm24 << 2` sign-extended for ARM
+  `R_ARM_CALL`/`R_ARM_JUMP24`) next to `RELA`; `.stack_sizes` entries with a 4-byte
+  address. The offset of a call through a section symbol adds the PC bias (4 for
+  x86_64 and i386, 8 for ARM `BL`/`B`). Thumb branch relocations are refused (the
+  object is unreadable, so `⊤`), and relocations against `_GLOBAL_OFFSET_TABLE_`
+  (`R_386_GOTPC`) are data, not calls.
+- Return address (measured on this build's objects): i386 4 (`call` pushes it); ARM
+  0, as AArch64: `chain_top` begins `push {r11, lr}; sub sp, sp, #24` and its
+  `.stack_sizes` value is 32, the saved `lr` included. i386 position-independent code
+  reads the PC with `calll .+5; popl %ebx` (in `chain_top` at opt-level 0), 4 bytes
+  below the frame that `.stack_sizes` (0x1C = `pushl %ebx` + `subl $0x18`) does not
+  include: a function without callees counts 4 more bytes (`leaf_extra`, stated in the
+  note); a callee's return address covers it otherwise.
+- `stackbound::v0_path`: the path of a v0 symbol made of nested values and a crate
+  root; the shim is shown as "`__rustc::__rust_alloc` (the allocator shim of the
+  executable, symbol `_RNv..`)".
+
+**Measured** (fixture `stack`, new variants `-i686` and `-armv7`; cross-check with
+`llvm-readobj --stack-sizes`, frames of `chain_top`, `mid`, `leaf`):
+
+| case | before | after |
+|---|---|---|
+| `--target i686-unknown-linux-gnu` | every root `⊤` (object not read) | `chain` 4 bounded: `chain_top` 508 ≥ frame sum 484 (28 + 140 + 316), `indexed` 52, `summed` 244, `generic::<u32>` 8; `leafy` 1 |
+| `--target armv7-unknown-linux-gnueabihf` | every root `⊤` | `chain` 3 bounded: `chain_top` 488 ≥ 480 (32 + 128 + 320), `indexed` 32, `generic::<u32>` 4; `summed` `⊤` at `__aeabi_uidiv` (precompiled runtime); `leafy` 1 |
+| `--lib --tests`, `boxed` | "`_RNvCs5fGHjzWXRav_7___rustc12___rust_alloc` is defined in the build but .." | "`__rustc::__rust_alloc` (the allocator shim of the executable, symbol `_RNv..`) is defined .." |
+| dev, release, aarch64, buildstd variants; FIP verdicts | — | unchanged |
+
+**Left.** Thumb code (`thumbv7*` targets) is refused; Mach-O, COFF and WASM still have
+no frame sizes.
+

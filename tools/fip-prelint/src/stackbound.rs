@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! Stack bounds from a build (limits plan L9; `cargo fip-prelint --stack`), without
-//! dependencies: an `ar` reader for rlibs, an ELF64 little-endian reader for their
-//! objects (`.stack_sizes` from `-Zemit-stack-sizes`, symbols, relocations; x86_64 and
-//! AArch64, top plan T8a), and the longest path over the call graph.
+//! dependencies: an `ar` reader for rlibs, a little-endian ELF reader for their
+//! objects (`.stack_sizes` from `-Zemit-stack-sizes`, symbols, relocations; ELF64
+//! x86_64 and AArch64, top plan T8a; ELF32 i386 and ARM), and the longest path over
+//! the call graph.
 //!
 //! **Graph.** Nodes are the functions defined in the objects of the build's rlibs
 //! (one `.text.<symbol>` section per function). Edges are the direct calls of the
@@ -22,9 +23,11 @@
 //!
 //! **Bound.** `Σ (frame + return address)` over the longest path from the root's
 //! symbol, frames from `.stack_sizes` (a symbol in several objects: its maximum), the
-//! return address 8 bytes on x86_64 (pushed by `call`) and 0 on AArch64 (`bl` puts
-//! it in the link register; a callee that saves it pushes a frame record, which its
-//! `.stack_sizes` value includes); other machines and formats are `⊤`. A symbol
+//! return address 8 bytes on x86_64 and 4 on i386 (pushed by `call`; on i386 a
+//! function without callees counts 4 more, [`leaf_extra`]) and 0 on AArch64 and ARM
+//! (`bl` puts it in the link register; a callee that saves it pushes a frame record,
+//! which its `.stack_sizes` value includes); other machines, Thumb code and other
+//! formats are `⊤`. A symbol
 //! without a frame size that the root's crate declares with `fip::stack_leaf` counts
 //! the declared bytes (trusted, top plan T8b). `⊤` with the reason
 //! for: recursion (a cycle), a call of a symbol not defined in the build's objects
@@ -39,17 +42,30 @@ use std::path::Path;
 /// A bound and its longest path (labels with frames), or why there is none.
 type Found = Result<(u64, Vec<(String, u64)>), String>;
 
+const EM_386: u16 = 3;
+const EM_ARM: u16 = 40;
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
 
 /// Bytes a call adds besides the callee's frame: the return address `call` pushes on
-/// x86_64; none on AArch64 (the link register).
+/// x86_64 (8) and i386 (4); none on AArch64 and ARM (`bl` puts it in the link
+/// register; a callee that saves it pushes it inside its frame, measured on ARMv7:
+/// `push {r11, lr}` is part of the `.stack_sizes` value).
 pub fn return_address(machine: u16) -> Option<u64> {
     match machine {
         EM_X86_64 => Some(8),
-        EM_AARCH64 => Some(0),
+        EM_386 => Some(4),
+        EM_AARCH64 | EM_ARM => Some(0),
         _ => None,
     }
+}
+
+/// Bytes below its frame that a function without callees may still use: on i386,
+/// position-independent code reads the PC with a `call` of the next instruction and a
+/// `pop` (4 bytes, outside `.stack_sizes`; measured at opt-level 0). A function with
+/// a callee covers them with that callee's return address.
+pub fn leaf_extra(machine: u16) -> u64 {
+    if machine == EM_386 { 4 } else { 0 }
 }
 
 /// The machine's name in messages.
@@ -57,6 +73,8 @@ pub fn machine_name(machine: u16) -> &'static str {
     match machine {
         EM_X86_64 => "x86_64",
         EM_AARCH64 => "AArch64",
+        EM_386 => "i386",
+        EM_ARM => "ARM",
         _ => "unknown",
     }
 }
@@ -133,6 +151,7 @@ struct Sym {
 
 const SHT_SYMTAB: u32 = 2;
 const SHT_RELA: u32 = 4;
+const SHT_REL: u32 = 9;
 const SHF_EXECINSTR: u64 = 4;
 const STT_FUNC: u8 = 2;
 const STT_SECTION: u8 = 3;
@@ -170,33 +189,76 @@ fn uleb(b: &[u8], mut o: usize) -> Option<(u64, usize)> {
     }
 }
 
-/// Reads a relocatable ELF64 little-endian x86_64 or AArch64 object.
+/// Reads a relocatable little-endian ELF object: ELF64 x86_64 or AArch64 (`RELA`
+/// relocations), ELF32 i386 or ARM (`REL` relocations, addends in the relocated data;
+/// top plan T8 residue).
 pub fn read_object(b: &[u8]) -> Result<Object, String> {
-    if !b.starts_with(b"\x7fELF") || b.get(4) != Some(&2) || b.get(5) != Some(&1) {
-        return Err("not an ELF64 little-endian object".to_string());
+    if !b.starts_with(b"\x7fELF") || b.get(5) != Some(&1) {
+        return Err("not a little-endian ELF object".to_string());
     }
+    let wide = match b.get(4) {
+        Some(2) => true,
+        Some(1) => false,
+        _ => return Err("not an ELF32 or ELF64 object".to_string()),
+    };
     let machine = u16_at(b, 18).ok_or("truncated ELF header")?;
     if return_address(machine).is_none() {
         return Err(format!(
-            "ELF machine {machine}: only x86_64 and AArch64 objects are supported"
+            "ELF machine {machine}: only x86_64, AArch64, i386 and ARM objects are supported"
         ));
     }
-    let shoff = usize::try_from(u64_at(b, 0x28).ok_or("truncated")?).map_err(|e| e.to_string())?;
-    let shentsize = usize::from(u16_at(b, 0x3A).ok_or("truncated")?);
-    let shnum = usize::from(u16_at(b, 0x3C).ok_or("truncated")?);
-    let shstrndx = usize::from(u16_at(b, 0x3E).ok_or("truncated")?);
+    if wide != matches!(machine, EM_X86_64 | EM_AARCH64) {
+        return Err(format!(
+            "ELF machine {machine} in an object of the other class"
+        ));
+    }
+    // A word (address, offset, size) of the object's class.
+    let word = |o: usize| -> Option<u64> {
+        if wide {
+            u64_at(b, o)
+        } else {
+            u32_at(b, o).map(u64::from)
+        }
+    };
+    let to_usize = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+    let (shoff, shentsize, shnum, shstrndx) = if wide {
+        (
+            word(0x28).ok_or("truncated")?,
+            u16_at(b, 0x3A).ok_or("truncated")?,
+            u16_at(b, 0x3C).ok_or("truncated")?,
+            u16_at(b, 0x3E).ok_or("truncated")?,
+        )
+    } else {
+        (
+            word(0x20).ok_or("truncated")?,
+            u16_at(b, 0x2E).ok_or("truncated")?,
+            u16_at(b, 0x30).ok_or("truncated")?,
+            u16_at(b, 0x32).ok_or("truncated")?,
+        )
+    };
+    let (shoff, shentsize, shnum, shstrndx) = (
+        to_usize(shoff),
+        usize::from(shentsize),
+        usize::from(shnum),
+        usize::from(shstrndx),
+    );
+    // Section header fields: flags, offset, size, link, info.
+    let (f_flags, f_off, f_size, f_link, f_info) = if wide {
+        (8, 24, 32, 40, 44)
+    } else {
+        (8, 16, 20, 24, 28)
+    };
     let mut secs = Vec::with_capacity(shnum);
     for i in 0..shnum {
         let o = shoff + i * shentsize;
-        let to_usize = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
         secs.push(Section {
             name: String::new(),
             kind: u32_at(b, o + 4).ok_or("truncated section header")?,
-            flags: u64_at(b, o + 8).ok_or("truncated section header")?,
-            offset: to_usize(u64_at(b, o + 24).ok_or("truncated section header")?),
-            size: to_usize(u64_at(b, o + 32).ok_or("truncated section header")?),
-            link: u32_at(b, o + 40).ok_or("truncated section header")?,
-            info: u32_at(b, o + 44).ok_or("truncated section header")?,
+            flags: word(o + f_flags).ok_or("truncated section header")?,
+            offset: to_usize(word(o + f_off).ok_or("truncated section header")?),
+            size: to_usize(word(o + f_size).ok_or("truncated section header")?),
+            link: u32_at(b, o + f_link).ok_or("truncated section header")?,
+            info: u32_at(b, o + f_info).ok_or("truncated section header")?,
         });
         let name_off = u32_at(b, o).ok_or("truncated section header")?;
         secs[i].name = name_off.to_string();
@@ -220,16 +282,29 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
     let strdata = b
         .get(strtab.offset..strtab.offset + strtab.size)
         .ok_or("truncated string table")?;
+    let sym_size = if wide { 24 } else { 16 };
     let mut syms = Vec::new();
-    for k in 0..symtab.size / 24 {
-        let o = symtab.offset + k * 24;
-        syms.push(Sym {
-            name: cstr(strdata, u32_at(b, o).ok_or("truncated symbol")? as usize),
-            kind: b.get(o + 4).ok_or("truncated symbol")? & 0xf,
-            shndx: u16_at(b, o + 6).ok_or("truncated symbol")?,
-            value: u64_at(b, o + 8).ok_or("truncated symbol")?,
-            size: u64_at(b, o + 16).ok_or("truncated symbol")?,
-        });
+    for k in 0..symtab.size / sym_size {
+        let o = symtab.offset + k * sym_size;
+        let name = cstr(strdata, u32_at(b, o).ok_or("truncated symbol")? as usize);
+        let sym = if wide {
+            Sym {
+                name,
+                kind: b.get(o + 4).ok_or("truncated symbol")? & 0xf,
+                shndx: u16_at(b, o + 6).ok_or("truncated symbol")?,
+                value: u64_at(b, o + 8).ok_or("truncated symbol")?,
+                size: u64_at(b, o + 16).ok_or("truncated symbol")?,
+            }
+        } else {
+            Sym {
+                name,
+                kind: b.get(o + 12).ok_or("truncated symbol")? & 0xf,
+                shndx: u16_at(b, o + 14).ok_or("truncated symbol")?,
+                value: u64::from(u32_at(b, o + 4).ok_or("truncated symbol")?),
+                size: u64::from(u32_at(b, o + 8).ok_or("truncated symbol")?),
+            }
+        };
+        syms.push(sym);
     }
     let exec = |idx: u16| {
         secs.get(usize::from(idx))
@@ -258,35 +333,74 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
             })
             .unwrap_or_default()
     };
-    for (ri, rs) in secs.iter().enumerate() {
-        if rs.kind != SHT_RELA || rs.link as usize >= secs.len() {
+    for rs in &secs {
+        let explicit = rs.kind == SHT_RELA;
+        if !(explicit || rs.kind == SHT_REL) || rs.link as usize >= secs.len() {
             continue;
         }
         let target = rs.info as usize;
         let Some(tsec) = secs.get(target) else {
             continue;
         };
-        let _ = ri;
-        let relocs: Vec<(u64, usize, u32, i64)> = (0..rs.size / 24)
-            .filter_map(|k| {
-                let o = rs.offset + k * 24;
-                let info = u64_at(b, o + 8)?;
-                Some((
-                    u64_at(b, o)?,
-                    usize::try_from(info >> 32).ok()?,
-                    u32::try_from(info & 0xffff_ffff).ok()?,
-                    i64::from_le_bytes(b.get(o + 16..o + 24)?.try_into().ok()?),
-                ))
-            })
-            .collect();
+        let tdata = b.get(tsec.offset..tsec.offset + tsec.size).unwrap_or(&[]);
+        // (offset, symbol, type, addend) of each relocation.
+        let ent = match (wide, explicit) {
+            (true, true) => 24,
+            (true, false) => 16,
+            (false, true) => 12,
+            (false, false) => 8,
+        };
+        let mut relocs: Vec<(u64, usize, u32, i64)> = Vec::new();
+        for k in 0..rs.size / ent {
+            let o = rs.offset + k * ent;
+            let (off, sym, rtype) = if wide {
+                let info = u64_at(b, o + 8).ok_or("truncated relocation")?;
+                (
+                    u64_at(b, o).ok_or("truncated relocation")?,
+                    usize::try_from(info >> 32).map_err(|e| e.to_string())?,
+                    u32::try_from(info & 0xffff_ffff).map_err(|e| e.to_string())?,
+                )
+            } else {
+                let info = u32_at(b, o + 4).ok_or("truncated relocation")?;
+                (
+                    u64::from(u32_at(b, o).ok_or("truncated relocation")?),
+                    usize::try_from(info >> 8).map_err(|e| e.to_string())?,
+                    info & 0xff,
+                )
+            };
+            // Thumb branches encode their offset differently: not read (`⊤`).
+            if machine == EM_ARM && matches!(rtype, 10 | 30 | 102 | 103) {
+                return Err(format!(
+                    "ARM relocation type {rtype} (a Thumb branch) is not supported"
+                ));
+            }
+            let addend = match (wide, explicit) {
+                (true, true) => i64::from_le_bytes(
+                    b.get(o + 16..o + 24)
+                        .and_then(|s| s.try_into().ok())
+                        .ok_or("truncated relocation")?,
+                ),
+                (false, true) => i64::from(i32::from_le_bytes(
+                    b.get(o + 8..o + 12)
+                        .and_then(|s| s.try_into().ok())
+                        .ok_or("truncated relocation")?,
+                )),
+                // `REL`: the addend is stored in the relocated data.
+                _ => usize::try_from(off)
+                    .ok()
+                    .and_then(|p| implicit_addend(machine, rtype, tdata, p))
+                    .ok_or("relocation outside its section")?,
+            };
+            relocs.push((off, sym, rtype, addend));
+        }
         if tsec.name == ".stack_sizes" {
-            // Entries: an address (relocated) and a ULEB128 size.
-            let data = b
-                .get(tsec.offset..tsec.offset + tsec.size)
-                .ok_or("truncated .stack_sizes")?;
+            // Entries: an address of the class's size (relocated) and a ULEB128 size.
+            let addr = if wide { 8 } else { 4 };
             for (off, si, _, addend) in &relocs {
                 let Some(sym) = syms.get(*si) else { continue };
-                let Some((size, _)) = usize::try_from(*off + 8).ok().and_then(|p| uleb(data, p))
+                let Some((size, _)) = usize::try_from(*off + addr)
+                    .ok()
+                    .and_then(|p| uleb(tdata, p))
                 else {
                     continue;
                 };
@@ -311,11 +425,19 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
         for (off, si, rtype, addend) in &relocs {
             let Some(sym) = syms.get(*si) else { continue };
             let callers = func_at(u16::try_from(target).unwrap_or(0), *off);
-            // x86_64: PC-relative relocations address `S + A - P` with `A` = offset
-            // - 4. AArch64: the addend is the offset (`CALL26`, `JUMP26`, `ADR*`).
-            let pc_rel = machine == EM_X86_64 && matches!(rtype, 2 | 4 | 9 | 41 | 42);
+            // PC-relative relocations address `S + A - P`: the target's offset in its
+            // section is `A` plus the distance from the place to the PC the
+            // instruction uses (x86_64 and i386: the end of the 4-byte field; ARM
+            // `BL`/`B`: the place plus 8). AArch64 and absolute relocations: `A`.
+            let bias = match machine {
+                EM_X86_64 if matches!(rtype, 2 | 4 | 9 | 41 | 42) => 4,
+                EM_386 if matches!(rtype, 2 | 4) => 4,
+                EM_ARM if matches!(rtype, 28 | 29) => 8,
+                _ => 0,
+            };
             let callees: Vec<String> = if sym.shndx == 0 {
-                if sym.name.is_empty() {
+                // The GOT's address (`R_386_GOTPC`, `R_ARM_GOTPC`) is data, not code.
+                if sym.name.is_empty() || sym.name == "_GLOBAL_OFFSET_TABLE_" {
                     Vec::new()
                 } else {
                     vec![sym.name.clone()]
@@ -323,8 +445,7 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
             } else if sym.kind == STT_FUNC {
                 vec![sym.name.clone()]
             } else if sym.kind == STT_SECTION && exec(sym.shndx) {
-                let t = if pc_rel { *addend + 4 } else { *addend };
-                let t = u64::try_from(t).unwrap_or(0);
+                let t = u64::try_from(*addend + bias).unwrap_or(0);
                 func_at(sym.shndx, t)
                     .iter()
                     .filter(|f| {
@@ -349,6 +470,80 @@ pub fn read_object(b: &[u8]) -> Result<Object, String> {
         }
     }
     Ok(obj)
+}
+
+/// The addend of a `REL` relocation of `rtype` at `off` in the relocated data `data`
+/// (ELF32 i386 and ARM); `None` if the data is too short.
+fn implicit_addend(machine: u16, rtype: u32, data: &[u8], off: usize) -> Option<i64> {
+    let w = u32_at(data, off)?;
+    match (machine, rtype) {
+        // `R_ARM_CALL`, `R_ARM_JUMP24`: `imm24 << 2`, sign-extended.
+        (EM_ARM, 28 | 29) => {
+            let imm = i64::from(w & 0x00ff_ffff) << 2;
+            Some(if imm & (1 << 25) != 0 {
+                imm - (1 << 26)
+            } else {
+                imm
+            })
+        }
+        // A 32-bit word (`R_386_32`, `R_386_PC32`, `R_386_PLT32`, `R_ARM_ABS32`,
+        // `R_ARM_REL32`, ..): sign-extended.
+        _ => Some(i64::from(i32::from_le_bytes(w.to_le_bytes()))),
+    }
+}
+
+/// The path of a Rust v0 symbol made of nested values and a crate root only
+/// (`_RNvCs<disambiguator>_7___rustc12___rust_alloc` is `__rustc::__rust_alloc`);
+/// `None` for anything else (generic arguments, impls, Punycode).
+pub fn v0_path(sym: &str) -> Option<String> {
+    fn ident(s: &[u8], i: &mut usize) -> Option<String> {
+        let start = *i;
+        while s.get(*i)?.is_ascii_digit() {
+            *i += 1;
+        }
+        let n: usize = std::str::from_utf8(&s[start..*i]).ok()?.parse().ok()?;
+        if s.get(*i) == Some(&b'_') {
+            *i += 1;
+        }
+        let id = s.get(*i..*i + n)?;
+        *i += n;
+        String::from_utf8(id.to_vec()).ok()
+    }
+    fn disambiguator(s: &[u8], i: &mut usize) -> Option<()> {
+        if s.get(*i) == Some(&b's') {
+            *i += 1;
+            while *s.get(*i)? != b'_' {
+                *i += 1;
+            }
+            *i += 1;
+        }
+        Some(())
+    }
+    fn path(s: &[u8], i: &mut usize, depth: usize) -> Option<Vec<String>> {
+        if depth > 16 {
+            return None;
+        }
+        match *s.get(*i)? {
+            b'C' => {
+                *i += 1;
+                disambiguator(s, i)?;
+                Some(vec![ident(s, i)?])
+            }
+            b'N' => {
+                *i += 2;
+                let mut p = path(s, i, depth + 1)?;
+                disambiguator(s, i)?;
+                p.push(ident(s, i)?);
+                Some(p)
+            }
+            _ => None,
+        }
+    }
+    let s = sym.strip_prefix("_R")?.as_bytes();
+    let mut i = 0;
+    let p = path(s, &mut i, 0)?;
+    // A trailing instantiating crate is allowed; anything else is not read.
+    (i == s.len() || s.get(i) == Some(&b'C')).then(|| p.join("::"))
 }
 
 /// A `.fip-stack` file of one crate (see `src/stack.rs`).
@@ -525,6 +720,11 @@ impl Build {
     }
 
     /// The build's machine, for messages.
+    /// [`leaf_extra`] of the build's machine.
+    pub fn leaf_extra(&self) -> u64 {
+        self.machine.map_or(0, leaf_extra)
+    }
+
     pub fn machine(&self) -> &'static str {
         self.machine.map_or("unknown", machine_name)
     }
@@ -617,8 +817,16 @@ impl Build {
             ));
         }
         let Some((label, why)) = self.mapped.get(sym) else {
+            let shown = match v0_path(sym) {
+                // The allocator shim rustc generates for an executable (top plan T8f).
+                Some(p) if p.starts_with("__rustc::") => {
+                    format!("`{p}` (the allocator shim of the executable, symbol `{sym}`)")
+                }
+                Some(p) => format!("`{p}` (symbol `{sym}`)"),
+                None => format!("`{sym}`"),
+            };
             return Err(format!(
-                "`{sym}` is defined in the build but is not a function rustc codegened from MIR for a crate the driver compiled"
+                "{shown} is defined in the build but is not a function rustc codegened from MIR for a crate the driver compiled"
             ));
         };
         if let Some(why) = why {
@@ -650,13 +858,31 @@ impl Build {
         on_path.pop();
         let mut path = vec![(label.clone(), frame)];
         path.extend(best.1);
-        Ok((frame + self.return_address() + best.0, path))
+        let extra = self.leaf_extra();
+        Ok((frame + self.return_address() + best.0.max(extra), path))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v0_paths() {
+        assert_eq!(
+            v0_path("_RNvCs5fGHjzWXRav_7___rustc12___rust_alloc").as_deref(),
+            Some("__rustc::__rust_alloc")
+        );
+        assert_eq!(
+            v0_path("_RNvCskTneyE8Q88p_5chain9chain_top").as_deref(),
+            Some("chain::chain_top")
+        );
+        assert_eq!(
+            v0_path("_RINvNtCs5yrd3dq0xpX_4core4hint9black_boxQAyj20_E"),
+            None
+        );
+        assert_eq!(v0_path("memcpy"), None);
+    }
 
     #[test]
     fn uleb128() {

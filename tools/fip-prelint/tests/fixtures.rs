@@ -460,11 +460,13 @@ fn profiles() {
 /// `-Zcross-crate-inline-threshold=never` every root has a symbol, T8d). Crate `leafy`
 /// declares `memcpy` a stack leaf (T8b) and instantiates `chain::generic::<u32>`
 /// (bounded per instance, T8e). Variants: `-tests` (`--lib --tests`: the test target's
-/// objects add `chain::generic::<u8>`, T8f), `-aarch64` (`--target
-/// aarch64-unknown-linux-gnu`, AArch64 ELF, return address 0, T8a; skipped if not
-/// installed), `-buildstd` (`--build-std`: the std functions are built and bounded,
+/// objects add `chain::generic::<u8>`, T8f; the allocator shim is named
+/// `__rustc::__rust_alloc`), `-aarch64` (`--target aarch64-unknown-linux-gnu`, AArch64
+/// ELF, return address 0, T8a), `-i686` (ELF32 i386, return address 4, 4 more bytes
+/// for a function without callees) and `-armv7` (ELF32 ARM, return address 0)
+/// (cross targets skipped if not installed), `-buildstd` (`--build-std`: the std functions are built and bounded,
 /// down to the foreign `getpid`/`memcpy`, T8c). If the system `llvm-readobj` exists,
-/// each bound of `chain_top` (dev, release, aarch64) is checked to be at least the sum
+/// each bound of `chain_top` (dev, release and the cross targets) is checked to be at least the sum
 /// of its chain's frame sizes as `llvm-readobj --stack-sizes` reads them.
 #[test]
 fn stack() {
@@ -481,22 +483,33 @@ fn stack() {
         .output()
         .expect("rustc --print sysroot");
     let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    let aarch64 = "aarch64-unknown-linux-gnu";
-    let has_aarch64 = sysroot.join("lib").join("rustlib").join(aarch64).is_dir();
-    let variants: [(&str, &[&str], Option<&str>); 5] = [
+    let installed = |t: &str| sysroot.join("lib").join("rustlib").join(t).is_dir();
+    let variants: [(&str, &[&str], Option<&str>); 7] = [
         ("-dev", &[], Some("debug")),
         ("-release", &["--release"], Some("release")),
         ("-tests", &["--lib", "--tests"], None),
         (
             "-aarch64",
-            &["--target", aarch64],
+            &["--target", "aarch64-unknown-linux-gnu"],
             Some("aarch64-unknown-linux-gnu/debug"),
+        ),
+        (
+            "-i686",
+            &["--target", "i686-unknown-linux-gnu"],
+            Some("i686-unknown-linux-gnu/debug"),
+        ),
+        (
+            "-armv7",
+            &["--target", "armv7-unknown-linux-gnueabihf"],
+            Some("armv7-unknown-linux-gnueabihf/debug"),
         ),
         ("-buildstd", &["--build-std"], None),
     ];
     for (variant, extra, cross_check) in variants {
-        if variant == "-aarch64" && !has_aarch64 {
-            eprintln!("stack fixture{variant}: `{aarch64}` not installed, skipped");
+        if let ["--target", t] = extra
+            && !installed(t)
+        {
+            eprintln!("stack fixture{variant}: `{t}` not installed, skipped");
             continue;
         }
         let mut args = vec!["--stack"];

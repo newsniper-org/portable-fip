@@ -502,13 +502,19 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
     }
     if !records.is_empty() {
         eprintln!(
-            "note: fip-prelint: stack: built with `-Zemit-stack-sizes -Zshare-generics=no -Zcross-crate-inline-threshold=never`{} ({} objects; the bounds hold for this build)",
+            "note: fip-prelint: stack: built with `-Zemit-stack-sizes -Zshare-generics=no -Zcross-crate-inline-threshold=never`{} ({} objects{}; the bounds hold for this build)",
             if build_std {
                 ", against a `-Zbuild-std` standard library built with the profile's settings (not the shipped one)"
             } else {
                 ""
             },
-            build.machine()
+            build.machine(),
+            match build.leaf_extra() {
+                0 => String::new(),
+                n => format!(
+                    "; a function without callees counts {n} more bytes, for a `call` that reads the PC"
+                ),
+            }
         );
     }
     let ra = build.return_address();
