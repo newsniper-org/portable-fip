@@ -209,6 +209,30 @@ pub open spec fn compact_map_by_post<A, F: Fn(A) -> (A, bool)>(
     compact_map_post(old, new, w, |a: A, b: A, k: bool| f.ensures((a,), (b, k)), ys, ks, idx, pos)
 }
 
+/// Assembles `compact_map_by_post` from `compact_map`'s loop invariant at exit, as one
+/// small query of its own: measured, the same assertion inside `compact_map` failed
+/// whenever an earlier query of module `slice` had failed (Z3 session state), on 10
+/// seeds and both Verus builds, which `verifier::spinoff_prover` used to hide.
+pub proof fn lemma_compact_map_by_post_intro<A, F: Fn(A) -> (A, bool)>(
+    old: Seq<A>, new: Seq<A>, w: int, f: F, ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>,
+)
+    requires
+        ys.len() == old.len(),
+        ks.len() == old.len(),
+        forall|j: int| 0 <= j < old.len() ==> f.ensures((old[j],), (#[trigger] ys[j], ks[j])),
+        new.len() == old.len(),
+        new.to_multiset() == ys.to_multiset(),
+        0 <= w <= old.len(),
+        idx.len() == w,
+        strictly_increasing_below(idx, old.len() as int),
+        prefix_ok(new, ys, ks, idx, w),
+        pos.len() == old.len(),
+        forall|j: int| 0 <= j < old.len() && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+    ensures
+        compact_map_by_post(old, new, w, f, ys, ks, idx, pos),
+{
+}
+
 /// The first `w` elements of `s` are `ys[idx[i]]`, each with `ks[idx[i]]`.
 /// Loop invariant of `compact_map`, named so that its frame reasoning lives in the
 /// two lemmas below rather than in assertions spread over the loop body.
@@ -602,6 +626,32 @@ pub mod state {
     ) -> bool {
         compact_map_st_post(old, new, w, |a: S, x: A, b: S, y: A, k: bool| f.ensures((a, x), (b, y, k)),
             s0, s, ss, ys, ks, idx, pos)
+    }
+
+    /// Assembles `compact_map_st_by_post` from `compact_map_st`'s loop invariant at
+    /// exit, as one small query of its own (see `lemma_compact_map_by_post_intro`).
+    pub proof fn lemma_compact_map_st_by_post_intro<S, A, F: Fn(S, A) -> (S, A, bool)>(
+        old: Seq<A>, new: Seq<A>, w: int, f: F, s0: S, s: S,
+        ss: Seq<S>, ys: Seq<A>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>,
+    )
+        requires
+            ss.len() == old.len() + 1,
+            ss[0] == s0,
+            ss[old.len() as int] == s,
+            ys.len() == old.len(),
+            ks.len() == old.len(),
+            forall|j: int| 0 <= j < old.len() ==> f.ensures((ss[j], old[j]), (ss[j + 1], #[trigger] ys[j], ks[j])),
+            new.len() == old.len(),
+            new.to_multiset() == ys.to_multiset(),
+            0 <= w <= old.len(),
+            idx.len() == w,
+            strictly_increasing_below(idx, old.len() as int),
+            super::prefix_ok(new, ys, ks, idx, w),
+            pos.len() == old.len(),
+            forall|j: int| 0 <= j < old.len() && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+        ensures
+            compact_map_st_by_post(old, new, w, f, s0, s, ss, ys, ks, idx, pos),
+    {
     }
 
     /// `compact_map_st_post` for a `FipFn` function.

@@ -147,6 +147,23 @@ Findings:
   earlier query of module `slice` had failed (mutants of `map_in_place_st`);
   `verifier::spinoff_prover` gives each its own Z3 process, after which those mutants
   fail only where intended.
+  **Update 2026-11-04: `spinoff_prover` removed.** Measured without it (upstream
+  0.2026.10.18.7d82994 and the fork 0.2026.10.31.559ac52, `smt.random_seed` 1–10,
+  `--multiple-errors 8`): the unmodified crate verifies on all 20 runs, but in every
+  mutant run of module `slice` (`map-st-reverse-order`, `map-st-not-threaded`,
+  `map-st-inv-not-carried`, `map-skips-store`, `compact-no-swap`, `dedup-no-swap`)
+  `compact_map` and `compact_map_st` each fail one extra assertion, on all 10 seeds
+  and both builds: the final `assert(compact_map_by_post(..))` /
+  `compact_map_st_by_post(..)`, narrowed to the prefix conjunct (`forall i < w ==>
+  new[i] == ys[idx[i]] && ks[idx[i]]`), which failed even right after asserting the
+  invariant `prefix_ok(..)` that is the same formula. Fix: the postcondition is
+  assembled by two small lemmas in `spec` (`lemma_compact_map_by_post_intro`,
+  `state::lemma_compact_map_st_by_post_intro`) whose `requires` are the loop
+  invariants at exit; the loop calls them instead of asserting the post. After: 58
+  verified (2 lemmas) on all 20 clean runs, and each of the 6 mutants fails only in
+  the mutated function on all 10 seeds and both builds, as with `spinoff_prover`;
+  `just verify` and the fork's run pass (47 mutants and controls rejected for the
+  intended reason).
 - **Error budget of mutants.** A reversed `map_in_place_st` loop now first fails
   `f`'s indexed precondition; with Verus's default of 2 extra errors per function
   the state-chain invariant was not reported. Mutants run with `--multiple-errors 8`.

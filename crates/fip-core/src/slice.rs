@@ -414,9 +414,6 @@ pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
             #[trigger] compact_map_by_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-// Own Z3 process: measured, this proof verifies alone and on 7 seeds, but failed when an
-// earlier query of the same module failed (mutants of `map_in_place_st`).
-#[cfg_attr(verus_keep_ghost, verifier::spinoff_prover)]
 pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (usize, T) {
     let len = xs.len();
     let mut spare = hole;
@@ -495,7 +492,7 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
     }
     proof! {
         assert(xs@.subrange(0, len as int) =~= xs@);
-        assert(compact_map_by_post(old(xs)@, xs@, w as int, f, ys, ks, idx, pos));
+        crate::spec::lemma_compact_map_by_post_intro(old(xs)@, xs@, w as int, f, ys, ks, idx, pos);
     }
     let res = (w, spare);
     proof! {
@@ -551,8 +548,6 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
         }),
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-// Own Z3 process, as `compact_map` (measured: failed after a failing `map_in_place_st`).
-#[cfg_attr(verus_keep_ghost, verifier::spinoff_prover)]
 pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
     xs: &mut [T],
     hole: T,
@@ -654,7 +649,7 @@ pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
     proof! {
         assert(xs@.subrange(0, len as int) =~= xs@);
         assert(res.0 == w && res.1 == last);
-        assert(compact_map_st_by_post(old(xs)@, xs@, res.0 as int, f, s0, res.1, ss, ys, ks, idx, pos));
+        crate::spec::state::lemma_compact_map_st_by_post_intro(old(xs)@, xs@, res.0 as int, f, s0, res.1, ss, ys, ks, idx, pos);
     }
     res
 }
