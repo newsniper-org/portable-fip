@@ -3,7 +3,7 @@
 
 # TODO: open items of `#[fip(strict = true)]` and `FipFn`
 
-**Status:** items 1–4, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 DONE; 25 CAUGHT by `fip-prelint`; 26, 27 MITIGATED; 28 OPEN; 5, 7 and 10 INHERENT for the attribute macro but CAUGHT by `fip-prelint` (MIR, 2026-11-01); 6 MITIGATED (reasons below).
+**Status:** items 1–4, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 28 DONE; 25 CAUGHT by `fip-prelint`; 26, 27 MITIGATED; 5, 7 and 10 INHERENT for the attribute macro but CAUGHT by `fip-prelint` (MIR, 2026-11-01); 6 MITIGATED (reasons below).
 **Recorded:** 2026-11-01. **Updated:** 2026-11-04.
 Design and limits: `docs/decisions/2026-11-01-strict-core-table.md`.
 
@@ -36,5 +36,5 @@ Design and limits: `docs/decisions/2026-11-01-strict-core-table.md`.
 | 25 | local type named like a std heap type | CAUGHT by `fip-prelint` | `struct Vec` with an allocating `Vec::new`: strict cert 0, 1 allocation (measured); the driver reports "may allocate 1 time(s)" (measured). A token-level fix would need the std type's identity in `fip-strict`, which has no `alloc`. |
 | 26 | `fip_fn!` recognised by its last segment | MITIGATED | A user macro named `fip_fn` has its arguments skipped in strict bodies; `fip_testkit::certs` lists `macro_rules! fip_fn` and `use .. as fip_fn`. |
 | 27 | trait identity residual | MITIGATED | `trait a::Tr: b::Tr` with a blanket `impl<T: b::Tr> a::Tr for T`, both named `Tr` with method `m`, passes the trait-identity check of `<Foo as a::Tr>::m` (design note in the decision record). |
-| 28 | `fip_testkit::summaries` matches the `core` table by spelling | OPEN | `srcmodel` still accepts `core::mem::swap` under a local `mod core` (the crate-wide checker, not the macro); apply the absolute-path rule there too. |
+| 28 | `fip_testkit::summaries` matches the `core` table by spelling | DONE (2026-11-04) | Only an absolute `::core::..` / `::std::..` / `::alloc::..` path (also in `use ::core::..`) reads the audited table, as in the macro. A bare `core::..` resolves like a relative path (a local `mod core` in the caller's module, a `use .. as core`) or, naming nothing local, is `⊤`. Before, a `mod core` inside the caller's module and `use evil as core` were summarised 0, and so was a bare `core::mem::swap`. Test: `summaries::tests::std_table_needs_absolute_paths`. |
 

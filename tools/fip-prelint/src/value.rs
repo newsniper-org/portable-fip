@@ -3619,6 +3619,10 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
         let mut asserts = vec![false; n_blocks];
         let mut dead = vec![false; n_blocks];
         let mut returns = Vec::new();
+        // A reachable `become` leaves the body without a `Return`: the body may return
+        // with an unknown value, so it gets no summary (a missing `Return` must not read
+        // as "never returns", which would make the caller's rest dead).
+        let mut tail_call = false;
         let mut contexts = HashMap::new();
         for bb in &rpo {
             let b = bb.as_usize();
@@ -3646,6 +3650,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                     asserts[b] = self.decide_operand(&st, cond) == Some(*expected);
                 }
                 TerminatorKind::Return => returns.push(st),
+                TerminatorKind::TailCall { .. } => tail_call = true,
                 TerminatorKind::Call { args, .. } => {
                     let paths = self
                         .calls
@@ -3666,7 +3671,7 @@ impl<'a, 'tcx> Ctx<'a, 'tcx> {
                 dead,
                 contexts,
             },
-            returns: Some(returns),
+            returns: (!tail_call).then_some(returns),
         }
     }
 

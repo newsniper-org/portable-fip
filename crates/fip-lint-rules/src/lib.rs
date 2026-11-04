@@ -394,9 +394,15 @@ pub mod mir {
     /// Functions that run only when a safety precondition is already violated (the
     /// `assert_unsafe_precondition!` checks of `core`, compiled in under
     /// `debug_assertions`) or are unreachable by contract. They are skipped: the
-    /// caller's `unsafe` contract excludes them.
+    /// caller's `unsafe` contract excludes them. Matched exactly, on standard-library
+    /// paths only (the driver passes an empty path for any other crate): a function
+    /// whose last path segment is the first entry (the item that
+    /// `assert_unsafe_precondition!` defines), or a path equal to another entry.
     pub const UB_CHECK_MARKERS: &[&str] =
-        &["::precondition_check", "core::hint::unreachable_unchecked"];
+        &["precondition_check", "core::hint::unreachable_unchecked"];
+
+    /// Crates whose `precondition_check` items [`is_ub_check`] accepts.
+    const UB_CHECK_CRATES: &[&str] = &["core::", "alloc::", "std::"];
 
     /// Reason of the `f32`/`f64` math intrinsics in [`ALLOC_FREE_INTRINSICS`] (top
     /// plan T7d). LLVM lowers them to instructions or, depending on the target and
@@ -675,10 +681,18 @@ pub mod mir {
         PANIC_PREFIXES.iter().any(|p| path.starts_with(p))
     }
 
-    /// `true` if `path` contains a [`UB_CHECK_MARKERS`] entry.
+    /// `true` for a [`UB_CHECK_MARKERS`] item: a `core`/`alloc`/`std` path whose last
+    /// segment is `precondition_check`, or `core::hint::unreachable_unchecked`.
     #[must_use]
     pub fn is_ub_check(path: &str) -> bool {
-        UB_CHECK_MARKERS.iter().any(|m| path.contains(m))
+        let (marker, exact) = (UB_CHECK_MARKERS[0], &UB_CHECK_MARKERS[1..]);
+        if exact.contains(&path) {
+            return true;
+        }
+        UB_CHECK_CRATES.iter().any(|c| path.starts_with(c))
+            && path
+                .rsplit_once("::")
+                .is_some_and(|(_, last)| last == marker)
     }
 
     /// Results of intrinsics, which have no MIR, as return summaries for the value
@@ -869,6 +883,17 @@ mod tests {
         assert!(mir::is_ub_check(
             "core::slice::index::get_unchecked::precondition_check"
         ));
+        assert!(mir::is_ub_check("core::hint::unreachable_unchecked"));
+        // Exact: a longer last segment, a non-std path or a nested item is not one.
+        assert!(!mir::is_ub_check("S::precondition_check"));
+        assert!(!mir::is_ub_check("m::precondition_check_and_free"));
+        assert!(!mir::is_ub_check(
+            "core::ptr::read::precondition_check_and_free"
+        ));
+        assert!(!mir::is_ub_check(
+            "core::ptr::read::precondition_check::{closure#0}"
+        ));
+        assert!(!mir::is_ub_check(""));
         assert!(mir::is_alloc_free_intrinsic("typed_swap_nonoverlapping"));
         assert!(!mir::is_alloc_free_intrinsic("catch_unwind"));
         assert!(mir::is_panic_intrinsic("abort"));

@@ -96,7 +96,7 @@ fn witness_marks_the_loop_on_the_chain() {
 #[test]
 fn zero_cost_calls_in_loops_stay_zero() {
     let r = report(
-        "#[fip]\nfn a(xs: &mut [u8]) { let mut i = 0; while i < xs.len() { b(xs, i); i += 1; } }\nfn b(xs: &mut [u8], i: usize) { core::mem::swap(&mut xs[i], &mut 0) }\n",
+        "#[fip]\nfn a(xs: &mut [u8]) { let mut i = 0; while i < xs.len() { b(xs, i); i += 1; } }\nfn b(xs: &mut [u8], i: usize) { ::core::mem::swap(&mut xs[i], &mut 0) }\n",
     );
     assert_eq!(r.violations, Vec::new());
     assert_eq!(summary_of(&r, "a"), "0");
@@ -363,7 +363,7 @@ fn qualified_methods_and_std_constructors_as_values() {
 #[test]
 fn non_allocating_constructors_are_not_sites() {
     let r = report(
-        "#[fip]\nfn a(v: &mut Vec<u8>) -> Vec<u8> { core::mem::replace(v, Vec::new()) }\n#[fip]\nfn b() -> (String, std::collections::BTreeMap<u8, u8>) { (String::default(), std::collections::BTreeMap::new()) }\n",
+        "#[fip]\nfn a(v: &mut Vec<u8>) -> Vec<u8> { ::core::mem::replace(v, Vec::new()) }\n#[fip]\nfn b() -> (String, std::collections::BTreeMap<u8, u8>) { (String::default(), std::collections::BTreeMap::new()) }\n",
     );
     assert_eq!(r.violations, Vec::new());
     assert_eq!(summary_of(&r, "a"), "0");
@@ -460,7 +460,7 @@ fn macros_core_table_and_drops() {
         matches!(&kinds(&r)[..], [ViolationKind::Unresolved { what, .. }] if what.contains('?'))
     );
     let r = report(
-        "#[fip]\nfn a(x: &mut u8, y: &mut u8) { core::mem::swap(x, y); std::mem::replace(x, 1); }\n",
+        "#[fip]\nfn a(x: &mut u8, y: &mut u8) { ::core::mem::swap(x, y); ::std::mem::replace(x, 1); }\n",
     );
     assert_eq!(r.violations, Vec::new());
     let r = report("#[fip]\nfn a(x: u8, y: u8) -> u8 { core::cmp::min(x, y) }\n");
@@ -533,7 +533,7 @@ fn crates_resolve_through_pub_use() {
     )];
     let slot = (
         PathBuf::from("core_src/slot.rs"),
-        "pub fn replace<T>(s: &mut T, v: T) -> T { let mut v = v; core::mem::swap(s, &mut v); v }\npub fn boxed() -> Box<u8> { Box::new(1) }\n".to_string(),
+        "pub fn replace<T>(s: &mut T, v: T) -> T { let mut v = v; ::core::mem::swap(s, &mut v); v }\npub fn boxed() -> Box<u8> { Box::new(1) }\n".to_string(),
     );
     let core = [core[0].clone(), slot];
     let app = [(
@@ -689,4 +689,49 @@ fn heap_type_aliases_are_read_as_the_type() {
     );
     assert_eq!(summary_of(&r, "d"), "0");
     assert_eq!(summary_of(&r, "f"), "0");
+}
+
+/// Strict-open-items 28: only an absolute `::core::..` / `::std::..` path reads the
+/// audited table. A local `mod core` (at the root or in the caller's module) or a
+/// `use .. as core` shadows the extern prelude silently in rustc, so a bare
+/// `core::mem::swap` is resolved locally or, naming nothing local, is `⊤`.
+#[test]
+fn std_table_needs_absolute_paths() {
+    let evil = "pub mod mem { pub fn swap<T>(_a: &mut T, _b: &mut T) { let _x = Box::new(1u8); } }";
+    // Before (65cba01): the nested `mod core` and the `use evil as core` cases were
+    // summarised 0; the crate-root `mod core` ones were caught.
+    for src in [
+        format!(
+            "mod core {{ {evil} }}\n#[fip]\nfn a(x: &mut u8, y: &mut u8) {{ core::mem::swap(x, y) }}\n"
+        ),
+        format!(
+            "mod m {{\n    mod core {{ {evil} }}\n    #[fip]\n    pub fn a(x: &mut u8, y: &mut u8) {{ core::mem::swap(x, y) }}\n}}\n"
+        ),
+        format!(
+            "mod evil {{ {evil} }}\nuse evil as core;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) {{ core::mem::swap(x, y) }}\n"
+        ),
+        format!(
+            "mod core {{ {evil} }}\nuse core::mem::swap;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) {{ swap(x, y) }}\n"
+        ),
+    ] {
+        let r = report(&src);
+        assert!(!r.violations.is_empty(), "{src}\n{r:?}");
+    }
+    // A bare `core::..` naming nothing local is not audited by spelling: `⊤` (it was
+    // summarised 0 before).
+    let r = report("#[fip]\nfn a(x: &mut u8, y: &mut u8) { core::mem::swap(x, y) }\n");
+    assert!(
+        matches!(&kinds(&r)[..], [ViolationKind::Unresolved { what, .. }] if what.contains("core::mem::swap")),
+        "{r:?}"
+    );
+    // The absolute spellings read the table, also through `use ::core::..`.
+    for src in [
+        "#[fip]\nfn a(x: &mut u8, y: &mut u8) { ::core::mem::swap(x, y) }\n",
+        "use ::core::mem::swap;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { swap(x, y) }\n",
+        "use ::core::mem;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { mem::swap(x, y) }\n",
+    ] {
+        let r = report(src);
+        assert_eq!(r.violations, Vec::new(), "{src}");
+        assert_eq!(summary_of(&r, "a"), "0", "{src}");
+    }
 }

@@ -617,6 +617,15 @@ fn ffi() {
     check("ffi");
 }
 
+/// The soundness audit's probes (2026-11-04): a callee leaving through `become`, a
+/// cycle through a contracted `dyn` method, user items named like `core`'s UB checks
+/// or panic machinery, foreign functions renamed by `#[link_name]`. Every root is
+/// reported (`RUSTC_BOOTSTRAP` for `explicit_tail_calls`).
+#[test]
+fn audit_probes() {
+    check_with("audit_probes", "", &[("RUSTC_BOOTSTRAP", "1".into())]);
+}
+
 /// Constructor spellings the token rule cannot resolve (inferred type, type alias)
 /// are decided by the driver; the audited non-allocating spellings pass.
 #[test]

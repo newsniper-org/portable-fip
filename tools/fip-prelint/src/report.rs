@@ -22,7 +22,7 @@
 //! | an implementation of a contracted trait method in a crate without `fip::export` | error (`⊤`), at the implementation |
 //! | `fip::requires(..)` in a trait method contract; `param(g = ..)` in one whose `g` is not a function-pointer or callable trait-object parameter | error |
 //! | an implementation's own `param(g = K)` below the contract's bound for that parameter | error |
-//! | a standard-library function without MIR not covered by the std summaries, or summaries not used (missing file, stamp of another rustc or target) | `⊤` (error), with the reason |
+//! | a standard-library function without MIR not covered by the std summaries, or summaries not used (missing file, stamp of another rustc, target or settings, a `core` that is not the sysroot's) | `⊤` (error), with the reason |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
 //! The per-crate summary note ends with the number of declared sources when the crate
@@ -1394,8 +1394,7 @@ pub fn generate(tcx: TyCtxt<'_>) {
             format: crate::stdsum::FORMAT,
             rustc: crate::analysis::rustc_version().to_string(),
             target: tcx.sess.opts.target_triple.tuple().to_string(),
-            settings: "opt-level=3 debug-assertions=off overflow-checks=off (-Zbuild-std, -Zalways-encode-mir)"
-                .to_string(),
+            settings: crate::stdsum::SETTINGS.to_string(),
             std_src: {
                 let lib = std::path::Path::new(&crate::sysroot(None))
                     .join("lib/rustlib/src/rust/library");

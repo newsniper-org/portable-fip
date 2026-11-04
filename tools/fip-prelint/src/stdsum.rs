@@ -59,6 +59,13 @@ use std::collections::BTreeMap;
 /// analysis that produces them changes what an entry means.
 pub const FORMAT: u32 = 2;
 
+/// The `settings` stamp line: the release settings of the shipped `std` that the
+/// summaries were generated with. A file stamped otherwise is refused (its entries
+/// would describe other code: debug assertions and overflow checks change the panic
+/// paths).
+pub const SETTINGS: &str =
+    "opt-level=3 debug-assertions=off overflow-checks=off (-Zbuild-std, -Zalways-encode-mir)";
+
 /// The stamp of a sidecar: what it was generated for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stamp {
@@ -144,13 +151,22 @@ impl Sidecar {
         }
         let mut sc = Sidecar::default();
         let mut format = None;
+        // The entry being read, and whether its `alloc` line was seen: every entry
+        // has exactly one (a missing one must not read as `alloc 0`).
         let mut current: Option<(String, FnSummary)> = None;
+        let mut has_alloc = false;
         for (n, line) in lines {
             let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
             let err = |m: &str| format!("line {n}: {m}");
             if let Some((_, s)) = current.as_mut() {
                 match key {
-                    "alloc" => s.alloc = Count::parse(rest).map_err(|e| err(&e))?,
+                    "alloc" => {
+                        if has_alloc {
+                            return Err(err("a second `alloc` line in an entry"));
+                        }
+                        has_alloc = true;
+                        s.alloc = Count::parse(rest).map_err(|e| err(&e))?;
+                    }
                     "term" => {
                         let (m, k) = rest
                             .split_once(' ')
@@ -163,6 +179,9 @@ impl Sidecar {
                     "top" => s.top.push(rest.to_string()),
                     "recursion" => s.recursion = Some(rest.to_string()),
                     "end" => {
+                        if !has_alloc {
+                            return Err(err("entry without an `alloc` line"));
+                        }
                         let (name, s) = current.take().expect("inside an entry");
                         if sc.fns.insert(name.clone(), s).is_some() {
                             return Err(err(&format!("`{name}` summarised twice")));
@@ -185,6 +204,7 @@ impl Sidecar {
                 "std-src" => sc.stamp.std_src = rest.to_string(),
                 "fn" if !rest.is_empty() => {
                     current = Some((rest.to_string(), FnSummary::default()));
+                    has_alloc = false;
                 }
                 other => return Err(err(&format!("unknown key `{other}`"))),
             }
@@ -231,7 +251,7 @@ impl Sidecar {
     }
 
     /// `Err(reason)` unless the sidecar was generated for exactly this format,
-    /// compiler and target.
+    /// compiler, target and [`SETTINGS`].
     pub fn check_stamp(&self, rustc: &str, target: &str) -> Result<(), String> {
         let s = &self.stamp;
         if s.format != FORMAT {
@@ -250,6 +270,12 @@ impl Sidecar {
             return Err(format!(
                 "generated for target `{}`, this crate is compiled for `{target}`",
                 s.target
+            ));
+        }
+        if s.settings != SETTINGS {
+            return Err(format!(
+                "generated with the settings `{}`, this driver reads summaries of `{SETTINGS}`",
+                s.settings
             ));
         }
         Ok(())
@@ -335,7 +361,7 @@ mod tests {
                 format: FORMAT,
                 rustc: "1.99.1 (abc 2026-01-01)".to_string(),
                 target: "x86_64-unknown-linux-gnu".to_string(),
-                settings: "opt-level=3".to_string(),
+                settings: SETTINGS.to_string(),
                 std_src: "0123".to_string(),
             },
             fns,
@@ -376,6 +402,15 @@ mod tests {
             old.check_stamp("1.99.1 (abc 2026-01-01)", "x86_64-unknown-linux-gnu")
                 .is_err()
         );
+        // Summaries of a debug build (debug assertions, overflow checks) are refused.
+        let mut debug = sample();
+        debug.stamp.settings =
+            "opt-level=0 debug-assertions=on overflow-checks=on (-Zbuild-std)".to_string();
+        assert!(
+            debug
+                .check_stamp("1.99.1 (abc 2026-01-01)", "x86_64-unknown-linux-gnu")
+                .is_err()
+        );
     }
 
     #[test]
@@ -389,6 +424,13 @@ mod tests {
         assert!(Sidecar::parse(&text.replace(&format!("format {FORMAT}\n"), "")).is_err());
         let twice = format!("{text}\nfn core::fmt::write\nend\n");
         assert!(Sidecar::parse(&twice).is_err());
+        // Exactly one `alloc` line per entry: none, or two, is malformed.
+        let no_alloc = format!("{text}\nfn core::other\nend\n");
+        assert!(Sidecar::parse(&no_alloc).is_err());
+        let two_alloc = format!("{text}\nfn core::other\nalloc 0\nalloc 1\nend\n");
+        assert!(Sidecar::parse(&two_alloc).is_err());
+        let ok = format!("{text}\nfn core::other\nalloc 0\nend\n");
+        assert!(Sidecar::parse(&ok).is_ok());
     }
 
     /// The committed sidecars parse, and one is stamped for this driver's compiler: a

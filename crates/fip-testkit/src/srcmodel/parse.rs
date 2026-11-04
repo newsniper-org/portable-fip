@@ -1239,6 +1239,14 @@ impl<'a> Builder<'a> {
         if i > 0 && is_p(t, i - 1, '$') && segs[0] == "crate" {
             segs[0] = "$crate".to_string();
         }
+        // `::core::..` (a leading `::`, not `<T>::`/`a::`): only an absolute path names
+        // the standard library; a bare `core::..` may be a local `mod core` or a `use
+        // .. as core` (rustc lets either shadow the extern prelude silently).
+        let leading =
+            i >= 2 && sep(t, i - 2) && !(i >= 3 && (id(t, i - 3).is_some() || is_p(t, i - 3, '>')));
+        if leading {
+            absolute_root(&mut segs);
+        }
         let name = segs.pop().unwrap_or_default();
         if is_p(t, j, '!') && !is_p(t, j + 1, '=') && is_open(t, j + 1) {
             return self.macro_call(t, i, &name, j + 1, lp, cx);
@@ -1503,6 +1511,17 @@ fn qualified_value(t: &[Tok], x: usize, b: usize) -> Arg {
     }
 }
 
+/// Marks the first segment of an absolute path (`::core::..`) whose root is a
+/// standard-library crate as `::core` / `::std` / `::alloc`: only that spelling
+/// resolves to the audited tables (`Model::resolve`).
+fn absolute_root(segs: &mut [String]) {
+    if let Some(first) = segs.first_mut()
+        && matches!(first.as_str(), "core" | "std" | "alloc")
+    {
+        *first = format!("::{first}");
+    }
+}
+
 /// `use` tree `t[a..b]` under `prefix`.
 fn use_tree(
     t: &[Tok],
@@ -1514,6 +1533,7 @@ fn use_tree(
 ) {
     let mut segs = prefix.to_vec();
     let mut k = from;
+    let leading = prefix.is_empty() && sep(t, k);
     if sep(t, k) {
         k += 2;
     }
@@ -1531,6 +1551,9 @@ fn use_tree(
         }
         let Some(s) = id(t, k) else { return };
         segs.push(s.to_string());
+        if leading && segs.len() == 1 {
+            absolute_root(&mut segs);
+        }
         if sep(t, k + 1) {
             k += 3;
             continue;

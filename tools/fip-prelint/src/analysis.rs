@@ -690,7 +690,48 @@ fn load_std_summaries(tcx: TyCtxt<'_>) -> Result<crate::stdsum::Sidecar, String>
     let sc = crate::stdsum::Sidecar::parse(&text).map_err(|e| format!("`{name}`: {e}"))?;
     sc.check_stamp(rustc_version(), &target)
         .map_err(|e| format!("`{name}`: {e}"))?;
+    shipped_std(tcx).map_err(|e| format!("`{name}`: {e}"))?;
     Ok(sc)
+}
+
+/// `Err(reason)` unless the `core` this crate links is the sysroot's (the shipped
+/// standard library): under a user `-Zbuild-std`, `std` is compiled with the
+/// profile's settings, so the summaries (of the shipped release build) would leave
+/// out its debug-assertion and overflow panic paths.
+fn shipped_std(tcx: TyCtxt<'_>) -> Result<(), String> {
+    let Some(&core) = tcx
+        .crates(())
+        .iter()
+        .find(|&&c| tcx.crate_name(c).as_str() == "core")
+    else {
+        return Ok(());
+    };
+    let roots: Vec<std::path::PathBuf> = tcx
+        .sess
+        .opts
+        .sysroot
+        .all_paths()
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
+    let src = tcx.used_crate_source(core);
+    let mut paths = src.paths().peekable();
+    if paths.peek().is_none() {
+        return Err("the location of `core` is not known".to_string());
+    }
+    for p in paths {
+        let inside = p
+            .canonicalize()
+            .is_ok_and(|c| roots.iter().any(|r| c.starts_with(r)));
+        if !inside {
+            let file = p
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().to_string());
+            return Err(format!(
+                "`core` (`{file}`) is not the sysroot's: summaries describe the shipped standard library only (a `-Zbuild-std` build has its own settings)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Why a function is an allocation or free source.
@@ -815,6 +856,18 @@ pub fn ffi_symbol(tcx: TyCtxt<'_>, def_id: DefId) -> String {
     tcx.symbol_name(Instance::mono(tcx, def_id))
         .name
         .to_string()
+}
+
+/// The name a foreign declaration is classified by in the allocation tables: its
+/// link symbol (`#[link_name]` included), except for declarations in the standard
+/// library, whose `extern "Rust"` runtime symbols (`__rust_alloc`, ..) are mangled
+/// by `#[rustc_std_internal_symbol]` and are named by their item name in the tables.
+pub fn foreign_table_name(tcx: TyCtxt<'_>, def_id: DefId) -> String {
+    if is_std_like(tcx, def_id.krate) {
+        tcx.item_name(def_id).to_string()
+    } else {
+        ffi_symbol(tcx, def_id)
+    }
 }
 
 /// The ABI of a foreign function as rustc prints it.
@@ -1115,7 +1168,7 @@ impl Crates {
             }
         }
         if tcx.is_foreign_item(def_id)
-            && let Some((a, f)) = rules::foreign_alloc_symbol(tcx.item_name(def_id).as_str())
+            && let Some((a, f)) = rules::foreign_alloc_symbol(&foreign_table_name(tcx, def_id))
         {
             let s = Source {
                 alloc: u64::from(a),
@@ -1443,6 +1496,10 @@ pub struct Analysis<'a, 'tcx> {
     /// Nodes of private functions entered from a call in the body that
     /// [`Analysis::arguments_in`] scans (top plan T4.3): that call.
     entries: HashMap<usize, Via>,
+    /// Checking an implementation against its trait method's contract: a dynamic
+    /// call of a contracted method may re-enter this implementation (or another one
+    /// checked under the same assumption), so it also carries a possible recursion.
+    contract_impl: bool,
 }
 
 /// A call, in a body scanned by [`Analysis::arguments_in`], of a private function
@@ -1581,6 +1638,18 @@ fn def_path(tcx: TyCtxt<'_>, def_id: DefId) -> String {
     with_no_visible_paths!(with_no_trimmed_paths!(tcx.def_path_str(def_id)))
 }
 
+/// `def_id`'s path if it is defined in a standard-library crate, else the empty
+/// string: every path-table test goes through it, because the paths of local items
+/// print without a crate prefix (a local `mod core { .. }` would otherwise match a
+/// `core::..` entry).
+fn std_path(tcx: TyCtxt<'_>, def_id: DefId) -> String {
+    if is_std_like(tcx, def_id.krate) {
+        def_path(tcx, def_id)
+    } else {
+        String::new()
+    }
+}
+
 fn def_path_args<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, args: GenericArgsRef<'tcx>) -> String {
     with_no_visible_paths!(with_no_trimmed_paths!(
         tcx.def_path_str_with_args(def_id, args)
@@ -1641,6 +1710,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             entries: HashMap::new(),
             vsums: crate::value::Summaries::new(crates),
             verus_direct: HashMap::new(),
+            contract_impl: false,
         };
         a.collect_param_names(owner);
         a
@@ -1812,6 +1882,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         let crates = self.crates;
         let mut a = self;
         a.owner_params = mark.params.clone();
+        a.contract_impl = !assume_requires;
         // A root is analysed under its own precondition (checked at its callers).
         let ctx = crates
             .requires_of(root)
@@ -2098,7 +2169,19 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             InstanceKind::Virtual(def_id, _) => match self.source_leaf(def_id) {
                 Some(leaf) => leaf,
                 None => match self.crates.contract_of(tcx, def_id) {
-                    Some(m) => NodeKind::Leaf(contract_events(&def_path(tcx, def_id), m)),
+                    Some(m) => {
+                        let path = def_path(tcx, def_id);
+                        let mut evs = contract_events(&path, m);
+                        // The contract is assumed for the implementation being
+                        // checked as well: without this, a cycle through dynamic
+                        // calls would be assumed away on both sides.
+                        if self.contract_impl && m.kind != marks::Kind::Fbip {
+                            evs.push(Ev::Recurse(format!(
+                                "dynamic call of `{path}` inside an implementation checked against a contract: it may call this implementation again"
+                            )));
+                        }
+                        NodeKind::Leaf(evs)
+                    }
                     None => NodeKind::Leaf(vec![Ev::Unknown(format!(
                         "dynamic call to `{}` (trait object)",
                         def_path_args(tcx, def_id, inst.args)
@@ -2221,29 +2304,33 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             return leaf;
         }
         let path = def_path(tcx, def_id);
-        if rules::is_realloc_entry(&path) {
+        // Path tables name standard-library items only (see `std_path`).
+        let std = std_path(tcx, def_id);
+        if rules::is_realloc_entry(&std) {
             return NodeKind::Leaf(vec![
                 Ev::Alloc(format!("reallocation `{path}`")),
                 Ev::Free(format!("reallocation `{path}`")),
             ]);
         }
-        if rules::is_alloc_entry(&path) {
+        if rules::is_alloc_entry(&std) {
             return NodeKind::Leaf(vec![Ev::Alloc(format!("allocation `{path}`"))]);
         }
-        if rules::is_dealloc_entry(&path) {
+        if rules::is_dealloc_entry(&std) {
             return NodeKind::Leaf(vec![Ev::Free(format!("deallocation `{path}`"))]);
         }
-        if rules::is_panic_entry(&path) {
+        if rules::is_panic_entry(&std) {
             return NodeKind::Leaf(vec![Ev::Panic(format!("`{path}`"))]);
         }
-        if rules::is_ub_check(&path) {
+        if rules::is_ub_check(&std) {
             return NodeKind::Leaf(Vec::new());
         }
         if matches!(tcx.def_kind(def_id), DefKind::Ctor(..)) {
             return NodeKind::Leaf(Vec::new());
         }
         if tcx.is_foreign_item(def_id) {
-            let name = tcx.item_name(def_id);
+            // By link symbol (`#[link_name]`), like the marks: the Rust name of a
+            // foreign declaration outside `std` says nothing about what it binds.
+            let name = foreign_table_name(tcx, def_id);
             let name = name.as_str();
             if rules::is_realloc_entry(name) {
                 return NodeKind::Leaf(vec![
@@ -3569,7 +3656,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             let ty::Adt(def, _) = ty.kind() else {
                 return None;
             };
-            if def_path(tcx, def.did()) != "core::fmt::builders::PadAdapter" {
+            if std_path(tcx, def.did()) != "core::fmt::builders::PadAdapter" {
                 return None;
             }
             let buf = def
@@ -5601,7 +5688,7 @@ const MAX_CALLABLE_DEPTH: usize = 3;
 type Binds<'tcx> = Vec<(u32, Bind<'tcx>)>;
 
 fn adt_is(tcx: TyCtxt<'_>, ty: Ty<'_>, path: &str) -> bool {
-    matches!(ty.kind(), ty::Adt(def, _) if def_path(tcx, def.did()) == path)
+    matches!(ty.kind(), ty::Adt(def, _) if std_path(tcx, def.did()) == path)
 }
 
 /// `&mut fmt::Formatter` (or a shared reference to one).
@@ -5615,7 +5702,7 @@ fn is_dyn_write_ref(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
         return false;
     };
     matches!(inner.kind(), ty::Dynamic(preds, ..)
-        if preds.principal_def_id().is_some_and(|d| def_path(tcx, d) == "core::fmt::Write"))
+        if preds.principal_def_id().is_some_and(|d| std_path(tcx, d) == "core::fmt::Write"))
 }
 
 /// `&dyn fmt::Debug` or `&dyn fmt::Display` (a value formatted through `core`'s debug
@@ -5626,7 +5713,7 @@ fn is_obj_ref(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
     };
     matches!(inner.kind(), ty::Dynamic(preds, ..)
     if preds.principal_def_id().is_some_and(|d| {
-        matches!(def_path(tcx, d).as_str(), "core::fmt::Debug" | "core::fmt::Display")
+        matches!(std_path(tcx, d).as_str(), "core::fmt::Debug" | "core::fmt::Display")
     }))
 }
 
@@ -5713,7 +5800,7 @@ fn bindable_paths<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Vec<(Vec<mir::PlaceE
         match ty.kind() {
             ty::Closure(..) | ty::Tuple(..) => true,
             ty::Adt(def, _) => {
-                def.is_struct() && def_path(tcx, def.did()).starts_with("core::fmt::builders::")
+                def.is_struct() && std_path(tcx, def.did()).starts_with("core::fmt::builders::")
             }
             _ => false,
         }
@@ -5778,7 +5865,7 @@ fn audited_field(tcx: TyCtxt<'_>, ty: Ty<'_>, f: rustc_abi::FieldIdx) -> bool {
     if !def.is_struct() {
         return false;
     }
-    let path = def_path(tcx, def.did());
+    let path = std_path(tcx, def.did());
     let Some(field) = def.non_enum_variant().fields.get(f) else {
         return false;
     };
@@ -5802,7 +5889,7 @@ fn builder_ctor_fields(tcx: TyCtxt<'_>, d: DefId) -> Option<&'static [&'static s
                 "core::fmt::Formatter",
             )
     });
-    let builders = def_path(tcx, d).starts_with("core::fmt::builders::");
+    let builders = std_path(tcx, d).starts_with("core::fmt::builders::");
     match name.as_str() {
         "debug_struct" | "debug_tuple" | "debug_map" if formatter_method => Some(&["fmt"]),
         "debug_list" | "debug_set" if formatter_method => Some(&["inner", "fmt"]),
@@ -5826,7 +5913,7 @@ fn returns_receiver(tcx: TyCtxt<'_>, d: DefId) -> bool {
     let ty::Adt(def, _) = self_ty.kind() else {
         return false;
     };
-    if !def_path(tcx, def.did()).starts_with("core::fmt::builders::") {
+    if !std_path(tcx, def.did()).starts_with("core::fmt::builders::") {
         return false;
     }
     let sig = tcx.fn_sig(d).skip_binder().skip_binder();
@@ -5895,7 +5982,7 @@ fn body_builds_arguments<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
     body.basic_blocks.iter().any(|data| {
         matches!(&data.terminator().kind, TerminatorKind::Call { func, .. }
             if matches!(*func.ty(&body.local_decls, tcx).kind(), ty::FnDef(d, _) if {
-                let p = def_path(tcx, d);
+                let p = std_path(tcx, d);
                 let name = tcx.item_name(d);
                 let ctor = name.as_str().starts_with("new") || name.as_str().starts_with("from");
                 ctor && (p.starts_with("core::fmt::rt::Argument::") || p.starts_with("core::fmt::Arguments::"))
@@ -6235,7 +6322,7 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
         let ty::FnDef(d, _) = *ft.kind() else {
             return None;
         };
-        let path = def_path(self.tcx, d);
+        let path = std_path(self.tcx, d);
         if path.starts_with("core::fmt::rt::Argument::") {
             return Some(vec![FmtSrc::Ctor(ft)]);
         }
@@ -6331,7 +6418,7 @@ impl<'b, 'tcx> OriginCx<'b, 'tcx> {
         }
         if let [Def::Rv(mir::Rvalue::Aggregate(kind, ops))] = self.writes[l.as_usize()].as_slice()
             && let mir::AggregateKind::Adt(did, variant, ..) = **kind
-            && def_path(self.tcx, did) == "core::fmt::Formatter"
+            && std_path(self.tcx, did) == "core::fmt::Formatter"
         {
             let fields = &self.tcx.adt_def(did).variant(variant).fields;
             let buf = fields

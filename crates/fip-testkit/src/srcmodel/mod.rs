@@ -723,7 +723,10 @@ impl Program {
             .and_then(|v| v.iter().rev().find(|(a, _)| a == last).map(|(_, p)| p))
             .or_else(|| self.use_alias(unit, &base, last))?;
         let t = target.last()?;
-        let std_path = target.len() == 1 || matches!(target[0].as_str(), "std" | "alloc" | "core");
+        // Over-approximating: a bare `std::..` alias counts too (a heap type is an
+        // allocation site either way).
+        let std_path = target.len() == 1
+            || matches!(target[0].trim_start_matches("::"), "std" | "alloc" | "core");
         if fip_lint_rules::HEAP_TYPES.contains(&t.as_str()) && std_path {
             return Some(t.clone());
         }
@@ -823,11 +826,28 @@ impl Program {
         let rest = &segs[1..];
         let group = self.unit_group[cx.unit];
         match first.as_str() {
-            "core" | "std" | "alloc" if !self.has_module(cx.unit, &segs[..1]) => {
+            // Only an absolute `::core::..` (marked by the parser) names the standard
+            // library: a bare `core::..` may be a local module or a `use .. as core`,
+            // so it resolves like any relative path (`⊤` when it names nothing local).
+            "::core" | "::std" | "::alloc" => {
+                let first = &first[2..];
                 let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
                 let drop = is_drop_function(first, &rest, name);
                 let cost = (in_core_table(first, &rest, name) || drop).then_some(0);
                 Res::External { cost, frees: drop }
+            }
+            // A bare `core::..` naming no local module or import: most likely the
+            // standard library, but not audited by spelling (`⊤`, no guessed edges).
+            "core" | "std" | "alloc"
+                if !self.has_module(cx.unit, &segs[..1])
+                    && !self.has_module(cx.unit, &[cx.module, &segs[..1]].concat())
+                    && self.use_alias(cx.unit, cx.module, first).is_none() =>
+            {
+                let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+                Res::External {
+                    cost: None,
+                    frees: is_drop_function(first, &rest, name),
+                }
             }
             "crate" | "$crate" => self.walk(cx.unit, Vec::new(), rest, name, depth),
             "self" => self.walk(cx.unit, cx.module.to_vec(), rest, name, depth),

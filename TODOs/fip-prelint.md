@@ -2957,3 +2957,54 @@ attribute", `#[verus_verify(open)]` "requires `dual_spec`"; only the internal
 `#[verus::internal(open)]` passes, and then the struct must leave `verus!` too. The
 `Compose`/`Then` bodies also use `forall`/`exists`/`==>`, which plain `rustc` cannot
 parse. Reopen if Verus gains a user-facing attribute for open spec functions.
+
+## Resolved 2026-11-04: soundness audit of the driver
+
+An audit of the driver (probes in `/tmp/probe1`..`/tmp/probe6`) found roots that
+passed while they allocate, free, recurse or panic. Regression fixture:
+`tests/fixtures/audit_probes` (`probes`: findings 2, 3, 6, 7; `tail`: finding 1).
+Measured with the driver of 65cba01 (before) and after, on that fixture: `probes` 5
+roots, 4 passed → 0 passed, 7 errors; `tail` 2 roots, 2 passed → 0 passed, 3 errors.
+
+1. **`become` hid the rest of the caller** (`value.rs`). `run` collected only
+   `Return` states, so a body leaving through `TailCall` was summarised `never_returns`
+   and the call's return edge infeasible: `root_tail` (a `Box::new` after `let j =
+   tail(i)`) and `root_tail_strict` (`a[j]`) passed. Now a reachable `TailCall` gives
+   no summary; both are reported (allocation, free, bounds check).
+2. **Recursion through a contracted `dyn` method** (`analysis.rs`). `impl Tr for A {
+   fn m(&self, d: &dyn Tr) -> u32 { d.m(d) } }` under `kind = "fip"` passed: the
+   dynamic call cost the contract, a leaf without recursion, also while `A::m` itself
+   was checked against it. Now, in a contract check, a dynamic call of a contracted
+   method carries `Ev::Recurse` ("may call this implementation again"); `<A as Tr>::m`
+   is reported. A root calling `d.m(d)` still passes: it relies on every
+   implementation being checked, as before.
+3. **`precondition_check` by substring.** `S::precondition_check` (returns a `Box`)
+   and `m::precondition_check_and_free` (drops one) were empty leaves; `ub_marker`
+   passed. Now `is_ub_check` matches the last segment exactly, under
+   `core::`/`alloc::`/`std::`, and the driver passes it only standard-library paths:
+   allocation and free reported. Unit test in `fip-lint-rules`.
+4. **Foreign functions by Rust name.** `#[link_name = "free"] fn
+   __rust_no_alloc_shim_is_unstable_v2` was an allocation-free leaf, `#[link_name =
+   "free"] fn malloc` an allocation. Now the tables (and `Crates::source_of`) read the
+   link symbol outside the standard library (`foreign_table_name`; inside it the item
+   name, since `__rust_alloc` and the other runtime symbols are mangled by
+   `#[rustc_std_internal_symbol]`, measured: with the link symbol everywhere,
+   `Box::new` became "foreign function `alloc::alloc::__rust_alloc` .. neither
+   certified nor excluded"). Both probes report a free.
+5. **Path tables not crate-gated.** A local `mod core { pub mod panicking { pub fn
+   leak() -> Box<u8> } }` was a panic leaf; `panic_prefix` passed its allocation. Now
+   every path-table test, including the `core::fmt` ones of the formatting analysis
+   (`adt_is`, `is_dyn_write_ref`, `is_obj_ref`, the builders, `AUDITED_FIELDS`,
+   `Arguments`/`Argument` constructors, `Formatter` aggregates, `PadAdapter`), goes
+   through `std_path`. The allocation is reported.
+6. **Std summaries** (`stdsum.rs`, not probed by the audit). `check_stamp` now compares
+   `settings` with `SETTINGS` (unit test: a debug-settings stamp is refused); an entry
+   without, or with two, `alloc` lines is a parse error (it read as `alloc 0`). A
+   crate whose `core` is not under the sysroot does not use the summaries: measured on
+   `tests/fixtures/std_summaries` with `-Zbuild-std --target x86_64-unknown-linux-gnu`,
+   before "std summary of `core::fmt::write` ..", after 45 × "std summaries not used:
+   .. `core` (`libcore-<hash>.rmeta`) is not the sysroot's". Not a fixture: it needs
+   `-Zbuild-std` (crates.io for std's dependencies).
+
+Unchanged: every other fixture, the self-checks and `targets.expected` (no workspace
+item is affected).

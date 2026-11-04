@@ -123,7 +123,8 @@ Implementation: `tools/fip-prelint`; results and open items: `TODOs/fip-prelint.
    paths and are not looked into. Skipped: `Assert`s whose condition is a constant that
    cannot fail (opt-level 0 keeps the shift check of `x >> 1`), the null/misaligned
    pointer UB checks, and `core`'s `precondition_check` functions (they fire only
-   when an `unsafe` contract is already broken).
+   when an `unsafe` contract is already broken; since 2026-11-04 matched exactly, on
+   standard-library items only, see the amendment "soundness audit of the driver").
 
 ## Not covered, and why
 
@@ -904,6 +905,41 @@ on functions with a body only. Trust without the driver: the mapping is unchecke
 except that `Cert::allocs_for` checks the certificate's name against `sym` of the
 local path. Measured: `tests/fixtures/ffi` cases 15–17, see `TODOs/fip-prelint.md`,
 "Resolved 2026-11-04: FFI certificate mapping for strict callers".
+
+## Amendment 2026-11-04: soundness audit of the driver
+
+Rules tightened after an audit whose probes passed code that allocates, frees,
+recurses or panics:
+
+- **Tail calls.** A body with a reachable `become` (`TailCall`) gets no return summary
+  (its callers learn nothing about the result). Before, a body without `Return` was
+  summarised "never returns", which made the rest of every caller dead.
+- **Contracts and recursion.** While an implementation is checked against its trait
+  method's contract (`run_contract`, `run_default`), a dynamic call of a contracted
+  method also carries a possible recursion (for `fip`; `fbip` allows it anyway): the
+  contract is assumed for that implementation too, so a cycle through `dyn` calls was
+  assumed away on both sides. Allocation counts stay sound by induction and are
+  unchanged.
+- **Path tables name standard-library items only.** Every path-table test
+  (allocation, deallocation and reallocation entry points, panic prefixes, UB checks,
+  the `core::fmt` paths of the formatting analysis) reads `std_path`, empty for a
+  crate that is not `core`/`alloc`/`std` or one of their dependencies: a local
+  `mod core { mod panicking { .. } }` prints as `core::panicking::..`. UB checks are
+  matched exactly (`fip_lint_rules::mir::is_ub_check`: last segment
+  `precondition_check` under `core::`/`alloc::`/`std::`, or
+  `core::hint::unreachable_unchecked`), not by substring.
+- **Foreign functions by link symbol.** The allocation tables (`__rust_alloc`,
+  `malloc`, `free`, ..) classify a foreign declaration by its link symbol
+  (`#[link_name]`), as the marks do (`foreign_table_name`); declarations inside the
+  standard library keep their item name, because `#[rustc_std_internal_symbol]`
+  mangles the runtime symbols.
+- **Std summaries.** The stamp's `settings` must equal the generator's
+  (`stdsum::SETTINGS`), every entry has exactly one `alloc` line, and summaries are
+  not used when the crate's `core` is not the sysroot's (a user `-Zbuild-std` build
+  compiles `std` with the profile's settings).
+
+Details and measurements: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: soundness
+audit of the driver".
 
 ## What would reopen this
 
