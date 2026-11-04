@@ -33,6 +33,12 @@
 //!   return address included, for the roots of this crate. A trusted declaration,
 //!   listed in the stack summary; never used by the allocation analysis.
 //!
+//! - `#[cfg_attr(fip_prelint, fip::ffi_map)]` (functions; emitted by `fip-macros`
+//!   for `#[fip(strict = true, ffi(dep::sym = local::sym))]`, only under the driver):
+//!   the function's body names two foreign functions, `dep::sym` and `local::sym`;
+//!   strict calls of the first read the certificate of the second, so both must have
+//!   the same link symbol and ABI (an error otherwise).
+//!
 //! Any other name under `fip::` is rejected: rustc accepts unknown names under a
 //! registered tool silently.
 
@@ -46,6 +52,7 @@ pub const KNOWN: &[&str] = &[
     "cert",
     "exclude",
     "stack_leaf",
+    "ffi_map",
 ];
 
 /// The conjuncts of the printed `fip::requires(..)` attributes of one function

@@ -2875,3 +2875,34 @@ diagnostics unchanged; summary "10 `fip_fn!` constructions, 10 passed, 6 errors"
 `-stack-forged`, `-generate`). Remaining: without a written return type Rust
 rejects a borrow-returning closure itself (plain `rustc` 1.99.1), so the return type
 must be written.
+
+## Resolved 2026-11-04: FFI certificate mapping for strict callers (top plan T10.2)
+
+**Before.** A strict call of a dependency's foreign function (`cdep::labs(x)`) failed
+with E0425 on `cdep::__fip_strict_labs`: the certificate of a `#[fip_extern]`
+declaration of the same symbol was found only through that declaration's path,
+although the driver already certified the call by symbol (top plan N4).
+
+**Change.** `#[fip(strict = true, ffi(dep::sym = local::sym, ..))]` (`fip-macros`,
+`parse_ffi_maps`, `StrictScan::on_path_call`): a strict call written with the path
+`dep::sym` reads `local::__fip_strict_sym` through `Cert::allocs_for(.., "sym")`.
+Under the driver one hidden function per pair, `#[cfg_attr(fip_prelint,
+fip::ffi_map)] fn __fip_ffi_map_K() { let _ = (dep::sym as *const (), local::sym as
+*const ()); }`, is emitted at the start of the strict body; the driver
+(`report.rs`, `check_ffi_maps`) reads both functions from its HIR and reports a side
+that is not a foreign function, or a pair with different link symbols or ABIs.
+Rejected by the macro (5 `compile_fail` examples): `ffi(..)` without `strict = true`,
+an entry that is not `path = path` (generic arguments included), a left side without
+a module path, a path mapped twice (or to itself), a mapping no call uses. Trust
+without the driver: unchecked except for the certificate's name. Decision record
+amendment: `docs/decisions/2026-11-01-fip-prelint.md`, "`ffi(dep::sym = local::sym)`
+mappings checked by symbol and ABI".
+
+**After.** Fixture `ffi`, new module `mapped` and cases 15–17: `strict_dep_mapped`
+(`ffi(cdep::labs = mapped::labs)`) compiles and passes; `strict_dep_other_symbol`
+(`= mapped::llabs`) compiles in a plain build (the trusted case) and gets the driver
+error "have different link symbols"; `strict_dep_other_abi`
+(`cdep::toupper = mapped::toupper`, `C-unwind` vs `C`) gets "have different ABIs" plus
+the existing across-ABIs error at the call. Every earlier diagnostic byte-identical;
+summary "14 roots, 7 passed, 10 errors, 8 certified foreign functions" → "17 roots,
+9 passed, 13 errors, 11 certified foreign functions".

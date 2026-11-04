@@ -82,6 +82,25 @@ pub(crate) struct Call {
     in_loop: bool,
 }
 
+/// One pair of `ffi(dep::sym = local::sym)`: strict calls of `dep::sym` read the
+/// certificate `local::__fip_strict_sym` (name checked by `Cert::allocs_for`).
+#[derive(Clone)]
+pub(crate) struct FfiMap {
+    /// The dependency's path as identifier segments joined by `::` (a leading `::`
+    /// dropped), compared with the callee path as written.
+    pub(crate) dep_key: String,
+    /// The dependency's path as written.
+    pub(crate) dep: Vec<TokenTree>,
+    /// The local declaration's path as written.
+    pub(crate) local: Vec<TokenTree>,
+    /// The local path before its last segment, with the trailing `::`.
+    pub(crate) local_prefix: Vec<TokenTree>,
+    /// The local declaration's name (the certificate's name).
+    pub(crate) local_name: String,
+    /// The pair's first token, for messages and the driver's check function.
+    pub(crate) span: Span,
+}
+
 /// How a callee is named.
 enum Callee {
     /// `a::b::name` / `name`: the path tokens before the name, with the trailing `::`.
@@ -109,6 +128,10 @@ pub(crate) struct StrictScan {
     pub(crate) krate: Option<TokenStream>,
     /// Mapping of parameter name to its trait path and trait name: `(prefix, trait_name)`.
     pub(crate) param_traits: Vec<(String, (Vec<TokenTree>, String))>,
+    /// `ffi(dep::sym = local::sym, ..)`.
+    pub(crate) ffi: Vec<FfiMap>,
+    /// Which pairs of `ffi` a call used.
+    pub(crate) ffi_used: Vec<bool>,
 }
 
 fn param_index(params: &[Param], name: &str) -> Option<usize> {
@@ -449,6 +472,29 @@ impl StrictScan {
             .map(ToString::to_string)
             .chain([s.clone()])
             .collect();
+        // `ffi(dep::sym = local::sym)`: a call of `dep::sym` reads `local::sym`'s
+        // certificate (the driver checks that both name one foreign function).
+        let key = segs
+            .iter()
+            .cloned()
+            .chain([s.clone()])
+            .collect::<Vec<_>>()
+            .join("::");
+        if let Some(k) = self.ffi.iter().position(|m| m.dep_key == key) {
+            if let Some(u) = self.ffi_used.get_mut(k) {
+                *u = true;
+            }
+            let m = &self.ffi[k];
+            self.calls.push(Call {
+                cert_prefix: m.local_prefix.clone(),
+                cert_name: m.local_name.clone(),
+                trait_target: None,
+                shown,
+                span: id.span(),
+                in_loop,
+            });
+            return;
+        }
         // `Type::m` / `Self::m`: the certificate sits next to the type's module path.
         let type_seg = match prefix.len().checked_sub(3).map(|k| &prefix[k]) {
             Some(TokenTree::Ident(t)) if upper_initial(&t.to_string()) => Some(t.clone()),
@@ -780,6 +826,40 @@ pub(crate) fn krate_item(krate: &TokenStream, item: &str) -> TokenStream {
 }
 
 impl StrictScan {
+    /// Driver-only check functions of `ffi(dep::sym = local::sym, ..)`, one per pair:
+    /// `#[cfg_attr(fip_prelint, fip::ffi_map)] fn __fip_ffi_map_K() { let _ =
+    /// (dep::sym as *const (), local::sym as *const ()); }`. `fip-prelint` reads the
+    /// two foreign functions it names and reports a pair whose link symbols or ABIs
+    /// differ. Emitted only under the driver (like `fip::mark`), as items at the start
+    /// of the strict body, so the paths resolve as the body's calls do.
+    pub(crate) fn emit_ffi_checks(&self) -> TokenStream {
+        let mut out = TokenStream::new();
+        for (k, m) in self.ffi.iter().enumerate() {
+            let respan = |t: TokenStream| -> TokenStream {
+                t.into_iter()
+                    .map(|mut t| {
+                        t.set_span(m.span);
+                        t
+                    })
+                    .collect()
+            };
+            out.extend(respan(ts(&format!(
+                "#[cfg_attr(fip_prelint, fip::ffi_map)] #[doc(hidden)] #[allow(dead_code, non_snake_case, clippy::all, clippy::pedantic)] fn __fip_ffi_map_{k}()"
+            ))));
+            let mut pair: TokenStream = m.dep.iter().cloned().collect();
+            pair.extend(respan(ts("as *const (),")));
+            pair.extend(m.local.iter().cloned());
+            pair.extend(respan(ts("as *const ()")));
+            let mut body = respan(ts("let _ ="));
+            body.extend([paren(pair)]);
+            body.extend(respan(ts(";")));
+            let mut b = Group::new(Delimiter::Brace, body);
+            b.set_span(m.span);
+            out.extend([TokenTree::Group(b)]);
+        }
+        out
+    }
+
     /// Path of the `fip_strict` crate in generated code.
     pub(crate) fn krate(&self) -> TokenStream {
         self.krate.clone().unwrap_or_else(default_krate)

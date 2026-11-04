@@ -888,6 +888,23 @@ sidecars of path dependencies outside the workspace, transitively. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-04: Verus sidecars for impl methods,
 `fip-strict` and `fip-alloc`".
 
+## Amendment 2026-11-04: `ffi(dep::sym = local::sym)` mappings checked by symbol and ABI (top plan T10.2)
+
+`#[fip(strict = true, ffi(dep::sym = local::sym, ..))]` lets strict calls of a
+dependency's foreign function `dep::sym` read the certificate of a `#[fip_extern]`
+declaration `local::sym` (before: E0425 on `dep::__fip_strict_sym`). Under the driver
+the attribute emits, at the start of the strict body, one hidden function per pair
+carrying `fip::ffi_map` whose body names both functions
+(`let _ = (dep::sym as *const (), local::sym as *const ());`). The driver reads the
+two functions from the HIR of each `fip::ffi_map` function and reports, at the pair,
+a side that is not a foreign function, or two declarations whose link symbols
+(`tcx.symbol_name`) or ABIs differ: the same rule as marks matched by symbol, applied
+to the certificate the macro chose. `fip::ffi_map` is a known tool attribute, accepted
+on functions with a body only. Trust without the driver: the mapping is unchecked,
+except that `Cert::allocs_for` checks the certificate's name against `sym` of the
+local path. Measured: `tests/fixtures/ffi` cases 15–17, see `TODOs/fip-prelint.md`,
+"Resolved 2026-11-04: FFI certificate mapping for strict callers".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

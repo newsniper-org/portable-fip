@@ -267,6 +267,8 @@ fn validate_tool_attrs(out: &mut Out<'_>) {
                     "cert" => Some("`fip::cert` applies to foreign functions".to_string()),
                     "exclude" if on_fn && is_foreign => None,
                     "exclude" => Some("`fip::exclude` applies to foreign functions".to_string()),
+                    "ffi_map" if on_fn && !is_foreign => None,
+                    "ffi_map" => Some("`fip::ffi_map` applies to the check functions `fip-macros` emits for `ffi(..)`".to_string()),
                     "stack_leaf" if on_root => crate::stack::stack_leaf_of(tcx, item.span)
                         .err()
                         .map(|e| format!("malformed `fip::stack_leaf`: {e}")),
@@ -453,6 +455,96 @@ fn check_ffi_symbols(out: &mut Out<'_>, crates: &Crates, local: &LocalFfi) {
             break;
         }
     }
+}
+
+/// The check functions of `#[fip(strict = true, ffi(dep::sym = local::sym))]`
+/// (`fip::ffi_map`, emitted by `fip-macros` under the driver): strict calls of
+/// `dep::sym` read `local::sym`'s certificate, so both must be foreign functions with
+/// one link symbol and ABI. Returns the number of pairs checked.
+fn check_ffi_maps(out: &mut Out<'_>) -> usize {
+    use rustc_hir::intravisit::{self, Visitor};
+    struct Named<'tcx> {
+        tcx: TyCtxt<'tcx>,
+        owner: rustc_hir::def_id::LocalDefId,
+        fns: Vec<DefId>,
+    }
+    impl<'tcx> Visitor<'tcx> for Named<'tcx> {
+        fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+            if let rustc_hir::ExprKind::Path(ref qpath) = e.kind
+                && let rustc_hir::def::Res::Def(DefKind::Fn, d) =
+                    self.tcx.typeck(self.owner).qpath_res(qpath, e.hir_id)
+            {
+                self.fns.push(d);
+            }
+            intravisit::walk_expr(self, e);
+        }
+    }
+    let tcx = out.tcx;
+    let mut checks: Vec<rustc_hir::def_id::LocalDefId> = Vec::new();
+    for f in rustc_public::local_crate().fn_defs() {
+        let mapped = f.all_tool_attrs().iter().any(|a| {
+            matches!(
+                marks::tool_attr_of_printed(a.as_str()),
+                Some(("ffi_map", None))
+            )
+        });
+        if !mapped {
+            continue;
+        }
+        let def_id: DefId = rustc_public::rustc_internal::internal(tcx, f.def_id());
+        if let Some(l) = def_id.as_local() {
+            checks.push(l);
+        }
+    }
+    checks.sort_by_key(|d| tcx.def_span(*d));
+    for &owner in &checks {
+        let mut v = Named {
+            tcx,
+            owner,
+            fns: Vec::new(),
+        };
+        v.visit_body(tcx.hir_body(tcx.hir_body_owned_by(owner).id()));
+        let span = tcx.def_span(owner);
+        let [dep, local] = v.fns[..] else {
+            out.error(
+                span,
+                "malformed `fip::ffi_map` check function: it must name exactly two functions",
+            );
+            continue;
+        };
+        let (dp, lp) = (tcx.def_path_str(dep), tcx.def_path_str(local));
+        let foreign = |d: DefId, p: &str, side: &str| {
+            (!tcx.is_foreign_item(d)).then(|| {
+                format!("`ffi({dp} = {lp})`: `{p}` (the {side} side) is not a foreign function; `ffi(..)` maps a dependency's foreign function to a `#[fip_extern]` declaration of the same symbol")
+            })
+        };
+        if let Some(m) = foreign(dep, &dp, "left").or_else(|| foreign(local, &lp, "right")) {
+            out.error(span, &m);
+            continue;
+        }
+        let (ds, ls) = (
+            crate::analysis::ffi_symbol(tcx, dep),
+            crate::analysis::ffi_symbol(tcx, local),
+        );
+        let (da, la) = (
+            crate::analysis::ffi_abi(tcx, dep),
+            crate::analysis::ffi_abi(tcx, local),
+        );
+        let what = if ds != ls {
+            "link symbols"
+        } else if da != la {
+            "ABIs"
+        } else {
+            continue;
+        };
+        out.error(
+            span,
+            &format!(
+                "`ffi({dp} = {lp})`: `{dp}` (symbol `{ds}`, `extern {da}`) and `{lp}` (symbol `{ls}`, `extern {la}`) have different {what}: strict calls of `{dp}` would read the certificate of another foreign function"
+            ),
+        );
+    }
+    checks.len()
 }
 
 /// One note per foreign callee matched by symbol to a mark on another declaration.
@@ -857,6 +949,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     let local = local_ffi(tcx, Some(&mut out));
     index_local_ffi(tcx, &mut crates, &local);
     check_ffi_symbols(&mut out, &crates, &local);
+    check_ffi_maps(&mut out);
     let (local_certs, local_excls) = (&local.certs, &local.excls);
     // A mark on a trait method declaration is a contract of every implementation, not
     // a root; a declaration with a default body is also checked as a root (the

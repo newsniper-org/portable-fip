@@ -653,6 +653,10 @@ symbol".
      still checks the name.
    - Effort S–M. Gated on a use case.
 
+**Status 2026-11-04: candidate 2 implemented** (`TODOs/fip-prelint.md`, "Resolved
+2026-11-04: FFI certificate mapping for strict callers"). The driver mark is a hidden
+check function carrying `fip::ffi_map`, emitted only under the driver.
+
 ### T11. Non-strict implementations of strict contracts (driver-only)
 
 **Current.** `#[fip_impl]` cannot see whether a trait method has a contract, so `#[fbip]`

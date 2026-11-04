@@ -1141,6 +1141,45 @@
 //! }
 //! # fn main() {}
 //! ```
+//! `ffi(..)` without `strict = true`:
+//! ```compile_fail
+//! # // expect: `ffi(..)` requires `strict = true` before it
+//! mod dep { unsafe extern "C" { pub fn labs(x: core::ffi::c_long) -> core::ffi::c_long; } }
+//! #[fip_macros::fip(ffi(dep::labs = sys::labs))]
+//! fn f(x: core::ffi::c_long) -> core::ffi::c_long { unsafe { dep::labs(x) } }
+//! # fn main() {}
+//! ```
+//! an `ffi(..)` entry that is not a `path = path` pair:
+//! ```compile_fail
+//! # // expect: `ffi(..)` takes `dependency::path = local::path` pairs
+//! mod dep { unsafe extern "C" { pub fn labs(x: core::ffi::c_long) -> core::ffi::c_long; } }
+//! #[fip_macros::fip(strict = true, ffi(dep::labs))]
+//! fn f(x: core::ffi::c_long) -> core::ffi::c_long { unsafe { dep::labs(x) } }
+//! # fn main() {}
+//! ```
+//! an `ffi(..)` left side that is a bare name (it has its own certificate):
+//! ```compile_fail
+//! # // expect: the left side names a foreign function of another module or crate by its path
+//! unsafe extern "C" { fn labs(x: core::ffi::c_long) -> core::ffi::c_long; }
+//! #[fip_macros::fip(strict = true, ffi(labs = sys::labs))]
+//! fn f(x: core::ffi::c_long) -> core::ffi::c_long { unsafe { labs(x) } }
+//! # fn main() {}
+//! ```
+//! one dependency path mapped twice:
+//! ```compile_fail
+//! # // expect: `ffi(..)` maps `dep::labs` twice
+//! mod dep { unsafe extern "C" { pub fn labs(x: core::ffi::c_long) -> core::ffi::c_long; } }
+//! #[fip_macros::fip(strict = true, ffi(dep::labs = a::labs, dep::labs = b::labs))]
+//! fn f(x: core::ffi::c_long) -> core::ffi::c_long { unsafe { dep::labs(x) } }
+//! # fn main() {}
+//! ```
+//! a mapping no call of the body uses:
+//! ```compile_fail
+//! # // expect: `ffi(dep::labs = ..)`: the body has no call of `dep::labs` written with this path
+//! #[fip_macros::fip(strict = true, ffi(dep::labs = sys::labs))]
+//! fn f(x: u8) -> u8 { x }
+//! # fn main() {}
+//! ```
 
 #![forbid(unsafe_code)]
 
@@ -1212,9 +1251,12 @@ struct FipArgs {
     /// `requires(..)`: the declared precondition, emitted for `fip-prelint` as
     /// `fip::requires(..)`.
     requires: Option<(Vec<fip_lint_rules::requires::Conjunct>, Span)>,
+    /// `ffi(dep::sym = local::sym, ..)`: strict calls of `dep::sym` read the
+    /// certificate of the `#[fip_extern]` declaration `local::sym`.
+    ffi: Vec<strict::FfiMap>,
 }
 
-const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)`, `panic_macros = false` and `crate = path::to::fip_strict` after `strict = true`, and `requires(i < j, j < xs.len())`";
+const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)`, `panic_macros = false`, `crate = path::to::fip_strict` and `ffi(dep::sym = local::sym)` after `strict = true`, and `requires(i < j, j < xs.len())`";
 
 const KRATE_HELP: &str = "`crate = ..` takes the path of the `fip_strict` crate as the caller sees it, e.g. `crate = my_facade::fip_strict` or `crate = \"my_facade::fip_strict\"`";
 
@@ -1273,6 +1315,80 @@ fn parse_krate(key: Span, rest: &[TokenTree]) -> Result<TokenStream, (Span, Stri
     Ok(toks.into_iter().collect())
 }
 
+const FFI_HELP: &str = "`ffi(..)` takes `dependency::path = local::path` pairs: strict calls of the dependency's foreign function read the certificate of the `#[fip_extern]` declaration at the local path, e.g. `ffi(libc::labs = sys::labs)`";
+
+/// A plain path `a::b::c` or `::a::b` (identifiers only, no generic arguments):
+/// `(tokens, identifier segments)`.
+fn plain_path(toks: &[TokenTree], at: Span) -> Result<Vec<String>, (Span, String)> {
+    let sp = toks.first().map_or(at, TokenTree::span);
+    let mut segs = Vec::new();
+    let mut i = 0;
+    if toks.len() >= 2 && is_punct(&toks[0], ':') && is_punct(&toks[1], ':') {
+        i = 2;
+    }
+    loop {
+        match toks.get(i) {
+            Some(TokenTree::Ident(id)) => segs.push(id.to_string()),
+            _ => return Err((sp, FFI_HELP.to_string())),
+        }
+        i += 1;
+        if i == toks.len() {
+            return Ok(segs);
+        }
+        if !(is_punct(&toks[i], ':') && toks.get(i + 1).is_some_and(|t| is_punct(t, ':'))) {
+            return Err((toks[i].span(), FFI_HELP.to_string()));
+        }
+        i += 2;
+    }
+}
+
+/// The pairs of `ffi(dep::sym = local::sym, ..)`.
+fn parse_ffi_maps(key: Span, g: &Group) -> Result<Vec<strict::FfiMap>, (Span, String)> {
+    let mut maps: Vec<strict::FfiMap> = Vec::new();
+    let pairs = split_commas(g.stream());
+    if pairs.is_empty() {
+        return Err((g.span(), FFI_HELP.to_string()));
+    }
+    for pair in pairs {
+        let sp = pair.first().map_or(key, TokenTree::span);
+        let eqs: Vec<usize> = pair
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| is_punct(t, '='))
+            .map(|(k, _)| k)
+            .collect();
+        let [eq] = eqs.as_slice() else {
+            return Err((sp, FFI_HELP.to_string()));
+        };
+        let (dep, local) = (&pair[..*eq], &pair[*eq + 1..]);
+        let dep_segs = plain_path(dep, pair[*eq].span())?;
+        let local_segs = plain_path(local, pair[*eq].span())?;
+        if dep_segs.len() < 2 {
+            return Err((
+                sp,
+                "`ffi(..)`: the left side names a foreign function of another module or crate by its path (`dep::sym`); a function in scope by its bare name already has its own certificate".to_string(),
+            ));
+        }
+        let key_of = |segs: &[String]| segs.join("::");
+        if key_of(&dep_segs) == key_of(&local_segs) {
+            return Err((sp, "`ffi(..)` maps a path to itself".to_string()));
+        }
+        if maps.iter().any(|m| m.dep_key == key_of(&dep_segs)) {
+            return Err((sp, format!("`ffi(..)` maps `{}` twice", key_of(&dep_segs))));
+        }
+        let (name, prefix) = local.split_last().expect("a plain path has a segment");
+        maps.push(strict::FfiMap {
+            dep_key: key_of(&dep_segs),
+            dep: dep.to_vec(),
+            local: local.to_vec(),
+            local_prefix: prefix.to_vec(),
+            local_name: strict::bare(&name.to_string()).to_string(),
+            span: sp,
+        });
+    }
+    Ok(maps)
+}
+
 fn split_commas(ts: TokenStream) -> Vec<Vec<TokenTree>> {
     let mut parts = vec![Vec::new()];
     for t in ts {
@@ -1295,6 +1411,20 @@ fn int_literal(t: &TokenTree) -> Option<u64> {
     }
 }
 
+/// `Err` "`<what>` requires `strict = true` before it" unless `strict`.
+fn needs_strict(strict: bool, key: &Ident, what: &str) -> Result<(), (Span, String)> {
+    if strict {
+        Ok(())
+    } else {
+        Err((
+            key.span(),
+            format!("{what} requires `strict = true` before it"),
+        ))
+    }
+}
+
+const FFI_TWICE: &str = "`ffi(..)` is given twice; list every mapping in one `ffi(..)`";
+
 fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
     let mut args = FipArgs {
         mode: Mode::Fip,
@@ -1305,6 +1435,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
         param_unstrict: None,
         krate: None,
         requires: None,
+        ffi: Vec::new(),
     };
     let mut seen_strict = false;
     for (k, part) in split_commas(attr).into_iter().enumerate() {
@@ -1329,12 +1460,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
             [TokenTree::Ident(key), eq, TokenTree::Ident(v)]
                 if key.to_string() == "panic_macros" && is_punct(eq, '=') =>
             {
-                if !args.strict {
-                    return Err((
-                        key.span(),
-                        "`panic_macros = ..` requires `strict = true` before it".to_string(),
-                    ));
-                }
+                needs_strict(args.strict, key, "`panic_macros = ..`")?;
                 args.panic_macros = match v.to_string().as_str() {
                     "true" => true,
                     "false" => false,
@@ -1349,12 +1475,7 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
             [TokenTree::Ident(key), eq, rest @ ..]
                 if key.to_string() == "crate" && is_punct(eq, '=') && args.krate.is_none() =>
             {
-                if !args.strict {
-                    return Err((
-                        key.span(),
-                        "`crate = ..` requires `strict = true` before it".to_string(),
-                    ));
-                }
+                needs_strict(args.strict, key, "`crate = ..`")?;
                 args.krate = Some(parse_krate(key.span(), rest)?);
             }
             [TokenTree::Ident(key), TokenTree::Group(g)]
@@ -1365,6 +1486,15 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
                 let cs = fip_lint_rules::requires::parse(&g.stream().to_string())
                     .map_err(|e| (g.span(), format!("`requires(..)`: {e}")))?;
                 args.requires = Some((cs, g.span()));
+            }
+            [TokenTree::Ident(key), TokenTree::Group(g)]
+                if key.to_string() == "ffi" && g.delimiter() == Delimiter::Parenthesis =>
+            {
+                needs_strict(args.strict, key, "`ffi(..)`")?;
+                if !args.ffi.is_empty() {
+                    return Err((key.span(), FFI_TWICE.to_string()));
+                }
+                args.ffi = parse_ffi_maps(key.span(), g)?;
             }
             [TokenTree::Ident(key), TokenTree::Group(g)]
                 if key.to_string() == "param" && g.delimiter() == Delimiter::Parenthesis =>
@@ -1941,6 +2071,9 @@ fn expand_parts(
         let (cert_items, stmt) = ss.emit_fn(&tag, &cert_name(&shape.name, ctx), &vis, n, local);
         items.extend(cert_items);
         let mut new_body = stmt;
+        if std::env::var_os(PRELINT_ENV).is_some() {
+            new_body.extend(ss.emit_ffi_checks());
+        }
         new_body.extend(body.stream());
         let mut g = Group::new(Delimiter::Brace, new_body);
         g.set_span(body.span());
@@ -2470,6 +2603,8 @@ fn run_strict_scan(
         no_panic_macros: !args.panic_macros,
         krate: args.krate.clone(),
         param_traits: extract_param_traits(shape.params.as_ref(), &shape.generics, ctx),
+        ffi: args.ffi.clone(),
+        ffi_used: vec![false; args.ffi.len()],
         ..strict::StrictScan::default()
     };
     let types = param_types(shape.params.as_ref());
@@ -2496,6 +2631,17 @@ fn run_strict_scan(
     }
     ss.stream(body.stream(), false);
     ss.check_params();
+    for (m, used) in ss.ffi.iter().zip(&ss.ffi_used) {
+        if !used {
+            ss.errors.push((
+                m.span,
+                format!(
+                    "`ffi({} = ..)`: the body has no call of `{}` written with this path",
+                    m.dep_key, m.dep_key
+                ),
+            ));
+        }
+    }
     for (sp, msg) in &ss.errors {
         errors.extend(compile_error(*sp, &format!("{tag} strict: {msg}")));
     }
@@ -2898,7 +3044,36 @@ pub fn fip_cert(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// get `#[allow(dead_code)]`: a declaration may exist only to carry the mark. The
 /// emitted `__fip_strict_<name>` certificate is still found only through this
 /// declaration's path, so a strict caller calls this declaration, not the
-/// dependency's.
+/// dependency's, or maps the dependency's path to it with
+/// `#[fip(strict = true, ffi(dep::sym = local::sym, ..))]`.
+///
+/// **`ffi(dep::sym = local::sym)`.** Strict calls of `dep::sym` written with exactly
+/// this path read the certificate of `local::sym` (`local::__fip_strict_sym`, its name
+/// checked by `Cert::allocs_for`). Under `cargo fip-prelint` the attribute also emits
+/// a hidden check function naming both (`fip::ffi_map`), and the driver reports a pair
+/// whose link symbols or ABIs differ. **Trust without the driver:** the mapping is
+/// unchecked; the only compile-time check is the certificate's name, so a mapping to
+/// a `#[fip_extern]` declaration of another symbol compiles and its bound is used for
+/// `dep::sym`. Rejected: a left side without a module path (a function in scope by
+/// its bare name has its own certificate), a path mapped twice or to itself, generic
+/// arguments, and a mapping no call of the body uses.
+///
+/// ```
+/// mod dep {
+///     // A dependency's declaration without FIP marks.
+///     unsafe extern "C" { pub fn labs(x: core::ffi::c_long) -> core::ffi::c_long; }
+/// }
+/// mod sys {
+///     #[fip_macros::fip_extern]
+///     unsafe extern "C" {
+///         #[fip_cert(evidence = "C standard 7.24.6.1: computes a value", allocs = 0)]
+///         pub fn labs(x: core::ffi::c_long) -> core::ffi::c_long;
+///     }
+/// }
+/// #[fip_macros::fip(strict = true, ffi(dep::labs = sys::labs))]
+/// fn abs_of(x: core::ffi::c_long) -> core::ffi::c_long { unsafe { dep::labs(x) } }
+/// # fn main() { assert_eq!(abs_of(-3), 3); }
+/// ```
 ///
 /// ```
 /// // A dependency (here `std`, as `std::sys::..::errno_location`) declares

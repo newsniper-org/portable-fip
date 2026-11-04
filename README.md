@@ -147,7 +147,10 @@ declaration in your crate also covers the same symbol declared in `std`, `libc` 
 any other dependency (each such match is listed in the crate summary); marks on one
 symbol must agree everywhere (certified and excluded, or two certificates with
 different properties, are errors), and a declaration with another ABI is not
-covered (an error). Strict callers still need the certificate's own path.
+covered (an error). Strict callers use the certificate's own path, or map the
+dependency's path to it with `#[fip(strict = true, ffi(dep::sym = local::sym))]`
+(`fip-prelint` checks that both declarations share symbol and ABI; without it the
+mapping is trusted, only the certificate's name is checked).
 The `core` table is **audited** (at rustc 1.97.1 and 1.99.1; a test fails on any
 other compiler) rather than machine-proved, except that "no allocation" follows from
 `core` having no allocator; the installed `vstd` specifies 7 of its 11 entries.

@@ -157,3 +157,42 @@ pub fn call_split() {
 pub fn call_twice() {
     unsafe { by_symbol::other::c_twice() }
 }
+
+/// Declarations a strict caller maps a dependency's foreign function to
+/// (`#[fip(strict = true, ffi(dep::sym = local::sym))]`, top plan T10.2).
+pub mod mapped {
+    use core::ffi::{c_int, c_long};
+
+    #[fip_macros::fip_extern]
+    unsafe extern "C" {
+        /// The symbol of `cdep::labs`, same ABI.
+        #[fip_cert(evidence = "C standard 7.24.6.1: computes a value, no allocation", allocs = 0)]
+        pub fn labs(x: c_long) -> c_long;
+        /// Another symbol with the same signature.
+        #[fip_cert(evidence = "C standard 7.24.6.1: computes a value, no allocation", allocs = 0)]
+        pub fn llabs(x: c_long) -> c_long;
+        /// The symbol of `cdep::toupper`, declared `extern "C-unwind"` there.
+        #[fip_cert(evidence = "C standard 7.4.2.2", allocs = 0)]
+        pub fn toupper(c: c_int) -> c_int;
+    }
+}
+
+/// 15. Strict call of a dependency's foreign function mapped to a declaration of the
+/// same symbol and ABI: passes.
+#[fip(strict = true, ffi(cdep::labs = mapped::labs))]
+pub fn strict_dep_mapped(x: core::ffi::c_long) -> core::ffi::c_long {
+    unsafe { cdep::labs(x) }
+}
+
+/// 16. Mapped to a declaration of another symbol: error at the mapping.
+#[fip(strict = true, ffi(cdep::labs = mapped::llabs))]
+pub fn strict_dep_other_symbol(x: core::ffi::c_long) -> core::ffi::c_long {
+    unsafe { cdep::labs(x) }
+}
+
+/// 17. Mapped to a declaration of the same symbol under another ABI: error at the
+/// mapping (and at the call: marks do not apply across ABIs).
+#[fip(strict = true, ffi(cdep::toupper = mapped::toupper))]
+pub fn strict_dep_other_abi(c: core::ffi::c_int) -> core::ffi::c_int {
+    unsafe { cdep::toupper(c) }
+}
