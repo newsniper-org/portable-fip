@@ -6,7 +6,7 @@
 //! Verus proofs say nothing about unwinding.
 //!
 //! `compact_panic_leaves_a_permutation` and `compact_drops_each_element_exactly_once`
-//! are ported from Y4 (`fip/core/src/lib.rs` at commit 6e6e8b1).
+//! are ported from a downstream project (`fip/core/src/lib.rs` at commit 6e6e8b1).
 
 #![forbid(unsafe_code)]
 

@@ -889,7 +889,7 @@ Treatments:
     the rustc version.
   - Used only where MIR is unreadable. Any mismatch means not used (`⊤`).
   - The first producer is L6's `std` summaries. Consumer crates on other toolchains
-    (Y4 on 1.95) are served only if their code cannot be checked by the 1.99.1
+    (a downstream project on 1.95) are served only if their code cannot be checked by the 1.99.1
     driver at all; today it can (`cargo fip-prelint` uses its own toolchain).
   - Effort M, inside L6.
 

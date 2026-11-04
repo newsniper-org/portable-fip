@@ -121,7 +121,8 @@ equivalent to exhaustive FSM exploration. Rules:
 
 Code: `crates/fip-testkit/src/summaries.rs` (lattice, fixpoint, verdicts, witnesses),
 on the front end `crates/fip-testkit/src/srcmodel/` shared with `callgraph`. Unit
-tests: `crates/fip-testkit/src/summaries/tests.rs` (27 tests). Agreement with
+tests: `crates/fip-testkit/src/summaries/tests.rs` (27 tests at implementation, 39 at
+`ee273e1`). Agreement with
 `fip-macros`: `crates/fip-macros/tests/checker_agreement.rs`.
 
 ### What was built
@@ -203,9 +204,9 @@ tests: `crates/fip-testkit/src/summaries/tests.rs` (27 tests). Agreement with
 | helper allocation under `#[fbip]` callers only | `#[fip]` root unaffected (bound 0); the `#[fbip]` caller is reported (bound ∞ after widening its recursion) | `allocation_under_fbip_callers_only_does_not_affect_fip_roots` |
 | `#[fip]` calling an undefined function | `⊤`, reported with `file:line`, not passed | `undefined_function_is_unknown_not_zero`, `every_unresolved_leaf_is_listed` |
 | higher-order `#[fip]` calling its parameter in a loop | conditional `∞·alloc(g)`; with `\|x\| x + 1` pass, with a `Box::new` closure violation ∞ | `higher_order_root_is_conditional`, `closure_arguments_instantiate_the_parameter` |
-| `callgraph-limitations.md` cases | current or fixed result | `callgraph::tests` (34 tests) |
-| `fip-macros` and the checker agree | the 7 non-strict behaviour `compile_fail` examples of `fip-macros/src/lib.rs` (allocation sites, `vec!`, `.to_vec()`, direct recursion, `fip(1)` loop, two sites over `fip(1)`, `fbip` with `format!`) are violations, each asserted verbatim in `src/lib.rs`; `tests/accept.rs` (8 roots) has no violation. Since 2026-11-02 also a trait method's default body that allocates (a violation), and `accept.rs` with a trait whose bodiless `#[fip]`/`#[fip(1)]`/`#[fbip]` declarations are not roots (its default body and `Square::area` are; 10 roots) | `checker_agreement.rs`: `snippets_are_the_ones_in_the_crate_docs`, `rejected_examples_are_violations`, `accepted_examples_are_not_violations` |
-| runs on `crates/fip-macros/tests` | together with `fip_core`, `fip_alloc`, `fip_strict`: 39 roots, 0 violations, 0 conditional (every higher-order root there declares `param(..)`) | `tests_and_called_crates_have_no_violation` |
+| `callgraph-limitations.md` cases | current or fixed result | `callgraph::tests` (34 tests at implementation, 35 at `ee273e1`) |
+| `fip-macros` and the checker agree | the non-strict behaviour `compile_fail` examples of `fip-macros/src/lib.rs` (7 at implementation, 14 `REJECTED` snippets at `ee273e1`: allocation sites and their constructor spellings, `vec!`, `.to_vec()`, direct recursion, `fip(1)` loop, two sites over `fip(1)`, `fbip` with `format!`, a trait default body) are violations, each asserted verbatim in `src/lib.rs`; `tests/accept.rs` (8 roots) has no violation. Since 2026-11-02 also a trait method's default body that allocates (a violation), and `accept.rs` with a trait whose bodiless `#[fip]`/`#[fip(1)]`/`#[fbip]` declarations are not roots (its default body and `Square::area` are; 10 roots) | `checker_agreement.rs`: `snippets_are_the_ones_in_the_crate_docs`, `rejected_examples_are_violations`, `accepted_examples_are_not_violations` |
+| runs on `crates/fip-macros/tests` | together with `fip_core`, `fip_alloc`, `fip_strict`: 39 roots (103 at `ee273e1`), 0 violations, 0 conditional (every higher-order root there declares `param(..)`) | `tests_and_called_crates_have_no_violation` |
 
 The strict-mode `compile_fail` examples (certificates, `param`, `?`, macros) are not
 part of the agreement test: they are about the strict mode's certificate rules, not

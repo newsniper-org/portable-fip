@@ -63,8 +63,9 @@ verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern
 # fip-strict proofs (`FipFn` with `pre`/`post`, `Certified`), no trusted items;
 # exports the Verus metadata that fip-core and verify-compose import. The run goes
 # through the sidecar generator (top plan T13.4); its sidecar must equal
-# crates/fip-strict/verus-verified.txt (no function listed: every verified method is a
-# Verus-only twin or macro-generated, each skipped with the reason).
+# crates/fip-strict/verus-verified.txt (2 functions listed, `Certified::assume` and
+# `Certified::assume_no_panic_macros`; every other verified method is a Verus-only twin
+# or macro-generated, each skipped with the reason).
 verify-strict: sidecar-gen
     rm -rf target/verus-strict && mkdir -p target/verus-strict
     VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_strict --crate-dir crates/fip-strict --out target/verus-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_strict --no-cheating crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict

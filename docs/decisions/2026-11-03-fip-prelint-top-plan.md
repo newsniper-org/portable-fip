@@ -7,7 +7,8 @@
 implemented on branch `prelint/top-plan`, one commit per item. Item 16 (Verus
 panic-freedom sidecar, a trust change) ACCEPTED by the user on 2026-11-04 and
 implemented on branch `prelint/top-plan-2`. The "stay" and "only on demand" items are
-not executed.
+not executed, except T10.2 and T12.2 (on demand, implemented 2026-11-04; see their
+"Status 2026-11-04" lines).
 Builds on `docs/decisions/2026-11-02-fip-prelint-limits-plan.md` (ACCEPTED,
 implemented: L1–L12) and its "Other limits found and kept", on the amendments of
 `docs/decisions/2026-11-01-fip-prelint.md`, and on `TODOs/fip-prelint.md` and
@@ -610,7 +611,9 @@ instance `chain::generic::<u32>`; a test target instantiating `generic::<u8>`): 
 new variants `-tests` (5 bounded, both instances), `-aarch64` (5 bounded; `chain_top`
 544 ≥ `llvm-readobj` sum 528), `-buildstd` (5 bounded; `precompiled` now `⊤` at
 `libc::getpid`, `copy_big` at `libc::memcpy`). **Deviations:** i686 and ARMv7 (ELF32,
-REL relocations) are not read (`⊤`, "only x86_64 and AArch64"); the release build
+REL relocations) are not read (`⊤`, "only x86_64 and AArch64"; resolved 2026-11-04,
+`TODOs/fip-prelint.md`, "Resolved 2026-11-04: stack mode on ELF32 (i386, ARM) and the
+allocator shim's name"); the release build
 inlines `generic::<u32>` into `leafy`, so that root stays `⊤` there (no instance); in
 `--tests` the executable's allocator shim defines `__rust_alloc`, so `boxed` is `⊤` as
 "defined but not codegened from MIR" (mangled name) instead of "no frame size".
@@ -757,7 +760,9 @@ the call-site contexts. Fixture `preconditions`: `pre` 15 roots, 7 passed → 25
 pass; `Cell`, relational, variable-index and short-guard controls stay reported).
 N4 `idx_heap` passes. Sidecar unchanged when regenerated. **Deviation:** none in
 verdicts; a variable index (`xs[k]` read twice) is not covered (only constant
-indices are paths), recorded as a fixture case.
+indices are paths), recorded as a fixture case (resolved 2026-11-04,
+`TODOs/fip-prelint.md`, "Resolved 2026-11-04: an element at a variable index read
+twice").
 
 **Implemented** (item 16, candidate 4; a trust change accepted by the user). `just
 verify-core` runs Verus through `cargo fip-prelint --verus-sidecar`, which lists, from
@@ -773,8 +778,10 @@ precondition as a note; the summary counts the discharged sites with the stamp.
 Fixture `verus_sidecar` (with a stale-hash, a forged-source-hash, a foreign-stamp and
 a missing-file control). Self-check: dev unchanged, `--release` 16 → 15 notes
 (`dedup_by`'s bounds check). **Deviation:** in dev there is nothing to drop (the
-driver proves every `fip-core` check itself); impl methods are not listed. Details:
-`TODOs/fip-prelint.md`, "Resolved 2026-11-04".
+driver proves every `fip-core` check itself); impl methods are not listed (resolved
+2026-11-04, `TODOs/fip-prelint.md`, "Resolved 2026-11-04: Verus sidecars for impl
+methods, `fip-strict` and `fip-alloc`"). Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-04: Verus as an oracle for panic freedom (top plan T13.4)".
 
 ### T14. The remaining self-check notes, and the profile the driver analyses
 
@@ -895,7 +902,8 @@ flag. Precision on these: 4 of 4 hits are pools; recall 4 of 5 known unmarked po
 **Deviations:** `alloc_sources` gives 0 hits, not the "expected hits": its arena and
 slab are marked (hints cover unmarked methods only) and the unmarked `PlainArena` has
 no release method; `/tmp/tp-m3`'s `top::Pool` is missed because `top` does not declare
-`fip::export` (the plan's scope).
+`fip::export` (the plan's scope; resolved 2026-11-04, `TODOs/fip-prelint.md`,
+"Resolved 2026-11-04: pool hints on checked packages without `fip::export`").
 
 **Rejected.** A default warning or `⊤` for pool-shaped code: unsound to rely on, and
 noisy. Treating any `&mut self` method returning a borrow of `self`'s buffer as an
@@ -954,7 +962,7 @@ These are unchanged from the limits plan, sound and reported:
 | 14 | T14.3 allocation-failure label | — | S | wording only |
 | 15 | T17 `--pool-hints` | — | M | heuristic notes, opt-in |
 | 16 | T13.4 Verus panic-freedom sidecar | — | L | `fip-core` body panic sites dropped by provenance (trust change, accepted 2026-11-04; implemented: `--release` 16 → 15 notes) |
-| — | T6, T9, T10, T11, T12, T15, T16 | — | — | stay; T9.3 / T10.2 / T12.2 only on demand |
+| — | T6, T9, T10, T11, T12, T15, T16 | — | — | stay; T9.3 / T10.2 / T12.2 only on demand (T10.2, T12.2 implemented 2026-11-04) |
 
 The total for items 1–15 is about 25–32 agent-days (an estimate). Item 16 is
 separate, because it changes what is trusted. Items 1, 2, 6 and 10 have no

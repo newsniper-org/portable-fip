@@ -3,7 +3,7 @@
 
 [package]
 name = "fip-testkit"
-description = "Per-thread allocation counting and assert_fip!/assert_fbip!/assert_fip_n! for tests (std, no deps)."
+description = "Allocation counting with assert_fip!/assert_fbip!/assert_fip_n! for tests, call-graph and allocation-summary scans (std, workspace deps only)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

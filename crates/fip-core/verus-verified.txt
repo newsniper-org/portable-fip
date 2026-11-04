@@ -10,7 +10,7 @@ toolchain 1.99.1-x86_64-unknown-linux-gnu
 flags --no-cheating
 cfg x86_64-unknown-linux-gnu -
 verified 58
-source ../fip-strict/src/lib.rs e6b046953f9f81826bf61e725e04021027e78d02d7fd0587f5e54fd6b47f356a
+source ../fip-strict/src/lib.rs 490adf963a2c48601669610a395b41515887240f0e7b759401a0d34a6028c0dc
 source src/lib.rs 404c41e8839e7a64ad0e9bdda79aad9c473a4582311c570c2919064416e0d268
 source src/slice.rs 7e24b9df73408003963e2af0c87c9f760fe0998f15f7a4c8d79278e20a714cd2
 source src/slot.rs 59ebe64bbc0cd48cf499893adbc9a52ab1fb0d64c30bc0ede72ab335e08104ec

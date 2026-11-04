@@ -110,7 +110,7 @@ fn other_functions_are_allocation_free() {
 
 #[test]
 fn map_in_place_st_threads_the_state_in_index_order() {
-    // Y4's closure-state case (`fip_map!` with a captured counter), state passed explicitly.
+    // A downstream project's closure-state case (`fip_map!` with a captured counter), state passed explicitly.
     let mut xs = [0_u32, 0, 0];
     let (c, hole) = assert_fip!(fip_core::map_in_place_st(&mut xs, 0, 10_u32, |c, _v| (
         c + 1,

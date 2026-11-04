@@ -5,7 +5,9 @@
 
 **Status:** IMPLEMENTED 2026-11-01 (`tools/fip-prelint`, `just prelint`); see
 "Implementation" at the end for what was built, measured results and open items.
-Decision record: `docs/decisions/2026-11-01-fip-prelint.md`.
+Decision record: `docs/decisions/2026-11-01-fip-prelint.md`. The dated sections below
+record the figures of their commit (self-check roots and notes, mutant counts, ..);
+the current ones are in `README.md` and in `tools/fip-prelint/tests/*.expected`.
 
 ## Why a rustc driver, not another syntactic pass
 
@@ -40,7 +42,7 @@ ones.
 | typo `fip::exprot` under a registered tool | **accepted silently**: the driver must validate names under `fip::` itself |
 
 A bare `#![export_fip]` is an unknown attribute on stable rustc, so plain builds
-(e.g. Y4's) would break. Hence the `cfg_attr` form.
+(e.g. a downstream project's) would break. Hence the `cfg_attr` form.
 
 **End-to-end MIR lookup from a downstream driver.** A dependency `dep` with three
 non-generic, non-`#[inline]` functions: `leaf` (`x + 1`), `looped` (a short
@@ -79,7 +81,7 @@ Control: a `dep` built with the flag by 1.99.1 and read by rustc 1.97.1 fails wi
    inlining, but the verdict should come from one fixed opt-level. Proposed:
    analyse MIR from a dedicated driver build at opt-level 0.
 5. Encoded MIR is readable only by the same rustc. All crates of one analysis must
-   be built by the pinned toolchain. Verdicts can cross toolchains (Y4 on 1.95,
+   be built by the pinned toolchain. Verdicts can cross toolchains (a downstream project on 1.95,
    here 1.99) only through an exported **summary sidecar** (per-function allocation
    bound, recursion, frees, panics). Each sidecar is stamped with the crate hash, the
    driver version and the rustc version. It is a claim, so it is used only when the
@@ -98,7 +100,7 @@ Control: a `dep` built with the flag by 1.99.1 and read by rustc 1.97.1 fails wi
 ## Plan
 
 1. `rustc_public` probe; decision record (toolchain pinning, `rustc_public` vs
-   `rustc_middle`, Y4 toolchain alignment, sidecar format). **Done** (sidecar
+   `rustc_middle`, downstream toolchain alignment, sidecar format). **Done** (sidecar
    deferred).
 2. `fip-prelint` driver: port the `summaries` fixpoint to MIR input (resolved calls,
    `Drop` terminators, `Assert` terminators, allocator calls). **Done** 2026-11-01.
@@ -270,6 +272,13 @@ compact_map_st}` add 2 roots to `fip_core` (8) and 6 checked call sites (22 in t
 2. **Function pointers and trait objects** whose target is not in the analysed MIR are
    `⊤` (as the decision record says), also when they are the root's own parameter
    (`g: fn(u8) -> u8`, `g: &dyn Fn(..)`); the token-level design made those terms.
+   **Partly resolved** 2026-11-02 to 2026-11-04 (sections "Resolved 2026-11-02:
+   function pointers, trait objects and trait method contracts", "Resolved 2026-11-03:
+   function pointers from constants, immutable statics and local aggregates",
+   "callable bindings across calls", "the `Fn` shim of a function pointer and
+   `Box<dyn Fn*>`", "Resolved 2026-11-04: function-pointer residue"): declared
+   `param(g = K)` bounds, contracts and pointers of one known origin are resolved;
+   undeclared parameters and pointers of unknown origin stay `⊤`.
 3. ~~**Declared parameter bounds at call sites.**~~ **Resolved** 2026-11-01: every
    call site of a callee with `param(g = K)` is checked, in roots, in what they reach
    and in local bodies that are not roots (section "Resolved: declared parameter
@@ -278,9 +287,10 @@ compact_map_st}` add 2 roots to `fip_core` (8) and 6 checked call sites (22 in t
    type frees for every instantiation (`Vec<T>`); reported as warnings, never passed.~~
    **Resolved** 2026-11-02 (section "Resolved 2026-11-02: drops through their glue"):
    glue is analysed field by field; only a bare `drop(T)` stays a term.
-5. **`format!`**: `alloc::fmt::format::format_inner` has no MIR, so `format!` is `⊤` in
+5. ~~**`format!`**: `alloc::fmt::format::format_inner` has no MIR, so `format!` is `⊤` in
    addition to its allocation violation; a summary table for such `std` functions
-   (or `-Zbuild-std`) would remove it.
+   (or `-Zbuild-std`) would remove it.~~ **Resolved** 2026-11-02 (section "Resolved
+   2026-11-02: generated std summaries"): `format!` is a violation, not `⊤`.
 6. **Cross-toolchain summary sidecars** (decision record item 7): deferred.
 7. Measured on `x86_64` Linux only. `cargo-fip-prelint` sets `LD_LIBRARY_PATH`; the
    binaries also carry an rpath to the sysroot `lib`. **Partly resolved** 2026-11-02:
@@ -1949,8 +1959,9 @@ random source and the stderr paths reach foreign functions inside `std` (`syscal
 which a summary records as `⊤` at generation time (the seed has no marks for them).
 A user's FFI marks cannot reach into a summary. Open point: a summary term for a
 foreign call (`§ffi <symbol> <abi>`, resolved with the marks of the analysed crate)
-would turn these into FFI verdicts at the use site; not implemented. The seed was
-left unchanged.
+would turn these into FFI verdicts at the use site; not implemented here (implemented
+later: "Resolved 2026-11-03: foreign calls inside std summaries (`§ffi`, top plan item
+8b)"). The seed was left unchanged.
 
 ## Resolved 2026-11-03: contracts with `param(..)` (top plan T5)
 
@@ -2831,7 +2842,9 @@ sidecar with nothing listed: it makes the freshness check cover its proofs' sour
 
 **Left.** A verified method of a Verus-only twin (`fip-strict`) is never used; making
 it usable would need the plain and the Verus item to be one item (as in `fip-core`,
-`cfg_attr(verus_keep_ghost, verus_spec(..))`). `#[cfg(..)]` forms other than exactly
+`cfg_attr(verus_keep_ghost, verus_spec(..))`); done for `Certified::assume` and
+`assume_no_panic_macros` ("Resolved 2026-11-04: `fip-strict`'s Verus-only
+constructors merged into single items", 2 functions listed since). `#[cfg(..)]` forms other than exactly
 `#[cfg(verus_keep_ghost)]` are not recognised as ghost-only (such entries stay listed
 but no plain item sits at their location, so they are never used). Path dependencies
 are found by scanning manifests, not by `cargo metadata` (no subprocess, no network);
@@ -3032,7 +3045,7 @@ cheating, and a cache that replayed a pass after a Verus-only source changed.
      (variant `-cfgcrate`: the division note is back);
    - stamp (format 3): `cfg <target> <features>`, compared with the build (variant
      `-target`: a sidecar for `aarch64-unknown-linux-gnu` refused). `targets.expected`
-     re-blessed: the eight non-host targets name the refused sidecars; counts unchanged
+     re-blessed: the ten non-host targets name the refused sidecars; counts unchanged
      (checked by removing the suffix: only `fip_core`'s summary line, now non-empty,
      is added).
    The committed sidecars of `fip-strict`, `fip-core`, `fip-alloc` and the fixture

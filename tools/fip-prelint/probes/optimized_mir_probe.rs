@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
 #![feature(rustc_private)]
 extern crate rustc_driver;
 extern crate rustc_hir;

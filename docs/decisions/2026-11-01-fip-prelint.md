@@ -3,7 +3,8 @@
 
 # `fip-prelint`: a MIR-level checker as a rustc driver
 
-**Status:** ACCEPTED, 2026-11-01. Background and first probes: `TODOs/fip-prelint.md`. Probe sources: `tools/fip-prelint/probes/`.
+**Status:** ACCEPTED, 2026-11-01, amended 2026-11-01 through 2026-11-04 (sections "Amendment .."
+below; the 2026-11-04 Verus sidecar amendment is a trust change accepted by the user). Background and first probes: `TODOs/fip-prelint.md`. Probe sources: `tools/fip-prelint/probes/`.
 
 ## Decision
 
@@ -69,7 +70,7 @@
    - a callee's MIR is used if it is local, in a crate declaring `fip::export`, or
      (for `core`/`alloc`/`std`) available because it is generic or inline. Intrinsics
      and other bodies without MIR come from `fip_lint_rules` tables, else ⊤.
-7. **Cross-toolchain consumers** (e.g. Y4 on rustc 1.95): per-function summary
+7. **Cross-toolchain consumers** (e.g. a downstream project on rustc 1.95): per-function summary
    sidecars stamped with crate hash, driver version and rustc version. Deferred. A
    sidecar is a claim, used only where the MIR cannot be read.
 
@@ -134,7 +135,7 @@ Implementation: `tools/fip-prelint`; results and open items: `TODOs/fip-prelint.
 ## Amendment 2026-11-01: `RUSTC_WRAPPER` instead of `RUSTC_WORKSPACE_WRAPPER`
 
 With `RUSTC_WORKSPACE_WRAPPER` only workspace members went through the driver. A
-project that consumes portable-fip as a git or path dependency (Y4, rIC3) therefore
+project that consumes portable-fip as a git or path dependency therefore
 got `fip-core`/`fip-strict` compiled without `--cfg fip_prelint` and without
 `-Zalways-encode-mir`. Their `fip::export` was inactive and every call into them was
 ⊤. Measured with a consumer workspace (`/tmp/consumer`) depending on `fip-core`,
@@ -884,7 +885,9 @@ rustc's `{impl#1}`; in the fixture `verus_sidecar`, Verus `impl&%0` is rustc
 comes from a macro expansion (one text for every expansion). The driver does not use
 an impl method whose impl block's header (its attributes through the self type)
 mentions `verus_keep_ghost`, as for the item text. `fip-strict` and `fip-alloc`
-declare sidecars (0 and 1 functions listed). `FIP_PRELINT_VERUS_ID` also covers the
+declare sidecars (0 and 1 functions listed; `fip-strict` lists 2 since its
+`Certified` constructors became single items, `TODOs/fip-prelint.md`, "Resolved
+2026-11-04: `fip-strict`'s Verus-only constructors merged into single items"). `FIP_PRELINT_VERUS_ID` also covers the
 sidecars of path dependencies outside the workspace, transitively. Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-04: Verus sidecars for impl methods,
 `fip-strict` and `fip-alloc`".
@@ -959,7 +962,7 @@ imported a crate verified with cheating:
   (`verus::crate_cfg_conflict`: a `#[cfg(test)]` constant or inherent method changes
   a listed item without changing its text). The stamp records the run's target and
   features (sidecar format 3, line `cfg`); the driver uses a sidecar only for a build
-  with both equal. Consequence, measured: on the eight other installed targets the
+  with both equal. Consequence, measured: on the ten other installed targets (nine with `std`, and `x86_64-unknown-none`) the
   self-check names the refused sidecars; no verdict changes (no site was discharged in
   dev).
 - **Imports.** The generator accepts `--import <name>=<vir>` only with

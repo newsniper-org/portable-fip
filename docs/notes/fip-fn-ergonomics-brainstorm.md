@@ -10,7 +10,7 @@ where).
 
 - rustc 1.99.1;
 - Verus `0.2026.10.18.7d82994` (upstream, `/usr/bin/verus`);
-- the fork `0.2026.10.31.559ac52` (`$HOME/Y4/verus-fork/.../verus`, `VERUS_Z3_PATH=/usr/bin/z3`);
+- the fork `0.2026.10.31.559ac52` (`<fork>/source/target-verus/release/verus`, `VERUS_Z3_PATH=/usr/bin/z3`);
 - `fip-prelint` built from `d127bc4`.
 
 Probe files are under `/tmp/tp-verus/p` and `/tmp/tp-m3/tok`. They are summarised in
@@ -127,7 +127,7 @@ let h = fip_fn!(<Ticker as Step>::step);       // trait-impl method
 - A function without a certificate fails like a strict call of it (E0425 on
   `__fip_strict_f`), which idea 9 can improve.
 - No item is declared, so the expression stays valid inside Verus-verified bodies
-  (`fip_fn_wrapper`'s rule, `lib.rs:3573-3576`).
+  (`fip_fn_wrapper`'s rule, `lib.rs:5461-5462`).
 
 **Trust.**
 
@@ -531,9 +531,10 @@ which is unmeasured (triggers). **Trust:** an audited `unsafe impl` per combinat
 
 ### 14. More arities
 
-`MAX_ARITY = 4` (`crates/fip-strict/src/lib.rs:377`, mirrored in `fip-macros`
-`lib.rs:3526`). Extending `certified_fip_fn!` to 8 is mechanical. Unmeasured: Verus
-verification time per added impl (`just verify-strict` has 7 items today). **Cost** S.
+`MAX_ARITY = 4` (`crates/fip-strict/src/lib.rs:669`, mirrored in `fip-macros`
+`lib.rs:5401` as `MAX_FIP_FN_ARITY`). Extending `certified_fip_fn!`
+to 8 is mechanical. Unmeasured: Verus verification time per added impl (`just
+verify-strict`: 7 verified when this note was written, 19 now). **Cost** S.
 
 ### 15. Methods and trait methods as values
 

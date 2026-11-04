@@ -5,7 +5,7 @@
 //! `fip_core` is the Verus build exported by `just verify-core`, so its `spec::state`
 //! predicates are visible here.
 //!
-//! - `counter`: Y4's `fip_map!` example (a closure capturing a counter, state 10,
+//! - `counter`: a downstream project's `fip_map!` example (a closure capturing a counter, state 10,
 //!   elements `[11, 12, 13]`), with the state passed explicitly; the caller names the
 //!   trace with `map_st_by_trace` instead of choosing one.
 //! - `number_from_11` / `number_from_11_strict`: a counter step that would overflow

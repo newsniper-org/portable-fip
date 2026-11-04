@@ -30,8 +30,10 @@
 //! ## Hand-written certificates are visible
 //!
 //! A certificate is a claim, so making one by hand needs `unsafe`:
-//! [`Cert::assume`] and [`Certified::assume`] are `unsafe fn`s and [`FipBound`] is
-//! an `unsafe trait`. In a crate with `#![forbid(unsafe_code)]` none can be written
+//! [`Cert::assume`], [`Cert::assume_no_panic_macros`], [`Certified::assume`] and
+//! [`Certified::assume_no_panic_macros`] are `unsafe fn`s and [`FipBound`] is an
+//! `unsafe trait` (its four `unsafe impl`s in this crate, for [`Certified`] and the
+//! adapters, are the audited ones). In a crate with `#![forbid(unsafe_code)]` none can be written
 //! by hand at all, while the code `fip-macros` generates still compiles (rustc does
 //! not apply `unsafe_code` to proc-macro output). Everywhere else they stand out to
 //! review and to `grep -n "Cert::assume\|unsafe impl.*FipBound"`. `fip_testkit::certs`

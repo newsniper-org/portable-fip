@@ -3,7 +3,9 @@
 
 # Verification layout: one source, attribute-syntax specs, no `vstd` dependency
 
-**Status:** ACCEPTED, 2026-10-31.
+**Status:** ACCEPTED, 2026-10-31. Amended 2026-10-31 (`fip-strict` verified and imported by
+`fip-core`); measurements added through 2026-11-04 (`verifier::spinoff_prover` removed).
+Current verified counts: `README.md`, section "Verification".
 
 ## Decision
 
@@ -115,8 +117,8 @@ Two findings constrain how the specs are written:
 
 Two open points of the state-passing variants: `f` had to accept every element with
 any state, and callers had to `choose` the trace. Both Verus builds, `--no-cheating`:
-upstream 0.2026.10.18.7d82994 and Y4's fork 0.2026.10.31.559ac52
-(`VERUS=$HOME/Y4/verus-fork/source/target-verus/release/verus VERUS_Z3_PATH=/usr/bin/z3
+upstream 0.2026.10.18.7d82994 and a downstream fork 0.2026.10.31.559ac52
+(`VERUS=<fork>/source/target-verus/release/verus VERUS_Z3_PATH=/usr/bin/z3
 just verify`), identical results: `fip-strict` 7, `fip-core` 56 (51 before),
 `fip-alloc` 1, `verify/compose.rs` 2, `verify/compose_strict.rs` 4,
 `verify/compose_state.rs` 9 (4 before) verified; `fip-core` also verifies with
@@ -168,8 +170,11 @@ Findings:
   `f`'s indexed precondition; with Verus's default of 2 extra errors per function
   the state-chain invariant was not reported. Mutants run with `--multiple-errors 8`.
 
-Still open: `fip_fn!` cannot wrap a closure with Verus `ensures`, so a strict verified
-caller passes a named function through `Certified::assume` by hand.
+Resolved 2026-11-03 (was open here): `fip_fn!` keeps a leading
+`#[cfg_attr(verus_keep_ghost, verus_spec(..))]` on a closure (`number_from_11_closure`)
+and takes a named function as `fip_fn!(path)` (`fip_fn!(tick_checked)`), so a strict
+verified caller no longer writes `Certified::assume` by hand
+(`TODOs/strict-open-items.md`, items 14 and 15).
 
 ## Gaps this layout creates, and how they are closed
 
@@ -177,7 +182,10 @@ caller passes a named function through `Certified::assume` by hand.
   function without `verus_spec` is external to Verus, and `--no-cheating` does not
   object. Closed by `tests/verified_surface.rs` in each verified crate (scanner in
   `fip_testkit::surface`): every `fn` outside `verus! { }` must carry a `verus_spec`
-  attribute; a mutant with one attribute removed must fail the test.
+  attribute; a mutant with one attribute removed must fail the test. Since 2026-11-04
+  the same gate also rejects function-level `decreases` and `verifier::` attributes
+  outside an allowlist (`exec_allows_no_decreases_clause` let a recursive function
+  verify), with a mutant for each.
 - **`vstd` coverage limits what can be used.** E.g. `core::mem::replace` and
   `<[T]>::swap` have no `vstd` specification; `fip-core` builds them from
   `core::mem::swap` and `split_at_mut`, which do. A trusted specification would

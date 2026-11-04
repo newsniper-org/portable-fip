@@ -3,7 +3,7 @@
 
 [package]
 name = "fip-macros"
-description = "#[fip], #[fip(N)], #[fbip]: syntactic FIP lints as attribute macros (no deps)."
+description = "#[fip], #[fip(N)], #[fbip]: syntactic FIP lints, strict mode with allocation certificates, fip_fn! (workspace deps only)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

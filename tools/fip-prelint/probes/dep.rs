@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
 /// Non-generic, not `#[inline]`, with a loop.
 pub fn looped(x: u32) -> u32 {
     let mut s = 0u32;

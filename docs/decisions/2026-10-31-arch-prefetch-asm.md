@@ -3,7 +3,8 @@
 
 # `unsafe` in `fip-arch`: inline prefetch hints
 
-**Status:** ACCEPTED, 2026-10-31.
+**Status:** ACCEPTED, 2026-10-31. Amended 2026-11-04 (riscv64 `prefetch.r` as `ori x0, p, 1`;
+`just cross` assembles the aarch64 and riscv64 templates).
 
 ## Decision
 

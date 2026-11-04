@@ -28,8 +28,8 @@ Source references to Verus are file:line at commit `7d82994`.
   human-written (`CONTRIBUTING.md:32-38`).
 - License: Verus is MIT. `portable-fip` is now dual MIT OR Apache-2.0 (relicensed in
   commit `9b18e50`, 2026-11-04; `docs/decisions/2026-11-04-dual-license.md`).
-- Commit trailers in `portable-fip` (measured 2026-11-04): 0 of 90 commits on all
-  branches contain `Co-Authored-By` or `Claude`. The extracted contribution will add
+- Commit trailers in `portable-fip` (measured 2026-11-04 at `ee273e1`): 0 of 114
+  commits on all local branches contain `Co-Authored-By` or `Claude`. The extracted contribution will add
   `Assisted-by:` trailers where they apply.
 
 ## 1. Findings about Verus itself (candidate issues or Discussion points)
@@ -66,8 +66,8 @@ What happens:
   the function for unverified callers (`rewrite_unverified_func`,
   `source/builtin_macros/src/attr_rewrite.rs:1222`).
 - That copy is `external_body` with `requires false`.
-- `--no-cheating` rejects every `external_body` outside vstd: "external_body/
-  assume_specification not allowed with --no-cheating",
+- `--no-cheating` rejects every `external_body` outside vstd:
+  `external_body/assume_specification not allowed with --no-cheating`,
   `source/vir/src/well_formed.rs:1597`.
 
 Measured on both builds:
@@ -107,9 +107,11 @@ flag.
 
 - The driver adds `--cfg verus_keep_ghost` through its driver API
   (`source/rust_verify/src/driver.rs:177`, `:290-291`;
-  `source/rust_verify/src/cargo_verus.rs:221`). So it is not visible to proc macros,
-  and `#[allow(unexpected_cfgs)]` on emitted items does not silence downstream warnings
-  (measured).
+  `source/rust_verify/src/cargo_verus.rs:221`). A proc macro never sees the crate's
+  `--cfg` set, however it is passed, so it cannot tell that it runs under Verus. A
+  macro that therefore emits `#[cfg(verus_keep_ghost)]` items in every build makes
+  downstream crates without that `check-cfg` warn, and `#[allow(unexpected_cfgs)]` on
+  the emitted items does not silence the warning (measured).
 - Workaround in `portable-fip` (commit `f573d62`): detect `argv[0] == rust_verify`
   in the proc macro.
 
@@ -122,7 +124,12 @@ variable, to proc macros?
   triggers" (`6fe289b`).
 - Z3 session sensitivity: `compact_map` verified alone and on seeds 1-7, but failed
   after an earlier query in the same module failed. `verifier::spinoff_prover` was
-  used as a workaround (`6fe289b`).
+  used as a workaround (`6fe289b`), and removed in `612a2b5`: without it the
+  unmodified crate verified on all 20 runs (seeds 1-10, both builds), but in mutant
+  runs of the module `compact_map` and `compact_map_st` each failed their final
+  postcondition assertion, even right after asserting the identical loop invariant.
+  Assembling the postcondition in two small lemmas whose `requires` are the loop
+  invariants at exit fixed it.
 - The default of 2 extra errors per function hid a later failure in a mutant run.
   `--multiple-errors 8` was needed (`6fe289b`).
 - Attribute mode on closures:
@@ -139,8 +146,8 @@ variable, to proc macros?
 | part | what it is | verified (upstream, `--no-cheating`) | fit (our guess, to ask) |
 |---|---|---|---|
 | state-passing pattern | guide text plus the probes of 1.1 | yes (5 / control fails) | guide chapter |
-| in-place slice combinators (`compact`, `dedup_by`, `compact_map`, `map_in_place`, `update`, `replace`, `swap`, `_st` variants) | specs: permutation, filter, order, state trace, state invariants | `fip-core` 56 verified; 33 functional mutants rejected; 7 caller controls | vstd extension or example |
-| allocation-bound certificates (`fip-strict`: `FipFn`, `Certified`, `Cert`, `Stateless`, `Compose`) | type-level allocation bounds for callables | `fip-strict` 11 verified | open; depends on interest in FIP |
+| in-place slice combinators (`compact`, `dedup_by`, `compact_map`, `map_in_place`, `update`, `replace`, `swap`, `_st` variants) | specs: permutation, filter, order, state trace, state invariants | `fip-core` 58 verified; 35 functional mutants and 1 recursive mutant rejected; 14 caller controls | vstd extension or example |
+| allocation-bound certificates (`fip-strict`: `FipFn`, `Certified`, `Cert`, `Stateless`, `Compose`, `Then`) | type-level allocation bounds for callables | `fip-strict` 19 verified; 1 mutant rejected | open; depends on interest in FIP |
 | `#[fip]` family macros | token-level checks, strict mode with certificates | n/a (proc macro) | open; perhaps under `contrib/` like `auto_spec`, `exec_spec` |
 | tooling from 1.3 / 1.4 | verified-items output, driver signal | n/a | general Verus features |
 

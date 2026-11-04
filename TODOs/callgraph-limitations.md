@@ -4,7 +4,7 @@
 # TODO: limitations of `fip_testkit::callgraph`
 
 **Status:** items 1–3 and 6–10 FIXED, items 4 and 5 PARTLY FIXED (the remaining parts
-are inherent), 2026-10-31. **Recorded:** 2026-10-31, against commit `43a671b`.
+are inherent), 2026-10-31 (items 6 and 7: 2026-11-01). **Recorded:** 2026-10-31, against commit `43a671b`.
 **Component:** `crates/fip-testkit/src/callgraph.rs` (`fip_cycles`, `fip_cycles_in`,
 `fip_cycles_multi`, `fip_cycles_in_crates`), front end in
 `crates/fip-testkit/src/srcmodel/`.
@@ -72,7 +72,8 @@ external, Verus ghost code skipped.
 Measured on the workspace (2026-10-31): `crates/fip-macros/tests` with `fip_core`,
 `fip_alloc`, `fip_strict` (`fip_cycles` over the tests directory, the
 `no_indirect_recursion` test, and the summary run in
-`crates/fip-macros/tests/checker_agreement.rs`): no cycle, 39 roots. Scanning all eleven
+`crates/fip-macros/tests/checker_agreement.rs`): no cycle, 39 roots (103 roots, no
+cycle at `ee273e1`, after the strict-mode test crates were added). Scanning all eleven
 source and test directories of the workspace at once takes 0.12 s for the cycles and
 reports 40 cycles, all false positives of item 8's remaining part (method calls are
 resolved by name: `.push(..)` on a `Vec` reaches `Lexer::push`, `.max(..)` reaches

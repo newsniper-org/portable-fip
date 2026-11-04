@@ -6,14 +6,20 @@
 **Status:** ACCEPTED, 2026-11-01. Amended 2026-10-31 (named certificates,
 `#[fip_impl]`, `Certified`, Verus specs for `FipFn`, `panic_macros = false`,
 audit at rustc 1.97.1). Amended 2026-11-01 (`crate = ..` path, certificates read
-through the `Cert` type; non-allocating constructors of std heap types). Open items: `TODOs/strict-open-items.md`.
+through the `Cert` type; non-allocating constructors of std heap types). Amended 2026-11-04
+(audit: table functions only by absolute `::core::`/`::std::` path, panicking and
+ghost macros emitted by absolute path or emptied, strict contracts need an `unsafe
+trait`, `#[fip_extern]` needs `unsafe extern`; section "Name resolution the tokens
+cannot see"). Open items: `TODOs/strict-open-items.md`.
 
 ## Decision
 
 A strict function may call only
 
-1. functions in the `core` table below, named by a full path rooted at `core` or
-   `std` (`core::mem::swap(..)`; `use` aliases are not recognised and are rejected), or
+1. functions in the `core` table below, named by an absolute path rooted at `::core`
+   or `::std` (`::core::mem::swap(..)`; since 2026-11-04 a bare `core::..` is rejected,
+   since a local `mod core` could shadow it; `use` aliases are not recognised and are
+   rejected), or
 2. functions with a certificate: a `fip_strict::Cert` constant next to the function
    (or, for values called through `FipFn`, a `fip_strict::FipBound` impl):
 
@@ -283,8 +289,10 @@ on 1.96.0: both toolchain tests fail).
 ## Hand-written certificates
 
 A certificate is a claim. Writing one by hand needs `unsafe`
-(`Cert::assume` and `Certified::assume` are `unsafe fn`s, `FipBound` an
-`unsafe trait`):
+(`Cert::assume`, `Cert::assume_no_panic_macros`, `Certified::assume` and
+`Certified::assume_no_panic_macros` are `unsafe fn`s, `FipBound` an `unsafe trait`;
+`fip-strict`'s own four `unsafe impl FipBound`, for `Certified`, `Stateless`,
+`Compose` and `Then`, are pinned by `tests/hand_written_certs.rs`):
 
 - in a crate with `#![forbid(unsafe_code)]` it is impossible, while macro output still
   compiles (rustc does not apply `unsafe_code` to proc-macro output; measured
