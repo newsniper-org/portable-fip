@@ -2848,3 +2848,30 @@ callers outside roots and is counted there, not against the construction).
 |---|---|---|
 | fixture `driver_checked`, crate `checked` | "11 roots, 11 passed, 6 errors, 0 warnings, 0 notes" | "1 roots, 1 passed, 10 `fip_fn!` constructions, 10 passed, 6 errors, 0 warnings, 0 notes" |
 | every other fixture, `targets`, self-check dev and `--release` (no driver-mode construction in the workspace) | — | unchanged |
+
+## Resolved 2026-11-04: driver-mode `fip_fn!` in generic functions and borrow-returning closures
+
+**Before.** `fip_fn!(prelint, N, |x: T| ..)` inside `fn f<T>` failed with E0401 (the
+nested check function named `T` in its `&dyn Fn(T) -> R` parameter), and
+`|x: &u32| -> &u32 { x }` failed with "lifetime may not live long enough" (`R` was
+one type for every lifetime). Measured on fixture `driver_checked`: 2 × E0401, 2 ×
+lifetime errors for the four new functions.
+
+**Change.** The check function is generic only over fresh parameters of its own
+(`G: Fn(&P0, A1) -> &R` for an elided reference parameter and a written `-> &V`,
+else `Ak` / `R`) and takes the closure by value as its argument, so the bound is the
+closure's expected signature (`fip-macros`, `prelint_check_generics`). The driver
+checks a generic `g: G` argument of `__fip_prelint_checked` against its `fip` mark
+like a `&dyn Fn` one (no free, no recursion; `analysis.rs`, `note_arg_site`).
+Decision record amendment: `docs/decisions/2026-11-03-fip-fn-driver-mode.md`,
+"Check function generic over its own parameters".
+
+**After.** `generic_param` (`|x: T| x` in `fn generic_param<T: Copy>`) and
+`borrowed` (`|x: &u32| -> &u32 { x }`) pass; `generic_param_lie` (allocates, claim
+0) and `borrowed_frees` (drops a `Box` argument) are reported; all earlier
+diagnostics unchanged; summary "10 `fip_fn!` constructions, 10 passed, 6 errors" →
+"14 .., 14 passed, 8 errors". Forging tests unchanged and passing
+(`crates/fip-macros/tests/driver_mode.rs`, fixture variants `-stack`,
+`-stack-forged`, `-generate`). Remaining: without a written return type Rust
+rejects a borrow-returning closure itself (plain `rustc` 1.99.1), so the return type
+must be written.

@@ -4265,7 +4265,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             else {
                 continue;
             };
-            let indirect = indirect.then(|| mark.clone().into_owned());
+            // The driver-mode check function (`fip_fn!(prelint, N, ..)`) takes the
+            // closure by its type (`g: &G`) and never calls it: the argument must not
+            // do what its mark forbids (free, recursion), as for a parameter called by
+            // its declaration.
+            let indirect =
+                (indirect || is_checked_fn(self.tcx, def_id)).then(|| mark.clone().into_owned());
             let from_param = self
                 .tcx
                 .fn_arg_idents(def_id)

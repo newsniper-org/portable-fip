@@ -134,3 +134,41 @@ pub fn generic_term<T: Make>() -> u32 {
 pub fn term_instances() -> u32 {
     generic_term::<Plain>() + generic_term::<Heap>() + generic_default::<u8>(1)
 }
+
+/// Parameter types naming the enclosing function's type parameter: the check function
+/// is generic only over its own parameters, so no E0401 (it was with a
+/// `&dyn Fn(T) -> R` parameter); allocation-free, passes.
+pub fn generic_param<T: Copy>(t: T) -> T {
+    let f = fip_fn!(prelint, 0, |x: T| x);
+    f.call((t,))
+}
+
+/// The same allocating under claim 0: rejected.
+pub fn generic_param_lie<T: Copy>(t: T) -> T {
+    let f = fip_fn!(prelint, 0, |x: T| *Box::new(x));
+    f.call((t,))
+}
+
+/// A closure returning a borrow of its parameter ("lifetime may not live long
+/// enough" with a `&dyn Fn(&u32) -> R` parameter; the closure is now the check
+/// function's argument, whose bound is its expected signature): passes. The return
+/// type is written, as Rust needs for this closure without an expected signature.
+pub fn borrowed(y: u32) -> u32 {
+    let f = fip_fn!(prelint, 0, |x: &u32| -> &u32 { x });
+    *f.call((&y,))
+}
+
+/// A borrow-returning closure that drops its boxed argument: the free is still found
+/// (rejected).
+pub fn borrowed_frees(y: u32) -> u32 {
+    let f = fip_fn!(prelint, 0, |x: &u32, b: Box<u32>| -> &u32 {
+        drop(b);
+        x
+    });
+    *f.call((&y, Box::new(1)))
+}
+
+/// Instantiates the generic ones.
+pub fn param_instances() -> (u8, u16) {
+    (generic_param::<u8>(1), generic_param_lie::<u16>(2))
+}

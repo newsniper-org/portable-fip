@@ -3815,10 +3815,11 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// (`cargo fip-prelint` on the crate as a primary package); a plain build, a
 /// dependency build, `cargo fip-prelint --stack` and std-summary generation fail with
 /// a compile error naming `cargo fip-prelint`. Every parameter type
-/// must be written (they form the `&dyn Fn(..)` parameter of the check function), the
-/// return type must not borrow from a parameter, the parameter types must not name
-/// type parameters of an enclosing generic function (the check function is a nested
-/// item), and `bound <= K` is not accepted (`N` is the bound). See
+/// must be written (the closure has no expected signature to infer them from), and
+/// `bound <= K` is not accepted (`N` is the bound). Parameter types may name type
+/// parameters of an enclosing generic function, and a closure may return a borrow
+/// of its one elided-reference parameter when its return type is written
+/// (`|x: &T| -> &T { x }`; Rust rejects that closure without the written type). See
 /// `docs/decisions/2026-11-03-fip-fn-driver-mode.md`.
 ///
 /// ```text
@@ -4163,24 +4164,31 @@ fn closure_param_types(params: &[TokenTree]) -> Result<Vec<TokenStream>, Span> {
 /// `fip_fn!(prelint, N, closure)`: the closure certified with the declared bound `N`,
 /// checked by `fip-prelint` at the construction instead of by this macro (no token
 /// scan of the body). Outside a checking driver run (see [`checked_by_driver`]) a
-/// compile error. Under it:
+/// compile error. Under it, for `|x: &T, y: U| -> &V { .. }`:
 ///
 /// ```text
 /// {
 ///     #[cfg(not(fip_prelint))] ::core::compile_error!("..");
 ///     #[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = false,
 ///         panic_macros = true, param(g = N)))]
-///     fn __fip_prelint_checked<R>(g: &dyn ::core::ops::Fn(T0, ..) -> R) { let _ = g; }
-///     let __fip_prelint_closure = closure;
-///     __fip_prelint_checked(&__fip_prelint_closure);
-///     unsafe { <krate>::Certified::<N, _>::assume(__fip_prelint_closure) }
+///     fn __fip_prelint_checked<G: ::core::ops::Fn(&P0, A1) -> &R, P0: ?Sized, A1, R: ?Sized>(g: G) -> G { g }
+///     let __fip_prelint_closure = __fip_prelint_checked(closure);
+///     unsafe { <krate>::Certified::<N, _, false>::assume(__fip_prelint_closure) }
 /// }
 /// ```
 ///
-/// The driver checks every analysed call of a function declaring `param(g = N)`: for
-/// the `&dyn Fn` parameter it resolves the closure unsized there and requires at most
-/// `N` allocations per call, no free and no recursion (the `fip` mark). The checked
-/// value is the certified one.
+/// The check function is generic only over its own parameters (see
+/// [`prelint_check_generics`]), inferred from the closure at the call, so it names no
+/// type parameter of an enclosing generic function (a nested item cannot: E0401).
+/// The closure is its argument, so the bound `G: Fn(..)` is the closure's expected
+/// signature: an elided `&` parameter is higher-ranked, and with a written return
+/// type `-> &V` and exactly one such parameter the output borrows from it (rustc
+/// rejects `|x: &u32| -> &u32 { x }` without an expected signature: "lifetime may not
+/// live long enough"). The driver checks every analysed call of a function declaring
+/// `param(g = N)`: for `g: G` it analyses the closure's `Fn*` methods at the call and
+/// requires at most `N` allocations per call; for the check function (named
+/// `__fip_prelint_checked`) it also forbids a free and recursion in the argument, as
+/// its `fip` mark does. The checked value is the certified one.
 fn fip_fn_prelint(krate: Option<TokenStream>, at: Span, n: u64, toks: &[TokenTree]) -> TokenStream {
     if toks.first().is_some_and(|t| is_ident(t, "bound"))
         && toks.get(1).is_some_and(|t| is_punct(t, '<'))
@@ -4215,36 +4223,29 @@ fn fip_fn_prelint(krate: Option<TokenStream>, at: Span, n: u64, toks: &[TokenTre
         Err(sp) => {
             return compile_error(
                 sp,
-                "fip_fn!(prelint, N, ..): write the type of every closure parameter (`|x: T| ..`); they form the `&dyn Fn(..)` parameter that `fip-prelint` checks",
+                "fip_fn!(prelint, N, ..): write the type of every closure parameter (`|x: T| ..`); the closure has no expected signature to infer them from",
             );
         }
     };
     if !checked_by_driver() {
         return compile_error(at, PRELINT_UNCHECKED);
     }
+    let ret = toks.get(body_start..).and_then(|rest| {
+        (rest.len() > 2 && is_punct(&rest[0], '-') && is_punct(&rest[1], '>'))
+            .then(|| rest[2..rest.len() - 1].to_vec())
+    });
+    let generics = prelint_check_generics(&types, ret.as_deref());
     let parse = |src: &str| src.parse::<TokenStream>().unwrap_or_default();
-    let mut fn_args = TokenStream::new();
-    for (k, ty) in types.into_iter().enumerate() {
-        if k > 0 {
-            fn_args.extend(parse(","));
-        }
-        fn_args.extend(ty);
-    }
     let mut out = TokenStream::new();
     out.extend(compile_error_cfg_guard());
     out.extend(parse(&format!(
-        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", n = 0, strict = false, panic_macros = true, param(g = {n})))] fn __fip_prelint_checked<R>"
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", n = 0, strict = false, panic_macros = true, param(g = {n})))] fn __fip_prelint_checked<{generics}>(g: __FipG) -> __FipG {{ g }} let __fip_prelint_closure = __fip_prelint_checked"
     )));
-    let mut param = parse("g: &dyn ::core::ops::Fn");
-    param.extend([TokenTree::Group(Group::new(
+    out.extend([TokenTree::Group(Group::new(
         Delimiter::Parenthesis,
-        fn_args,
+        toks.iter().cloned().collect(),
     ))]);
-    param.extend(parse("-> R"));
-    out.extend([TokenTree::Group(Group::new(Delimiter::Parenthesis, param))]);
-    out.extend(parse("{ let _ = g; } let __fip_prelint_closure ="));
-    out.extend(toks.iter().cloned());
-    out.extend(parse("; __fip_prelint_checked(&__fip_prelint_closure);"));
+    out.extend(parse(";"));
     let mut inner = strict::krate_item(&krate.unwrap_or_else(strict::default_krate), "Certified");
     inner.extend(parse(&format!(
         "::<{n}, _, false>::assume(__fip_prelint_closure)"
@@ -4252,6 +4253,60 @@ fn fip_fn_prelint(krate: Option<TokenStream>, at: Span, n: u64, toks: &[TokenTre
     out.extend(parse("unsafe"));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
     TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, out)))
+}
+
+/// Generic parameters of the driver-mode check function for a closure with parameter
+/// types `types` and written return type `ret`, all fresh names (none from the
+/// caller): `__FipG: Fn(..) -> ..` first, then one parameter per closure parameter. An
+/// elided reference type `&T` / `&mut T` becomes `&__FipPk` / `&mut __FipPk` with
+/// `__FipPk: ?Sized` (higher-ranked in the `Fn` bound, as in the closure's own
+/// annotation); any other type becomes `__FipAk`. The output is `&__FipR` /
+/// `&mut __FipR` (`?Sized`) when `ret` is an elided reference and exactly one
+/// parameter is (Rust's elision in `Fn(..) -> ..`), otherwise `__FipR`.
+fn prelint_check_generics(types: &[TokenStream], ret: Option<&[TokenTree]>) -> String {
+    // `&` or `&mut` followed by a type without a lifetime: the reference prefix.
+    let elided_ref = |ty: &[TokenTree]| -> Option<&'static str> {
+        if !ty.first().is_some_and(|t| is_punct(t, '&')) || ty.len() < 2 {
+            return None;
+        }
+        if is_punct(&ty[1], '\'') {
+            return None;
+        }
+        if is_ident(&ty[1], "mut") {
+            return (ty.len() > 2 && !is_punct(&ty[2], '\'')).then_some("&mut ");
+        }
+        Some("&")
+    };
+    let mut sig = Vec::new();
+    let mut own = Vec::new();
+    let mut refs = 0;
+    for (k, ty) in types.iter().enumerate() {
+        let ty: Vec<TokenTree> = ty.clone().into_iter().collect();
+        if let Some(prefix) = elided_ref(&ty) {
+            refs += 1;
+            sig.push(format!("{prefix}__FipP{k}"));
+            own.push(format!("__FipP{k}: ?::core::marker::Sized"));
+        } else {
+            sig.push(format!("__FipA{k}"));
+            own.push(format!("__FipA{k}"));
+        }
+    }
+    let out = match ret.and_then(elided_ref) {
+        Some(prefix) if refs == 1 => {
+            own.push("__FipR: ?::core::marker::Sized".to_string());
+            format!("{prefix}__FipR")
+        }
+        _ => {
+            own.push("__FipR".to_string());
+            "__FipR".to_string()
+        }
+    };
+    let mut generics = format!("__FipG: ::core::ops::Fn({}) -> {out}", sig.join(", "));
+    for g in own {
+        generics.push_str(", ");
+        generics.push_str(&g);
+    }
+    generics
 }
 
 /// `#[cfg(not(fip_prelint))] ::core::compile_error!(..);`: a driver-mode expansion

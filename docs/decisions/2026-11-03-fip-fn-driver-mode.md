@@ -254,7 +254,8 @@ Open points:
 - parameter types naming type parameters of an enclosing generic function fail with
   E0401 (the check function is a nested item), and a closure returning a borrow of a
   parameter fails with "lifetime may not live long enough" (`R` is not higher-ranked);
-  both measured, both compile errors, not silent passes;
+  both measured, both compile errors, not silent passes. Resolved 2026-11-04 (amendment
+  below, "Check function generic over its own parameters");
 - no count of driver-mode constructions in the crate summary yet (they appear as
   roots named `..::__fip_prelint_checked`). Resolved 2026-11-04: counted apart from
   the roots ("N roots, P passed, K `fip_fn!` constructions, Q passed, ..": a root is a
@@ -263,3 +264,45 @@ Open points:
   `fip_fn!` constructions in the crate summary");
 - `--warn-only` reports a wrong `N` as a warning (threat model: out of scope);
 - Verus is not the driver, so driver mode does not compile in verified crates.
+
+## Amendment 2026-11-04: check function generic over its own parameters
+
+The check function no longer takes `&dyn Fn(T0, ..) -> R`. It is generic only over
+fresh parameters of its own and takes the closure by value, as its argument:
+
+```rust
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", n = 0, strict = false,
+    panic_macros = true, param(g = N)))]
+fn __fip_prelint_checked<G: Fn(&P0, A1) -> &R, P0: ?Sized, A1, R: ?Sized>(g: G) -> G { g }
+let __fip_prelint_closure = __fip_prelint_checked(|x: &T, y: U| -> &V { .. });
+unsafe { Certified::<N, _, false>::assume(__fip_prelint_closure) }
+```
+
+- An elided reference parameter `&T` / `&mut T` becomes `&Pk` / `&mut Pk`
+  (`Pk: ?Sized`), any other type `Ak`; the output is `&R` when the closure's written
+  return type is an elided reference and exactly one parameter is (the elision rule
+  of `Fn(..) -> ..`), else `R`. No written type of the closure appears in the item,
+  so an enclosing function's type parameters are never named (no E0401). The bound
+  `G: Fn(..)` is the closure's expected signature, so its reference parameters are
+  higher-ranked and a written `-> &V` borrows from the parameter. Without the written
+  return type Rust itself rejects `|x: &u32| x` ("lifetime may not live long enough",
+  measured with plain `rustc` 1.99.1, with and without `fip_fn!`).
+- The driver checks the argument for `g: G` like any `param(g = K)` of a generic
+  type: the closure's `Fn*` methods at the call, at most `N` allocations. A generic
+  parameter is not called by its declaration, so free and recursion were not checked
+  for such parameters; for the check function (`__fip_prelint_checked`,
+  `is_checked_fn`) the argument now must not do what its `fip` mark forbids, as for
+  the `&dyn Fn` parameter before (`analysis.rs`, `note_arg_site`).
+- Forging guarantees are unchanged: the expansion is still gated by
+  `FIP_PRELINT_DRIVER` + `FIP_PRELINT_CHECKS=1` and `#[cfg(not(fip_prelint))]
+  compile_error!`; `crates/fip-macros/tests/driver_mode.rs` (plain build, forged
+  environment, forged cfg) passes, and the fixture's dependency, `--stack`, `--stack`
+  with `FIP_PRELINT_CHECKS` inherited and generation variants still fail to compile
+  the mode (`tests/fixtures.rs::driver_checked`).
+
+Measured on fixture `driver_checked` (new functions `generic_param`,
+`generic_param_lie`, `borrowed`, `borrowed_frees`): with the old expansion, 2 × E0401
+and 2 × "lifetime may not live long enough"; now `generic_param` and `borrowed`
+pass, `generic_param_lie` is reported (1 allocation, claim 0) and `borrowed_frees` is
+reported (a free); every earlier diagnostic is byte-identical; the summary goes from
+"10 `fip_fn!` constructions, 10 passed, 6 errors" to "14 .., 14 passed, 8 errors".
