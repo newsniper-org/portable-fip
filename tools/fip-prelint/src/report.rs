@@ -1012,9 +1012,12 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     } else {
         format!(", {by_symbol} foreign functions certified or excluded by symbol")
     };
+    // Verus as an oracle (top plan T13.4): the panic sites discharged by Verus, with
+    // the sidecar's stamp, and sidecars consulted but not used.
+    let verus = crates.verus.summary();
     let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
     tcx.dcx().note(format!(
-        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}{certified}{excluded}{matched}",
+        "fip-prelint: crate `{crate_name}`: {} roots, {passed} passed, {} errors, {} warnings, {} notes{declared}{certified}{excluded}{matched}{verus}",
         checked,
         out.errors,
         out.warnings,

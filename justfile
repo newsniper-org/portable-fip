@@ -39,7 +39,7 @@ cross:
     cargo check -p fip-arch --target aarch64-apple-darwin
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
-verify: verify-strict verify-core verify-alloc verify-compose verify-negative
+verify: verify-strict verify-core verify-alloc verify-compose verify-negative verify-sidecar
 
 # Verus metadata and library of fip-strict, imported where `FipFn` specs are needed.
 verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern fip_strict=target/verus-strict/libfip_strict.rlib"
@@ -54,11 +54,44 @@ verify-strict:
 # imported by verified callers in `verify/`.
 verus_core := "--import fip_core=target/verus-core/fip_core.vir --extern fip_core=target/verus-core/libfip_core.rlib -L target/verus-strict"
 
+# Generator of Verus sidecars (top plan T13.4): `cargo fip-prelint --verus-sidecar`, a
+# plain binary of tools/fip-prelint (no rustc-dev needed to run it).
+sidecar_gen := "tools/fip-prelint/target/debug/cargo-fip-prelint --verus-sidecar"
+
 # fip-core proofs, no trusted items (--no-cheating); imports fip-strict's Verus build
-# and exports fip-core's for `verify/compose_state.rs`.
+# and exports fip-core's for `verify/compose_state.rs`. The run goes through the
+# sidecar generator, which writes the verified bodies (top plan T13.4) to
+# target/verus-core/verus-verified.txt; it must equal crates/fip-core/verus-verified.txt.
 verify-core: verify-strict
     rm -rf target/verus-core && mkdir -p target/verus-core
-    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
+    just verus-sidecar-check target/verus-core/verus-verified.txt crates/fip-core/verus-verified.txt
+
+# A regenerated Verus sidecar must equal the committed one, so a stale sidecar fails
+# `just ci` here (and, in `prelint`, the driver refuses it: the self-check changes).
+# Compared only when the run's stamp is the driver's trusted pin
+# (tools/fip-prelint/verus-trusted.txt): another Verus build (e.g. `VERUS=<fork>`)
+# writes its own sidecar, which the driver would refuse anyway.
+# `FIP_VERUS_BLESS=1` copies the regenerated file over the committed one.
+verus-sidecar-check generated committed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pin_verus=$(awk '$1 == "verus" {print $2, $3}' tools/fip-prelint/verus-trusted.txt)
+    pin_z3=$(awk '$1 == "z3" {print $2}' tools/fip-prelint/verus-trusted.txt)
+    got_verus=$(awk '$1 == "verus" {print $2, $3}' "{{generated}}")
+    got_z3=$(awk '$1 == "z3" {print $2}' "{{generated}}")
+    if [ "$got_verus" != "$pin_verus" ] || [ "$got_z3" != "$pin_z3" ]; then
+      echo "verus sidecar: stamp Verus $got_verus / Z3 $got_z3 is not the trusted pin ($pin_verus / Z3 $pin_z3): {{committed}} not compared"
+      exit 0
+    fi
+    if [ "${FIP_VERUS_BLESS:-}" = 1 ]; then cp "{{generated}}" "{{committed}}"; echo "verus sidecar: blessed {{committed}}"; exit 0; fi
+    if ! cmp -s "{{generated}}" "{{committed}}"; then
+      diff -u "{{committed}}" "{{generated}}" || true
+      echo "FAIL: {{committed}} is stale (review the diff, then FIP_VERUS_BLESS=1 just verify)"
+      exit 1
+    fi
+    echo "verus sidecar: {{committed}} is up to date"
 
 # fip-alloc proofs, no trusted items (--no-cheating).
 verify-alloc:
@@ -227,6 +260,35 @@ verify-negative: verify-strict verify-core
     grep -q "test result: FAILED" "$d/log" || { echo "FAIL: drift mutant failed for another reason"; cat "$d/log"; exit 1; }
     echo "mutant drift-call rejected by the drift test"
     echo "verify-negative: ok"
+
+# The Verus sidecar of the driver fixture (tools/fip-prelint/tests/fixtures/verus_sidecar)
+# is regenerated and compared like fip-core's; the generator refuses a run without
+# `--no-cheating`; an `external_body` function makes the `--no-cheating` run fail, so no
+# sidecar lists it (the VIR filter is unit-tested in src/verusgen.rs).
+verify-sidecar:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    (cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint)
+    gen="$PWD/tools/fip-prelint/target/debug/cargo-fip-prelint --verus-sidecar"
+    out="$PWD/target/verify-sidecar"; rm -rf "$out"; mkdir -p "$out"
+    fx=tools/fip-prelint/tests/fixtures/verus_sidecar
+    (cd "$fx" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/vside.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs)
+    just verus-sidecar-check "$out/vside.txt" "$fx/vside/verus-verified.txt"
+    # Without --no-cheating: refused before Verus runs, nothing written.
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/cheat.txt" -- {{verus}} --crate-type=lib --crate-name vside vside/src/lib.rs) 2> "$out/cheat.err"; then
+      echo "FAIL: a sidecar was generated without --no-cheating"; exit 1
+    fi
+    grep -q "must use \`--no-cheating\`" "$out/cheat.err"
+    test ! -e "$out/cheat.txt"
+    # An `external_body` function: Verus rejects the --no-cheating run, nothing written.
+    cp -r "$fx" "$out/ext"
+    printf '\n#[cfg_attr(verus_keep_ghost, verifier::external_body)]\npub fn ext() -> u32 { 2 }\n' >> "$out/ext/vside/src/lib.rs"
+    if (cd "$out/ext" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/ext.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/ext.log" 2>&1; then
+      echo "FAIL: a sidecar was generated for a crate with external_body"; exit 1
+    fi
+    grep -q "Verus failed: no sidecar written" "$out/ext.log"
+    test ! -e "$out/ext.txt"
+    echo "verify-sidecar: ok"
 
 # CACHE_LINE override: supported values take effect, others are rejected.
 arch-override:

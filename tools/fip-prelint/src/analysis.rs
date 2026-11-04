@@ -322,6 +322,10 @@ pub struct Summary {
     pub unknown: Vec<Witness>,
     pub recursion: Option<Witness>,
     pub terms_w: BTreeMap<String, Witness>,
+    /// The node's own body had panic sites discharged by Verus under the Verus
+    /// `requires` of this function (top plan T13.4): a caller that Verus did not verify
+    /// gets that precondition as a panic path. Not merged into callers.
+    pub verus_pre: Option<String>,
 }
 
 fn push_w(list: &mut Vec<Witness>, w: Witness, cap: usize, key: impl Fn(&Witness) -> String) {
@@ -396,6 +400,9 @@ enum Ev {
     Bound(u64, String),
     /// Possible recursion declared by a contract (`fbip` allows it).
     Recurse(String),
+    /// A panic site discharged by Verus under the `requires` of the named function
+    /// (top plan T13.4): no event here, an obligation for its callers.
+    VerusPre(String),
 }
 
 #[derive(Clone, Debug)]
@@ -648,6 +655,8 @@ pub struct Crates {
     /// Generating std summaries (`--std-summaries`): a foreign call is the term
     /// `§ffi <symbol> <abi>`, resolved where the summary is used.
     pub generating: bool,
+    /// Verus sidecars of verified bodies (top plan T13.4).
+    pub verus: crate::verustrust::VerusTrust,
 }
 
 /// The rustc version of this driver (`1.99.1 (<commit> <date>)`).
@@ -939,6 +948,7 @@ impl Crates {
             ffi_std_matches: std::cell::RefCell::new(Vec::new()),
             std_summaries,
             generating: generate,
+            verus: crate::verustrust::VerusTrust::new(),
         }
     }
     /// Adds the marks of the local crate (the roots).
@@ -1401,6 +1411,10 @@ pub struct Analysis<'a, 'tcx> {
     arg_sites: Vec<ArgSite>,
     /// Return summaries for the value analysis of the explored bodies.
     vsums: crate::value::Summaries<'a, 'tcx>,
+    /// Direct calls (caller node, callee node, call span) in the bodies of
+    /// Verus-verified functions: Verus checked the callee's `requires` there (top
+    /// plan T13.4). Value: the caller's path and whether it has a `requires`.
+    verus_direct: HashMap<(usize, usize, Span), (String, bool)>,
 }
 
 /// Result for one root.
@@ -1570,6 +1584,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             owner_params: Vec::new(),
             arg_sites: Vec::new(),
             vsums: crate::value::Summaries::new(crates),
+            verus_direct: HashMap::new(),
         };
         a.collect_param_names(owner);
         a
@@ -2553,6 +2568,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         Item::Call(_) | Item::Alt(_) => item.calls(),
                         _ => Vec::new(),
                     };
+                    // A direct call of a function item from a Verus-verified body.
+                    if let Item::Call(j) = &item
+                        && let Some((fd, _)) = func.const_fn_def()
+                        && self.nodes[*j].inst.def == InstanceKind::Item(fd)
+                        && let InstanceKind::Item(caller) = inst.def
+                        && let Some(listed) = self.crates.verus.is_listed(tcx, caller, body.span)
+                    {
+                        self.verus_direct.insert((self.current, *j, span), listed);
+                    }
                     for j in callees {
                         // Call sites in analysed crates (local, `fip::export`) are
                         // checked against the callee's declared parameter bounds.
@@ -2624,10 +2648,38 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         || (matches!(**msg, AssertKind::Overflow(mir::BinOp::Add, ..))
                             && crate::value::enumerate_count_cannot_overflow(tcx, inst));
                     if !cannot_fire && !is_ub_check_assert(msg) {
-                        blocks[b].push(Site {
-                            item: Item::Ev(Ev::Panic(describe_assert(msg))),
-                            span,
-                        });
+                        // A body-local site of a Verus-verified function (top plan
+                        // T13.4): discharged under its `requires`, which becomes its
+                        // callers' obligation; else kept, with the reason if its
+                        // package declares a Verus sidecar.
+                        let verdict = match inst.def {
+                            InstanceKind::Item(d) => {
+                                self.crates.verus.site(tcx, d, body.span, span)
+                            }
+                            _ => crate::verustrust::SiteVerdict::Kept(None),
+                        };
+                        match verdict {
+                            crate::verustrust::SiteVerdict::Discharged(Some(f)) => {
+                                blocks[b].push(Site {
+                                    item: Item::Ev(Ev::VerusPre(f)),
+                                    span,
+                                });
+                            }
+                            crate::verustrust::SiteVerdict::Discharged(None) => {}
+                            crate::verustrust::SiteVerdict::Kept(why) => {
+                                let what = match why {
+                                    Some(why) => format!(
+                                        "{} (not discharged by Verus: {why})",
+                                        describe_assert(msg)
+                                    ),
+                                    None => describe_assert(msg),
+                                };
+                                blocks[b].push(Site {
+                                    item: Item::Ev(Ev::Panic(what)),
+                                    span,
+                                });
+                            }
+                        }
                     }
                 }
                 TerminatorKind::InlineAsm { .. } => blocks[b].push(Site {
@@ -4486,6 +4538,21 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                             in_loop: false,
                         };
                         s.merge_events(&cs, std::slice::from_ref(&step));
+                        // Called through the parameter: Verus checked no
+                        // precondition there (top plan T13.4).
+                        if let Some(f) = &cs.verus_pre {
+                            push_w(
+                                &mut s.panics,
+                                Witness {
+                                    steps: vec![step],
+                                    what: verus_pre_text(f),
+                                    span: DUMMY_SP,
+                                    in_loop: false,
+                                },
+                                MAX_WITNESSES,
+                                key_site,
+                            );
+                        }
                     }
                     Item::Term(k) => {
                         cost = cost.max(&Cost::term(k));
@@ -4676,6 +4743,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                 s.recursion = Some(w(what));
                             }
                         }
+                        Ev::VerusPre(f) => {
+                            if s.verus_pre.is_none() {
+                                s.verus_pre = Some(f.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -4688,7 +4760,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     }
                     let in_loop = info.in_loop[b];
                     for site in &info.blocks[b] {
-                        let c = self.site_cost(&site.item, site.span, in_loop, sums, skip, &mut s);
+                        let c =
+                            self.site_cost(i, &site.item, site.span, in_loop, sums, skip, &mut s);
                         *cost = cost.add(&c);
                     }
                 }
@@ -4700,8 +4773,10 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
 
     /// The cost of one site of a body (looped if `in_loop`), its events merged into
     /// `s`; calls into `skip` contribute nothing. Alternatives cost their maximum.
+    #[allow(clippy::too_many_arguments)]
     fn site_cost(
         &self,
+        caller: usize,
         item: &Item,
         span: Span,
         in_loop: bool,
@@ -4729,6 +4804,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     in_loop,
                 };
                 s.merge_events(cs, std::slice::from_ref(&step));
+                if let Some(f) = &cs.verus_pre {
+                    self.verus_obligation(caller, *j, f, span, in_loop, s);
+                }
                 cs.alloc.looped(in_loop)
             }
             Item::Term(k) => {
@@ -4748,7 +4826,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             Item::Alt(items) => {
                 let mut c = Cost::default();
                 for item in items {
-                    c = c.max(&self.site_cost(item, span, in_loop, sums, skip, s));
+                    c = c.max(&self.site_cost(caller, item, span, in_loop, sums, skip, s));
                 }
                 c
             }
@@ -4758,6 +4836,41 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 push_w(&mut s.unknown, local(&what), MAX_UNKNOWN, key_what);
                 Cost::default()
             }
+        }
+    }
+
+    /// The callee `j` had panic sites discharged by Verus under the `requires` of `f`
+    /// (top plan T13.4). A direct call from a Verus-verified caller: Verus checked the
+    /// precondition here, under the caller's own `requires`, which becomes the
+    /// caller's obligation in turn (none if it has none). Any other call: the
+    /// precondition is a panic path at this call site.
+    fn verus_obligation(
+        &self,
+        caller: usize,
+        j: usize,
+        f: &str,
+        span: Span,
+        in_loop: bool,
+        s: &mut Summary,
+    ) {
+        match self.verus_direct.get(&(caller, j, span)) {
+            Some((g, true)) => {
+                if s.verus_pre.is_none() {
+                    s.verus_pre = Some(g.clone());
+                }
+            }
+            Some((_, false)) => {}
+            None => push_w(
+                &mut s.panics,
+                Witness {
+                    steps: Vec::new(),
+                    what: verus_pre_text(f),
+                    span,
+                    in_loop,
+                },
+                MAX_WITNESSES,
+                key_site,
+            ),
         }
     }
 
@@ -4790,6 +4903,22 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 for (k, &other) in comp.iter().enumerate() {
                     let prefix = paths.get(&other).cloned().unwrap_or_default();
                     s.merge_events(&locals[k], &prefix);
+                    // Calls inside the cycle were skipped by `site_cost`: a Verus
+                    // precondition of a member is a panic path for every member
+                    // (conservative; Verus rejects recursion without `decreases`).
+                    if let Some(f) = &locals[k].verus_pre {
+                        push_w(
+                            &mut s.panics,
+                            Witness {
+                                steps: prefix.clone(),
+                                what: verus_pre_text(f),
+                                span: DUMMY_SP,
+                                in_loop: false,
+                            },
+                            MAX_WITNESSES,
+                            key_site,
+                        );
+                    }
                 }
                 s.recursion = Some(Witness {
                     steps: cycle,
@@ -4993,6 +5122,14 @@ fn to_fn_summary(s: &Summary) -> crate::stdsum::FnSummary {
 }
 
 /// Adds one event found in a body (witness `w`) to `s`; returns its allocation cost.
+/// The panic path of a call that Verus did not check against the callee's `requires`
+/// (top plan T13.4).
+fn verus_pre_text(f: &str) -> String {
+    format!(
+        "precondition of `{f}` verified by Verus only for Verus callers (its body's panic sites are discharged by Verus under its `requires`)"
+    )
+}
+
 fn local_event(s: &mut Summary, ev: &Ev, w: impl Fn(&String) -> Witness) -> Cost {
     match ev {
         Ev::Alloc(what) => {
@@ -5014,6 +5151,11 @@ fn local_event(s: &mut Summary, ev: &Ev, w: impl Fn(&String) -> Witness) -> Cost
         Ev::Recurse(what) => {
             if s.recursion.is_none() {
                 s.recursion = Some(w(what));
+            }
+        }
+        Ev::VerusPre(f) => {
+            if s.verus_pre.is_none() {
+                s.verus_pre = Some(f.clone());
             }
         }
     }
@@ -6312,6 +6454,7 @@ mod tests {
                     Ev::Unknown(_) => "top".to_string(),
                     Ev::Bound(k, _) => format!("bound {k}"),
                     Ev::Recurse(_) => "recurse".to_string(),
+                    Ev::VerusPre(_) => "verus".to_string(),
                 })
                 .collect()
         };

@@ -61,6 +61,10 @@ mod report;
 mod stack;
 mod stdsum;
 mod value;
+// The generator (`cargo-fip-prelint`) uses the writing half of the sidecar module.
+#[allow(dead_code)]
+mod verus;
+mod verustrust;
 
 use std::path::Path;
 use std::process::Command;
@@ -126,6 +130,8 @@ const TRACKED_ENV: &[&str] = &[
     "FIP_MACROS_MARK_ONLY",
     "FIP_PRELINT_STACK",
     "FIP_PRELINT_POOL_HINTS",
+    "FIP_PRELINT_NO_VERUS",
+    "FIP_PRELINT_VERUS_ID",
 ];
 
 /// Added in stack mode (`cargo fip-prelint --stack`, [`stack`]):
@@ -168,6 +174,21 @@ impl Callbacks for Prelint {
                     .file_depinfo
                     .borrow_mut()
                     .insert(Symbol::intern(&path.to_string_lossy()));
+            }
+            // The crate's own Verus sidecar (top plan T13.4); the others are keyed by
+            // `FIP_PRELINT_VERUS_ID`.
+            if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
+                let dir = Path::new(&dir);
+                if let Some(s) = std::fs::read_to_string(dir.join("Cargo.toml"))
+                    .ok()
+                    .and_then(|t| verus::declared_sidecar(&t))
+                    && dir.join(&s).is_file()
+                {
+                    tcx.sess
+                        .file_depinfo
+                        .borrow_mut()
+                        .insert(Symbol::intern(&dir.join(s).to_string_lossy()));
+                }
             }
         }
         Compilation::Continue

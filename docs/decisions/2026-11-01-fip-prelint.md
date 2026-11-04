@@ -772,8 +772,50 @@ default; never a verdict, a count or an exit status. Unmarked pools remain the
 declared assumption. Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-03: opt-in
 pool hints".
 
+## Amendment 2026-11-04: Verus as an oracle for panic freedom (top plan T13.4)
+
+**A trust change, accepted by the user on 2026-11-04.** The driver now also trusts
+Verus, for one kind of fact: a body-local `Assert` panic site (overflow, bounds,
+division, remainder, negation checks) of a function that a `--no-cheating` Verus run
+of its whole crate verified is discharged under that function's Verus `requires`.
+
+- **What is trusted.** Verus 0.2026.10.18.7d82994 (commit `7d829946231d`) with Z3
+  4.16.0, pinned in `tools/fip-prelint/verus-trusted.txt` (compiled into the driver;
+  changing it is a trust decision), and the sidecar's provenance: the generator
+  `cargo fip-prelint --verus-sidecar`, which accepts only a successful run over the
+  entire crate with `--no-cheating` and lists the exec functions of the crate's VIR
+  log that have a body and are not `external_body`.
+- **Where.** A package opts in in its manifest (`[package.metadata.fip-prelint]
+  verus-sidecar = ".."`); the sidecar is committed next to it
+  (`crates/fip-core/verus-verified.txt`). `just verify-core` regenerates it and fails
+  if it differs; a stale sidecar is refused by the driver, which changes the
+  self-check.
+- **When it is used.** Only if the stamp equals the pin, every source file of the run
+  (the crate and the imported Verus crates) has its recorded SHA-256, the function's
+  path is listed for its file and the SHA-256 of its item text (outer attributes and
+  doc comments through the body, so the `verus_spec` too) matches, and the site lies
+  in that text outside any macro expansion. Otherwise the site stays reported, with
+  the reason; a refused sidecar is named in the crate summary.
+- **What does not change.** Calls, allocations, frees, recursion, `⊤`, `assert!` and
+  `panic!` calls, and the sites of closures and of functions not listed. A caller that
+  Verus did not verify (or a call Verus did not check directly: through a pointer, a
+  trait method, a `param(..)` argument, a cycle) carries the callee's Verus `requires`
+  as a panic path ("precondition .. verified by Verus only for Verus callers"); a
+  Verus caller passes it on under its own `requires`.
+- **Visible.** The crate summary ends with "N panic sites discharged by Verus (sidecar
+  of `<crate>`: Verus <version> (<commit>), Z3 <version>, --no-cheating)".
+  `cargo fip-prelint --no-verus` gives the analysis without the trust.
+
+Measured: `fip-core` 17 functions listed (both the upstream and the fork Verus build
+give the same list and hashes; only the stamp differs, and the fork's is refused); the
+self-check is unchanged in dev (0 sites to discharge) and under `--release` has 15
+instead of 16 notes (the `strict::dedup_by` bounds check discharged; `pipeline`'s note
+becomes the precondition note). Details: `TODOs/fip-prelint.md`, "Resolved
+2026-11-04: Verus as an oracle for panic freedom".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
-- A Verus toolchain change (re-pin, re-run the probes).
+- A Verus toolchain change (re-pin, re-run the probes); a Verus or Z3 update (re-pin
+  `verus-trusted.txt`, regenerate the Verus sidecars, review their diff).
 - A stable way to encode MIR for all functions without `-Z` flags.

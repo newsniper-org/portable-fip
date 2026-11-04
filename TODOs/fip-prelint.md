@@ -2326,3 +2326,131 @@ the targets run without the flag: unchanged.
 **Deviations.** The plan expected hits on `alloc_sources`: its pools are marked and the
 unmarked arena has no release method, so none. `top::Pool` is out of scope (no
 `fip::export`).
+
+## Resolved 2026-11-04: Verus as an oracle for panic freedom (top plan T13.4)
+
+Plan: `docs/decisions/2026-11-03-fip-prelint-top-plan.md`, item 16 (a trust change,
+accepted by the user on 2026-11-04).
+
+**Before.** The driver proved overflow, bounds and division checks only with its own
+difference-bound analysis and `fip::requires`. `fip-core`'s bodies are verified by
+Verus with `--no-cheating`, but that result was not used: under `--release` the
+bounds check of `xs[w - 1]` in `strict::dedup_by` (`strict.rs:324`, whose `1 <= w` is
+only a Verus loop invariant) was a note in `fip_core` and, through the instance
+`pipeline` calls, in `strict_behaviour`.
+
+**How the list of verified functions is obtained (measured, Verus
+0.2026.10.18.7d82994).** Three sources were measured on `fip-core`:
+
+- `--output-json`'s `func-details` names every function the crate's verification
+  touched, `vstd` and imported specs included (`core::mem::swap`,
+  `vstd::seq::lemma_..`), so it cannot tell a verified body from an imported spec;
+- the text output gives only counts (`56 verified, 0 errors`);
+- the VIR log (`--log vir`, `crate.vir`) has one `(Function ..)` record per function
+  Verus processed, with its span, `:mode` (`Exec`/`Spec`/`Proof`), `:attrs ..
+  :is_external_body`, `:body` (`None` or the body's span) and `:require`.
+
+The VIR log is the source. Listed: functions of the crate (`<crate>::` path) with
+mode `Exec`, a body, `is_external_body false`, a path without `impl&%` (methods are
+not matched to rustc paths yet), body and signature in one file, and no
+`verus_keep_ghost` in the item text other than `cfg_attr(verus_keep_ghost, ..)` and
+`cfg_attr(not(verus_keep_ghost), fip_macros::..)` (otherwise the plain build may
+compile other code than Verus verified). The run must report `success`, 0 errors, no
+(VIR) error and `is-verifying-entire-crate` (the JSON result); `--no-cheating` must be
+on the command line (it rejects `assume`, `admit`, `external_body`,
+`assume_specification`); `--no-verify`, `--no-lifetime`, `--verify-root`,
+`--verify-module`, `--verify-only-module`, `--verify-function`, `--no-builtin`,
+`--no-vstd` are refused. Measured detail: outside `verus!`, a function without any
+Verus attribute is not in the VIR at all (Verus treats unannotated code as external),
+so it is never listed (fixture `halves_unannotated`).
+
+**Change.**
+
+- Generator: `cargo fip-prelint --verus-sidecar --crate-name N --crate-dir D --out F
+  -- <verus> <args..>` (`src/verusgen.rs`, `src/verus.rs`) runs Verus with
+  `--output-json --log vir`, checks the run, reads the VIR log, and writes the sidecar:
+  stamp (Verus version and commit and toolchain from the JSON result, Z3 version from
+  `VERUS_Z3_PATH` or the `z3` next to the resolved Verus binary, the flag
+  `--no-cheating`, Verus's verified count), the SHA-256 of every source file of the run
+  (every workspace file in a VIR span, so imported crates such as `fip-strict`, and
+  every `.rs` file under `D/src`), and per function `fn <path> <file> <sha256 of the
+  item text> <requires | ->`. The item text is the function from its first outer
+  attribute or outer doc comment (the `verus_spec` attribute holds the spec) through the
+  closing brace of the body, found with a small lexer (comments, strings, raw strings,
+  character literals vs lifetimes). SHA-256 is implemented in the driver (FIPS 180-4
+  vectors in the unit tests); no dependency.
+- Driver (`src/verustrust.rs`): a package opts in with `[package.metadata.fip-prelint]
+  verus-sidecar = "verus-verified.txt"`. For a function, the driver finds the nearest
+  `Cargo.toml` above its source file; the package's library crate (`[lib] name` or the
+  package name) must be the function's crate (tests and examples of the package are not
+  covered). The sidecar is used for the function only if it parses, its stamp equals
+  `tools/fip-prelint/verus-trusted.txt` (compiled into the driver) and has
+  `--no-cheating`, every listed source file has its hash, the path is listed for the
+  same file, and the hash of the item text (from the start of `def_span` to the end of
+  the MIR body's span, extended over the attributes) equals the entry's. Then an
+  `Assert` site (overflow, bounds, division, remainder, negation) of the function whose
+  span lies in the item text and is not from a macro expansion is discharged; it is
+  counted per sidecar in the crate summary with the stamp. Otherwise the site stays a
+  panic path, with ` (not discharged by Verus: <reason>)` appended when the package
+  declares a sidecar; a refused sidecar is named in the summary with the reason.
+  Calls, allocations, frees, recursion and `⊤` are never touched.
+- Callers: a listed function with a Verus `requires` whose body had a site discharged
+  passes the obligation on. A direct call (the MIR callee is that function item) from
+  a listed function: Verus checked the precondition there, under the caller's own
+  `requires`, which becomes the caller's obligation in turn (none if it has none). Any
+  other call (an unverified caller, a call through a pointer, a trait method, a
+  `param(..)` argument, a recursive cycle): the panic path "precondition of `f`
+  verified by Verus only for Verus callers". A root's own `requires` is assumed, as
+  for `fip::requires`.
+- Freshness: `crates/fip-core/verus-verified.txt` and the fixture's
+  `tests/fixtures/verus_sidecar/vside/verus-verified.txt` are committed. `just
+  verify-core` and `just verify-sidecar` regenerate them and fail when they differ
+  (only when the run's stamp is the trusted pin; another Verus build, e.g. the fork,
+  is reported as not compared); `FIP_VERUS_BLESS=1` copies after review. A stale
+  sidecar also changes the self-check (the driver refuses it and the summaries name the
+  reason), so `just ci` fails twice. Cache: `FIP_PRELINT_VERUS_ID` (content hash of
+  every declared sidecar under the workspace) and `FIP_PRELINT_NO_VERUS` are tracked in
+  the dep-info, and the crate's own sidecar is a file dependency.
+- `cargo fip-prelint --no-verus` (`FIP_PRELINT_NO_VERUS=1`) ignores every sidecar.
+
+**Decisions.** Committed, not generated in CI: the self-check must not depend on
+`verify` having run, and the trusted list is reviewed in the diff like the std
+summaries. Automatic where declared, not a global flag: the declaration in the
+manifest is the per-package opt-in, every use is visible in the summary, and failure
+is closed. Whole-run source hashes on top of item hashes: a proof also depends on its
+callees' specs, spec functions and imported crates, which an item hash does not cover;
+any change of a source file of the run therefore refuses the whole sidecar (the item
+hash still separates functions with one path, e.g. `cfg`'d variants, and guards the
+location).
+
+**Measured** (rustc 1.99.1, x86_64 Linux; before = `861f620`):
+
+| run | before | after |
+|---|---|---|
+| `fip-core` sidecar (`just verify-core`) | — | 17 exec functions listed (every exec function of the crate, 16 with `requires`, `slot::replace` without), 0 skipped; Verus reports 56 verified; 1.94–1.97 s with the generator vs 1.75–1.86 s for the plain Verus run (3 runs each, `--log vir` included) |
+| fork Verus 0.2026.10.31.559ac52 (`VERUS_Z3_PATH=/usr/bin/z3`, Z3 4.16.0) | — | the same 17 entries and source hashes, byte for byte; only the `verus` stamp line differs, so the driver refuses it (fixture `-stamp`); the fixture sidecar likewise (4 entries, equal) |
+| driver verdicts on `fip-core` (trace, not committed) | — | every analysed `fip_core` function (11 distinct) matched its entry; 0 hash mismatches |
+| self-check dev | 95 roots, 92 passed, 3 errors, 1 warning, 30 notes, 0 ⊤, 40 `param` call sites | identical (every line; 0 sites discharged: the driver proves every `fip_core` check in dev itself) |
+| self-check `--release` | 95 roots, 92 passed, 3 errors, 1 warning, 16 notes (`fip_core` 1, `strict_behaviour` 1: the `dedup_by` bounds check) | 15 notes: `fip_core` 0 (1 site discharged, stated with the stamp), `strict_behaviour` 1 (the bounds note replaced by "precondition of `fip_core::strict::dedup_by` verified by Verus only for Verus callers"; its summary states the discharged site); 40 `param` call sites |
+| mutant: a comment added inside `strict::dedup_by`, `--release` (not committed) | — | the sidecar refused ("source `src/strict.rs` changed since the verification run"), both notes back with that reason, in the `fip_core` and `strict_behaviour` summaries |
+| fixture `verus_sidecar` (new) | `--no-verus`: 8 notes | 3 notes, 3 sites discharged (`mul` nonlinear overflow, `pick` relational bounds, `halves` without `requires`); `square_small` (Verus caller) no note; `plain::use_mul` carries `mul`'s precondition; `plain::mul` (same name, not verified) and `halves_unannotated` keep their notes with the reason |
+| fixture variants | — | `-mutant` (body edited): sidecar refused, 8 notes; `-item` (body edited, source hash forged): only `mul`'s item hash differs, its 3 notes back, `pick`/`halves` stay discharged (5 notes); `-stamp` (Verus version of the fork): refused, 8 notes; `-missing`: refused, 8 notes |
+| `just verify-sidecar` | — | the fixture sidecar regenerated and equal; a run without `--no-cheating` refused before Verus runs; an added `#[verifier::external_body]` function: Verus rejects the `--no-cheating` run, nothing written; the VIR filter drops an `external_body` record (unit test on a VIR excerpt) |
+| every other fixture | — | unchanged |
+
+The README's self-check numbers (79 roots, 26 / 13 notes, 23 `param` call sites) were
+stale since the `fip_fn!` ergonomics items added the `adapters`, `fip_fn_path` and
+`strict_crate_path` test crates; recounted above from the expected files and a
+`FIP_PRELINT_DUMP=1` run (40 distinct `argument:` lines in dev and in release).
+
+**Deviations.** The plan expected `fip-core`'s body panic sites to go in general; in
+dev there are none left to drop (the driver already proves them), so the measurable
+effect is the one `--release` site, and its unverified caller keeps a note (the
+precondition, as the plan says). Impl methods are not listed (their Verus paths,
+`impl&%N`, are not matched to rustc paths); `fip-strict` and `fip-alloc` have no
+sidecar yet (no driver note depends on them).
+
+**Open.** A Verus `requires` fully covered by the linear `fip::requires` could
+replace the caller note by the driver's own check (needs the two to be equal, not
+only `fip::requires ⊆ requires` as `fip-macros` checks). `assert!` / `panic!` calls are
+not `Assert` terminators and are never dropped.

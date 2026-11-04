@@ -751,6 +751,23 @@ N4 `idx_heap` passes. Sidecar unchanged when regenerated. **Deviation:** none in
 verdicts; a variable index (`xs[k]` read twice) is not covered (only constant
 indices are paths), recorded as a fixture case.
 
+**Implemented** (item 16, candidate 4; a trust change accepted by the user). `just
+verify-core` runs Verus through `cargo fip-prelint --verus-sidecar`, which lists, from
+the VIR log of a successful `--no-cheating` run over the entire crate, the exec
+functions with a body and without `external_body`, with the SHA-256 of their item text
+(attributes, `verus_spec` and body), the source hashes of the run and the stamp
+(Verus version and commit, Z3, `--no-cheating`). The sidecar is committed
+(`crates/fip-core/verus-verified.txt`, declared in the manifest); `verify-core` fails
+when it is stale. The driver drops only the body-local `Assert` sites of a listed
+function whose stamp, sources and item hash match (pin
+`tools/fip-prelint/verus-trusted.txt`); callers Verus did not check get the
+precondition as a note; the summary counts the discharged sites with the stamp.
+Fixture `verus_sidecar` (with a stale-hash, a forged-source-hash, a foreign-stamp and
+a missing-file control). Self-check: dev unchanged, `--release` 16 → 15 notes
+(`dedup_by`'s bounds check). **Deviation:** in dev there is nothing to drop (the
+driver proves every `fip-core` check itself); impl methods are not listed. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-04".
+
 ### T14. The remaining self-check notes, and the profile the driver analyses
 
 **Current.** N1: 15 overflow, 8 `handle_alloc_error`, 2 contract-allows-panic,
@@ -928,7 +945,7 @@ These are unchanged from the limits plan, sound and reported:
 | 13 | T1.4 certified function pointers | 3 | M | fields of `Certified<N, fn>` type pass |
 | 14 | T14.3 allocation-failure label | — | S | wording only |
 | 15 | T17 `--pool-hints` | — | M | heuristic notes, opt-in |
-| 16 | T13.4 Verus panic-freedom sidecar | — | L | `fip-core` body panic sites dropped by provenance (trust change, needs a user decision) |
+| 16 | T13.4 Verus panic-freedom sidecar | — | L | `fip-core` body panic sites dropped by provenance (trust change, accepted 2026-11-04; implemented: `--release` 16 → 15 notes) |
 | — | T6, T9, T10, T11, T12, T15, T16 | — | — | stay; T9.3 / T10.2 / T12.2 only on demand |
 
 The total for items 1–15 is about 25–32 agent-days (an estimate). Item 16 is

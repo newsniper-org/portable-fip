@@ -29,14 +29,28 @@ fn run_args(
     envs: &[(&str, std::ffi::OsString)],
     args: &[&str],
 ) -> Vec<String> {
-    let dir = fixtures_dir().join(name);
+    run_at(
+        &fixtures_dir().join(name),
+        &format!("{name}{variant}"),
+        envs,
+        args,
+    )
+}
+
+/// `run_args` on the workspace at `dir`, into the target directory `target_key`.
+fn run_at(
+    dir: &Path,
+    target_key: &str,
+    envs: &[(&str, std::ffi::OsString)],
+    args: &[&str],
+) -> Vec<String> {
     let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("fixtures")
-        .join(format!("{name}{variant}"));
+        .join(target_key);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"));
     cmd.arg("fip-prelint")
         .args(args)
-        .current_dir(&dir)
+        .current_dir(dir)
         .env("FIP_PRELINT_TARGET_DIR", &target)
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
         .env_remove("FIP_PRELINT_WARN_ONLY")
@@ -46,6 +60,7 @@ fn run_args(
         .env_remove("FIP_PRELINT_STD_SUMMARIES_OUT")
         .env_remove("FIP_PRELINT_STACK")
         .env_remove("FIP_MACROS_MARK_ONLY")
+        .env_remove("FIP_PRELINT_NO_VERUS")
         .env_remove("CARGO_TARGET_DIR");
     for (k, v) in envs {
         cmd.env(k, v);
@@ -656,4 +671,155 @@ fn driver_checked() {
         generate[0] == "exit: failure" && generate.iter().any(|l| l.contains(PRELINT_UNCHECKED)),
         "std-summary generation accepted fip_fn!(prelint, ..): {generate:#?}"
     );
+}
+
+/// Copies the fixture `name` to a fresh directory under the test's temporary
+/// directory (without `target`), for mutations.
+fn copy_fixture(name: &str, to: &str) -> PathBuf {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create the copy");
+        for e in std::fs::read_dir(from).expect("read the fixture").flatten() {
+            let p = e.path();
+            if e.file_name() == "target" {
+                continue;
+            }
+            if p.is_dir() {
+                copy(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).expect("copy a fixture file");
+            }
+        }
+    }
+    let dest = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("copies")
+        .join(to);
+    let _ = std::fs::remove_dir_all(&dest);
+    copy(&fixtures_dir().join(name), &dest);
+    dest
+}
+
+/// Replaces `from` by `to` (exactly once) in `file`.
+fn edit(file: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(file).expect("read the file to edit");
+    assert_eq!(
+        text.matches(from).count(),
+        1,
+        "`{from}` once in {}",
+        file.display()
+    );
+    std::fs::write(file, text.replace(from, to)).expect("write the edited file");
+}
+
+/// Verus as an oracle for panic freedom (top plan T13.4). Fixture `verus_sidecar`: the
+/// crate `vside` declares the sidecar `vside/verus-verified.txt` written by a
+/// `--no-cheating` Verus run (`just verify-sidecar` regenerates it and fails if it
+/// differs). With it, the body-local overflow and bounds sites of the listed `mul`,
+/// `pick`, `halves` are discharged (3, stated in the crate summary with the stamp);
+/// the Verus caller `square_small` has no note; the call of `mul` from
+/// `plain::use_mul`, which Verus did not check, carries `mul`'s precondition; the
+/// non-verified `plain::mul` (same name) and the unannotated `halves_unannotated`
+/// (not in the VIR, so not listed) keep their notes, with the reason. With
+/// `--no-verus` every site is reported as before (8 notes).
+#[test]
+fn verus_sidecar() {
+    check("verus_sidecar");
+    compare(
+        "verus_sidecar",
+        "-off",
+        &run_args(
+            "verus_sidecar",
+            "-off",
+            &[],
+            &["--message-format", "short", "--no-verus"],
+        ),
+    );
+}
+
+/// Stale or foreign sidecars are never used (top plan T13.4): a body edited after the
+/// verification run (every note back, the sidecar refused: its source hash differs);
+/// the same edit with the sidecar's source hash forged to match (only the edited
+/// function's item hash differs: its notes are back, the other two functions keep
+/// theirs discharged); a sidecar stamped with another Verus version; a missing one.
+#[test]
+fn verus_sidecar_refused() {
+    let body_from = "pub fn mul(a: u32, b: u32) -> u32 {\n    a * b\n}";
+    let body_to = "pub fn mul(a: u32, b: u32) -> u32 {\n    b * a\n}";
+
+    let d = copy_fixture("verus_sidecar", "verus_mutant");
+    edit(&d.join("vside/src/lib.rs"), body_from, body_to);
+    compare(
+        "verus_sidecar",
+        "-mutant",
+        &run_at(
+            &d,
+            "verus_sidecar-mutant",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_item");
+    let sidecar = d.join("vside/verus-verified.txt");
+    let old = sha256_file(&d.join("vside/src/lib.rs"));
+    edit(&d.join("vside/src/lib.rs"), body_from, body_to);
+    let new = sha256_file(&d.join("vside/src/lib.rs"));
+    edit(
+        &sidecar,
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}"),
+    );
+    compare(
+        "verus_sidecar",
+        "-item",
+        &run_at(
+            &d,
+            "verus_sidecar-item",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_stamp");
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        "verus 0.2026.10.18.7d82994 ",
+        "verus 0.2026.10.31.559ac52 ",
+    );
+    compare(
+        "verus_sidecar",
+        "-stamp",
+        &run_at(
+            &d,
+            "verus_sidecar-stamp",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_missing");
+    std::fs::remove_file(d.join("vside/verus-verified.txt")).expect("remove the sidecar");
+    compare(
+        "verus_sidecar",
+        "-missing",
+        &run_at(
+            &d,
+            "verus_sidecar-missing",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+}
+
+/// SHA-256 of a file with `sha256sum` (the driver's own implementation is checked
+/// against the FIPS vectors in its unit tests).
+fn sha256_file(p: &Path) -> String {
+    let out = Command::new("sha256sum")
+        .arg(p)
+        .output()
+        .expect("run sha256sum");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .expect("a hash")
+        .to_string()
 }

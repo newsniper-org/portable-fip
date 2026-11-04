@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+#
+# The Verus build whose `--no-cheating` results `fip-prelint` trusts (top plan T13.4):
+# a Verus sidecar (`[package.metadata.fip-prelint] verus-sidecar`) is used only if its
+# stamp names exactly this Verus version and commit and this Z3 version. Compiled into
+# the driver; changing it is a trust decision (decision record 2026-11-01-fip-prelint).
+verus 0.2026.10.18.7d82994 7d829946231d6413a398f6e4160cdfe951261dad
+z3 4.16.0

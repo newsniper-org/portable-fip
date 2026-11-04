@@ -24,6 +24,13 @@
 //! directory, never the repository's `target/`), writing
 //! `std-summaries/<release>-<target>.txt` (or `--out`).
 //!
+//! `cargo fip-prelint --verus-sidecar --crate-name <name> --crate-dir <dir> --out <file>
+//! -- <verus> <args..>` (top plan T13.4) runs Verus (`<verus> <args..> --output-json
+//! --log vir`), which must verify the entire crate with `--no-cheating` and without
+//! errors, and writes the sidecar of the exec functions Verus verified
+//! (`src/verus.rs`, `src/verusgen.rs`). `--no-verus` makes the driver ignore every
+//! Verus sidecar (the analysis as without the trust, for comparisons).
+//!
 //! `cargo fip-prelint --stack [--build-std] [cargo build args..]` (limits plan L9) runs
 //! `cargo build --workspace --lib` (a target selection such as `--lib --tests`
 //! replaces `--lib`; bins and tests contribute their functions and instances, top plan
@@ -43,6 +50,12 @@ use std::process::{Command, ExitCode, Stdio};
 
 #[path = "../stackbound.rs"]
 mod stackbound;
+// The driver uses the reading half of the sidecar module, this binary the writing half.
+#[allow(dead_code)]
+#[path = "../verus.rs"]
+mod verus;
+#[path = "../verusgen.rs"]
+mod verusgen;
 
 const DEFAULT_TOOLCHAIN: &str = "1.99.1";
 
@@ -111,6 +124,50 @@ fn inputs_id() -> String {
         }
     }
     format!("std-summaries-{}-{h:016x}", files.len())
+}
+
+/// Content hash of the Verus sidecars declared by the packages under `root`
+/// (`[package.metadata.fip-prelint] verus-sidecar`, top plan T13.4), passed to the
+/// driver as `FIP_PRELINT_VERUS_ID` (recorded in the dep-info like
+/// `FIP_PRELINT_INPUTS_ID`): a regenerated or edited sidecar re-checks every crate.
+/// Directories named `target` and hidden ones are skipped.
+fn verus_id(root: &Path) -> String {
+    let mut h = verus::sha256_hex(b"");
+    let mut n = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    let mut manifests = Vec::new();
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if p.is_dir() {
+                if name != "target" && !name.starts_with('.') {
+                    stack.push(p);
+                }
+            } else if name == "Cargo.toml" {
+                manifests.push(p);
+            }
+        }
+    }
+    manifests.sort();
+    for m in manifests {
+        let Some(decl) = std::fs::read_to_string(&m)
+            .ok()
+            .and_then(|t| verus::declared_sidecar(&t))
+        else {
+            continue;
+        };
+        let file = m.with_file_name(decl);
+        let bytes = std::fs::read(&file).unwrap_or_else(|_| b"<missing>".to_vec());
+        h = verus::sha256_hex(
+            format!("{h}{}{}", file.display(), verus::sha256_hex(&bytes)).as_bytes(),
+        );
+        n += 1;
+    }
+    format!("verus-{n}-{}", &h[..16])
 }
 
 fn sysroot(toolchain: &str) -> Result<String, String> {
@@ -527,12 +584,159 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
     ExitCode::SUCCESS
 }
 
+/// `--verus-sidecar`: runs Verus and writes the sidecar (see the module documentation).
+fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
+    let fail = |msg: &str| {
+        eprintln!("cargo-fip-prelint --verus-sidecar: {msg}");
+        ExitCode::from(2)
+    };
+    let Some(sep) = args.iter().position(|a| a == "--") else {
+        return fail("expected `-- <verus> <args..>`");
+    };
+    let mut cmd_line = args.split_off(sep);
+    cmd_line.remove(0);
+    let (Some(krate), Some(dir), Some(out)) = (
+        take_value(&mut args, "--crate-name"),
+        take_value(&mut args, "--crate-dir"),
+        take_value(&mut args, "--out"),
+    ) else {
+        return fail("`--crate-name`, `--crate-dir` and `--out` are required");
+    };
+    if !args.is_empty() {
+        return fail(&format!("unexpected arguments {args:?}"));
+    }
+    if cmd_line.is_empty() {
+        return fail("no Verus command after `--`");
+    }
+    let verus_cmd = cmd_line.remove(0);
+    let flags = cmd_line;
+    if !flags.iter().any(|f| f == verus::NO_CHEATING) {
+        return fail(&format!(
+            "the Verus run must use `{}`: without it no sidecar is written",
+            verus::NO_CHEATING
+        ));
+    }
+    if let Some(f) = flags.iter().find(|f| {
+        verusgen::REFUSED_FLAGS
+            .iter()
+            .any(|r| f.as_str() == *r || f.starts_with(&format!("{r}=")))
+            || f.starts_with("--output-json")
+            || f.starts_with("--log")
+    }) {
+        return fail(&format!("refused Verus flag `{f}`"));
+    }
+    let out = PathBuf::from(out);
+    let log_dir = PathBuf::from(format!("{}.vir-log", out.display()));
+    let _ = std::fs::remove_dir_all(&log_dir);
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        return fail(&format!("{}: {e}", log_dir.display()));
+    }
+    let run = Command::new(&verus_cmd)
+        .args(&flags)
+        .args(["--output-json", "--log", "vir", "--log-dir"])
+        .arg(&log_dir)
+        .stderr(Stdio::inherit())
+        .output();
+    let run = match run {
+        Ok(r) => r,
+        Err(e) => return fail(&format!("cannot run `{verus_cmd}`: {e}")),
+    };
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    // `--output-json` prints one JSON object; anything before it is passed on.
+    let json_at = stdout.find("\n{").map_or(0, |i| i + 1);
+    let (before, json_text) = stdout.split_at(if stdout.starts_with('{') { 0 } else { json_at });
+    print!("{before}");
+    if !run.status.success() {
+        // The diagnostics went to stderr; the JSON result only gives the counts.
+        if let Ok(j) = verusgen::parse_json(json_text.trim()) {
+            let n = |k: &str| {
+                j.path(&["verification-results", k])
+                    .and_then(verusgen::Json::as_u64)
+                    .unwrap_or(0)
+            };
+            println!(
+                "verification results:: {} verified, {} errors",
+                n("verified"),
+                n("errors")
+            );
+        }
+        return fail("Verus failed: no sidecar written");
+    }
+    let info = match verusgen::parse_json(json_text.trim()).and_then(|j| verusgen::run_info(&j)) {
+        Ok(i) => i,
+        Err(e) => return fail(&format!("Verus result not usable: {e}")),
+    };
+    println!(
+        "verification results:: {} verified, 0 errors",
+        info.verified
+    );
+    let z3 = verusgen::z3_path(&verus_cmd);
+    let z3_version = match Command::new(&z3).arg("--version").output() {
+        Ok(o) => verusgen::z3_version(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => None,
+    };
+    let Some(z3_version) = z3_version else {
+        return fail(&format!("cannot read the version of Z3 `{}`", z3.display()));
+    };
+    let vir = match std::fs::read_to_string(log_dir.join("crate.vir")) {
+        Ok(v) => v,
+        Err(e) => return fail(&format!("no VIR log in {}: {e}", log_dir.display())),
+    };
+    let fns = match verusgen::vir_functions(&vir) {
+        Ok(f) => f,
+        Err(e) => return fail(&format!("VIR log not readable: {e}")),
+    };
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let sidecar = match verusgen::build(
+        &root,
+        &krate,
+        Path::new(&dir),
+        &info,
+        &z3_version,
+        &flags,
+        &fns,
+    ) {
+        Ok(s) => s,
+        Err(e) => return fail(&e),
+    };
+    let text = sidecar.render();
+    if verus::Sidecar::parse(&text).as_ref() != Ok(&sidecar) {
+        return fail("internal error: the sidecar does not read back");
+    }
+    if let Err(e) = std::fs::write(&out, text) {
+        return fail(&format!("{}: {e}", out.display()));
+    }
+    let _ = std::fs::remove_dir_all(&log_dir);
+    eprintln!(
+        "verus sidecar: {} functions listed, {} skipped, {} ({}) -> {}",
+        sidecar.fns.len(),
+        sidecar.skipped.len(),
+        krate,
+        sidecar.stamp(),
+        out.display()
+    );
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // `cargo fip-prelint ..` passes the subcommand name first.
     if args.first().is_some_and(|a| a == "fip-prelint") {
         args.remove(0);
     }
+    if args.first().is_some_and(|a| a == "--verus-sidecar") {
+        args.remove(0);
+        return verus_sidecar(args);
+    }
+    let mut no_verus = false;
+    args.retain(|a| {
+        if a == "--no-verus" {
+            no_verus = true;
+            false
+        } else {
+            true
+        }
+    });
     let mut generate = false;
     args.retain(|a| {
         if a == "--std-summaries" {
@@ -668,6 +872,14 @@ fn main() -> ExitCode {
     } else {
         cmd.env_remove("FIP_PRELINT_POOL_HINTS");
     }
+    if no_verus {
+        cmd.env("FIP_PRELINT_NO_VERUS", "1");
+    } else {
+        cmd.env_remove("FIP_PRELINT_NO_VERUS");
+    }
+    let root =
+        workspace_root(&toolchain, manifest.as_deref()).unwrap_or_else(|_| PathBuf::from("."));
+    cmd.env("FIP_PRELINT_VERUS_ID", verus_id(&root));
     match cmd.status() {
         Ok(st) => match st.code() {
             Some(0) => ExitCode::SUCCESS,
