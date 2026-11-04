@@ -64,6 +64,48 @@ pub fn halves_unannotated(a: u32, b: u32) -> u32 {
     a / 2 + b / 2
 }
 
+/// Impl methods (top plan item 8). The sidecar names them `vside::{impl}::<name>` and
+/// the driver matches them by that path, file and line, not by the impl number: this
+/// crate's plain build has one impl block more than its Verus build (the one below),
+/// so rustc's `{impl#N}` and Verus's `impl&%N` differ.
+#[cfg_attr(verus_keep_ghost, verifier::verify)]
+pub struct Acc {
+    pub n: u32,
+}
+
+/// Only in the plain build: it shifts the plain build's impl numbers by one.
+#[cfg(not(verus_keep_ghost))]
+impl Acc {
+    /// Not seen by Verus: its overflow note stays.
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
+    pub fn add_plain(&self, a: u32) -> u32 {
+        self.n + a
+    }
+}
+
+impl Acc {
+    /// Verified under `requires`: its overflow site is discharged.
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        requires
+            self.n < 1000,
+            a < 1000,
+    ))]
+    pub fn add(&self, a: u32) -> u32 {
+        self.n + a
+    }
+
+    /// Verified without `requires`: its overflow site is discharged.
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            r == self.n / 2 + self.n / 4,
+    ))]
+    pub fn three_quarters(&self) -> u32 {
+        self.n / 2 + self.n / 4
+    }
+}
+
 /// Not seen by Verus.
 #[cfg(not(verus_keep_ghost))]
 pub mod plain {
@@ -86,5 +128,12 @@ pub mod plain {
     #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
     pub fn use_halves(a: u32) -> u32 {
         super::halves(a, a)
+    }
+
+    /// A call of the verified method `Acc::add` that Verus did not check: it carries
+    /// `add`'s precondition as a note.
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
+    pub fn use_add(a: u32) -> u32 {
+        super::Acc { n: a }.add(3)
     }
 }

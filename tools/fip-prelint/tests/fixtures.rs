@@ -763,12 +763,15 @@ fn edit(file: &Path, from: &str, to: &str) {
 /// crate `vside` declares the sidecar `vside/verus-verified.txt` written by a
 /// `--no-cheating` Verus run (`just verify-sidecar` regenerates it and fails if it
 /// differs). With it, the body-local overflow and bounds sites of the listed `mul`,
-/// `pick`, `halves` are discharged (3, stated in the crate summary with the stamp);
-/// the Verus caller `square_small` has no note; the call of `mul` from
-/// `plain::use_mul`, which Verus did not check, carries `mul`'s precondition; the
-/// non-verified `plain::mul` (same name) and the unannotated `halves_unannotated`
-/// (not in the VIR, so not listed) keep their notes, with the reason. With
-/// `--no-verus` every site is reported as before (8 notes).
+/// `pick`, `halves` and of the impl methods `Acc::add`, `Acc::three_quarters` are
+/// discharged (5, stated in the crate summary with the stamp; the methods are matched
+/// by `{impl}` path, file and line, since a plain-only impl block shifts rustc's impl
+/// numbers against Verus's); the Verus caller `square_small` has no note; the calls of
+/// `mul` from `plain::use_mul` and of `Acc::add` from `plain::use_add`, which Verus did
+/// not check, carry the callee's precondition; the non-verified `plain::mul` (same
+/// name), `Acc::add_plain` and the unannotated `halves_unannotated` (not in the VIR, so
+/// not listed) keep their notes, with the reason. With `--no-verus` every site is
+/// reported as before (12 notes).
 #[test]
 fn verus_sidecar() {
     check("verus_sidecar");
@@ -788,7 +791,9 @@ fn verus_sidecar() {
 /// verification run (every note back, the sidecar refused: its source hash differs);
 /// the same edit with the sidecar's source hash forged to match (only the edited
 /// function's item hash differs: its notes are back, the other two functions keep
-/// theirs discharged); a sidecar stamped with another Verus version; a missing one.
+/// theirs discharged); a sidecar stamped with another Verus version; a missing one; an
+/// impl method's body edited (its notes back); an impl method's entry moved to another
+/// line; the impl block's header configured differently for Verus.
 #[test]
 fn verus_sidecar_refused() {
     let body_from = "pub fn mul(a: u32, b: u32) -> u32 {\n    a * b\n}";
@@ -853,6 +858,92 @@ fn verus_sidecar_refused() {
         &run_at(
             &d,
             "verus_sidecar-missing",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    // Impl methods (top plan item 8): the body of the verified `Acc::add` edited, the
+    // source hash forged: only `add`'s item hash differs, its note is back (and its
+    // caller's precondition note becomes the plain chain); `three_quarters` stays
+    // discharged.
+    let d = copy_fixture("verus_sidecar", "verus_impl");
+    let lib = d.join("vside/src/lib.rs");
+    let old = sha256_file(&lib);
+    edit(
+        &lib,
+        "pub fn add(&self, a: u32) -> u32 {\n        self.n + a\n    }",
+        "pub fn add(&self, a: u32) -> u32 {\n        a + self.n\n    }",
+    );
+    let new = sha256_file(&lib);
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}"),
+    );
+    compare(
+        "verus_sidecar",
+        "-impl",
+        &run_at(
+            &d,
+            "verus_sidecar-impl",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    // An impl method is matched by path, file and line, never by its impl number:
+    // `add`'s entry moved to the line of `three_quarters` is not used for `add`.
+    let d = copy_fixture("verus_sidecar", "verus_line");
+    let sidecar = d.join("vside/verus-verified.txt");
+    let text = std::fs::read_to_string(&sidecar).expect("read the sidecar");
+    let line_of = |name: &str| {
+        text.lines()
+            .find(|l| l.starts_with(&format!("fn vside::{{impl}}::{name} ")))
+            .and_then(|l| l.split_whitespace().nth(2))
+            .expect("an impl entry")
+            .to_string()
+    };
+    let (add_at, tq_at) = (line_of("add"), line_of("three_quarters"));
+    edit(
+        &sidecar,
+        &format!("fn vside::{{impl}}::add {add_at} "),
+        &format!("fn vside::{{impl}}::add {tq_at} "),
+    );
+    compare(
+        "verus_sidecar",
+        "-line",
+        &run_at(
+            &d,
+            "verus_sidecar-line",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    // The impl block's header configured differently for Verus (an attribute under
+    // `cfg_attr(not(verus_keep_ghost), ..)` on the same line, source hash forged):
+    // neither method of the block is used.
+    let d = copy_fixture("verus_sidecar", "verus_header");
+    let lib = d.join("vside/src/lib.rs");
+    let old = sha256_file(&lib);
+    edit(
+        &lib,
+        "\nimpl Acc {\n    /// Verified under",
+        "\n#[cfg_attr(not(verus_keep_ghost), allow(unused))] impl Acc {\n    /// Verified under",
+    );
+    let new = sha256_file(&lib);
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}"),
+    );
+    compare(
+        "verus_sidecar",
+        "-header",
+        &run_at(
+            &d,
+            "verus_sidecar-header",
             &[],
             &["--message-format", "short"],
         ),

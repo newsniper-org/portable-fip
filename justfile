@@ -45,10 +45,14 @@ verify: verify-strict verify-core verify-alloc verify-compose verify-negative ve
 verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern fip_strict=target/verus-strict/libfip_strict.rlib"
 
 # fip-strict proofs (`FipFn` with `pre`/`post`, `Certified`), no trusted items;
-# exports the Verus metadata that fip-core and verify-compose import.
-verify-strict:
+# exports the Verus metadata that fip-core and verify-compose import. The run goes
+# through the sidecar generator (top plan T13.4); its sidecar must equal
+# crates/fip-strict/verus-verified.txt (no function listed: every verified method is a
+# Verus-only twin or macro-generated, each skipped with the reason).
+verify-strict: sidecar-gen
     rm -rf target/verus-strict && mkdir -p target/verus-strict
-    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --crate-name fip_strict --no-cheating crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_strict --crate-dir crates/fip-strict --out target/verus-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_strict --no-cheating crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict
+    just verus-sidecar-check target/verus-strict/verus-verified.txt crates/fip-strict/verus-verified.txt
 
 # Verus metadata and library of fip-core (needs fip-strict's on the library path),
 # imported by verified callers in `verify/`.
@@ -58,13 +62,16 @@ verus_core := "--import fip_core=target/verus-core/fip_core.vir --extern fip_cor
 # plain binary of tools/fip-prelint (no rustc-dev needed to run it).
 sidecar_gen := "tools/fip-prelint/target/debug/cargo-fip-prelint --verus-sidecar"
 
+# Builds the sidecar generator.
+sidecar-gen:
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint
+
 # fip-core proofs, no trusted items (--no-cheating); imports fip-strict's Verus build
 # and exports fip-core's for `verify/compose_state.rs`. The run goes through the
 # sidecar generator, which writes the verified bodies (top plan T13.4) to
 # target/verus-core/verus-verified.txt; it must equal crates/fip-core/verus-verified.txt.
 verify-core: verify-strict
     rm -rf target/verus-core && mkdir -p target/verus-core
-    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint
     VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
     just verus-sidecar-check target/verus-core/verus-verified.txt crates/fip-core/verus-verified.txt
 
@@ -93,9 +100,12 @@ verus-sidecar-check generated committed:
     fi
     echo "verus sidecar: {{committed}} is up to date"
 
-# fip-alloc proofs, no trusted items (--no-cheating).
-verify-alloc:
-    VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating crates/fip-alloc/src/lib.rs
+# fip-alloc proofs, no trusted items (--no-cheating), through the sidecar generator;
+# the sidecar must equal crates/fip-alloc/verus-verified.txt.
+verify-alloc: sidecar-gen
+    rm -rf target/verus-alloc && mkdir -p target/verus-alloc
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc --no-cheating crates/fip-alloc/src/lib.rs
+    just verus-sidecar-check target/verus-alloc/verus-verified.txt crates/fip-alloc/verus-verified.txt
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
 # Strict functions with `FipFn` parameters verify against fip-strict's Verus build.

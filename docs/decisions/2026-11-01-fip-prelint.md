@@ -869,6 +869,25 @@ branch relocations make the object unreadable (`⊤`). Details:
 `TODOs/fip-prelint.md`, "Resolved 2026-11-04: stack mode on ELF32 (i386, ARM) and
 the allocator shim's name".
 
+## Amendment 2026-11-04: Verus sidecars list impl methods, by location
+
+Sidecar format 2. Every entry records the 1-based line where its item text starts
+(`fn <path> <file>:<line> <hash> <requires>`), and every impl block in a path is
+written `{impl}`. An impl method is identified by that path, its file and the line,
+never by the impl number: Verus's `impl&%N` and rustc's `{impl#N}` are both the
+`DefPath` disambiguator, but of two different builds, and `cfg(verus_keep_ghost)`
+changes the impl blocks a build has (measured: `fip-strict`'s Verus `impl&%8` is
+rustc's `{impl#1}`; in the fixture `verus_sidecar`, Verus `impl&%0` is rustc
+`{impl#1}`). The generator skips methods inside an item marked exactly
+`#[cfg(verus_keep_ghost)]` (no plain twin at that place) and functions whose span
+comes from a macro expansion (one text for every expansion). The driver does not use
+an impl method whose impl block's header (its attributes through the self type)
+mentions `verus_keep_ghost`, as for the item text. `fip-strict` and `fip-alloc`
+declare sidecars (0 and 1 functions listed). `FIP_PRELINT_VERUS_ID` also covers the
+sidecars of path dependencies outside the workspace, transitively. Details:
+`TODOs/fip-prelint.md`, "Resolved 2026-11-04: Verus sidecars for impl methods,
+`fip-strict` and `fip-alloc`".
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

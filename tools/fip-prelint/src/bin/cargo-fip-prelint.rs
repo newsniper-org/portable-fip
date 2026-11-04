@@ -127,10 +127,12 @@ fn inputs_id() -> String {
 }
 
 /// Content hash of the Verus sidecars declared by the packages under `root`
-/// (`[package.metadata.fip-prelint] verus-sidecar`, top plan T13.4), passed to the
-/// driver as `FIP_PRELINT_VERUS_ID` (recorded in the dep-info like
-/// `FIP_PRELINT_INPUTS_ID`): a regenerated or edited sidecar re-checks every crate.
-/// Directories named `target` and hidden ones are skipped.
+/// (`[package.metadata.fip-prelint] verus-sidecar`, top plan T13.4) and by the path
+/// dependencies of those packages outside `root`, transitively (the driver reads a
+/// dependency's sidecar when it analyses a call into it), passed to the driver as
+/// `FIP_PRELINT_VERUS_ID` (recorded in the dep-info like `FIP_PRELINT_INPUTS_ID`): a
+/// regenerated or edited sidecar re-checks every crate. Directories named `target`
+/// and hidden ones are skipped by the walk under `root`.
 fn verus_id(root: &Path) -> String {
     let mut h = verus::sha256_hex(b"");
     let mut n = 0usize;
@@ -152,7 +154,27 @@ fn verus_id(root: &Path) -> String {
             }
         }
     }
+    // Path dependencies, transitively; every manifest once (canonical path).
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut seen: std::collections::BTreeSet<PathBuf> =
+        manifests.iter().map(|m| canon(m)).collect();
+    let mut queue: Vec<PathBuf> = manifests.clone();
+    while let Some(m) = queue.pop() {
+        let Ok(text) = std::fs::read_to_string(&m) else {
+            continue;
+        };
+        let dir = m.parent().unwrap_or(Path::new("."));
+        for p in verus::path_dependencies(&text) {
+            let dep = dir.join(p).join("Cargo.toml");
+            if dep.is_file() && seen.insert(canon(&dep)) {
+                manifests.push(dep.clone());
+                queue.push(dep);
+            }
+        }
+    }
+    let mut manifests: Vec<PathBuf> = manifests.iter().map(|m| canon(m)).collect();
     manifests.sort();
+    manifests.dedup();
     for m in manifests {
         let Some(decl) = std::fs::read_to_string(&m)
             .ok()
@@ -896,5 +918,48 @@ fn main() -> ExitCode {
             eprintln!("cargo-fip-prelint: cannot run cargo: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path dependency outside the workspace that declares a Verus sidecar: its
+    /// content is part of `FIP_PRELINT_VERUS_ID` (the cache key), so editing it
+    /// re-checks every crate.
+    #[test]
+    fn verus_id_covers_path_dependencies_outside_the_workspace() {
+        let base = std::env::temp_dir().join(format!("fip-verus-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (ws, ext, ext2) = (base.join("ws"), base.join("ext"), base.join("ext2"));
+        for d in [&ws, &ext, &ext2] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[package]\nname = \"ws\"\n[dependencies]\next = { path = \"../ext\" }\n",
+        )
+        .unwrap();
+        // `ext` reaches `ext2` through its own path dependency.
+        std::fs::write(
+            ext.join("Cargo.toml"),
+            "[package]\nname = \"ext\"\n[dependencies]\next2 = { path = \"../ext2\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext2.join("Cargo.toml"),
+            "[package]\nname = \"ext2\"\n[package.metadata.fip-prelint]\nverus-sidecar = \"v.txt\"\n",
+        )
+        .unwrap();
+        std::fs::write(ext2.join("v.txt"), "a").unwrap();
+        let first = verus_id(&ws);
+        assert!(first.starts_with("verus-1-"), "{first}");
+        assert_eq!(verus_id(&ws), first);
+        std::fs::write(ext2.join("v.txt"), "b").unwrap();
+        let second = verus_id(&ws);
+        assert!(second.starts_with("verus-1-"), "{second}");
+        assert_ne!(second, first);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

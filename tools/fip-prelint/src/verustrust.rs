@@ -244,17 +244,22 @@ impl VerusTrust {
                 tcx.def_descr(d)
             ));
         }
-        let path = format!("{krate}{}", tcx.def_path(d).to_string_no_crate_verbose());
-        let Some(entry) = loaded.sidecar.fns.iter().find(|e| e.path == path) else {
+        // Impl blocks are `{impl}` on both sides: rustc's and Verus's impl numbers are
+        // disambiguators of two different builds (see `crate::verus`), so an impl
+        // method is identified by its file and the line of its item text.
+        let path = verus::impl_key(&format!(
+            "{krate}{}",
+            tcx.def_path(d).to_string_no_crate_verbose()
+        ));
+        let candidates: Vec<&verus::Entry> = loaded
+            .sidecar
+            .fns
+            .iter()
+            .filter(|e| e.path == path)
+            .collect();
+        if candidates.is_empty() {
             return Verdict::NotListed(format!(
                 "`{path}` is not in the Verus sidecar (not verified by Verus)"
-            ));
-        };
-        let entry_file = std::fs::canonicalize(loaded.dir.join(&entry.file)).ok();
-        if entry_file.as_deref() != Some(file.as_path()) {
-            return Verdict::NotListed(format!(
-                "`{path}` is listed for `{}`, not for this file",
-                entry.file
             ));
         }
         let end = sm.lookup_byte_offset(body_span.hi());
@@ -268,10 +273,52 @@ impl VerusTrust {
         let Some((lo, hi)) = verus::item_region(&src, s, e) else {
             return Verdict::NotListed("the item text is not found in its file".to_string());
         };
+        let line = verus::line_of(&src, lo);
+        let Some(entry) = candidates.iter().find(|e| {
+            e.line == line
+                && std::fs::canonicalize(loaded.dir.join(&e.file))
+                    .ok()
+                    .as_deref()
+                    == Some(file.as_path())
+        }) else {
+            let at: Vec<String> = candidates
+                .iter()
+                .map(|e| format!("{}:{}", e.file, e.line))
+                .collect();
+            return Verdict::NotListed(format!(
+                "`{path}` is listed for `{}`, not for this item (line {line})",
+                at.join("`, `")
+            ));
+        };
         if verus::sha256_hex(&src.as_bytes()[lo..hi]) != entry.hash {
             return Verdict::NotListed(format!(
                 "the item text of `{path}` differs from the one Verus verified (regenerate with `just verify`)"
             ));
+        }
+        // An impl method also depends on its impl block's header (generics, `Self`,
+        // the trait): it must not be configured differently for Verus.
+        if let Some(imp) = tcx.opt_parent(d)
+            && matches!(tcx.def_kind(imp), DefKind::Impl { .. })
+        {
+            let h = tcx.def_span(imp);
+            let (hs, he) = (sm.lookup_byte_offset(h.lo()), sm.lookup_byte_offset(h.hi()));
+            let header = (real_path(&hs.sf.name).as_deref() == Some(file.as_path())
+                && hs.sf.start_pos == he.sf.start_pos)
+                .then(|| {
+                    let a = verus::attrs_start(&src, hs.pos.0 as usize)?;
+                    src.get(a..he.pos.0 as usize)
+                })
+                .flatten();
+            let Some(header) = header else {
+                return Verdict::NotListed(
+                    "the impl block's header is not found in the item's file".to_string(),
+                );
+            };
+            if let Some(c) = verus::ghost_cfg_conflict(header) {
+                return Verdict::NotListed(format!(
+                    "the impl block's header mentions {c}: plain and Verus code may differ"
+                ));
+            }
         }
         Verdict::Listed {
             path,

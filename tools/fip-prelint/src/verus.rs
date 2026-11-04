@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! fip-prelint verus sidecar
-//! format 1
+//! format 2
 //! crate <crate name>
 //! verus <version> <commit>
 //! z3 <version>
@@ -31,14 +31,22 @@
 //! flags <verus flags relevant to trust, e.g. --no-cheating>
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
-//! fn <crate>::<path> <file relative to the sidecar's directory> <sha256 of the item text> <requires | ->
+//! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | ->
 //! skip <crate>::<path> <reason>
 //! ```
+//!
+//! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
+//! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
+//! `impl&%N` and rustc `{impl#N}`, both with the `DefPath` disambiguator of their own
+//! build, and the two builds differ wherever `cfg(verus_keep_ghost)` adds or removes an
+//! impl block (measured on `fip-strict`: Verus's `impl&%8` is rustc's `{impl#1}`). An
+//! impl method is therefore identified by its path without the number, its file and
+//! the line of its item text, never by the number.
 
 use std::fmt::Write as _;
 
 /// Version of the format.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
@@ -381,6 +389,12 @@ pub fn item_region(src: &str, start: usize, end: usize) -> Option<(usize, usize)
     if !src[..end].ends_with('}') {
         return None;
     }
+    Some((attrs_start(src, start)?, end))
+}
+
+/// `start` (a token boundary) extended backwards over the outer attributes and outer
+/// doc comments directly in front of it, as in [`item_region`].
+pub fn attrs_start(src: &str, start: usize) -> Option<usize> {
     let toks = lex(src);
     let mut k = toks.iter().position(|t| t.1 == start)?;
     if matches!(toks[k].0, Tok::Ws | Tok::Comment) {
@@ -429,7 +443,7 @@ pub fn item_region(src: &str, start: usize, end: usize) -> Option<(usize, usize)
             _ => break,
         }
     }
-    Some((lo, end))
+    Some(lo)
 }
 
 /// SHA-256 of the item text ([`item_region`]).
@@ -485,16 +499,104 @@ pub fn ghost_cfg_conflict(text: &str) -> Option<String> {
     None
 }
 
+/// A function path with every impl-block segment written `{impl}`: Verus's
+/// `impl&%N` and rustc's `{impl#N}` (see the module documentation: the numbers of the
+/// two builds differ, so they are never compared).
+pub fn impl_key(path: &str) -> String {
+    path.split("::")
+        .map(|seg| {
+            let verus = seg
+                .strip_prefix("impl&%")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            let rustc = seg
+                .strip_prefix("{impl#")
+                .and_then(|r| r.strip_suffix('}'))
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if verus || rustc { "{impl}" } else { seg }
+        })
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// 1-based line of byte offset `at` in `src`.
+pub fn line_of(src: &str, at: usize) -> usize {
+    src.as_bytes()[..at.min(src.len())]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        + 1
+}
+
+/// Byte ranges of the items that carry exactly `#[cfg(verus_keep_ghost)]` (from the
+/// attribute through the item's closing `}` or `;`): code only the Verus build
+/// compiles, such as a `verus! { .. }` block with Verus-only twins of plain items.
+pub fn ghost_only_regions(src: &str) -> Vec<(usize, usize)> {
+    let toks: Vec<(Tok, usize, usize)> = lex(src)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let attr = ["#", "[", "cfg", "(", "verus_keep_ghost", ")", "]"];
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k + attr.len() <= toks.len() {
+        if !(0..attr.len()).all(|m| text(k + m) == attr[m]) {
+            k += 1;
+            continue;
+        }
+        let start = toks[k].1;
+        let mut depth = 0usize;
+        let mut end = None;
+        let mut m = k + attr.len();
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[') => depth += 1,
+                Tok::Punct(b')' | b']') => depth = depth.saturating_sub(1),
+                Tok::Punct(b';') if depth == 0 => {
+                    end = Some(toks[m].2);
+                    break;
+                }
+                Tok::Punct(b'{') if depth == 0 => {
+                    let mut braces = 0usize;
+                    while m < toks.len() {
+                        match toks[m].0 {
+                            Tok::Punct(b'{') => braces += 1,
+                            Tok::Punct(b'}') => {
+                                braces -= 1;
+                                if braces == 0 {
+                                    end = Some(toks[m].2);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        m += 1;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+            m += 1;
+        }
+        let end = end.unwrap_or(src.len());
+        out.push((start, end));
+        k = m.max(k + 1);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------------
 // The sidecar.
 
 /// One verified function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// `<crate>::<module path>::<name>` (as Verus names it).
+    /// `<crate>::<module path>::<name>`, impl blocks written `{impl}` ([`impl_key`]).
     pub path: String,
     /// File relative to the sidecar's directory.
     pub file: String,
+    /// 1-based line where the item text starts.
+    pub line: usize,
     /// SHA-256 of the item text.
     pub hash: String,
     /// The function has a Verus `requires`: callers must establish it.
@@ -564,9 +666,14 @@ impl Sidecar {
                     s.sources.push((p.to_string(), h.to_string()));
                 }
                 "fn" => {
-                    let [p, f, h, r] = words[..] else {
+                    let [p, at, h, r] = words[..] else {
                         return Err(bad());
                     };
+                    let (f, line) = at.rsplit_once(':').ok_or_else(bad)?;
+                    let line: usize = line.parse().map_err(|_| bad())?;
+                    if line == 0 || f.is_empty() {
+                        return Err(bad());
+                    }
                     let requires = match r {
                         "requires" => true,
                         "-" => false,
@@ -575,6 +682,7 @@ impl Sidecar {
                     s.fns.push(Entry {
                         path: p.to_string(),
                         file: f.to_string(),
+                        line,
                         hash: h.to_string(),
                         requires,
                     });
@@ -605,7 +713,7 @@ impl Sidecar {
         let mut o = String::new();
         o.push_str("fip-prelint verus sidecar\n");
         o.push_str(
-            "# Generated by `cargo fip-prelint --verus-sidecar` (just verify-core); do not edit.\n\
+            "# Generated by `cargo fip-prelint --verus-sidecar` (just verify); do not edit.\n\
              # Exec functions Verus verified with --no-cheating, with the SHA-256 of their item\n\
              # text (outer attributes and doc comments through the body). Top plan T13.4.\n",
         );
@@ -621,7 +729,7 @@ impl Sidecar {
         }
         for e in &self.fns {
             let r = if e.requires { "requires" } else { "-" };
-            let _ = writeln!(o, "fn {} {} {} {r}", e.path, e.file, e.hash);
+            let _ = writeln!(o, "fn {} {}:{} {} {r}", e.path, e.file, e.line, e.hash);
         }
         for (p, why) in &self.skipped {
             let _ = writeln!(o, "skip {p} {why}");
@@ -738,6 +846,56 @@ pub fn lib_crate_name(manifest: &str) -> Option<String> {
     lib.or_else(|| package.map(|p| p.replace('-', "_")))
 }
 
+/// The `path = ".."` values of the dependency tables of a `Cargo.toml` text
+/// (`[dependencies]`, `[dev-dependencies]`, `[build-dependencies]`, their `target.*`
+/// and `workspace` forms, `[dependencies.<name>]` tables, `[patch.*]` and
+/// `[replace]`), inline tables included. `path` keys of `[lib]`, `[[bin]]` and other
+/// target tables are source files and are not returned.
+pub fn path_dependencies(manifest: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for l in manifest.lines() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            let name = t
+                .trim_start_matches('[')
+                .split(']')
+                .next()
+                .unwrap_or("")
+                .trim();
+            inside = name
+                .split('.')
+                .any(|seg| seg.trim().ends_with("dependencies"))
+                || name.starts_with("patch")
+                || name == "replace"
+                || name.starts_with("replace.");
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let code = t.split('#').next().unwrap_or("");
+        let b = code.as_bytes();
+        let mut i = 0;
+        while let Some(rel) = code[i..].find("path") {
+            let at = i + rel;
+            i = at + 4;
+            let before_ok = at == 0 || matches!(b[at - 1], b'{' | b',' | b' ' | b'\t');
+            let rest = code[at + 4..].trim_start();
+            if !before_ok || !rest.starts_with('=') {
+                continue;
+            }
+            let Some(v) = rest[1..].trim_start().strip_prefix('"') else {
+                continue;
+            };
+            if let Some(end) = v.find('"') {
+                out.push(v[..end].to_string());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,6 +999,29 @@ mod tests {
     }
 
     #[test]
+    fn impl_keys_lines_and_ghost_regions() {
+        assert_eq!(impl_key("c::impl&%8::assume"), "c::{impl}::assume");
+        assert_eq!(impl_key("c::{impl#1}::assume"), "c::{impl}::assume");
+        assert_eq!(impl_key("c::m::impl&%12::f"), "c::m::{impl}::f");
+        assert_eq!(impl_key("c::impl&%::f"), "c::impl&%::f");
+        assert_eq!(impl_key("c::{impl#x}::f"), "c::{impl#x}::f");
+        assert_eq!(impl_key("c::f"), "c::f");
+        assert_eq!(line_of("a\nb\nc", 0), 1);
+        assert_eq!(line_of("a\nb\nc", 4), 3);
+        let src = "fn a() {}\n#[cfg(verus_keep_ghost)]\nverus! {\nimpl X { fn f() { g(\"}\") } }\n}\n#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n#[cfg(not(verus_keep_ghost))]\nimpl X { fn f() {} }\n";
+        let r = ghost_only_regions(src);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert_eq!(
+            &src[r[0].0..r[0].1],
+            "#[cfg(verus_keep_ghost)]\nverus! {\nimpl X { fn f() { g(\"}\") } }\n}"
+        );
+        assert_eq!(
+            &src[r[1].0..r[1].1],
+            "#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;"
+        );
+    }
+
+    #[test]
     fn sidecar_round_trip_and_stamp() {
         let s = Sidecar {
             format: FORMAT,
@@ -853,8 +1034,9 @@ mod tests {
             verified: 3,
             sources: vec![("src/lib.rs".to_string(), "00".to_string())],
             fns: vec![Entry {
-                path: "c::f".to_string(),
+                path: "c::{impl}::f".to_string(),
                 file: "src/lib.rs".to_string(),
+                line: 12,
                 hash: "11".to_string(),
                 requires: true,
             }],
@@ -882,7 +1064,17 @@ mod tests {
             ..s.clone()
         };
         assert!(cheat.check_stamp(&t).is_err());
-        assert!(Sidecar::parse(&s.render().replace("format 1", "format 2")).is_err());
+        assert!(Sidecar::parse(&s.render().replace("format 2", "format 3")).is_err());
+        assert!(Sidecar::parse(&s.render().replace("src/lib.rs:12", "src/lib.rs")).is_err());
+    }
+
+    #[test]
+    fn manifest_path_dependencies() {
+        let m = "[package]\nname = \"x\"\n[lib]\npath = \"src/x.rs\"\n[[bin]]\nname = \"b\"\npath = \"src/b.rs\"\n[dependencies]\na = { path = \"../a\" }\nb = { version = \"1\", path= \"../b\" } # c = { path = \"../c\" }\nfilepath = \"1\"\n[dev-dependencies.d]\npath = \"../d\"\n[target.'cfg(unix)'.build-dependencies]\ne = {path=\"/abs/e\"}\n[workspace.dependencies]\nf = { path = \"crates/f\" }\n[patch.crates-io]\ng = { path = \"../g\" }\n[features]\npath = []\n";
+        assert_eq!(
+            path_dependencies(m),
+            vec!["../a", "../b", "../d", "/abs/e", "crates/f", "../g"]
+        );
     }
 
     #[test]
