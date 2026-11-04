@@ -18,7 +18,7 @@ a kernel.
 |---|---|---|---|---|
 | `fip-core` | yes | **no** | forbidden | `replace`, `update`, `swap`, `compact`, `dedup_by`, `compact_map`, `map_in_place` on `&mut` slots and slices; state-passing `map_in_place_st`, `compact_map_st`; `fip_core::strict::*`: the same over certified `FipFn` callables; all Verus-verified |
 | `fip-alloc` | yes | yes | forbidden | `refill`: reuse a `Box` cell instead of drop + `Box::new`; Verus-verified |
-| `fip-arch` | yes | no | 2 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
+| `fip-arch` | yes | no | 3 `asm!` hints | `ARCH`, `CACHE_LINE` (overridable), `per_cache_line`, `prefetch_read`, chosen by `cfg(target_arch)` |
 | `fip-strict` | yes | no | 3 declarations | `Cert` (named), `FipBound`, `FipFn` (with Verus `pre`/`post` specs), `Certified`: allocation certificates for strict mode; Verus-verified |
 | `fip-macros` | n/a (proc-macro) | — | forbidden | `#[fip]`, `#[fip(N)]`, `#[fbip]` lints (on a trait method declaration: a contract of every implementation, checked by `fip-prelint`); `strict = true` mode; `#[fip_trait]`; `#[fip_impl]`; `#[fip_extern]`; `#[fip_cert]`; `#[fip_exclude]`; `fip_fn!` |
 | `fip-lint-rules` | yes | no | forbidden | the rule tables shared by `fip-macros` and `fip-testkit` (allocation sites, ghost macros, audited `core` table) |

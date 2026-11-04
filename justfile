@@ -36,6 +36,8 @@ nostd:
 cross:
     cargo check -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target aarch64-unknown-linux-gnu
     cargo check -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target riscv64gc-unknown-linux-gnu
+    cargo check -p fip-arch --target riscv64gc-unknown-linux-musl
+    cargo check -p fip-arch --target riscv64gc-unknown-none-elf
     cargo check -p fip-arch --target aarch64-apple-darwin
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
@@ -303,6 +305,21 @@ verify-sidecar:
     grep -q "Verus failed: no sidecar written" "$out/ext.log"
     test ! -e "$out/ext.txt"
     echo "verify-sidecar: ok"
+
+# `fip-arch`'s unit tests on riscv64 under qemu-user, with and without Zicbop
+# (decision 2026-10-31-arch-prefetch-asm, amendment 2026-11-04). Not in `ci`: needs
+# `qemu-riscv64` and the `riscv64gc-unknown-linux-musl` target (linked by `rust-lld`).
+arch-qemu-riscv64:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker=rust-lld -C linker-flavor=ld.lld -C link-self-contained=yes -C target-feature=+crt-static"
+    for cpu in rv64,zicbop=false rv64,zicbop=true max; do
+      for profile in "" --release; do
+        QEMU_CPU="$cpu" CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER=qemu-riscv64 \
+          cargo test -q $profile -p fip-arch --lib --target riscv64gc-unknown-linux-musl --target-dir target/rv64-qemu
+      done
+    done
+    echo "arch-qemu-riscv64: ok"
 
 # CACHE_LINE override: supported values take effect, others are rejected.
 arch-override:

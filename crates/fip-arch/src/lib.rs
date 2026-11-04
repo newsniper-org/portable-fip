@@ -10,13 +10,13 @@
 //! |---|---|---|
 //! | `x86_64` | 64 | `prefetcht0` (baseline x86-64, no SSE needed) |
 //! | `aarch64` | 64 (Apple: 128) | `prfm pldl1keep` (baseline `ARMv8`-A) |
-//! | `riscv64` | 64 | no-op (`prefetch.r` needs Zicbop; not assumed) |
+//! | `riscv64` | 64 | `prefetch.r 0(rs1)` (Zicbop), emitted as its base-ISA encoding `ori x0, rs1, 1`: a HINT, a no-op on cores without Zicbop |
 //! | other | 64 | no-op |
 //!
 //! `CACHE_LINE` can be overridden per build: `RUSTFLAGS='--cfg fip_cache_line="128"'`
 //! (allowed: 32, 64, 128).
 //!
-//! `#![no_std]`, no `alloc`, no dependencies. `unsafe` is confined to the two inline
+//! `#![no_std]`, no `alloc`, no dependencies. `unsafe` is confined to the three inline
 //! `asm!` hints and justified in `docs/decisions/2026-10-31-arch-prefetch-asm.md`.
 
 #![no_std]
@@ -127,7 +127,28 @@ pub fn prefetch_read<T>(p: *const T) {
             options(nostack, preserves_flags, readonly),
         );
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(target_arch = "riscv64")]
+    // SAFETY: `ori x0, rs1, 1` is the encoding of Zicbop's `prefetch.r 0(rs1)`
+    // (`0x00156013` for `rs1 = a0`). In the base ISA, `ORI` with `rd = x0` is a HINT
+    // (RISC-V Unprivileged ISA, "HINT Instructions"): it writes no register and
+    // accesses no memory, so it is a no-op on a core without Zicbop; with Zicbop the
+    // prefetch raises no exception for any address and changes no architectural
+    // state (CMO extension, "Cache-Block Prefetch Instructions"). Written as `ori`
+    // because every RV64I assembler takes it, whatever extensions it is told about.
+    // Hence `nostack`, `preserves_flags`, `readonly`.
+    #[allow(unsafe_code)]
+    unsafe {
+        core::arch::asm!(
+            "ori x0, {0}, 1",
+            in(reg) p,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
     let _ = p;
 }
 
