@@ -176,6 +176,9 @@ pub(crate) struct StrictScan {
     /// `FipFn::call(&g, ..)`: the index of its argument group in the current list and
     /// the type of `g`, whose first argument is rewritten to `(&g as &G)`.
     pub(crate) fipfn_arg: Option<(usize, Option<Ident>)>,
+    /// Absolute roots the body uses (see [`std_roots_used`]); empty means `core`
+    /// only. Checked by [`std_roots_check`] in the emitted bound checks.
+    pub(crate) std_roots: Vec<&'static str>,
 }
 
 /// `&g, rest..` with the leading `&g` replaced by `(&g as &ty)`.
@@ -402,6 +405,179 @@ pub(crate) fn bound_names(ts: TokenStream, out: &mut Vec<String>) {
     }
 }
 
+/// Rebindings of the declared callable parameters `names` (`param(g = K)` and
+/// parameters of a contracted trait) in a strict body, as `(span, message)` errors.
+///
+/// The rewrites of `g.call(..)` to `(&g as &G).call(..)` and of `x.m(..)` to
+/// `Tr::m(x, ..)` stop a rebinding to an unrelated type, but not one to a type that
+/// derefs to the parameter's type (`let g = W(g)` with `W<G>: Deref<Target = G>`):
+/// the cast and the argument coerce through a user `deref`, which may allocate. So
+/// every binding of such a name in the body is rejected: in a `let` (also `if let`,
+/// `while let`, let-else) pattern, a `for` pattern, a `match` arm pattern, a closure
+/// parameter list and before `@`. The check is token-level and errs on the side of
+/// rejecting: a struct field pattern `S { g: x }` named like a parameter is reported
+/// too. Contents of `fip_fn!` and of the ghost macros are skipped, as the scan skips
+/// them.
+pub(crate) fn rebinding_errors(ts: TokenStream, names: &[String]) -> Vec<(Span, String)> {
+    let mut errs = Vec::new();
+    if !names.is_empty() {
+        rebind_list(&ts.into_iter().collect::<Vec<_>>(), names, &mut errs);
+    }
+    errs
+}
+
+fn rebind_message(name: &str) -> String {
+    format!(
+        "`{name}` is a declared callable parameter and cannot be rebound in the body (a `let`, `for`, `match` or closure pattern): a rebinding to a type that derefs to the parameter's type would make its calls run a user `deref`; use another name"
+    )
+}
+
+/// Every occurrence of a name of `names` in the pattern tokens `toks` (descending
+/// into groups), except a path segment (`a::g`, `g::A`).
+fn rebind_pattern(toks: &[TokenTree], names: &[String], errs: &mut Vec<(Span, String)>) {
+    for (k, t) in toks.iter().enumerate() {
+        match t {
+            TokenTree::Ident(id) => {
+                let s = id.to_string();
+                let joint_colon = |t: &TokenTree| matches!(t, TokenTree::Punct(p) if p.as_char() == ':' && p.spacing() == Spacing::Joint);
+                let path = (k > 1 && is_punct(&toks[k - 1], ':') && joint_colon(&toks[k - 2]))
+                    || toks.get(k + 1).is_some_and(joint_colon);
+                if !path && names.iter().any(|n| bare(n) == bare(&s)) {
+                    errs.push((id.span(), rebind_message(bare(&s))));
+                }
+            }
+            TokenTree::Group(g) => {
+                rebind_pattern(&g.stream().into_iter().collect::<Vec<_>>(), names, errs);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `=` that is not part of `==`, `=>`, `<=`, `>=`, `!=`, `+=`, ..: an assignment or
+/// the `=` of a `let`.
+fn lone_eq(toks: &[TokenTree], k: usize) -> bool {
+    let joint_before =
+        k > 0 && matches!(&toks[k - 1], TokenTree::Punct(p) if p.spacing() == Spacing::Joint);
+    matches!(&toks[k], TokenTree::Punct(p) if p.as_char() == '=' && p.spacing() == Spacing::Alone)
+        && !joint_before
+}
+
+/// A `|` that opens a closure parameter list: at the start of the list, or after a
+/// punctuation token or a keyword (`move`, `return`, ..), not after an operand
+/// (`a | b`, `(x) | y`, `1 | 2`).
+fn closure_bar(toks: &[TokenTree], k: usize) -> bool {
+    is_punct(&toks[k], '|')
+        && match k.checked_sub(1).map(|p| &toks[p]) {
+            None | Some(TokenTree::Punct(_)) => true,
+            Some(TokenTree::Ident(id)) => KEYWORDS.contains(&id.to_string().as_str()),
+            Some(_) => false,
+        }
+}
+
+fn rebind_list(toks: &[TokenTree], names: &[String], errs: &mut Vec<(Span, String)>) {
+    let mut i = 0;
+    while i < toks.len() {
+        let t = &toks[i];
+        if let TokenTree::Ident(id) = t {
+            let s = id.to_string();
+            if toks.get(i + 1).is_some_and(|n| is_punct(n, '!'))
+                && (s == "fip_fn" || GHOST_MACROS.contains(&s.as_str()))
+            {
+                i += 3;
+                continue;
+            }
+            if toks.get(i + 1).is_some_and(|n| is_punct(n, '@'))
+                && names.iter().any(|n| bare(n) == bare(&s))
+            {
+                errs.push((id.span(), rebind_message(bare(&s))));
+            }
+            if s == "let" {
+                // The pattern (and type) up to the `=` or the end of the statement.
+                let end = (i + 1..toks.len())
+                    .find(|&k| lone_eq(toks, k) || is_punct(&toks[k], ';'))
+                    .unwrap_or(toks.len());
+                rebind_pattern(&toks[i + 1..end], names, errs);
+                i = end;
+                continue;
+            }
+            if s == "for" {
+                let end = (i + 1..toks.len())
+                    .find(|&k| is_ident(&toks[k], "in"))
+                    .unwrap_or(toks.len());
+                rebind_pattern(&toks[i + 1..end], names, errs);
+                i = end;
+                continue;
+            }
+            if s == "match"
+                && let Some(b) = (i + 1..toks.len()).find(|&k| is_group(&toks[k], Delimiter::Brace))
+            {
+                rebind_list(&toks[i + 1..b], names, errs);
+                if let TokenTree::Group(g) = &toks[b] {
+                    rebind_arms(&g.stream().into_iter().collect::<Vec<_>>(), names, errs);
+                }
+                i = b + 1;
+                continue;
+            }
+        }
+        if closure_bar(toks, i) {
+            let end = (i + 1..toks.len())
+                .find(|&k| is_punct(&toks[k], '|'))
+                .unwrap_or(toks.len());
+            rebind_pattern(&toks[i + 1..end], names, errs);
+            i = end + 1;
+            continue;
+        }
+        if let TokenTree::Group(g) = t {
+            rebind_list(&g.stream().into_iter().collect::<Vec<_>>(), names, errs);
+        }
+        i += 1;
+    }
+}
+
+/// The arms of a `match` body: each pattern (up to its guard `if` or its `=>`) is
+/// checked as a pattern; guards and arm bodies as code.
+fn rebind_arms(toks: &[TokenTree], names: &[String], errs: &mut Vec<(Span, String)>) {
+    let mut i = 0;
+    while i < toks.len() {
+        let arrow = (i..toks.len()).find(|&k| {
+            is_punct(&toks[k], '=')
+                && matches!(&toks[k], TokenTree::Punct(p) if p.spacing() == Spacing::Joint)
+                && toks.get(k + 1).is_some_and(|n| is_punct(n, '>'))
+        });
+        let Some(arrow) = arrow else {
+            // No further arm: check the rest as a pattern (fail closed).
+            rebind_pattern(&toks[i..], names, errs);
+            return;
+        };
+        let guard = (i..arrow)
+            .find(|&k| is_ident(&toks[k], "if"))
+            .unwrap_or(arrow);
+        rebind_pattern(&toks[i..guard], names, errs);
+        rebind_list(&toks[guard..arrow], names, errs);
+        let body = arrow + 2;
+        let end = if toks
+            .get(body)
+            .is_some_and(|t| is_group(t, Delimiter::Brace))
+        {
+            body + 1
+        } else {
+            (body..toks.len())
+                .find(|&k| is_punct(&toks[k], ','))
+                .unwrap_or(toks.len())
+        };
+        rebind_list(
+            &toks[body.min(toks.len())..end.min(toks.len())],
+            names,
+            errs,
+        );
+        i = end;
+        if toks.get(i).is_some_and(|t| is_punct(t, ',')) {
+            i += 1;
+        }
+    }
+}
+
 /// Item keywords rejected in a strict body: an item or `use` inside the body can
 /// shadow the name of a certified callee for the body while the certificate is read
 /// at module level.
@@ -424,9 +600,11 @@ impl StrictScan {
     /// - a bare ghost-code macro (`proof!`, ..) is removed: its contents are not
     ///   scanned, so they must not be compiled;
     /// - `g.call(args)` / `FipFn::call(&g, args)` on a `param(g = K)` parameter become
-    ///   `<G as FipFn<_>>::call(&g, args)`, and `x.m(args)` on a parameter of a
-    ///   contracted trait `Tr` becomes `Tr::m(x, args)`: if `g` / `x` is rebound in the
-    ///   body, the call no longer type-checks instead of calling the new binding.
+    ///   `(&g as &G).call(args)` / `FipFn::call((&g as &G), args)`, and `x.m(args)` on
+    ///   a parameter of a contracted trait `Tr` becomes `Tr::m(x, args)`. These
+    ///   rewrites alone do not stop a rebinding (`let g = W(g)` with `W<G>: Deref<Target
+    ///   = G>` coerces through a user `deref`), so [`rebinding_errors`] rejects every
+    ///   rebinding of such a parameter in the body.
     pub(crate) fn stream(&mut self, ts: TokenStream, in_loop: bool) -> TokenStream {
         self.stream_list(ts, in_loop, true)
     }
@@ -897,8 +1075,9 @@ impl StrictScan {
             if !self.keep_tokens
                 && let Some(ty) = self.params[p].ty.clone()
             {
-                // `(&g as &G).call(..)`: a rebinding of `g` to another type is a type
-                // error instead of a call of its own `call`.
+                // `(&g as &G).call(..)` names `G`'s `call`. This is not what keeps a
+                // rebinding of `g` out (`let g = W(g)` with `W<G>: Deref<Target = G>`
+                // coerces through `W::deref`): `rebinding_errors` rejects those.
                 out.truncate(out.len().saturating_sub(2));
                 out.push(as_param_ref(r, &ty));
                 out.push(toks[i - 1].clone());
@@ -1686,9 +1865,23 @@ impl StrictScan {
         out
     }
 
-    /// Statements asserting the bound and the loop rule.
+    /// The roots the emitted code relies on: `::core` always, `::std` / `::alloc`
+    /// when the body names them.
+    fn roots(&self) -> &[&'static str] {
+        if self.std_roots.is_empty() {
+            &["core"]
+        } else {
+            &self.std_roots
+        }
+    }
+
+    /// Statements asserting the bound and the loop rule (and, at module level,
+    /// [`std_roots_check`]).
     fn checks(&self, tag: &str, n: u64, local: u64, with_params: bool) -> TokenStream {
         let mut body = self.trait_check_items();
+        if !with_params {
+            body.extend(std_roots_check(self.roots()));
+        }
         // `n == u64::MAX` (a `fip_fn!` closure): no total to check.
         if n < u64::MAX {
             let mut a = self.sum_expr(local);
@@ -1825,7 +2018,7 @@ impl StrictScan {
             return None;
         }
         let krate = self.krate();
-        let mut body = TokenStream::new();
+        let mut body = std_roots_check(self.roots());
         for c in &self.calls {
             let mut a = cert_read(c, &krate, "Cert::no_panic_macros_for");
             a.extend(ts(&format!(
@@ -1841,6 +2034,82 @@ impl StrictScan {
         }
         Some(body)
     }
+}
+
+/// An item that fails to compile (E0659, "`__fip_extern_crate_renames_<root>` is
+/// ambiguous") unless each of `roots` (`core`, `std`, `alloc`) names the standard
+/// crate of that name.
+///
+/// The absolute paths strict mode audits by spelling (`::core::mem::swap`), the
+/// `::core::assert!` it emits for a bare `assert!`, and the `::core::assert!` of
+/// its own bound checks all go through the extern prelude, which `extern crate X as
+/// core;` at the crate root fills with `X` (re-audit N2: cert 0, measured 1 through
+/// `X::mem::swap`; a no-op `X::assert!` would disable the bound checks). An attribute
+/// macro cannot see the crate root, so the check is a name-resolution fact instead:
+/// module `a` imports `::<root>` (the extern prelude's), module `b` declares
+/// `extern crate <root>`, which loads the crate named `<root>` (the sysroot's, not the
+/// alias), and a glob import of both is ambiguous exactly when they differ. A
+/// plain `extern crate core;` or `extern crate alloc;` passes. Not covered: a Cargo
+/// dependency renamed to `core` / `std` / `alloc` in `Cargo.toml` (`--extern core=..`
+/// changes both), a manifest-level choice outside the source.
+///
+/// Left out under Verus's driver (whose expansion is not what runs).
+pub(crate) fn std_roots_check(roots: &[&str]) -> TokenStream {
+    if under_verus() || roots.is_empty() {
+        return TokenStream::new();
+    }
+    let (mut a, mut b, mut uses) = (String::new(), String::new(), String::new());
+    for r in roots {
+        let name = format!("__fip_extern_crate_renames_{r}");
+        a.push_str("pub(super) use ::");
+        a.push_str(r);
+        a.push_str(" as ");
+        a.push_str(&name);
+        a.push_str("; ");
+        b.push_str("pub(super) extern crate ");
+        b.push_str(r);
+        b.push_str(" as ");
+        b.push_str(&name);
+        b.push_str("; ");
+        uses.push_str("use ");
+        uses.push_str(&name);
+        uses.push_str(" as _; ");
+    }
+    ts(&format!(
+        "#[doc(hidden)] #[allow(unused_imports, unused_extern_crates, clippy::all, clippy::pedantic)] \
+         const _: () = {{ mod __fip_root_prelude {{ {a}}} mod __fip_root_crate {{ {b}}} \
+         use __fip_root_prelude::*; use __fip_root_crate::*; {uses}}};"
+    ))
+}
+
+/// The roots of absolute paths `::std::..` / `::alloc::..` in `ts` (descending into
+/// groups), with `core` always first: every strict expansion uses `::core`.
+pub(crate) fn std_roots_used(ts: TokenStream) -> Vec<&'static str> {
+    fn walk(ts: TokenStream, out: &mut Vec<&'static str>) {
+        let toks: Vec<TokenTree> = ts.into_iter().collect();
+        for (k, t) in toks.iter().enumerate() {
+            if let TokenTree::Group(g) = t {
+                walk(g.stream(), out);
+                continue;
+            }
+            // `::root` at the start of a path: not after `a::`, `<T>::` or `(..)::`.
+            let after_segment = k >= 3
+                && (matches!(&toks[k - 3], TokenTree::Ident(_) | TokenTree::Group(_))
+                    || is_punct(&toks[k - 3], '>'));
+            let leading = k >= 2
+                && is_punct(&toks[k - 1], ':')
+                && is_punct(&toks[k - 2], ':')
+                && !after_segment;
+            for root in ["std", "alloc"] {
+                if leading && is_ident(t, root) && !out.contains(&root) {
+                    out.push(root);
+                }
+            }
+        }
+    }
+    let mut out = vec!["core"];
+    walk(ts, &mut out);
+    out
 }
 
 /// `true` when the expanding compiler is Verus's driver: proc macros run in the

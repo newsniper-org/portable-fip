@@ -338,7 +338,7 @@ without `unsafe` (probes and measured counts in the commit messages):
 | `core::mem::swap` with a local `mod core` | cert 0, 1 allocation | table functions only by absolute `::core::` / `::std::` path |
 | local `macro_rules! assert`, `my::assert!`, a `proof!` that keeps its contents (strict and `#[fip]`) | cert 0, 1-2 allocations | bare panicking macros are emitted as `::core::assert!` etc.; a path must be `::core::` / `::std::`; a bare ghost macro is emitted as `const { proof! {} };` (contents dropped, the macro still used, no run-time code) |
 | `vec![e; n]`, `format!` | cert 1, 10 / 51 allocations | rejected; `vec![a, b]` only as `::std::vec!` / `::alloc::vec!` |
-| `param(g)` or contract parameter rebound (`let g = Evil; g.call(..)`) | cert 0, 1 allocation | emitted as `(&g as &G).call(..)` / `Tr::m(x, ..)`: a type error |
+| `param(g)` or contract parameter rebound (`let g = Evil; g.call(..)`) | cert 0, 1 allocation | emitted as `(&g as &G).call(..)` / `Tr::m(x, ..)`: a type error; every rebinding rejected since the re-audit (below) |
 | a local binding, nested `fn` or block-level `use` named like a strict function | cert 0, 1 allocation | bare calls of locally bound names and items in strict bodies are rejected |
 | `for i in { 0..n } { .. }`, `while { c } { .. }`, allocation in a `while` condition (strict and `#[fip(N)]`) | body taken as outside the loop: 50 allocations at bound 1 | header parsed as an expression without struct literals; the `while` header and every closure body count as in the loop |
 | `for x in user_iterator` | cert 0, 6 allocations in `next` | a strict `for` iterates over a range only |
@@ -351,6 +351,27 @@ without `unsafe` (probes and measured counts in the commit messages):
 segment). Measured cost: valid code changes only for `core` table calls (relative
 paths: 6 in `fip-core`/`fip-alloc`, 18 in tests, all rewritten), `vec!` spellings,
 and `self.m()` in trait impls.
+
+### Re-audit 2026-11-04 (N1, N2)
+
+| gap | before | now |
+|---|---|---|
+| N1: `param(g)` rebound to a wrapper whose `Deref` allocates (`let g = W(g); g.call(..)`, also `FipFn::call(&g, ..)`, a `match` arm, `if let`, a closure parameter, `g @ ..`) | cert 0, 1 allocation: `(&g as &G)` and the call's argument coerce through `W::deref` | every binding of a `param(..)` name or a contract-typed parameter in the body is rejected ("is a declared callable parameter and cannot be rebound"); token-level, so a struct field pattern `S { g: x }` named like the parameter is rejected too |
+| N2: `extern crate X as core;` / `as std;` at the crate root (also renames the `::core::assert!` strict mode emits and its own bound checks) | cert 0, 1 allocation through `X::mem::swap` | every strict expansion, `#[fip_impl]` on a trait impl and `fip_fn!(prelint, ..)` emit an item that fails with E0659 "`__fip_extern_crate_renames_core` is ambiguous" unless `::core` (and `::std` / `::alloc` where the body names them) is the crate of that name: a glob import of `use ::core as ..` (the extern prelude) and of `extern crate core as ..` (loads the crate named `core`) is ambiguous exactly when they differ |
+
+The N2 check is a name-resolution fact, not a read of the crate root: an attribute
+macro is not told which file is the crate root, and a source scan would miss
+`#[path]` / `include!` roots. A plain `extern crate core;` / `extern crate alloc;`
+passes. `fip_testkit::summaries` reads `::core::..` from the table only if the unit has
+no `extern crate X as core|std|alloc` (else unresolved, `⊤`), and
+`fip_testkit::certs::hand_written` lists such an alias.
+
+Trust boundary: a Cargo dependency renamed to `core`, `std` or `alloc` in
+`Cargo.toml` (`core = { package = "x", .. }`) passes `--extern core=..` to rustc,
+which changes the extern prelude and `extern crate core` alike (measured: cargo
+accepts it). The check cannot see it; a review of the manifest's dependency names
+must. Edition 2015 is not supported by strict mode (the emitted `::core::assert!`
+already fails there: "cannot find `core` in the crate root", measured).
 
 ## What strict does not cover
 

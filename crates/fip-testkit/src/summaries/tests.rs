@@ -735,3 +735,40 @@ fn std_table_needs_absolute_paths() {
         assert_eq!(summary_of(&r, "a"), "0", "{src}");
     }
 }
+
+/// `extern crate X as core;` (or `as std`) puts `X` in the extern
+/// prelude under that name, so the absolute `::core::..` names `X`: such a path is
+/// not read from the audited table (re-audit N2: before, summarised 0 while
+/// `X::mem::swap` allocates).
+#[test]
+fn extern_crate_alias_disables_the_std_table() {
+    for (root, src) in [
+        (
+            "core",
+            "extern crate evil as core;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { ::core::mem::swap(x, y) }\n",
+        ),
+        (
+            "std",
+            "extern crate evil as std;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { ::std::mem::swap(x, y) }\n",
+        ),
+        (
+            "core",
+            "extern crate evil as core;\nuse ::core::mem::swap;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { swap(x, y) }\n",
+        ),
+        // In a nested module (it renames `::core` only at the crate root in edition
+        // 2018+; read conservatively in every module).
+        (
+            "core",
+            "mod m { extern crate evil as core; }\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { ::core::mem::swap(x, y) }\n",
+        ),
+    ] {
+        let r = report(src);
+        assert!(!r.violations.is_empty(), "{root}: {src}\n{r:?}");
+    }
+    // A plain `extern crate core;` (no rename) keeps the table.
+    let r = report(
+        "extern crate core;\n#[fip]\nfn a(x: &mut u8, y: &mut u8) { ::core::mem::swap(x, y) }\n",
+    );
+    assert_eq!(r.violations, Vec::new());
+    assert_eq!(summary_of(&r, "a"), "0");
+}

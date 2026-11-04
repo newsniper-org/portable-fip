@@ -1229,7 +1229,7 @@
 //! a `param(..)` parameter rebound in the body (before: bound 0, measured 1
 //! allocation through `Evil::call`):
 //! ```compile_fail
-//! # // expect: non-primitive cast
+//! # // expect: `g` is a declared callable parameter and cannot be rebound
 //! use fip_strict::FipFn;
 //! struct Evil;
 //! impl Evil { fn call(&self, _: (u8,)) -> u8 { let _b = Box::new(1_u8); 1 } }
@@ -1237,9 +1237,51 @@
 //! fn f<F: FipFn<(u8,), Output = u8>>(g: F) -> u8 { let _ = g; let g = Evil; g.call((1,)) }
 //! # fn main() {}
 //! ```
+//! a `param(..)` parameter rebound to a wrapper whose `Deref` allocates (before:
+//! `(&g as &G)` coerced through `W::deref`, bound 0, measured 1 allocation):
+//! ```compile_fail
+//! # // expect: `g` is a declared callable parameter and cannot be rebound
+//! use fip_strict::FipFn;
+//! struct W<G>(G);
+//! impl<G> ::core::ops::Deref for W<G> {
+//!     type Target = G;
+//!     fn deref(&self) -> &G { let _b = Box::new(1_u64); &self.0 }
+//! }
+//! #[fip_macros::fip(strict = true, param(g = 0))]
+//! fn f<G: FipFn<(u8,), Output = u8>>(g: G) -> u8 { let g = W(g); g.call((1,)) }
+//! # fn main() {}
+//! ```
+//! the same through a `match` arm, a closure parameter or `if let`:
+//! ```compile_fail
+//! # // expect: `g` is a declared callable parameter and cannot be rebound
+//! use fip_strict::FipFn;
+//! struct W<G>(G);
+//! impl<G> ::core::ops::Deref for W<G> { type Target = G; fn deref(&self) -> &G { &self.0 } }
+//! #[fip_macros::fip(strict = true, param(g = 0))]
+//! fn f<G: FipFn<(u8,), Output = u8>>(g: G) -> u8 { match W(g) { g => g.call((1,)) } }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: `g` is a declared callable parameter and cannot be rebound
+//! use fip_strict::FipFn;
+//! #[fip_macros::fip(strict = true, param(g = 0))]
+//! fn f<G: FipFn<(u8,), Output = u8>>(g: G) -> u8 { let _h = |g: u8| g; g.call((1,)) }
+//! # fn main() {}
+//! ```
+//! ```compile_fail
+//! # // expect: `g` is a declared callable parameter and cannot be rebound
+//! use fip_strict::FipFn;
+//! struct W<G>(G);
+//! impl<G> ::core::ops::Deref for W<G> { type Target = G; fn deref(&self) -> &G { &self.0 } }
+//! #[fip_macros::fip(strict = true, param(g = 0))]
+//! fn f<G: FipFn<(u8,), Output = u8>>(g: G) -> u8 {
+//!     if let Some(g) = Some(W(g)) { g.call((1,)) } else { 0 }
+//! }
+//! # fn main() {}
+//! ```
 //! a contract-typed parameter rebound in the body:
 //! ```compile_fail
-//! # // expect: mismatched types
+//! # // expect: `x` is a declared callable parameter and cannot be rebound
 //! /// # Safety
 //! /// Implementations keep the contract.
 //! #[fip_macros::fip_trait]
@@ -3167,6 +3209,7 @@ fn run_strict_scan(
         ffi: args.ffi.clone(),
         ffi_used: vec![false; args.ffi.len()],
         keep_tokens: strict::under_verus(),
+        std_roots: strict::std_roots_used(body.stream()),
         ..strict::StrictScan::default()
     };
     let types = param_types(shape.params.as_ref());
@@ -3191,6 +3234,10 @@ fn run_strict_scan(
             bound: Some(*k),
         });
     }
+    let mut callable: Vec<String> = args.params.iter().map(|(n, _, _)| n.clone()).collect();
+    callable.extend(ss.param_traits.iter().map(|(n, _)| n.clone()));
+    ss.errors
+        .extend(strict::rebinding_errors(body.stream(), &callable));
     let emitted = ss.stream(body.stream(), false);
     ss.check_params();
     for (m, used) in ss.ffi.iter().zip(&ss.ffi_used) {
@@ -4591,6 +4638,8 @@ fn rewrite_impl_body(
         }
     }
     if let Some(t) = &ctx.trait_name {
+        // The contract comparisons below are `::core::assert!`s.
+        module_items.extend(strict::std_roots_check(&["core"]));
         let krate_path = first_krate
             .or_else(|| krate.cloned())
             .unwrap_or_else(strict::default_krate);
@@ -4861,6 +4910,7 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         no_panic_macros: no_panic,
         shadowed,
         keep_tokens: strict::under_verus(),
+        std_roots: strict::std_roots_used(body.clone()),
         ..strict::StrictScan::default()
     };
     let emitted = strict_scan.stream_expr(body);
@@ -5290,13 +5340,19 @@ fn prelint_check_generics(types: &[TokenStream], ret: Option<&[TokenTree]>) -> S
 
 /// `#[cfg(not(fip_prelint))] ::core::compile_error!(..);`: a driver-mode expansion
 /// compiled without the driver's cfg (only the environment variables forged) fails.
+/// With [`strict::std_roots_check`]: a `::core` renamed by `extern crate X as core;`
+/// could make `compile_error!` a no-op.
 fn compile_error_cfg_guard() -> TokenStream {
-    format!(
-        "#[cfg(not(fip_prelint))] ::core::compile_error!({:?});",
-        "fip_fn!(prelint, ..): `cfg(fip_prelint)` is not set, so this is not the `fip-prelint` driver; build with `cargo fip-prelint`"
-    )
-    .parse()
-    .unwrap_or_default()
+    let mut out = strict::std_roots_check(&["core"]);
+    out.extend(
+        format!(
+            "#[cfg(not(fip_prelint))] ::core::compile_error!({:?});",
+            "fip_fn!(prelint, ..): `cfg(fip_prelint)` is not set, so this is not the `fip-prelint` driver; build with `cargo fip-prelint`"
+        )
+        .parse::<TokenStream>()
+        .unwrap_or_default(),
+    );
+    out
 }
 
 /// `true` if `toks` looks like the path of a function: identifiers, `::`, `<..>`

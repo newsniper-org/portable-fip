@@ -15,7 +15,10 @@
 //!   its `unsafe extern` block is the visible `unsafe`);
 //! - a macro that strict mode trusts by name: `macro_rules! fip_fn` or a `use .. as
 //!   fip_fn` (strict bodies skip the arguments of `fip_fn!`, which `fip_fn!` checks
-//!   itself).
+//!   itself);
+//! - `extern crate X as core;` / `as std;` / `as alloc;`: it renames the absolute
+//!   `::core` / `::std` / `::alloc` paths that strict mode audits by spelling (strict
+//!   macro output also fails to compile in such a crate, see `fip_macros`).
 //!
 //! Not listed: an `unsafe impl` of a trait with strict contracts (`#[fip_trait]`
 //! requires an `unsafe trait`); it is visible as `unsafe impl` in review.
@@ -48,13 +51,29 @@ pub fn hand_written(dir: &Path) -> Vec<Occurrence> {
                 || code.contains("fip_cert(")
                 || (code.contains("evidence") && (code.contains("fip(") || code.contains("fbip(")))
                 || code.contains("macro_rules! fip_fn")
-                || code.contains("as fip_fn");
+                || code.contains("as fip_fn")
+                || renames_std_root(code);
             if hit {
                 out.push((f.clone(), n + 1, line.trim().to_string()));
             }
         }
     }
     out
+}
+
+/// `extern crate X as core|std|alloc` with `X` another crate.
+fn renames_std_root(code: &str) -> bool {
+    let words: Vec<&str> = code
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.windows(5).any(|w| {
+        w[0] == "extern"
+            && w[1] == "crate"
+            && w[3] == "as"
+            && matches!(w[4], "core" | "std" | "alloc")
+            && w[2] != w[4]
+    })
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -86,12 +105,16 @@ mod tests {
              #[fip_cert(evidence = \"C standard\", allocs = 0)]\n\
              #[fip(evidence = \"audit\")]\n\
              macro_rules! fip_fn { () => {} }\n\
-             use m::f as fip_fn;\n",
+             use m::f as fip_fn;\n\
+             extern crate core;\n\
+             extern crate evil as core;\n\
+             extern crate evil as std;\n\
+             pub extern crate evil as alloc;\n",
         )
         .expect("write");
         let found = hand_written(&dir);
         fs::remove_dir_all(&dir).expect("cleanup");
         let lines: Vec<usize> = found.iter().map(|o| o.1).collect();
-        assert_eq!(lines, vec![2, 3, 4, 6, 7, 8, 9]);
+        assert_eq!(lines, vec![2, 3, 4, 6, 7, 8, 9, 11, 12, 13]);
     }
 }

@@ -38,7 +38,9 @@
 //! - calls of closures bound to a local: the closure body's summary;
 //! - `core`/`std` functions of the audited `CORE_TABLE`, named by an absolute path
 //!   (`::core::mem::swap`, also through `use ::core::..`; a bare `core::..` may be a
-//!   local module, so it is resolved locally or is `⊤`), and explicit drops: 0;
+//!   local module, so it is resolved locally or is `⊤`; in a crate with `extern crate
+//!   X as core;` / `as std;` / `as alloc;` the absolute path names `X`: unresolved,
+//!   `⊤`), and explicit drops: 0;
 //!   capitalised names that are not defined functions (tuple structs, enum
 //!   variants): 0; any other external path, a name that matches scanned functions
 //!   only by name, a call through an expression or a non-closure local, `?`, or a

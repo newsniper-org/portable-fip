@@ -490,6 +490,9 @@ pub(crate) struct Program {
     globs: BTreeMap<(usize, Vec<String>), Vec<Vec<String>>>,
     /// Module-level `type` aliases per (unit, module): name and aliased path.
     type_aliases: Uses,
+    /// `(unit, root)` for every `extern crate X as core|std|alloc;` in the unit: it
+    /// puts `X` in the extern prelude under that name, so `::core::..` names `X`.
+    aliased_roots: BTreeSet<(usize, String)>,
     by_module: BTreeMap<(usize, Vec<String>, String), Vec<usize>>,
     by_owner: BTreeMap<(usize, String, String), Vec<usize>>,
     owned: BTreeMap<String, Vec<usize>>,
@@ -546,6 +549,14 @@ pub(crate) fn build(groups: &[Group], multi: bool) -> Program {
         };
         b.items(t, 0, t.len(), &sc);
     }
+    let mut aliased_roots = BTreeSet::new();
+    for (f, t) in toks.iter().enumerate() {
+        if let Some(unit) = tree.unit_of.get(f).copied().flatten() {
+            for root in extern_crate_aliases(t) {
+                aliased_roots.insert((unit, root));
+            }
+        }
+    }
     let unit_group: Vec<usize> = tree.units.iter().map(|u| u.0).collect();
     let primary = (0..groups.len())
         .map(|g| primary_unit(&fl, &tree, g))
@@ -577,6 +588,7 @@ pub(crate) fn build(groups: &[Group], multi: bool) -> Program {
         uses: b.uses,
         globs: b.globs,
         type_aliases: b.type_aliases,
+        aliased_roots,
         by_module: BTreeMap::new(),
         by_owner: BTreeMap::new(),
         owned: BTreeMap::new(),
@@ -588,6 +600,25 @@ pub(crate) fn build(groups: &[Group], multi: bool) -> Program {
     p.resolve_all();
     p.displays(multi);
     p
+}
+
+/// The roots `core` / `std` / `alloc` that `extern crate X as root;` in `t` (any
+/// module, any edition) renames to another crate `X`.
+fn extern_crate_aliases(t: &[Tok]) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..t.len() {
+        if is_id(t, i, "extern")
+            && is_id(t, i + 1, "crate")
+            && let Some(krate) = id(t, i + 2)
+            && is_id(t, i + 3, "as")
+            && let Some(root) = id(t, i + 4)
+            && matches!(root, "core" | "std" | "alloc")
+            && krate != root
+        {
+            out.push(root.to_string());
+        }
+    }
+    out
 }
 
 /// `lib.rs` unit of group `g`, else `main.rs`, else its only unit.
@@ -829,6 +860,14 @@ impl Program {
             // Only an absolute `::core::..` (marked by the parser) names the standard
             // library: a bare `core::..` may be a local module or a `use .. as core`,
             // so it resolves like any relative path (`⊤` when it names nothing local).
+            // `extern crate X as core;` makes `::core::..` name `X`: not audited.
+            "::core" | "::std" | "::alloc"
+                if self
+                    .aliased_roots
+                    .contains(&(cx.unit, first[2..].to_string())) =>
+            {
+                Res::Unresolved
+            }
             "::core" | "::std" | "::alloc" => {
                 let first = &first[2..];
                 let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
