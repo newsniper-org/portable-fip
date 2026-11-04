@@ -419,9 +419,18 @@ fn split_top(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0_i32;
     let mut in_str = false;
+    let mut escaped = false;
     let mut cur = String::new();
     for c in s.chars() {
+        // Inside a string literal, `\` escapes the next character (`\"` does not end
+        // it), so a comma in `evidence = "a \"b, c\" d"` stays in the value.
+        if in_str && escaped {
+            escaped = false;
+            cur.push(c);
+            continue;
+        }
         match c {
+            '\\' if in_str => escaped = true,
             '"' => in_str = !in_str,
             '(' if !in_str => depth += 1,
             ')' if !in_str => depth -= 1,
@@ -529,6 +538,16 @@ mod tests {
         assert!(parse_stack_leaf(Some("evidence = \"x\"")).is_err());
         assert!(parse_stack_leaf(Some("memcpy = 1, memcpy = 2, evidence = \"x\"")).is_err());
         assert!(parse_stack_leaf(Some("memcpy = big, evidence = \"x\"")).is_err());
+    }
+
+    #[test]
+    fn escaped_quotes_and_commas_stay_in_a_string() {
+        let c = parse_ffi_cert(Some(r#"kind = "fip", n = 0, evidence = "a \"b, c\" d""#)).unwrap();
+        assert_eq!(c.evidence, r#"a \"b, c\" d"#);
+        assert_eq!(
+            split_top(r#"a = "x\\", b = 1"#),
+            vec![r#"a = "x\\""#.to_string(), "b = 1".to_string()]
+        );
     }
 
     #[test]
