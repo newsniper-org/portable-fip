@@ -554,7 +554,7 @@ fn slice_qualified(toks: &[TokenTree], i: usize) -> bool {
 }
 
 /// How the callee at `toks[i]` is named: `a::b::f` (path tokens before it, with a
-/// leading `::` if any), or `<Ty as Tr>::f`.
+/// leading `::` if any), or `<Ty as Tr>::f`; `a::Ty::<..>::f` is `<a::Ty<..>>::f`.
 fn callee_path(toks: &[TokenTree], i: usize) -> Result<Callee, (Span, String)> {
     let mut start = i;
     loop {
@@ -604,10 +604,14 @@ fn qualified(toks: &[TokenTree], gt: usize) -> Result<Callee, (Span, String)> {
     };
     if lt > 0 {
         let prev = &toks[lt - 1];
+        if is_punct(prev, ':') && lt >= 2 && is_punct(&toks[lt - 2], ':') {
+            // `a::Type::<..>::m`: the generic arguments of the type, as in
+            // `<a::Type<..>>::m`.
+            return turbofish_type(toks, lt - 2, gt_span);
+        }
         let path_like = is_punct(prev, ':')
             || matches!(prev, TokenTree::Ident(id) if !KEYWORDS.contains(&id.to_string().as_str()));
         if path_like {
-            // `Foo::<u8>::f`: generic arguments inside a path.
             return Err((gt_span, GENERIC_PATH.to_string()));
         }
     }
@@ -667,6 +671,41 @@ fn qualified(toks: &[TokenTree], gt: usize) -> Result<Callee, (Span, String)> {
     Ok(Callee::Qualified {
         ty: ty_part[..path_end].to_vec(),
         tr,
+    })
+}
+
+/// `a::Type::<..>::m` with the `::` before `<` starting at `toks[colon]`: the type
+/// path `a::Type` (identifiers and `::`, optionally a leading `::`), as the type of
+/// `<a::Type<..>>::m`. Generic arguments on an earlier segment are rejected.
+fn turbofish_type(
+    toks: &[TokenTree],
+    colon: usize,
+    gt_span: Span,
+) -> Result<Callee, (Span, String)> {
+    let mut start = colon;
+    loop {
+        if !(start >= 1 && matches!(toks[start - 1], TokenTree::Ident(_))) {
+            return Err((gt_span, GENERIC_PATH.to_string()));
+        }
+        start -= 1;
+        if start >= 2 && is_punct(&toks[start - 1], ':') && is_punct(&toks[start - 2], ':') {
+            match toks.get(start.wrapping_sub(3)) {
+                Some(TokenTree::Ident(_)) if start >= 3 => start -= 2,
+                Some(t) if start >= 3 && is_punct(t, '>') => {
+                    return Err((t.span(), GENERIC_PATH.to_string()));
+                }
+                _ => {
+                    start -= 2;
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(Callee::Qualified {
+        ty: toks[start..colon].to_vec(),
+        tr: None,
     })
 }
 

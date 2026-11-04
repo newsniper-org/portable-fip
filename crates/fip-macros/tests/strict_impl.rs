@@ -130,6 +130,13 @@ fn box_it(s: Slot<u16>) -> Box<u16> {
     <shapes::Slot<u16>>::boxed(s)
 }
 
+/// `Type::<..>::m` is `<Type<..>>::m` (before: "generic arguments in a callee path
+/// cannot be resolved").
+#[fip(1, strict = true)]
+fn box_it_turbofish(s: Slot<u16>) -> Box<u16> {
+    shapes::Slot::<u16>::boxed(s)
+}
+
 /// Trait method through `<Type as Trait>::m`, inherent one through `Type::m`.
 #[fip(strict = true)]
 fn both_steps(t: &mut Ticker) -> (u32, u32) {
@@ -163,6 +170,7 @@ fn generic_and_trait_methods_are_callable_from_strict_code() {
     assert_eq!(assert_fip!(s.put_twice(3, 4)), 3);
     assert_eq!(*s.peek(), 4);
     assert_eq!(*assert_fip_n!(1, box_it(Slot { v: 9 })), 9);
+    assert_eq!(*assert_fip_n!(1, box_it_turbofish(Slot { v: 10 })), 10);
     let mut t = Ticker { n: 5 };
     assert_eq!(assert_fip!(both_steps(&mut t)), (5, 16));
     assert_eq!(assert_fip!(t.trait_step()), 16);

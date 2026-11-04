@@ -693,6 +693,7 @@ impl<'p> Analysis<'p> {
     fn arg_sum(&self, f: usize, a: &Arg) -> Sum {
         match a {
             Arg::Closure(c) => self.sums[*c].clone(),
+            Arg::Known(k) => Sum::konst(Bound::Finite(*k)),
             Arg::Param(p) if self.is_callable(f, p) => Sum::term(p),
             Arg::Named {
                 res: Res::Fns(v), ..
@@ -1068,6 +1069,10 @@ impl<'p> Analysis<'p> {
                 Some(Arg::Closure(c)) => Bind {
                     sum: Self::conc(&self.sums[*c], env),
                     src: Src::Closure(*c, env.clone()),
+                },
+                Some(Arg::Known(k)) => Bind {
+                    sum: Sum::konst(Bound::Finite(*k)),
+                    src: Src::None,
                 },
                 Some(Arg::Param(q)) => env.get(q).cloned().unwrap_or_else(|| Bind {
                     sum: Sum::term(q),

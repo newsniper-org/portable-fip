@@ -63,7 +63,7 @@ recursion through strict functions is rejected as a cycle in constant evaluation
 Higher-order functions take `fip_strict::FipFn` parameters with declared bounds
 (`param(g = K)`); arguments are certified closures from `fip_fn!(|x: T| ..)`, or
 functions with a certificate from `fip_fn!(f)` (also `a::f`, `f::<T>`,
-`<Type<..>>::m`, `<Type as Trait>::m`): the bound is the function's own certificate,
+`<Type<..>>::m`, `Type::<..>::m`, `<Type as Trait>::m`): the bound is the function's own certificate,
 no `unsafe` is written, and strict bodies may use it. With an expected type
 `Certified<N, fn(..) -> ..>` the value is a certified function pointer.
 `fip_fn!(bound <= K, ..)` fails to compile (also under `cargo check`) when the

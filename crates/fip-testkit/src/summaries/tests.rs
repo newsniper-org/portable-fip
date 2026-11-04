@@ -328,6 +328,38 @@ fn fip_fn_with_panic_strictness_is_a_closure_or_the_named_function() {
     );
 }
 
+/// Qualified method paths used as values (`<W<T>>::m`, `W::<T>::m`, `<W<T> as Tr>::m`)
+/// are the method of that type, like `W::m`; std constructors used as values are a
+/// known bound (`Box::new` 1, `Vec::new` 0). Before: all `Unknown` (`⊤`).
+#[test]
+fn qualified_methods_and_std_constructors_as_values() {
+    let src = "#[fip(1, strict = true, param(make = 1))]\nfn make_once<F>(make: F, x: u32) -> Box<u32>\nwhere\n    F: FipFn<(u32,), Output = Box<u32>>,\n{\n    FipFn::call(&make, (x,))\n}\nstruct W<T>(T);\ntrait Tr { fn one(x: u32) -> Box<u32>; }\nimpl<T> W<T> {\n    #[fip(2, strict = true)]\n    fn two(x: u32) -> Box<u32> { let _y = Box::new(x); Box::new(x) }\n}\nimpl<T> Tr for W<T> {\n    fn one(x: u32) -> Box<u32> { Box::new(x) }\n}\nfn user() {\n    let _a = make_once(fip_fn!(<W<u8>>::two), 1);\n    let _b = make_once(fip_fn!(W::<u8>::two), 2);\n    let _c = make_once(fip_fn!(<W<u8> as Tr>::one), 3);\n    let _d = make_once(fip_fn!(Box::new), 4);\n    let _e = make_once(<W<u8> as Tr>::one, 5);\n}\n";
+    let r = report(src);
+    let exceeds = |line: u32, bound: Bound| ViolationKind::ArgumentExceedsDeclared {
+        caller: "user".to_string(),
+        param: "make".to_string(),
+        declared: 1,
+        bound,
+        at: format!("x.rs:{line}"),
+    };
+    assert_eq!(
+        kinds(&r),
+        vec![exceeds(18, Bound::Finite(2)), exceeds(19, Bound::Finite(2))]
+    );
+    let src0 = "#[fip(strict = true, param(make = 0))]\nfn make_none<F>(make: F) -> Vec<u8>\nwhere\n    F: FipFn<(), Output = Vec<u8>>,\n{\n    FipFn::call(&make, ())\n}\n#[fip(strict = true, param(make = 0))]\nfn box_none<F>(make: F) -> Box<u8>\nwhere\n    F: FipFn<(u8,), Output = Box<u8>>,\n{\n    FipFn::call(&make, (1,))\n}\nfn user() {\n    let _v = make_none(fip_fn!(Vec::new));\n    let _b = box_none(fip_fn!(Box::new));\n}\n";
+    let r = report(src0);
+    assert_eq!(
+        kinds(&r),
+        vec![ViolationKind::ArgumentExceedsDeclared {
+            caller: "user".to_string(),
+            param: "make".to_string(),
+            declared: 0,
+            bound: Bound::Finite(1),
+            at: "x.rs:17".to_string()
+        }]
+    );
+}
+
 #[test]
 fn non_allocating_constructors_are_not_sites() {
     let r = report(

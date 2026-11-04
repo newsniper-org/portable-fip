@@ -1355,18 +1355,41 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// Classifies a call argument `t[x..b]` (after `&`, `mut`, `*`).
+/// Classifies a call argument `t[x..b]` (after `&`, `mut`, `*`): a std constructor
+/// used as a value (`Box::new`, `Vec::new`, `<Box<u8>>::new`: one call allocates once,
+/// or not at all for an audited non-allocating one; an allocating one also stays an
+/// allocation site of the body passing it, as for `#[fip]`'s token rule, which
+/// over-counts but never under-counts), a qualified method path
+/// (`<Type>::m`, `<Type<..>>::m`, `<Type as Tr>::m`, `Type::<..>::m`: the method `m`
+/// of `Type`, as `Type::m`), or a plain path.
 fn classify_path(t: &[Tok], x: usize, b: usize, cx: &FnCtx) -> Arg {
+    if x < b && (id(t, x).is_some() || is_p(t, x, '<') || sep(t, x)) {
+        match classify_callee(&t[x..b]) {
+            Callee::Alloc { method: false, .. } => return Arg::Known(1),
+            Callee::NonAllocating { .. } => return Arg::Known(0),
+            Callee::Alloc { method: true, .. } | Callee::Inferred { .. } => return Arg::Other,
+            Callee::Other => {}
+        }
+    }
+    if is_p(t, x, '<') {
+        return qualified_value(t, x, b);
+    }
     let mut segs = Vec::new();
     let mut q = x;
     while q < b
         && let Some(s) = id(t, q)
     {
         segs.push(s.to_string());
-        if q + 2 < b && sep(t, q + 1) {
-            q += 3;
+        // A turbofish after a segment (`Type::<T>::m`, `f::<T>`): the generic
+        // arguments do not change which item the path names.
+        let mut after = q + 1;
+        if after + 2 < b && sep(t, after) && is_p(t, after + 2, '<') {
+            after = angle_end(t, after + 2, b);
+        }
+        if after + 2 < b && sep(t, after) {
+            q = after + 2;
         } else {
-            q += 1;
+            q = after;
             break;
         }
     }
@@ -1391,6 +1414,56 @@ fn classify_path(t: &[Tok], x: usize, b: usize, cx: &FnCtx) -> Arg {
     Arg::Named {
         segs,
         name,
+        res: Res::Pending,
+    }
+}
+
+/// `<Type>::m` / `<a::Type<..>>::m` / `<Type<..> as Tr>::m` (optionally with a
+/// trailing turbofish) in `t[x..b]`, `t[x]` being `<`: the method `m` of `Type`,
+/// named as `a::Type::m`. A self type that is not a path (`[T]`, `&T`, a tuple) is
+/// [`Arg::Other`].
+fn qualified_value(t: &[Tok], x: usize, b: usize) -> Arg {
+    let close = angle_end(t, x, b);
+    if !(close < b && sep(t, close)) {
+        return Arg::Other;
+    }
+    let Some(name) = id(t, close + 2) else {
+        return Arg::Other;
+    };
+    let mut end = close + 3;
+    if end + 2 < b && sep(t, end) && is_p(t, end + 2, '<') {
+        end = angle_end(t, end + 2, b);
+    }
+    if end != b {
+        return Arg::Other;
+    }
+    let mut segs = Vec::new();
+    let mut q = x + 1;
+    if sep(t, q) {
+        q += 2;
+    }
+    while let Some(s) = id(t, q) {
+        if s == "as" {
+            break;
+        }
+        segs.push(s.to_string());
+        q += 1;
+        if sep(t, q) && id(t, q + 2).is_some() {
+            q += 2;
+        } else {
+            break;
+        }
+    }
+    if is_p(t, q, '<') {
+        q = angle_end(t, q, close);
+    }
+    let as_trait = is_id(t, q, "as");
+    if segs.is_empty() || !(q == close - 1 || as_trait) {
+        return Arg::Other;
+    }
+    Arg::Named {
+        segs,
+        name: name.to_string(),
         res: Res::Pending,
     }
 }

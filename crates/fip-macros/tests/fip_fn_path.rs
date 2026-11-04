@@ -132,6 +132,13 @@ fn generic_and_associated_functions() {
     assert_eq!(*q.call((Slot { v: 6_u32 },)), 6);
     let t = fip_fn!(<Ticker as Step>::step);
     assert_eq!(t.call((&Ticker, 1)), 2);
+    // `Type::<T>::m` is `<Type<T>>::m` (also with a module path).
+    let turbo = fip_fn!(Slot::<u32>::boxed);
+    assert_eq!(bound(&turbo), 1);
+    assert_eq!(*turbo.call((Slot { v: 7_u32 },)), 7);
+    let module_turbo = fip_fn!(shapes::Slot::<u8>::get);
+    assert_eq!(bound(&module_turbo), 0);
+    assert_eq!(module_turbo.call((Slot { v: 8_u8 },)), 8);
 }
 
 #[test]

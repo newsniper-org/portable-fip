@@ -956,19 +956,6 @@
 //! fn f(x: u8) -> u8 { assert!(x > 0); x - 1 }
 //! # fn main() {}
 //! ```
-//! generic arguments in a callee path:
-//! ```compile_fail
-//! # // expect: generic arguments in a callee path cannot be resolved
-//! pub struct W<T>(T);
-//! #[fip_macros::fip_impl]
-//! impl<T> W<T> {
-//!     #[fip_macros::fip(strict = true)]
-//!     pub fn get(w: W<T>) -> T { w.0 }
-//! }
-//! #[fip_macros::fip(strict = true)]
-//! fn f(w: W<u8>) -> u8 { W::<u8>::get(w) }
-//! # fn main() {}
-//! ```
 //!
 //! Methods (`#[fip_impl]`, see [`macro@fip_impl`]):
 //!
@@ -3760,7 +3747,8 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// ```
 ///
 /// **Named functions.** `fip_fn!(path)` takes the path of a function that a strict
-/// body could call: `f`, `a::f`, `f::<T>`, `Type::m` / `<Type<..>>::m` (a
+/// body could call: `f`, `a::f`, `f::<T>`, `Type::m` / `<Type<..>>::m` /
+/// `Type::<..>::m` (a
 /// `#[fip_impl]` method), `<Type as Trait>::m` (a trait-impl method), a `core` table
 /// function or a std constructor. The bound is read from the function's certificate
 /// as a strict call of it reads it (`Cert::allocs_for(__fip_strict_f, "f")`), so a
@@ -3961,7 +3949,7 @@ fn panic_prefix(toks: Vec<TokenTree>) -> Result<(bool, Vec<TokenTree>), TokenStr
 }
 
 /// The message for an argument that is neither a closure nor a function path.
-const FIP_FN_SHAPE: &str = "fip_fn!: expected a closure `|args| body` or the path of a function with a certificate (`f`, `a::f`, `f::<T>`, `Type::m`, `<Type<..>>::m`, `<Type as Trait>::m`)";
+const FIP_FN_SHAPE: &str = "fip_fn!: expected a closure `|args| body` or the path of a function with a certificate (`f`, `a::f`, `f::<T>`, `Type::m`, `<Type<..>>::m`, `Type::<..>::m`, `<Type as Trait>::m`)";
 
 /// [`FIP_FN_SHAPE`], specialised for common misuse.
 fn misuse_message(toks: &[TokenTree]) -> String {

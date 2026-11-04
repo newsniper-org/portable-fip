@@ -129,6 +129,9 @@ pub(crate) enum Arg {
         name: String,
         res: Res,
     },
+    /// A std constructor used as a value: each call allocates this many times, frees
+    /// nothing and calls no user code (`Box::new` 1, `Vec::new` 0).
+    Known(u64),
     Other,
 }
 
