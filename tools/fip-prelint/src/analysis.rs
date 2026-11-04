@@ -4291,7 +4291,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         }
     }
 
-    /// A construction `Certified::<N, fn(..)>::assume(f)` (top plan T1.4): checked
+    /// A construction `Certified::<N, fn(..)>::assume(f)` (or `assume_no_panic_macros`,
+    /// top plan T1.4): checked
     /// like an argument for a declared `param(f = N)` of a `#[fip(N)]` callee that
     /// calls `f` by its declaration (so a free or recursion of `f` is forbidden, a
     /// panic allowed): the function `f` holds must allocate at most `N` times per call;
@@ -4310,7 +4311,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         };
         if tcx
             .opt_item_name(def_id)
-            .is_none_or(|n| n.as_str() != "assume")
+            .is_none_or(|n| !matches!(n.as_str(), "assume" | "assume_no_panic_macros"))
         {
             return false;
         }

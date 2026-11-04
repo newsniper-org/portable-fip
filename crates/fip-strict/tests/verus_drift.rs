@@ -165,7 +165,10 @@ fn region(start: &str, end: &str) -> &'static str {
 }
 
 /// Top-level items of a region (lines starting at column 0 with `pub`, `impl`,
-/// `unsafe impl`, or indented by one level inside `verus! { }`), normalized.
+/// `unsafe impl`, or indented by one level inside `verus! { }`), normalized. An
+/// `impl` block that holds only ghost items (empty once normalized, e.g. the Verus
+/// `impl<..> Certified<..> { closed spec fn inner .. }`) has no run-time content and
+/// is left out.
 fn items(region: &str) -> Vec<String> {
     let heads = [
         "pub unsafe trait",
@@ -181,7 +184,10 @@ fn items(region: &str) -> Vec<String> {
         let line = &region[k..line_end];
         if heads.iter().any(|h| line.starts_with(h)) {
             let end = item_end(region, k);
-            out.push(normalize(&region[k..end]));
+            let item = normalize(&region[k..end]);
+            if !(item.starts_with("impl<") && item.ends_with("{}")) {
+                out.push(item);
+            }
             k = end;
         } else {
             k = line_end;
@@ -201,7 +207,7 @@ fn verus_declarations_match_the_plain_ones() {
         "macro_rules! certified_fip_fn",
     );
     let verus = items(verus_decls);
-    assert_eq!(plain.len(), 11, "plain items: {plain:#?}");
+    assert_eq!(plain.len(), 15, "plain items: {plain:#?}");
     assert_eq!(plain, verus);
 }
 

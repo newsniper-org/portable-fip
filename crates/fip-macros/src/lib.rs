@@ -895,6 +895,39 @@
 //!     f(fip_strict::Compose(big, unsafe { fip_strict::Certified::<1, _>::assume(|x: u8| x) }));
 //! }
 //! ```
+//! a `panic_macros = false` strict callee given a callable not certified with
+//! `panic_macros = false` (`FipBound::NO_PANIC_MACROS` is `false`):
+//! ```compile_fail
+//! # // expect: the argument passed as `g` is not certified with `panic_macros = false`
+//! use fip_strict::FipFn;
+//! #[fip_macros::fip(strict = true, panic_macros = false, param(g = 0))]
+//! fn f<F: FipFn<(u8,), Output = u8>>(g: F) -> u8 { g.call((1,)) }
+//! fn main() { f(fip_macros::fip_fn!(|x: u8| x ^ 1)); }
+//! ```
+//! `fip_fn!(panic_macros = false, ..)` with a panicking macro in the closure:
+//! ```compile_fail
+//! # // expect: `assert!` may panic, and `panic_macros = false` rejects panicking macros
+//! fn main() { let _w = fip_macros::fip_fn!(panic_macros = false, |x: u8| { assert!(x > 0); x }); }
+//! ```
+//! `fip_fn!(panic_macros = false, path)` of a function whose certificate does not say
+//! `panic_macros = false`:
+//! ```compile_fail
+//! # // expect: fip_fn!(panic_macros = false, ..): `g` is not certified with `panic_macros = false`
+//! #[fip_macros::fip(strict = true)]
+//! fn g(x: u8) -> u8 { x }
+//! fn main() { let _w = fip_macros::fip_fn!(panic_macros = false, g); }
+//! ```
+//! `fip_fn!(panic_macros = false, path)` of a function without a certificate stating
+//! it (a `core` table function):
+//! ```compile_fail
+//! # // expect: fip_fn!(panic_macros = false, path) takes a function with a certificate
+//! fn main() { let _w = fip_macros::fip_fn!(panic_macros = false, core::mem::swap::<u8>); }
+//! ```
+//! `panic_macros = false` with the driver-checked mode:
+//! ```compile_fail
+//! # // expect: fip_fn!(panic_macros = false, prelint, ..) is not supported
+//! fn main() { let _w = fip_macros::fip_fn!(panic_macros = false, prelint, 0, |x: u8| x); }
+//! ```
 //! `fip_fn!(path)` claiming another bound than the certificate's:
 //! ```compile_fail
 //! # // expect: mismatched types
@@ -3763,6 +3796,27 @@ fn checked_marker(hash: &TokenTree, attr: &TokenTree) -> TokenStream {
 /// # let _ = f;
 /// ```
 ///
+/// **Panic strictness.** `fip_fn!(panic_macros = false, ..)` (after `crate = ..`,
+/// before `bound <= K`) scans a closure body as `#[fip(strict = true, panic_macros =
+/// false)]` does (no `assert!`, `panic!`, `unreachable!`, ..), and for a path requires
+/// the function's certificate to say `panic_macros = false`
+/// (`Cert::no_panic_macros_for`; a `core` table function or std constructor is
+/// rejected). The value is a `Certified<N, C, true>`, whose
+/// `FipBound::NO_PANIC_MACROS` is `true`; without the option it is `false`. A strict
+/// callee declared `panic_macros = false` asserts `F::NO_PANIC_MACROS` for every
+/// `param(..)` argument it calls, so it rejects a value that allows panicking macros
+/// (post-monomorphisation, like its `param(g = K)` check). `fip_strict::Stateless`,
+/// `Compose` and `Then` are panic-macro free only if every part is. As for a strict
+/// function, this covers the body's macros only; panics from indexing, arithmetic
+/// and callees are the driver's.
+///
+/// ```
+/// use fip_strict::FipFn;
+/// #[fip_macros::fip(strict = true, panic_macros = false, param(g = 0))]
+/// fn apply<F: FipFn<(u8,), Output = u8>>(g: F) -> u8 { g.call((1,)) }
+/// assert_eq!(apply(fip_macros::fip_fn!(panic_macros = false, |x: u8| x ^ 1)), 0);
+/// ```
+///
 /// **Driver-checked mode (opt-in per use).** `fip_fn!(prelint, N, |x: T, ..| body)`
 /// (an integer literal `N`, after `crate = ..` if any) certifies the closure with the
 /// declared bound `N` without the strict token scan of `body`, so method calls, `use`
@@ -3802,8 +3856,18 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         }
         _ => (None, all),
     };
+    let (no_panic, toks) = match panic_prefix(toks) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let toks = match prelint_prefix(toks) {
         PrelintPrefix::Absent(toks) => toks,
+        PrelintPrefix::Present { at, .. } if no_panic => {
+            return compile_error(
+                at,
+                "fip_fn!(panic_macros = false, prelint, ..) is not supported: the driver-checked mode does not scan the body's macros; drop `panic_macros = false` or `prelint, N,`",
+            );
+        }
         PrelintPrefix::Present { at, n, rest } => return fip_fn_prelint(krate, at, n, &rest),
         PrelintPrefix::Malformed(e) => return e,
     };
@@ -3815,7 +3879,7 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         Ok(v) => v,
         Err(sp) => {
             if fn_path_shape(&toks) {
-                return fip_fn_path(krate, toks, limit);
+                return fip_fn_path(krate, toks, limit, no_panic);
             }
             return compile_error(sp, &misuse_message(&toks));
         }
@@ -3829,6 +3893,7 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
     scan.stream(body.clone(), false);
     let mut strict_scan = strict::StrictScan {
         krate,
+        no_panic_macros: no_panic,
         ..strict::StrictScan::default()
     };
     strict_scan.stream(body, false);
@@ -3859,7 +3924,40 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         &strict_scan.krate(),
         limited(strict_scan.emit_fip_fn_bound(local), limit),
         closure,
+        no_panic,
     )
+}
+
+/// A leading `panic_macros = false,` (after `crate = ..`): the closure body is
+/// scanned with `panic_macros = false` (no panicking macro), a path must name a
+/// function whose certificate says so, and the value is a
+/// `Certified<N, C, true>` (`FipBound::NO_PANIC_MACROS`). `panic_macros = true` is
+/// the default and accepted.
+fn panic_prefix(toks: Vec<TokenTree>) -> Result<(bool, Vec<TokenTree>), TokenStream> {
+    let [TokenTree::Ident(key), eq, ..] = toks.as_slice() else {
+        return Ok((false, toks));
+    };
+    if key.to_string() != "panic_macros" || !is_punct(eq, '=') {
+        return Ok((false, toks));
+    }
+    let bad = |sp: Span| {
+        compile_error(
+            sp,
+            "fip_fn!: expected `panic_macros = false, ..` (or `true`, the default), then the closure or path",
+        )
+    };
+    let (Some(v), Some(comma)) = (toks.get(2), toks.get(3)) else {
+        return Err(bad(key.span()));
+    };
+    if !is_punct(comma, ',') {
+        return Err(bad(comma.span()));
+    }
+    let no_panic = match v.to_string().as_str() {
+        "false" => true,
+        "true" => false,
+        _ => return Err(bad(v.span())),
+    };
+    Ok((no_panic, toks[4..].to_vec()))
 }
 
 /// The message for an argument that is neither a closure nor a function path.
@@ -4160,7 +4258,9 @@ fn fip_fn_prelint(krate: Option<TokenStream>, at: Span, n: u64, toks: &[TokenTre
     out.extend(toks.iter().cloned());
     out.extend(parse("; __fip_prelint_checked(&__fip_prelint_closure);"));
     let mut inner = strict::krate_item(&krate.unwrap_or_else(strict::default_krate), "Certified");
-    inner.extend(parse(&format!("::<{n}, _>::assume(__fip_prelint_closure)")));
+    inner.extend(parse(&format!(
+        "::<{n}, _, false>::assume(__fip_prelint_closure)"
+    )));
     out.extend(parse("unsafe"));
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, inner))]);
     TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, out)))
@@ -4223,6 +4323,7 @@ fn fip_fn_path(
     krate: Option<TokenStream>,
     toks: Vec<TokenTree>,
     limit: Option<u64>,
+    no_panic: bool,
 ) -> TokenStream {
     let mut as_call: TokenStream = toks.iter().cloned().collect();
     as_call.extend([TokenTree::Group(Group::new(
@@ -4244,10 +4345,22 @@ fn fip_fn_path(
         return compile_error(*sp, &format!("fip_fn! strict: {msg}"));
     }
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
+    let mut bound = TokenStream::new();
+    if no_panic {
+        let Some(checks) = strict_scan.emit_no_panic_path_checks() else {
+            return compile_error(
+                toks.first().map_or_else(Span::call_site, TokenTree::span),
+                "fip_fn!(panic_macros = false, path) takes a function with a certificate (`#[fip(strict = true, panic_macros = false)]`); a `core` table function or a std constructor has no certificate stating `panic_macros = false`",
+            );
+        };
+        bound.extend(checks);
+    }
+    bound.extend(limited(strict_scan.emit_fip_fn_bound(local), limit));
     fip_fn_wrapper(
         &strict_scan.krate(),
-        limited(strict_scan.emit_fip_fn_bound(local), limit),
+        bound,
         toks.into_iter().collect(),
+        no_panic,
     )
 }
 
@@ -4310,16 +4423,26 @@ fn closure_shape(toks: &[TokenTree]) -> Result<(usize, usize), Span> {
     Ok((arity, j + 1))
 }
 
-/// `unsafe { <krate>::Certified::<{ checks; bound }, _>::assume(closure) }`.
+/// `unsafe { <krate>::Certified::<{ checks; bound }, _, false>::assume(closure) }`,
+/// or `.., true>::assume_no_panic_macros(..)` for `panic_macros = false`.
 ///
 /// No item is declared, so the expression is also accepted inside functions verified
 /// by Verus (which does not support item statements in function bodies).
-fn fip_fn_wrapper(krate: &TokenStream, bound: TokenStream, closure: TokenStream) -> TokenStream {
+fn fip_fn_wrapper(
+    krate: &TokenStream,
+    bound: TokenStream,
+    closure: TokenStream,
+    no_panic: bool,
+) -> TokenStream {
     let parse = |src: &str| src.parse::<TokenStream>().unwrap_or_default();
     let mut inner = strict::krate_item(krate, "Certified");
     inner.extend(parse("::<"));
     inner.extend([TokenTree::Group(Group::new(Delimiter::Brace, bound))]);
-    inner.extend(parse(", _>::assume"));
+    inner.extend(parse(if no_panic {
+        ", _, true>::assume_no_panic_macros"
+    } else {
+        ", _, false>::assume"
+    }));
     inner.extend([TokenTree::Group(Group::new(
         Delimiter::Parenthesis,
         closure,

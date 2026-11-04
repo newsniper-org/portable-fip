@@ -202,3 +202,40 @@ fn creation_site_bounds() {
     );
     assert_eq!(*assert_fip_n!(1, apply1(c, 4)), 4);
 }
+
+/// `panic_macros = false` on a strict callee covers the callables it calls: it takes
+/// only `FipBound::NO_PANIC_MACROS` arguments (`fip_fn!(panic_macros = false, ..)`).
+#[fip(strict = true, panic_macros = false, param(g = 0))]
+fn apply_quiet<F: FipFn<(u32,), Output = u32>>(g: F) -> u32 {
+    g.call((6,))
+}
+
+#[fip(strict = true, panic_macros = false)]
+fn third(x: u32) -> u32 {
+    x / 3
+}
+
+/// A strict, panic-macro free caller passing panic-macro free values.
+#[fip(strict = true, panic_macros = false)]
+fn quiet_caller() -> (u32, u32) {
+    (
+        apply_quiet(fip_fn!(panic_macros = false, third)),
+        apply_quiet(fip_fn!(panic_macros = false, |x: u32| x ^ 1)),
+    )
+}
+
+fn no_panic<B: FipBound>(_: &B) -> bool {
+    B::NO_PANIC_MACROS
+}
+
+#[test]
+fn panic_strict_callees_take_panic_strict_values() {
+    assert_eq!(assert_fip!(quiet_caller()), (2, 7));
+    let c: Certified<0, _, true> = fip_fn!(panic_macros = false, bound <= 0, |x: u32| x ^ 3);
+    assert!(no_panic(&c));
+    assert_eq!(c.call((1,)), 2);
+    assert!(!no_panic(&fip_fn!(|x: u32| x ^ 3)));
+    // `panic_macros = true` is the default: the value is a `Certified<N, C>`.
+    let d: Certified<0, fn(u32) -> u32> = fip_fn!(panic_macros = true, third);
+    assert_eq!(d.call((9,)), 3);
+}

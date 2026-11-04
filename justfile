@@ -245,6 +245,10 @@ verify-negative: verify-strict verify-core
     state_fail stateless-wrong-final '/^\/\/\/ Doubles every element through/,/^}/ s/final(xs)@\[k\] == 2 \* old(xs)@\[k\],$/final(xs)@[k] == 3 * old(xs)@[k],/' 'postcondition not satisfied'
     state_fail compose-wrong-final   '/^\/\/\/ Multiplies every element by 4/,/^}/ s/final(xs)@\[k\] == 4 \* old(xs)@\[k\],$/final(xs)@[k] == 5 * old(xs)@[k],/' 'postcondition not satisfied'
     state_fail compose-pre-missing   '/^\/\/\/ Multiplies every element by 4/,/^}/ s/old(xs)@\[k\] < 250,$/old(xs)@[k] < 1000,/' 'precondition not satisfied'
+    # `Then` promises only what both steps do: a wrong final claim, and a counter step
+    # whose output breaks the doubling step's `requires`.
+    state_fail then-wrong-final      '/^\/\/\/ Numbers from 11 and doubles/,/^}/ s/final(xs)@\[k\] == 2 \* (11 + k),$/final(xs)@[k] == 2 * (12 + k),/' 'postcondition not satisfied'
+    state_fail then-pre-missing      '/^\/\/\/ Numbers from 11 and doubles/,/^}/ s/^        old(xs)@.len() < 990,$/        old(xs)@.len() < 1990,/' 'precondition not satisfied|assertion failed'
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.

@@ -41,11 +41,22 @@
 //!
 //! [`Stateless`]`(f)` turns a one-argument callable into a state-passing step for
 //! the `_st` combinators (`(s, x)` to `(s, f(x))`, bound `F::ALLOCS`);
-//! [`Compose`]`(f, g)` calls `g(f(x))` (bound `F::ALLOCS + G::ALLOCS`, an overflow is
-//! a compile error). Both are tuple structs, so a strict body builds them as
-//! constructors, and their `FipBound` impls are the audited claims (pinned by
+//! [`Compose`]`(f, g)` calls `g(f(args))` for an `f` of any arity (it also maps a
+//! callable's output; bound `F::ALLOCS + G::ALLOCS`, an overflow is a compile
+//! error); [`Then`]`(f, g)` runs two state-passing steps one after the other (same
+//! bound). They are tuple structs, so a strict body builds them as constructors, and
+//! their `FipBound` impls are the audited claims (pinned by
 //! `tests/hand_written_certs.rs`). Under Verus their `pre` / `post` are built from the
 //! wrapped callables' (`verify/compose_state.rs`).
+//!
+//! ## Panic strictness
+//!
+//! [`FipBound::NO_PANIC_MACROS`] (default `false`) states that a callable's body was
+//! checked with `panic_macros = false`, as [`Cert::no_panic_macros`] does for a
+//! function. `fip_fn!(panic_macros = false, ..)` makes a `Certified<N, C, true>`
+//! ([`Certified::assume_no_panic_macros`]); the adapters have it only if every part
+//! has it; a strict callee declared `panic_macros = false` requires it of each
+//! `param(..)` argument it calls.
 //!
 //! ## Verus
 //!
@@ -225,6 +236,11 @@ const fn str_eq(a: &str, b: &str) -> bool {
 pub unsafe trait FipBound {
     /// Upper bound on allocations per call.
     const ALLOCS: u64;
+    /// `true` if the callable's body was checked with `panic_macros = false` (no
+    /// panicking macro in it), as [`Cert::no_panic_macros`] for a function. A strict
+    /// callee declared `panic_macros = false` requires it of every `param(..)`
+    /// argument it calls.
+    const NO_PANIC_MACROS: bool = false;
 }
 
 /// A certified callable taking `Args` (a tuple, e.g. `(&T,)`).
@@ -251,17 +267,19 @@ pub trait FipFn<Args>: FipBound {
 }
 
 /// A closure `C` certified to perform at most `ALLOCS` allocations per call, no
-/// deallocation and no recursion. Made by `fip_macros::fip_fn!`.
+/// deallocation and no recursion. Made by `fip_macros::fip_fn!`. `NO_PANIC_MACROS`
+/// (default `false`) states that its body was also checked with `panic_macros =
+/// false` (`fip_fn!(panic_macros = false, ..)`); it is [`FipBound::NO_PANIC_MACROS`].
 ///
 /// Fields are private and [`Certified::assume`] is `unsafe`: pairing a closure with
 /// a bound is a claim.
 #[cfg(not(verus_keep_ghost))]
-pub struct Certified<const ALLOCS: u64, C> {
+pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> {
     f: C,
 }
 
 #[cfg(not(verus_keep_ghost))]
-impl<const ALLOCS: u64, C> Certified<ALLOCS, C> {
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
     /// Wraps `f` without checking anything.
     ///
     /// # Safety
@@ -280,13 +298,34 @@ impl<const ALLOCS: u64, C> Certified<ALLOCS, C> {
     }
 }
 
+#[cfg(not(verus_keep_ghost))]
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
+    /// [`Certified::assume`] for a closure whose body was also checked with
+    /// `panic_macros = false`.
+    ///
+    /// # Safety
+    ///
+    /// As [`Certified::assume`], and the caller also asserts that the body of `f`
+    /// uses none of the panicking macros `panic_macros = false` rejects.
+    #[allow(
+        unsafe_code,
+        reason = "certificate constructor; `unsafe` marks a trusted claim"
+    )]
+    #[doc(hidden)]
+    #[must_use]
+    pub const unsafe fn assume_no_panic_macros(f: C) -> Self {
+        Certified { f }
+    }
+}
+
 #[allow(
     unsafe_code,
-    reason = "the bound was claimed by the `unsafe` constructor `Certified::assume`"
+    reason = "the bound was claimed by the `unsafe` constructors `Certified::assume` / `assume_no_panic_macros`"
 )]
 #[cfg(not(verus_keep_ghost))]
-unsafe impl<const ALLOCS: u64, C> FipBound for Certified<ALLOCS, C> {
+unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {
     const ALLOCS: u64 = ALLOCS;
+    const NO_PANIC_MACROS: bool = P;
 }
 
 /// Lifts a one-argument certified callable to a state-passing step for the `_st`
@@ -305,6 +344,7 @@ pub struct Stateless<F>(pub F);
 #[cfg(not(verus_keep_ghost))]
 unsafe impl<F: FipBound> FipBound for Stateless<F> {
     const ALLOCS: u64 = F::ALLOCS;
+    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS;
 }
 
 #[cfg(not(verus_keep_ghost))]
@@ -318,12 +358,14 @@ impl<S, A, B, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
     }
 }
 
-/// `Compose(f, g)` called with `(x,)` returns `g(f(x))`. Its bound is
-/// `F::ALLOCS + G::ALLOCS` (one call of each); an overflowing sum is a compile error
-/// in constant evaluation, not a wrapped bound.
+/// `Compose(f, g)` called with `args` returns `g(f(args))`: `f` takes any number of
+/// arguments (a `FipFn<Args>`), `g` takes `f`'s output. So it also maps the output
+/// of a multi-argument callable. Its bound is `F::ALLOCS + G::ALLOCS` (one call of
+/// each); an overflowing sum is a compile error in constant evaluation, not a
+/// wrapped bound.
 ///
-/// Under Verus, `pre((x,))` is `f.pre((x,))` and `g.pre` for every result `f.post`
-/// allows; `post((x,), z)` is: some `y` with `f.post((x,), y)` and `g.post((y,), z)`.
+/// Under Verus, `pre(args)` is `f.pre(args)` and `g.pre` for every result `f.post`
+/// allows; `post(args, z)` is: some `y` with `f.post(args, y)` and `g.post((y,), z)`.
 #[cfg(not(verus_keep_ghost))]
 pub struct Compose<F, G>(pub F, pub G);
 
@@ -334,17 +376,50 @@ pub struct Compose<F, G>(pub F, pub G);
 #[cfg(not(verus_keep_ghost))]
 unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {
     const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
+    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
 }
 
 #[cfg(not(verus_keep_ghost))]
-impl<A, B, C, F: FipFn<(A,), Output = B>, G: FipFn<(B,), Output = C>> FipFn<(A,)>
+impl<Args, B, C, F: FipFn<Args, Output = B>, G: FipFn<(B,), Output = C>> FipFn<Args>
     for Compose<F, G>
 {
     type Output = C;
     #[inline]
-    fn call(&self, args: (A,)) -> C {
+    fn call(&self, args: Args) -> C {
         let y = self.0.call(args);
         self.1.call((y,))
+    }
+}
+
+/// `Then(f, g)` runs two state-passing steps of the `_st` combinators one after the
+/// other: called with `(s, x)`, `f` gives `(s1, y)` and `g` is called with
+/// `(s1, y)`; the result is `g`'s. Bound `F::ALLOCS + G::ALLOCS`, as [`Compose`].
+///
+/// Under Verus, `pre((s, x))` is `f.pre((s, x))` and `g.pre(r)` for every result `r`
+/// `f.post` allows; `post((s, x), out)` is: some `r` with `f.post((s, x), r)` and
+/// `g.post(r, out)`.
+#[cfg(not(verus_keep_ghost))]
+pub struct Then<F, G>(pub F, pub G);
+
+#[allow(
+    unsafe_code,
+    reason = "one call of `Then(f, g)` is one call of `f` and one of `g`"
+)]
+#[cfg(not(verus_keep_ghost))]
+unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {
+    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
+    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
+}
+
+#[cfg(not(verus_keep_ghost))]
+impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>> FipFn<(S, A)>
+    for Then<F, G>
+{
+    type Output = (S, C);
+    #[inline]
+    fn call(&self, args: (S, A)) -> (S, C) {
+        let (s, y) = self.0.call(args);
+        self.1.call((s, y))
     }
 }
 
@@ -363,6 +438,8 @@ verus! {
 pub unsafe trait FipBound {
     /// Upper bound on allocations per call.
     const ALLOCS: u64;
+    /// `true` if the callable's body was checked with `panic_macros = false`.
+    const NO_PANIC_MACROS: bool = false;
 }
 
 /// A certified callable taking `Args`, with a specification.
@@ -389,11 +466,11 @@ pub trait FipFn<Args>: FipBound {
 }
 
 /// A certified closure; see the plain declaration.
-pub struct Certified<const ALLOCS: u64, C> {
+pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> {
     f: C,
 }
 
-impl<const ALLOCS: u64, C> Certified<ALLOCS, C> {
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
     /// Wraps `f` without checking anything; see the plain declaration.
     #[allow(unsafe_code, reason = "certificate constructor; `unsafe` marks a trusted claim")]
     #[doc(hidden)]
@@ -403,16 +480,31 @@ impl<const ALLOCS: u64, C> Certified<ALLOCS, C> {
     {
         Certified { f }
     }
+}
 
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
+    /// [`Certified::assume`] with `panic_macros = false`; see the plain declaration.
+    #[allow(unsafe_code, reason = "certificate constructor; `unsafe` marks a trusted claim")]
+    #[doc(hidden)]
+    pub const unsafe fn assume_no_panic_macros(f: C) -> (r: Self)
+        ensures
+            r.inner() == f,
+    {
+        Certified { f }
+    }
+}
+
+impl<const ALLOCS: u64, C, const P: bool> Certified<ALLOCS, C, P> {
     /// The wrapped closure.
     pub closed spec fn inner(&self) -> C {
         self.f
     }
 }
 
-#[allow(unsafe_code, reason = "the bound was claimed by the `unsafe` constructor `Certified::assume`")]
-unsafe impl<const ALLOCS: u64, C> FipBound for Certified<ALLOCS, C> {
+#[allow(unsafe_code, reason = "the bound was claimed by the `unsafe` constructors `Certified::assume` / `assume_no_panic_macros`")]
+unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {
     const ALLOCS: u64 = ALLOCS;
+    const NO_PANIC_MACROS: bool = P;
 }
 
 /// A state-keeping adapter; see the plain declaration.
@@ -421,6 +513,7 @@ pub struct Stateless<F>(pub F);
 #[allow(unsafe_code, reason = "one call of `Stateless(f)` is one call of `f`, bounded by `F::ALLOCS`")]
 unsafe impl<F: FipBound> FipBound for Stateless<F> {
     const ALLOCS: u64 = F::ALLOCS;
+    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS;
 }
 
 impl<S, A, B, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
@@ -445,21 +538,47 @@ pub struct Compose<F, G>(pub F, pub G);
 #[allow(unsafe_code, reason = "one call of `Compose(f, g)` is one call of `f` and one of `g`")]
 unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {
     const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
+    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
 }
 
-impl<A, B, C, F: FipFn<(A,), Output = B>, G: FipFn<(B,), Output = C>> FipFn<(A,)> for Compose<F, G> {
+impl<Args, B, C, F: FipFn<Args, Output = B>, G: FipFn<(B,), Output = C>> FipFn<Args> for Compose<F, G> {
     type Output = C;
-    open spec fn pre(&self, args: (A,)) -> bool {
+    open spec fn pre(&self, args: Args) -> bool {
         &&& self.0.pre(args)
         &&& forall|y: B| #[trigger] self.0.post(args, y) ==> self.1.pre((y,))
     }
-    open spec fn post(&self, args: (A,), out: C) -> bool {
+    open spec fn post(&self, args: Args, out: C) -> bool {
         exists|y: B| #[trigger] self.0.post(args, y) && self.1.post((y,), out)
     }
     #[inline]
-    fn call(&self, args: (A,)) -> (r: C) {
+    fn call(&self, args: Args) -> (r: C) {
         let y = self.0.call(args);
         self.1.call((y,))
+    }
+}
+
+/// Two state-passing steps; see the plain declaration.
+pub struct Then<F, G>(pub F, pub G);
+
+#[allow(unsafe_code, reason = "one call of `Then(f, g)` is one call of `f` and one of `g`")]
+unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {
+    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
+    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
+}
+
+impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>> FipFn<(S, A)> for Then<F, G> {
+    type Output = (S, C);
+    open spec fn pre(&self, args: (S, A)) -> bool {
+        &&& self.0.pre(args)
+        &&& forall|r: (S, B)| #[trigger] self.0.post(args, r) ==> self.1.pre(r)
+    }
+    open spec fn post(&self, args: (S, A), out: (S, C)) -> bool {
+        exists|r: (S, B)| #[trigger] self.0.post(args, r) && self.1.post(r, out)
+    }
+    #[inline]
+    fn call(&self, args: (S, A)) -> (r: (S, C)) {
+        let (s, y) = self.0.call(args);
+        self.1.call((s, y))
     }
 }
 
@@ -471,7 +590,7 @@ impl<A, B, C, F: FipFn<(A,), Output = B>, G: FipFn<(B,), Output = C>> FipFn<(A,)
 macro_rules! certified_fip_fn {
     ($($A:ident $a:ident),*) => {
         #[cfg(not(verus_keep_ghost))]
-        impl<const ALLOCS: u64, C, $($A,)* R> FipFn<($($A,)*)> for Certified<ALLOCS, C>
+        impl<const ALLOCS: u64, C, const P: bool, $($A,)* R> FipFn<($($A,)*)> for Certified<ALLOCS, C, P>
         where
             C: Fn($($A),*) -> R,
         {
@@ -485,7 +604,7 @@ macro_rules! certified_fip_fn {
 
         #[cfg(verus_keep_ghost)]
         verus! {
-        impl<const ALLOCS: u64, C, $($A,)* R> FipFn<($($A,)*)> for Certified<ALLOCS, C>
+        impl<const ALLOCS: u64, C, const P: bool, $($A,)* R> FipFn<($($A,)*)> for Certified<ALLOCS, C, P>
         where
             C: Fn($($A),*) -> R,
         {

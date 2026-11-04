@@ -77,8 +77,12 @@ compiles only in a checking
 `cargo fip-prelint` run, never in a plain build
 (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`). `fip_strict::Stateless(f)` lifts
 a one-argument callable to a state-passing step for the `_st` combinators,
-`fip_strict::Compose(f, g)` calls `g(f(x))` with the summed bound; both are also
-specified under Verus.
+`fip_strict::Compose(f, g)` calls `g(f(args))` (any arity of `f`) and
+`fip_strict::Then(f, g)` runs two state-passing steps, each with the summed bound;
+all are also specified under Verus. `fip_fn!(panic_macros = false, ..)` certifies a
+closure scanned with `panic_macros = false` (or a function whose certificate says
+so) as `FipBound::NO_PANIC_MACROS`, and a strict callee declared `panic_macros =
+false` rejects `param(..)` arguments without it.
 
 ```rust
 #[fip(strict = true, param(keep = 0))]

@@ -300,8 +300,10 @@ gated too.
 
 ### 8. State-passing helpers for the `_st` combinators
 
-**Status:** `Stateless` implemented in da394d5; `fip_fn_st!` and the invariant
-snippet not implemented (below).
+**Status:** `Stateless` implemented in da394d5, `Then` (two state steps, the
+`st::pair` sketch) on 2026-11-04 (`TODOs/strict-open-items.md` item 19);
+`fip_fn_st!` decided against (measured: none of the workspace's 26 `_st` calls
+mutates a state local) and the invariant snippet not implemented (below).
 
 **Probe (2026-11-03), files `/tmp/tp-verus/p4`, both builds identical
 (upstream `0.2026.10.18.7d82994`, fork `0.2026.10.31.559ac52`, `--no-cheating`):**
@@ -472,7 +474,12 @@ crate-level opt-in (`#![cfg_attr(fip_prelint, fip::driver_certified)]`), without
 
 ### 12. Panic strictness in `FipBound`
 
-**Status:** probed, not implemented. A2 verifies on both builds (a defaulted
+**Status:** IMPLEMENTED 2026-11-04 (`TODOs/strict-open-items.md` item 19):
+`FipBound::NO_PANIC_MACROS`, `Certified<N, C, const NO_PANIC_MACROS: bool = false>`
+with `assume` on `false` and `assume_no_panic_macros` on `true`,
+`fip_fn!(panic_macros = false, ..)`, the callee assertion and the adapters'
+propagation; verified on both Verus builds (fip-strict 19). Original status: probed,
+not implemented. A2 verifies on both builds (a defaulted
 associated const and a const-generic default in `verus!`), so the declaration side
 is not blocked. Not implemented because the rest is not small: `fip_fn!` must set
 `P` from its scan (`panic_macros = false` is not a `fip_fn!` option today), the
@@ -503,7 +510,10 @@ callee (see idea 10).
 
 ### 13. Composition combinators
 
-**Status:** `Compose` implemented in da394d5 (with idea 8's `Stateless`;
+**Status:** 2026-11-04: `Compose` generalised to `FipFn<Args>` for any arity of
+`f` (the output mapping), `Then` added for state steps; methods `then` /
+`map_output` not added (strict bodies reject method calls; the structs are
+constructors). `Compose` implemented in da394d5 (with idea 8's `Stateless`;
 A3b's specification, explicit type parameters per A5; bound `F::ALLOCS +
 G::ALLOCS`: an overflow is "attempt to compute `u64::MAX + 1_u64`, which would
 overflow" at compile time, a `compile_fail` example; Verus rejects

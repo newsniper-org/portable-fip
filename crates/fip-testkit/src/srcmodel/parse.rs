@@ -313,12 +313,19 @@ fn find_top(t: &[Tok], from: usize, to: usize, f: impl Fn(usize) -> bool) -> Opt
 }
 
 /// Start of the closure inside `fip_fn!(..)` whose `(` is `t[open]` and whose group
-/// ends before `ge`: skips a leading `crate = path,`, `prelint, N,` (driver-checked
-/// mode; the closure is modelled as in the default mode), `bound <= K,`, outer
-/// attributes (`#[..]`, a Verus spec on the closure) and `move`.
+/// ends before `ge`: skips a leading `crate = path,`, `panic_macros = false,`,
+/// `prelint, N,` (driver-checked mode; the closure is modelled as in the default
+/// mode), `bound <= K,`, outer attributes (`#[..]`, a Verus spec on the closure) and
+/// `move`.
 fn fip_fn_closure(t: &[Tok], open: usize, ge: usize) -> usize {
     let mut k = open + 1;
     if is_id(t, k, "crate")
+        && is_p(t, k + 1, '=')
+        && let Some(comma) = find_top(t, k + 2, ge - 1, |q| is_p(t, q, ','))
+    {
+        k = comma + 1;
+    }
+    if is_id(t, k, "panic_macros")
         && is_p(t, k + 1, '=')
         && let Some(comma) = find_top(t, k + 2, ge - 1, |q| is_p(t, q, ','))
     {

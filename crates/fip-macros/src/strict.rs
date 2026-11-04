@@ -695,6 +695,11 @@ fn brace(inner: TokenStream) -> TokenTree {
 /// `Cert` type, not as a method, so a constant of another type with an `allocs_for`
 /// method is not accepted as a certificate.
 fn term(c: &Call, krate: &TokenStream) -> TokenStream {
+    cert_read(c, krate, "Cert::allocs_for")
+}
+
+/// `<krate>::<read>(<the callee's certificate>, "name")`.
+fn cert_read(c: &Call, krate: &TokenStream, read: &str) -> TokenStream {
     let mut arg: TokenStream = if let Some((tr_path, m)) = &c.trait_target {
         let tr_prefix: String = c.cert_prefix.iter().map(ToString::to_string).collect();
         format!("<dyn {tr_prefix}{tr_path}>::__fip_strict_{m}")
@@ -709,7 +714,7 @@ fn term(c: &Call, krate: &TokenStream) -> TokenStream {
         a
     };
     arg.extend(ts(&format!(", {:?}", c.cert_name)));
-    let mut out = krate_item(krate, "Cert::allocs_for");
+    let mut out = krate_item(krate, read);
     out.extend([paren(arg)]);
     out
 }
@@ -817,18 +822,35 @@ impl StrictScan {
                         .iter()
                         .any(|c| self.params[c.param].name == p.name)
                 {
-                    let mut a =
-                        TokenStream::from(TokenTree::Punct(Punct::new('<', Spacing::Alone)));
-                    a.extend([TokenTree::Ident(ty.clone())]);
-                    a.extend(ts(" as "));
-                    a.extend(self.krate_item("FipBound"));
+                    let bound_of = |item: &str| {
+                        let mut a =
+                            TokenStream::from(TokenTree::Punct(Punct::new('<', Spacing::Alone)));
+                        a.extend([TokenTree::Ident(ty.clone())]);
+                        a.extend(ts(" as "));
+                        a.extend(self.krate_item("FipBound"));
+                        a.extend(ts(&format!(">::{item}")));
+                        a
+                    };
+                    let mut a = bound_of("ALLOCS");
                     a.extend(ts(&format!(
-                        ">::ALLOCS <= {k}u64, {:?}",
+                        " <= {k}u64, {:?}",
                         format!("{tag}: the argument passed as `{}` may allocate more than its declared bound {k}", p.name)
                     )));
                     body.extend(ts("::core::assert!"));
                     body.extend([paren(a)]);
                     body.extend(ts(";"));
+                    // `panic_macros = false` covers the callables it calls: their
+                    // bodies must have been checked the same way.
+                    if self.no_panic_macros {
+                        let mut a = bound_of("NO_PANIC_MACROS");
+                        a.extend(ts(&format!(
+                            ", {:?}",
+                            format!("{tag}: the argument passed as `{}` is not certified with `panic_macros = false` (`fip_fn!(panic_macros = false, ..)`), which this function's `panic_macros = false` requires", p.name)
+                        )));
+                        body.extend(ts("::core::assert!"));
+                        body.extend([paren(a)]);
+                        body.extend(ts(";"));
+                    }
                 }
             }
         }
@@ -896,6 +918,32 @@ impl StrictScan {
         let mut body = self.checks("fip_fn!", u64::MAX, local, false);
         body.extend(self.sum_expr(local));
         body
+    }
+
+    /// Statements for `fip_fn!(panic_macros = false, path)`: the function's
+    /// certificate must say that its body was checked with `panic_macros = false`
+    /// (`Cert::no_panic_macros_for`). `None` if the path has no certificate to read
+    /// (a `core` table function, a std constructor).
+    pub(crate) fn emit_no_panic_path_checks(&self) -> Option<TokenStream> {
+        if self.calls.is_empty() {
+            return None;
+        }
+        let krate = self.krate();
+        let mut body = TokenStream::new();
+        for c in &self.calls {
+            let mut a = cert_read(c, &krate, "Cert::no_panic_macros_for");
+            a.extend(ts(&format!(
+                ", {:?}",
+                format!(
+                    "fip_fn!(panic_macros = false, ..): `{}` is not certified with `panic_macros = false`",
+                    c.shown
+                )
+            )));
+            body.extend(ts("::core::assert!"));
+            body.extend([paren(a)]);
+            body.extend(ts(";"));
+        }
+        Some(body)
     }
 }
 

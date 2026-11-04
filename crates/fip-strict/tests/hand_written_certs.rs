@@ -59,8 +59,10 @@ fn certificates_carry_their_names() {
 
 /// Every `unsafe impl .. FipBound` in this crate, plain and Verus declarations: the
 /// claims a callable value's bound rests on. `Certified` (claimed by the `unsafe`
-/// constructor), `Stateless` (one call of the wrapped `F`) and `Compose` (one call of
-/// each part, an overflowing sum fails constant evaluation).
+/// constructors, `NO_PANIC_MACROS` its const parameter), `Stateless` (one call of
+/// the wrapped `F`), `Compose` and `Then` (one call of each part, an overflowing sum
+/// fails constant evaluation); the adapters are panic-macro free only if every part
+/// is.
 #[test]
 fn fip_bound_impls_are_exactly_the_documented_ones() {
     let src = include_str!("../src/lib.rs");
@@ -74,16 +76,32 @@ fn fip_bound_impls_are_exactly_the_documented_ones() {
         [
             "unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {",
             "unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {",
+            "unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {",
+            "unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {",
             "unsafe impl<F: FipBound> FipBound for Stateless<F> {",
             "unsafe impl<F: FipBound> FipBound for Stateless<F> {",
-            "unsafe impl<const ALLOCS: u64, C> FipBound for Certified<ALLOCS, C> {",
-            "unsafe impl<const ALLOCS: u64, C> FipBound for Certified<ALLOCS, C> {",
+            "unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {",
+            "unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {",
         ]
     );
     assert_eq!(src.matches("    const ALLOCS: u64 = F::ALLOCS;").count(), 2);
     assert_eq!(
         src.matches("    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;")
             .count(),
+        4
+    );
+    assert_eq!(
+        src.matches("    const NO_PANIC_MACROS: bool = P;").count(),
         2
+    );
+    assert_eq!(
+        src.matches("    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS;")
+            .count(),
+        2
+    );
+    assert_eq!(
+        src.matches("    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;")
+            .count(),
+        4
     );
 }
