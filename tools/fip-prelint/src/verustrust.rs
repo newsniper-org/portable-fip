@@ -19,8 +19,8 @@
 //!   (`verus-trusted.txt`, compiled into the driver) with `--no-cheating`;
 //! - every source file it lists has the recorded SHA-256 (a callee's spec, a spec
 //!   function or an imported crate's source that changed invalidates every entry), and
-//!   none of the crate's own tests a cfg other than `verus_keep_ghost` and `feature`
-//!   (`verus::crate_cfg_conflict`);
+//!   none of them tests a cfg other than `verus_keep_ghost` and `feature` or invokes a
+//!   macro whose expansion the scan cannot read (`verus::crate_cfg_conflict`);
 //! - the build has the sidecar's target and cargo features (its `cfg` line): Verus
 //!   compiled the crate for those;
 //! - the function's path is listed, in the same file, and the SHA-256 of its item text
@@ -188,6 +188,7 @@ impl VerusTrust {
         let sidecar = Sidecar::parse(&text)?;
         sidecar.check_stamp(trusted)?;
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let mut texts = Vec::new();
         for (file, hash) in &sidecar.sources {
             let bytes = std::fs::read(dir.join(file))
                 .map_err(|_| format!("source `{file}` of the verification run is missing"))?;
@@ -196,10 +197,18 @@ impl VerusTrust {
                     "source `{file}` changed since the verification run (regenerate with `just verify`)"
                 ));
             }
-            // The crate's own sources (an imported crate's are covered by its sidecar).
-            if !file.starts_with("../")
-                && let Some(c) = verus::crate_cfg_conflict(&String::from_utf8_lossy(&bytes))
-            {
+            texts.push((file, String::from_utf8_lossy(&bytes).into_owned()));
+        }
+        // Every listed source, also one outside `src/` (a `#[path]` module, re-audit
+        // N4) and an imported crate's (which passed the same scan in its own run):
+        // none may test a cfg the stamp does not record or expand a macro the scan
+        // cannot read.
+        let local: Vec<String> = texts
+            .iter()
+            .flat_map(|(_, t)| verus::macro_rules_names(t))
+            .collect();
+        for (file, text) in &texts {
+            if let Some(c) = verus::crate_cfg_conflict(text, &local) {
                 return Err(format!(
                     "source `{file}` has {c}: the driver's build and Verus's may differ"
                 ));

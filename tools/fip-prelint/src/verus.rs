@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! fip-prelint verus sidecar
-//! format 3
+//! format 4
 //! crate <crate name>
 //! verus <version> <commit>
 //! z3 <version>
@@ -41,6 +41,13 @@
 //! whose sources test any other cfg ([`crate_cfg_conflict`]) and lists no item whose
 //! text holds a `cfg` other than the Verus-only attribute forms ([`cfg_conflict`]).
 //!
+//! Format 4 (2026-11-04, re-audit N3/N4) changes no line, only what a sidecar of
+//! that format guarantees, so the driver refuses format 3 sidecars: every source of
+//! the run is scanned (not only `src/`), macros that can build a cfg test or read the
+//! environment are refused ([`macro_conflict`]), and a function verified against the
+//! specification of a function skipped because its code differs between the builds is
+//! skipped too (`relies on the specification of ..`).
+//!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
 //! `impl&%N` and rustc `{impl#N}`, both with the `DefPath` disambiguator of their own
@@ -52,7 +59,7 @@
 use std::fmt::Write as _;
 
 /// Version of the format.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
@@ -602,7 +609,9 @@ fn payload_only(payload: &[String], prefixes: &[&str]) -> bool {
 ///   added code has macro-expansion spans, which the driver never drops);
 /// - `cfg_attr(fip_prelint, fip::..)` (the driver's inert tool attributes).
 ///
-/// A `verus_keep_ghost` anywhere else is refused as well. `None` if there is nothing.
+/// A `verus_keep_ghost` anywhere else is refused as well, and so is every
+/// [`macro_conflict`] of the text (without the crate-wide rule on macros defined
+/// elsewhere, which [`crate_cfg_conflict`] applies). `None` if there is nothing.
 pub fn cfg_conflict(text: &str) -> Option<String> {
     let uses = cfg_uses(text);
     let mut allowed_ghosts = 0usize;
@@ -632,8 +641,10 @@ pub fn cfg_conflict(text: &str) -> Option<String> {
         .into_iter()
         .filter(|t| t.0 == Tok::Ident && &text[t.1..t.2] == "verus_keep_ghost")
         .count();
-    (ghosts != allowed_ghosts)
-        .then(|| "`verus_keep_ghost` outside an allowed `cfg_attr`".to_string())
+    if ghosts != allowed_ghosts {
+        return Some("`verus_keep_ghost` outside an allowed `cfg_attr`".to_string());
+    }
+    macro_conflict(text, None)
 }
 
 /// Cfg names a crate with a Verus sidecar may test anywhere in its sources:
@@ -648,7 +659,10 @@ const CRATE_CFG_NAMES: &[&str] = &["verus_keep_ghost", "feature"];
 /// `target_arch`: a `#[cfg(test)] const` or an inherent method in a
 /// `#[cfg(test)] mod` would change what a listed item compiles to), except the inert
 /// `cfg_attr(fip_prelint, fip::..)`. `None` if there is none.
-pub fn crate_cfg_conflict(src: &str) -> Option<String> {
+///
+/// Also every [`macro_conflict`] of `src`, with `local` the names the crate's sources
+/// define by `macro_rules!` ([`macro_rules_names`] of all of them).
+pub fn crate_cfg_conflict(src: &str, local: &[String]) -> Option<String> {
     for u in cfg_uses(src) {
         let pred = match u.kind {
             "cfg_attr" => u.args.first().cloned().unwrap_or_default(),
@@ -663,6 +677,181 @@ pub fn crate_cfg_conflict(src: &str) -> Option<String> {
             .find(|n| !CRATE_CFG_NAMES.contains(&n.as_str()))
         {
             return Some(format!("{} tests `{bad}`", u.shown()));
+        }
+    }
+    macro_conflict(src, Some(local))
+}
+
+/// The names `text` defines by `macro_rules! name`.
+pub fn macro_rules_names(text: &str) -> Vec<String> {
+    let toks: Vec<(Tok, usize, usize)> = lex(text)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let mut out = Vec::new();
+    for k in 0..toks.len() {
+        if toks[k].0 == Tok::Ident
+            && &text[toks[k].1..toks[k].2] == "macro_rules"
+            && toks.get(k + 1).is_some_and(|t| t.0 == Tok::Punct(b'!'))
+            && let Some(n) = toks.get(k + 2).filter(|t| t.0 == Tok::Ident)
+        {
+            out.push(text[n.1..n.2].to_string());
+        }
+    }
+    out
+}
+
+/// Macros that read the build's environment or other files: `env!` / `option_env!`
+/// (cargo sets variables for the driver's rustc that the direct Verus run does not
+/// have) and `include!` / `include_str!` / `include_bytes!` (the included file is
+/// not among the hashed sources).
+const ENV_MACROS: &[&str] = &[
+    "env",
+    "option_env",
+    "include",
+    "include_str",
+    "include_bytes",
+];
+
+/// Identifiers that, passed to a macro as a bare token, let its expansion build a
+/// cfg test or an environment read the text scan does not see (`gate!(cfg, x)` with
+/// `macro_rules! gate { ($c:ident, $p:ident) => { $c!($p) } }`).
+const BUILD_IDENTS: &[&str] = &[
+    "cfg",
+    "cfg_attr",
+    "env",
+    "option_env",
+    "include",
+    "include_str",
+    "include_bytes",
+];
+
+/// Macros defined outside a crate's sources that a crate with a Verus sidecar may
+/// invoke: `core` / `std` macros whose expansion tests no cfg and reads no
+/// environment (not `debug_assert!`, which tests `debug_assertions`), Verus's
+/// (`vstd`, pinned by the trusted stamp) and `fip_macros::fip_fn!`. Any other macro
+/// of a dependency could expand to `cfg!(fip_prelint)` or `option_env!(..)`, which
+/// is then evaluated with this crate's cfgs and environment.
+const KNOWN_MACROS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "calc",
+    "column",
+    "compile_error",
+    "concat",
+    "file",
+    "fip_fn",
+    "format",
+    "format_args",
+    "line",
+    "map",
+    "matches",
+    "module_path",
+    "panic",
+    "proof",
+    "proof_decl",
+    "seq",
+    "set",
+    "stringify",
+    "todo",
+    "unimplemented",
+    "unreachable",
+    "vec",
+    "verus",
+    "write",
+    "writeln",
+];
+
+/// First path segments under which a [`KNOWN_MACROS`] name may be invoked.
+const KNOWN_MACRO_ROOTS: &[&str] = &["core", "std", "alloc", "vstd", "builtin", "fip_macros"];
+
+/// Why a macro invocation of `text` may expand differently for the driver than for
+/// Verus (re-audit N3, 2026-11-04: `gate!(cfg, fip_prelint)` and
+/// `option_env!("CARGO_PKG_NAME")` were listed and their division sites
+/// discharged), if it may:
+///
+/// - an [`ENV_MACROS`] invocation (`env!`, `option_env!`, `include*!`);
+/// - a macro named by a metavariable (`$c!(..)`): it can be `cfg!`;
+/// - a macro whose arguments hold a [`BUILD_IDENTS`] identifier as a bare token
+///   (not a `cfg(..)` / `cfg!(..)` / `cfg_attr(..)` use, which [`cfg_uses`] reads);
+/// - with `local` (the `macro_rules!` names of every source of the crate, whose
+///   bodies the crate scan reads): a macro that is not one of them and is not a
+///   [`KNOWN_MACROS`] name invoked bare or under a [`KNOWN_MACRO_ROOTS`] path.
+///
+/// Not seen: attribute and derive macros of dependencies, and a glob import from a
+/// dependency that shadows a known macro's name (trust boundary in
+/// `docs/decisions/2026-11-01-fip-prelint.md`, amendment "Verus sidecars after the
+/// re-audit").
+pub fn macro_conflict(text: &str, local: Option<&[String]>) -> Option<String> {
+    let toks: Vec<(Tok, usize, usize)> = lex(text)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let tx = |k: usize| &text[toks[k].1..toks[k].2];
+    let is = |k: usize, c: u8| toks.get(k).is_some_and(|t| t.0 == Tok::Punct(c));
+    let ident = |k: usize| toks.get(k).filter(|t| t.0 == Tok::Ident).map(|_| tx(k));
+    for k in 0..toks.len() {
+        let Some(name) = ident(k) else { continue };
+        let open = is(k + 1, b'!') && (is(k + 2, b'(') || is(k + 2, b'[') || is(k + 2, b'{'));
+        if !open || name == "macro_rules" || name == "cfg" {
+            continue;
+        }
+        if k > 0 && is(k - 1, b'$') {
+            return Some(format!(
+                "`${name}!(..)` (a macro named by a metavariable, which can be `cfg!`)"
+            ));
+        }
+        if ENV_MACROS.contains(&name) {
+            return Some(format!(
+                "`{name}!(..)` (it reads the build's environment or a file outside the hashed sources)"
+            ));
+        }
+        // The argument tokens, to the matching close.
+        let mut depth = 0usize;
+        let mut m = k + 2;
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[' | b'{') => depth += 1,
+                Tok::Punct(b')' | b']' | b'}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Ident => {
+                    let w = tx(m);
+                    let used = is(m + 1, b'(') || (is(m + 1, b'!') && is(m + 2, b'('));
+                    if BUILD_IDENTS.contains(&w) && !used {
+                        return Some(format!(
+                            "`{name}!(..)` with the bare token `{w}` (its expansion can test a cfg or read the environment)"
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            m += 1;
+        }
+        if let Some(local) = local {
+            // The path before the name: `a::b::name!`.
+            let mut first = None;
+            let mut j = k;
+            while j >= 3 && is(j - 1, b':') && is(j - 2, b':') && ident(j - 3).is_some() {
+                first = ident(j - 3);
+                j -= 3;
+            }
+            let own = first.is_none_or(|r| matches!(r, "crate" | "self" | "super"))
+                && local.iter().any(|l| l == name);
+            let rooted = first.is_none_or(|r| KNOWN_MACRO_ROOTS.contains(&r));
+            if !own && !(KNOWN_MACROS.contains(&name) && rooted) {
+                let shown = match first {
+                    Some(r) => format!("{r}::..::{name}"),
+                    None => name.to_string(),
+                };
+                return Some(format!(
+                    "`{shown}!(..)` (a macro defined outside the crate's sources, whose expansion may test a cfg or read the environment)"
+                ));
+            }
         }
     }
     None
@@ -1229,7 +1418,8 @@ mod tests {
     fn crate_cfg() {
         assert_eq!(
             crate_cfg_conflict(
-                "#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n#[cfg(not(verus_keep_ghost))]\nfn f() {}\n#[cfg(feature = \"x\")]\nfn g() {}\n#[cfg_attr(fip_prelint, fip::export)]\nmod m {}\n"
+                "#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n#[cfg(not(verus_keep_ghost))]\nfn f() {}\n#[cfg(feature = \"x\")]\nfn g() {}\n#[cfg_attr(fip_prelint, fip::export)]\nmod m {}\n",
+                &[]
             ),
             None
         );
@@ -1241,8 +1431,59 @@ mod tests {
             "#[cfg(target_arch = \"x86_64\")]\nconst N: usize = 1;\n",
             "#[cfg_attr(fip_prelint, derive(Clone))]\nstruct S;\n",
         ] {
-            assert!(crate_cfg_conflict(bad).is_some(), "{bad}");
+            assert!(crate_cfg_conflict(bad, &[]).is_some(), "{bad}");
         }
+    }
+
+    /// Re-audit N3 (2026-11-04): a `cfg!` built by a macro from a bare `cfg` token and
+    /// an `option_env!` were listed (8 verified, 0 skipped) and their division sites
+    /// discharged; the driver's `--no-verus` run reported both.
+    #[test]
+    fn macros_that_can_test_cfgs_or_read_the_environment() {
+        let gate = "macro_rules! gate { ($c:ident, $p:ident) => { $c!($p) } }\n";
+        let probe_mac = "pub fn probe_mac(a: u32, b: u32) -> u32 { if gate!(cfg, fip_prelint) { a / b } else { 0 } }\n";
+        let probe_env = "pub fn probe_env(a: u32, b: u32) -> u32 { match option_env!(\"CARGO_PKG_NAME\") { Some(_) => a / b, None => 0 } }\n";
+        // Item texts (the per-function check, without the crate's macro names).
+        let e = cfg_conflict(probe_mac).unwrap_or_default();
+        assert!(e.contains("bare token `cfg`"), "{e}");
+        let e = cfg_conflict(probe_env).unwrap_or_default();
+        assert!(e.contains("option_env!"), "{e}");
+        // The crate scan: the metavariable macro, `env!`, `include*!`, dependency
+        // macros, and the bare tokens.
+        let local = macro_rules_names(gate);
+        assert_eq!(local, vec!["gate".to_string()]);
+        let e = crate_cfg_conflict(gate, &local).unwrap_or_default();
+        assert!(e.contains("`$c!(..)`"), "{e}");
+        for (bad, want) in [
+            (probe_mac, "bare token `cfg`"),
+            (probe_env, "option_env!"),
+            ("const N: &str = env!(\"CARGO_PKG_NAME\");\n", "env!"),
+            ("const N: &str = ::core::env!(\"X\");\n", "env!"),
+            ("include!(\"other.rs\");\n", "include!"),
+            (
+                "const B: &[u8] = include_bytes!(\"n.bin\");\n",
+                "include_bytes!",
+            ),
+            ("fn f() -> bool { dep::gate!() }\n", "dep::..::gate!"),
+            (
+                "fn f() -> bool { other!() }\n",
+                "`other!(..)` (a macro defined outside",
+            ),
+            ("fn f() { debug_assert!(true) }\n", "debug_assert!"),
+            ("fn f() { dep::assert!(true) }\n", "dep::..::assert!"),
+            (
+                "fn f() -> bool { m!(option_env, \"X\") }\n",
+                "bare token `option_env`",
+            ),
+            ("fn f() -> bool { m![cfg_attr] }\n", "bare token `cfg_attr`"),
+        ] {
+            let e = crate_cfg_conflict(bad, &local).unwrap_or_default();
+            assert!(e.contains(want), "{bad}: {e}");
+        }
+        // Known macros, local ones, and `cfg(..)` uses the cfg scan reads.
+        let ok = "macro_rules! proof { ($($t:tt)*) => {} }\nfn f(x: u8) { assert!(x < 9); ::core::assert_eq!(x, x); proof!{ let y = x; } fip_macros::fip_fn!(|a: u8| a); }\n#[cfg(verus_keep_ghost)]\nverus! { spec fn s() -> Seq<u8> { seq![1u8] } }\nfn g() { m2!(#[cfg(feature = \"x\")] 1) }\nmacro_rules! m2 { ($($t:tt)*) => {} }\n";
+        let local = macro_rules_names(ok);
+        assert_eq!(crate_cfg_conflict(ok, &local), None);
     }
 
     #[test]
@@ -1313,8 +1554,9 @@ mod tests {
             ..s.clone()
         };
         assert!(cheat.check_stamp(&t).is_err());
-        assert!(Sidecar::parse(&s.render().replace("format 3", "format 2")).is_err());
-        // Format 3 requires the `cfg` line.
+        assert!(Sidecar::parse(&s.render().replace("format 4", "format 3")).is_err());
+        assert!(Sidecar::parse(&s.render().replace("format 4", "format 2")).is_err());
+        // Format 3 and later require the `cfg` line.
         assert!(
             Sidecar::parse(&s.render().replace("cfg x86_64-unknown-linux-gnu a,b\n", "")).is_err()
         );

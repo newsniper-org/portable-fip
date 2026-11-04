@@ -979,6 +979,61 @@ imported a crate verified with cheating:
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-04: Verus sidecar trust after the
 audit".
 
+## Amendment 2026-11-04: Verus sidecars after the re-audit (sidecar format 4)
+
+The re-audit found three ways to get sites discharged in code Verus never compiled,
+each measured with the fixture crate `vside` (generator, then driver):
+
+- **N3, macros.** The cfg scan was textual: `gate!(cfg, fip_prelint)` with
+  `macro_rules! gate { ($c:ident, $p:ident) => { $c!($p) } }`, and
+  `option_env!("CARGO_PKG_NAME")` (cargo sets it for the driver's rustc, not for the
+  direct Verus run), were listed and their division sites discharged ("14 roots, 14
+  passed, 7 panic sites discharged"). Decided: refuse, not reproduce the driver's
+  configuration for Verus. Running Verus with the driver's cfgs and cargo's
+  environment would need every variable cargo sets (and `cfg(test)`, the profile's
+  cfgs, `fip_prelint`) to be reproduced per build, and would still not cover a
+  dependency macro; the refusal is checkable on the text. `verus::macro_conflict`
+  (generator and driver, crate scan and item texts) refuses `env!`, `option_env!`,
+  `include!`, `include_str!`, `include_bytes!` (an included file is not among the
+  hashed sources), a macro named by a metavariable (`$c!`), a bare `cfg`,
+  `cfg_attr`, `env`, `option_env` or `include*` token in a macro's arguments, and,
+  crate-wide, any macro that is neither a `macro_rules!` of the crate's sources
+  (whose body the scan reads) nor one of a short list of `core`/`std` macros whose
+  expansion tests no cfg (not `debug_assert!`), Verus's and `fip_fn!`. Measured on
+  the repository: `fip-core`, `fip-strict`, `fip-alloc` and `vside` use only local
+  macros (`proof!`, `proof_decl!`, `certified_fip_fn!`), `assert!`, `seq!`, `verus!`
+  and `fip_macros::fip_fn!`; no sidecar changes. After: the generator refuses both
+  probes ("`$c!(..)` (a macro named by a metavariable ..)", "`option_env!(..)` .."),
+  and the driver refuses an existing sidecar of such a crate (0 sites discharged).
+- **N4, sources outside `src/`.** The generator scanned `src/` and the driver skipped
+  every listed source starting with `../` (assumed imported): a
+  `#[path = "../../shared.rs"] mod shared;` whose `on()` returns `cfg!(fip_prelint)`
+  with `ensures !r` escaped both ("13 passed, 6 discharged"). Now both scan every
+  listed source. An imported crate's sources are scanned too rather than told apart by
+  import: they passed the same scan in the imported crate's own run, so this refuses
+  nothing more, and needs no record of which source came from which import. After:
+  the generator refuses the crate ("../shared.rs: `cfg!(fip_prelint)` tests
+  `fip_prelint`"), the driver an existing sidecar.
+- **N4, callers of a skipped function.** A function skipped because its code differs
+  between the builds (a cfg form in its text such as `cfg_attr(verus_keep_ghost,
+  cfg(any()))`, or Verus-only) still gave its `ensures` to verified callers, which
+  were listed. Measured: `on()` deleting `return true;` for Verus only, `ensures !r`,
+  and `probe_taint` dividing under `if on()`: listed, division discharged (6 sites).
+  Now the generator reads every function a VIR record names (`(Fun :path ..)`: call
+  targets, resolved trait methods, functions in specifications), taints every
+  function naming a tainted one to a fixpoint (through unlisted verified functions
+  too), and skips the listed ones ("relies on the specification of `vside::on`, whose
+  code may differ in the driver's build"); an `--import-sidecar`'s skips of these
+  kinds taint the importing run's callers. After: `probe_taint` skipped, its division
+  reported (5 sites discharged).
+
+The sidecar lines are unchanged; the format number is 4 so that the driver refuses
+sidecars written by the earlier generator. Trust boundary, not checked: attribute
+and derive macros of dependencies and a glob import from a dependency shadowing a
+known macro name are assumed to expand alike in both builds; a call through a trait
+method names the trait's method, so an implementation skipped for a cfg (impl paths
+compared as `{impl}`) taints only callers whose VIR names it.
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

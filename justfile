@@ -327,7 +327,9 @@ verify-negative: verify-strict verify-core
 # audit's probes (2026-11-04): an item whose text deletes code for Verus only is
 # skipped; a crate testing `fip_prelint` gets no sidecar; an `--import` without the
 # imported crate's committed sidecar, or of a VIR file no generator run exported, is
-# refused.
+# refused. The re-audit's probes (N3, N4): a crate with a macro-built `cfg!`, an
+# `option_env!` or a `#[path]` module outside `src/` testing `fip_prelint` gets no
+# sidecar; a caller of a function skipped for its cfg is skipped.
 verify-sidecar: verify-strict
     #!/usr/bin/env bash
     set -euo pipefail
@@ -365,6 +367,28 @@ verify-sidecar: verify-strict
     fi
     grep -q "tests \`fip_prelint\`.*no sidecar is written" "$out/cfgcrate.err"
     test ! -e "$out/cfgcrate.txt"
+    # Re-audit probes (N3, N4): a macro-built `cfg!`, `option_env!` and a `#[path]`
+    # module outside `src/` testing `fip_prelint` get no sidecar.
+    refused_probe() {  # name, text appended to lib.rs, expected stderr regex[, file, its text]
+      cp -r "$fx" "$out/$1"
+      printf '%b' "$2" >> "$out/$1/vside/src/lib.rs"
+      if [ $# -ge 5 ]; then printf '%b' "$5" > "$out/$1/$4"; fi
+      if (cd "$out/$1" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/$1.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/$1.log" 2>&1; then
+        echo "FAIL: a sidecar was generated for probe $1"; exit 1
+      fi
+      grep -q "$3" "$out/$1.log" || { echo "FAIL: probe $1 refused for another reason"; cat "$out/$1.log"; exit 1; }
+      test ! -e "$out/$1.txt"
+    }
+    refused_probe mac '\nmacro_rules! gate {\n    ($c:ident, $p:ident) => {\n        $c!($p)\n    };\n}\n\npub fn probe_mac(a: u32, b: u32) -> u32 {\n    if gate!(cfg, fip_prelint) { a / b } else { 0 }\n}\n' 'a macro named by a metavariable.*no sidecar is written'
+    refused_probe env '\npub fn probe_env(a: u32, b: u32) -> u32 {\n    match option_env!("CARGO_PKG_NAME") {\n        Some(_) => a / b,\n        None => 0,\n    }\n}\n' 'option_env!(..).*no sidecar is written'
+    refused_probe path '\n#[path = "../../shared.rs"]\npub mod shared;\n\npub fn probe_path(a: u32, b: u32) -> u32 {\n    if shared::on() { a / b } else { 0 }\n}\n' 'shared.rs: `cfg!(fip_prelint)` tests `fip_prelint`.*no sidecar is written' shared.rs '#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        !r,\n))]\npub fn on() -> bool {\n    cfg!(fip_prelint)\n}\n'
+    # A caller verified against the `ensures` of a function skipped for a Verus-only
+    # `cfg_attr`: skipped too.
+    cp -r "$fx" "$out/taint"
+    printf '\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        !r,\n))]\npub fn on() -> bool {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    return true;\n    false\n}\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        true,\n))]\npub fn probe_taint(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n' >> "$out/taint/vside/src/lib.rs"
+    (cd "$out/taint" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/taint.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/taint.log" 2>&1
+    if grep -q "^fn vside::probe_taint " "$out/taint.txt"; then echo "FAIL: a caller of a cfg-skipped function was listed"; exit 1; fi
+    grep -q "^skip vside::probe_taint relies on the specification of \`vside::on\`" "$out/taint.txt"
     # Imports: the imported crate's committed sidecar is required, and the VIR file must
     # come from a generator run (fip-strict's, copied without its `.fip-run` record).
     root="$PWD"; vir="$root/target/verus-strict/fip_strict.vir"

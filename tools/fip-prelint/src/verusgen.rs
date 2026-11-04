@@ -8,7 +8,7 @@
 //! not `external_body`; `#[verifier::external]` items are not in the VIR at all),
 //! with their item hashes ([`crate::verus::item_hash`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::verus::{self, Entry, NO_CHEATING, Sidecar};
@@ -250,6 +250,9 @@ pub struct VirFn {
     /// The function's span comes from a macro expansion (its syntax context is not
     /// `#0`): one text for every expansion.
     pub expanded: bool,
+    /// Every other function its record names (`(Fun :path ..)`: call targets, also
+    /// resolved trait methods and functions named in its specification).
+    pub calls: Vec<String>,
 }
 
 /// End of the balanced s-expression starting at `open` (a `(`), strings skipped.
@@ -387,6 +390,16 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
         };
         let req = field(func, ":require").ok_or_else(|| format!("`{path}`: no :require"))?;
         let requires = req.trim() != "()";
+        let mut calls: Vec<String> = Vec::new();
+        for part in func.split("(Fun :path ").skip(1) {
+            let p = part
+                .split(|c: char| c.is_whitespace() || c == ')')
+                .next()
+                .unwrap_or("");
+            if !p.is_empty() && p != path && !calls.iter().any(|c| c == p) {
+                calls.push(p.to_string());
+            }
+        }
         out.push(VirFn {
             path,
             span,
@@ -395,6 +408,7 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             body,
             requires,
             expanded: !span_text.ends_with(" (#0)"),
+            calls,
         });
     }
     Ok(out)
@@ -440,6 +454,9 @@ pub struct RunInfo {
     /// Target triple and cargo features of the run ([`run_cfg`]).
     pub target: String,
     pub features: Vec<String>,
+    /// Functions the run's `--import-sidecar`s skipped because their code may differ
+    /// between the builds ([`imported_cfg_skips`]).
+    pub imported_skips: Vec<String>,
 }
 
 /// Checks the `--output-json` result: success, no errors, the entire crate.
@@ -471,6 +488,7 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         verified: r("verified").and_then(Json::as_u64).unwrap_or(0),
         target: String::new(),
         features: Vec::new(),
+        imported_skips: Vec::new(),
     })
 }
 
@@ -515,7 +533,9 @@ pub fn run_cfg(flags: &[String], host: &str) -> Result<(String, Vec<String>), St
 }
 
 /// `Err` naming the first source file under `crate_dir/src` whose `cfg` predicates
-/// test anything the driver could not compare ([`verus::crate_cfg_conflict`]).
+/// or macros may make the driver's build differ from Verus's
+/// ([`verus::crate_cfg_conflict`]). Run before Verus; [`build`] checks every source
+/// of the run the same way.
 pub fn crate_cfg_check(crate_dir: &Path) -> Result<(), String> {
     let mut files = Vec::new();
     let mut stack = vec![crate_dir.join("src")];
@@ -533,17 +553,56 @@ pub fn crate_cfg_check(crate_dir: &Path) -> Result<(), String> {
         }
     }
     files.sort();
+    cfg_check_files(crate_dir, &files)
+}
+
+/// [`verus::crate_cfg_conflict`] on each of `files`, with the `macro_rules!` names
+/// of all of them.
+pub fn cfg_check_files(crate_dir: &Path, files: &[PathBuf]) -> Result<(), String> {
+    let mut texts = Vec::new();
     for f in files {
-        let src = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-        if let Some(c) = verus::crate_cfg_conflict(&src) {
+        let src = std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()))?;
+        texts.push((f, src));
+    }
+    let local: Vec<String> = texts
+        .iter()
+        .flat_map(|(_, src)| verus::macro_rules_names(src))
+        .collect();
+    for (f, src) in &texts {
+        if let Some(c) = verus::crate_cfg_conflict(src, &local) {
             return Err(format!(
-                "{}: {c}: the driver compiles the crate with other cfgs than Verus (`fip_prelint`, the profile, `test`), so no sidecar is written",
-                relative(&f, crate_dir)
+                "{}: {c}: the driver compiles the crate with other cfgs and environment than Verus (`fip_prelint`, the profile, `test`, cargo's variables), so no sidecar is written",
+                relative(f, crate_dir)
             ));
         }
     }
     Ok(())
 }
+
+/// Paths of the functions an `--import-sidecar` skipped because their item text
+/// differs between the builds ([`cfg_skip_reason`]), with impl segments as
+/// [`verus::impl_key`] writes them.
+pub fn imported_cfg_skips(sidecar: &Sidecar) -> Vec<String> {
+    sidecar
+        .skipped
+        .iter()
+        .filter(|(_, why)| cfg_skip_reason(why))
+        .map(|(p, _)| verus::impl_key(p))
+        .collect()
+}
+
+/// `true` for a skip reason saying the function's code may differ between the
+/// driver's build and Verus's (a cfg in its text, Verus-only, or a caller of such a
+/// function): its `ensures` may not hold for the code the driver analyses.
+pub fn cfg_skip_reason(why: &str) -> bool {
+    why.starts_with(SKIP_CFG_ITEM)
+        || why.starts_with(SKIP_GHOST_ONLY)
+        || why.starts_with(SKIP_TAINTED)
+}
+
+const SKIP_CFG_ITEM: &str = "the item text has ";
+const SKIP_GHOST_ONLY: &str = "only in the Verus build";
+const SKIP_TAINTED: &str = "relies on the specification of ";
 
 /// The `--import <name>=<file.vir>` arguments of a Verus command line.
 pub fn imports(flags: &[String]) -> Vec<(String, PathBuf)> {
@@ -681,6 +740,11 @@ pub fn build(
             }
         }
     }
+    // Every source of the run, also one outside `src/` (a `#[path]` module) or of an
+    // imported crate (re-audit N4: `#[path = "../../shared.rs"]` escaped the scan of
+    // `src/`); an imported crate's sources passed the same scan in its own run.
+    let files: Vec<PathBuf> = sources.iter().map(|s| crate_dir.join(s)).collect();
+    cfg_check_files(crate_dir, &files)?;
     let mut source_hashes = Vec::new();
     for s in &sources {
         let bytes =
@@ -688,8 +752,11 @@ pub fn build(
         source_hashes.push((s.clone(), verus::sha256_hex(&bytes)));
     }
     let prefix = format!("{krate}::");
-    let mut entries = Vec::new();
+    let mut entries: Vec<(Entry, &VirFn)> = Vec::new();
     let mut skipped = Vec::new();
+    // Functions whose code may differ between the two builds (impl segments as
+    // `impl_key`): their `ensures` were proved for Verus's build only.
+    let mut tainted: BTreeSet<String> = info.imported_skips.iter().cloned().collect();
     for f in fns {
         if !f.path.starts_with(&prefix) || f.mode != "Exec" {
             continue;
@@ -736,25 +803,77 @@ pub fn build(
         {
             skipped.push((
                 f.path.clone(),
-                "only in the Verus build (inside `#[cfg(verus_keep_ghost)]`)".to_string(),
+                format!("{SKIP_GHOST_ONLY} (inside `#[cfg(verus_keep_ghost)]`)"),
             ));
+            tainted.insert(verus::impl_key(&f.path));
             continue;
         }
         if let Some(c) = verus::cfg_conflict(&src[lo..hi]) {
             skipped.push((
                 f.path.clone(),
-                format!("the item text has {c}: the driver's build and Verus's may differ"),
+                format!("{SKIP_CFG_ITEM}{c}: the driver's build and Verus's may differ"),
             ));
+            tainted.insert(verus::impl_key(&f.path));
             continue;
         }
-        entries.push(Entry {
-            path: verus::impl_key(&f.path),
-            file: relative(&file, crate_dir),
-            line: verus::line_of(&src, lo),
-            hash: verus::sha256_hex(&src.as_bytes()[lo..hi]),
-            requires: f.requires,
-        });
+        entries.push((
+            Entry {
+                path: verus::impl_key(&f.path),
+                file: relative(&file, crate_dir),
+                line: verus::line_of(&src, lo),
+                hash: verus::sha256_hex(&src.as_bytes()[lo..hi]),
+                requires: f.requires,
+            },
+            f,
+        ));
     }
+    // Re-audit N4: a caller verified against the `ensures` of a function whose code
+    // differs in the driver's build (`shared::on`, `ensures !r`, returning
+    // `cfg!(fip_prelint)`) is not verified for the driver's code. Every function
+    // naming a tainted one is tainted, to a fixpoint (a verified but unlisted
+    // function passes its callees' assumptions on through its own `ensures`).
+    let mut why_tainted: BTreeMap<String, String> = BTreeMap::new();
+    loop {
+        let mut changed = false;
+        for f in fns {
+            let key = verus::impl_key(&f.path);
+            if tainted.contains(&key) {
+                continue;
+            }
+            if let Some(c) = f
+                .calls
+                .iter()
+                .find(|c| tainted.contains(&verus::impl_key(c)))
+            {
+                why_tainted.insert(key.clone(), verus::impl_key(c));
+                tainted.insert(key);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let entries: Vec<Entry> = entries
+        .into_iter()
+        .filter_map(|(e, f)| {
+            if !tainted.contains(&e.path) {
+                return Some(e);
+            }
+            // Named through a tainted function, or sharing its path (another impl
+            // block's method of that name: `{impl}` paths do not tell them apart).
+            let c = why_tainted
+                .get(&e.path)
+                .cloned()
+                .unwrap_or_else(|| e.path.clone());
+            skipped.push((
+                f.path.clone(),
+                format!("{SKIP_TAINTED}`{c}`, whose code may differ in the driver's build"),
+            ));
+            None
+        })
+        .collect();
+    let mut entries = entries;
     entries.sort_by(|a, b| (&a.path, &a.file, a.line).cmp(&(&b.path, &b.file, b.line)));
     // Two entries with one path, file and line would be ambiguous: neither is listed.
     let key = |e: &Entry| (e.path.clone(), e.file.clone(), e.line);
@@ -884,6 +1003,7 @@ mod tests {
             verified: 2,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            imported_skips: Vec::new(),
         };
         let fns = vir_functions(VIR).unwrap();
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
@@ -898,6 +1018,135 @@ mod tests {
         );
         assert!(s.flags.is_empty());
         assert_eq!(s.sources.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-audit N4 (2026-11-04): a caller verified against the `ensures` of a function
+    /// skipped for a cfg in its text is skipped too, transitively, and so is a caller
+    /// of a function an imported crate skipped for that reason.
+    #[test]
+    fn callers_of_cfg_skipped_functions_are_not_listed() {
+        let dir = std::env::temp_dir().join(format!("fip-verusgen-taint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let src = "pub fn on() -> bool {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    return true;\n    false\n}\n\npub fn g(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n\npub fn h(a: u32, b: u32) -> u32 {\n    g(a, b)\n}\n\npub fn k() -> u32 { 1 }\n\npub fn d() -> u32 { 2 }\n";
+        std::fs::write(dir.join("src/lib.rs"), src).unwrap();
+        let sp = |a: (usize, usize), b: (usize, usize)| VirSpan {
+            file: "src/lib.rs".to_string(),
+            lo: a,
+            hi: b,
+        };
+        let f = |path: &str,
+                 sig: (usize, usize),
+                 body: ((usize, usize), (usize, usize)),
+                 calls: &[&str]| VirFn {
+            path: path.to_string(),
+            span: sp(sig, sig),
+            mode: "Exec".to_string(),
+            external_body: false,
+            body: Some(sp(body.0, body.1)),
+            requires: false,
+            expanded: false,
+            calls: calls.iter().map(ToString::to_string).collect(),
+        };
+        let fns = vec![
+            f("t::on", (1, 1), ((1, 21), (5, 2)), &[]),
+            f("t::g", (7, 1), ((7, 33), (9, 2)), &["t::on"]),
+            f("t::h", (11, 1), ((11, 33), (13, 2)), &["t::g"]),
+            f("t::k", (15, 1), ((15, 19), (15, 24)), &[]),
+            f("t::d", (17, 1), ((17, 19), (17, 24)), &["dep::impl&%2::x"]),
+        ];
+        let info = RunInfo {
+            version: "v".to_string(),
+            commit: "c".to_string(),
+            toolchain: "t".to_string(),
+            verified: 5,
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: Vec::new(),
+            imported_skips: Vec::new(),
+        };
+        let info = RunInfo {
+            imported_skips: vec!["dep::{impl}::x".to_string()],
+            ..info
+        };
+        let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
+        let listed: Vec<&str> = s.fns.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(listed, vec!["t::k"], "{s:?}");
+        let why = |p: &str| {
+            s.skipped
+                .iter()
+                .find(|(q, _)| q == p)
+                .map(|(_, w)| w.clone())
+                .unwrap_or_default()
+        };
+        assert!(why("t::on").starts_with(SKIP_CFG_ITEM), "{s:?}");
+        assert!(why("t::g").contains("`t::on`"), "{s:?}");
+        assert!(why("t::h").contains("`t::g`"), "{s:?}");
+        assert!(why("t::d").contains("`dep::{impl}::x`"), "{s:?}");
+        assert_eq!(
+            imported_cfg_skips(&s),
+            vec![
+                "t::d".to_string(),
+                "t::g".to_string(),
+                "t::h".to_string(),
+                "t::on".to_string()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Re-audit N4 (2026-11-04): a source of the run outside `src/` (a `#[path]`
+    /// module) is scanned like the crate's own: before, `shared.rs` testing
+    /// `cfg!(fip_prelint)` escaped the scan of `src/`.
+    #[test]
+    fn every_source_of_the_run_is_scanned() {
+        let dir = std::env::temp_dir().join(format!("fip-verusgen-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            "#[path = \"../shared.rs\"]\npub mod shared;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("shared.rs"),
+            "pub fn on() -> bool {\n    cfg!(fip_prelint)\n}\n",
+        )
+        .unwrap();
+        assert_eq!(crate_cfg_check(&dir), Ok(()));
+        let span = VirSpan {
+            file: "shared.rs".to_string(),
+            lo: (1, 1),
+            hi: (1, 21),
+        };
+        let fns = vec![VirFn {
+            path: "t::shared::on".to_string(),
+            span: span.clone(),
+            mode: "Exec".to_string(),
+            external_body: false,
+            body: Some(VirSpan {
+                lo: (1, 21),
+                hi: (3, 2),
+                ..span
+            }),
+            requires: false,
+            expanded: false,
+            calls: Vec::new(),
+        }];
+        let info = RunInfo {
+            version: "v".to_string(),
+            commit: "c".to_string(),
+            toolchain: "t".to_string(),
+            verified: 1,
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: Vec::new(),
+            imported_skips: Vec::new(),
+        };
+        let e = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap_err();
+        assert!(
+            e.starts_with("shared.rs: `cfg!(fip_prelint)` tests `fip_prelint`"),
+            "{e}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -930,6 +1179,7 @@ mod tests {
             verified: 3,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            imported_skips: Vec::new(),
         };
         let fns = vir_functions(vir).unwrap();
         assert!(!fns[0].expanded && fns[2].expanded);

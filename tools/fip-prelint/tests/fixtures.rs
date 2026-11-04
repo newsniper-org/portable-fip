@@ -1100,6 +1100,88 @@ fn verus_sidecar_cfg() {
             &["--message-format", "short"],
         ),
     );
+
+    // The re-audit (N3, N4), each a sidecar the earlier generator wrote (a listed
+    // division under the probe's condition), refused by the driver:
+    // - `-macro`: `gate!(cfg, fip_prelint)` builds `cfg!` from a bare token;
+    // - `-env`: `option_env!("CARGO_PKG_NAME")` is set by cargo, not by Verus;
+    // - `-path`: `#[path = "../../shared.rs"]` module testing `fip_prelint`, listed
+    //   as `source ../shared.rs` (skipped before as if imported);
+    // - `-format`: a format 3 sidecar (written by the earlier generator).
+    let d = copy_fixture("verus_sidecar", "verus_macro");
+    forge_listed(
+        &d,
+        "probe_mac",
+        "macro_rules! gate {\n    ($c:ident, $p:ident) => {\n        $c!($p)\n    };\n}\n\n#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\npub fn probe_mac(a: u32, b: u32) -> u32 {\n    if gate!(cfg, fip_prelint) { a / b } else { 0 }\n}",
+    );
+    compare(
+        "verus_sidecar",
+        "-macro",
+        &run_at(
+            &d,
+            "verus_sidecar-macro",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_env");
+    forge_listed(
+        &d,
+        "probe_env",
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\npub fn probe_env(a: u32, b: u32) -> u32 {\n    match option_env!(\"CARGO_PKG_NAME\") {\n        Some(_) => a / b,\n        None => 0,\n    }\n}",
+    );
+    compare(
+        "verus_sidecar",
+        "-env",
+        &run_at(&d, "verus_sidecar-env", &[], &["--message-format", "short"]),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_path");
+    let shared = d.join("shared.rs");
+    std::fs::write(&shared, "pub fn on() -> bool {\n    cfg!(fip_prelint)\n}\n")
+        .expect("write shared.rs");
+    forge_listed(
+        &d,
+        "probe_path",
+        "#[path = \"../../shared.rs\"]\npub mod shared;\n\n#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\npub fn probe_path(a: u32, b: u32) -> u32 {\n    if shared::on() { a / b } else { 0 }\n}",
+    );
+    let sidecar = d.join("vside/verus-verified.txt");
+    edit(
+        &sidecar,
+        "\nsource src/lib.rs ",
+        &format!(
+            "\nsource ../shared.rs {}\nsource src/lib.rs ",
+            sha256_file(&shared)
+        ),
+    );
+    compare(
+        "verus_sidecar",
+        "-path",
+        &run_at(
+            &d,
+            "verus_sidecar-path",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    let d = copy_fixture("verus_sidecar", "verus_format");
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        "\nformat 4\n",
+        "\nformat 3\n",
+    );
+    compare(
+        "verus_sidecar",
+        "-format",
+        &run_at(
+            &d,
+            "verus_sidecar-format",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
 }
 
 /// The analysis cache follows every source a sidecar lists (the soundness audit,
