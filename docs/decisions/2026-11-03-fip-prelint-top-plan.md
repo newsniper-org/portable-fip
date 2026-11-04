@@ -5,8 +5,9 @@
 
 **Status:** ACCEPTED by the user, 2026-11-03, for items 1–15 of "Recommended order";
 implemented on branch `prelint/top-plan`, one commit per item. Item 16 (Verus
-panic-freedom sidecar, a trust change) awaits a separate user decision; the "stay" and
-"only on demand" items are not executed.
+panic-freedom sidecar, a trust change) ACCEPTED by the user on 2026-11-04 and
+implemented on branch `prelint/top-plan-2`. The "stay" and "only on demand" items are
+not executed.
 Builds on `docs/decisions/2026-11-02-fip-prelint-limits-plan.md` (ACCEPTED,
 implemented: L1–L12) and its "Other limits found and kept", on the amendments of
 `docs/decisions/2026-11-01-fip-prelint.md`, and on `TODOs/fip-prelint.md` and
