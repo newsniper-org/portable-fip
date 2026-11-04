@@ -572,8 +572,9 @@ fn stack() {
 }
 
 /// Pool hints (top plan T17): the default run has no hint; with `--pool-hints` the
-/// unmarked `Pool::alloc` and `Bump::alloc` of the exported crate get a heuristic note,
-/// the marked arena, the stack, the cursor and the unexported crate's arena do not.
+/// unmarked `Pool::alloc` and `Bump::alloc` of the exported crate and the `Bump::alloc`
+/// of the member without `fip::export` get a heuristic note, the marked arena, the
+/// stack and the cursor do not.
 /// Without the hint lines, the `--pool-hints` output equals the default output (same
 /// verdicts, counts and exit status).
 #[test]

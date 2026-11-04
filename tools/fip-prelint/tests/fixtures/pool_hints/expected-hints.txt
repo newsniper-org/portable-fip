@@ -2,6 +2,7 @@
 exit: failure
 note: fip-prelint: crate `plain`: 1 roots, 1 passed, 0 errors, 0 warnings, 0 notes
 note: fip-prelint: crate `pooly`: 2 roots, 1 passed, 1 errors, 0 warnings, 0 notes, 2 declared sources
+plain/src/lib.rs:13:5: note: fip-prelint: heuristic: `Bump::alloc` looks like an unmarked pool allocation (it writes `self.top` and returns a borrow of `self.buf`; `Bump::reset` resets `self.top`): if it hands out memory, mark it `fip::alloc_source` and its release `fip::free_source`; otherwise ignore this note (`--pool-hints`; it changes no verdict)
 pooly/src/lib.rs:144:5: error: fip-prelint: `use_marked` is #[fip] but may allocate 1 time(s), at most 0 allowed: `use_marked` -> `MarkedBump::alloc` (pooly/src/lib.rs:144): allocation: declared source `MarkedBump::alloc`
 pooly/src/lib.rs:17:5: note: fip-prelint: heuristic: `Pool::alloc` looks like an unmarked pool allocation (it writes `self.free`, a slot of `self.slots` and returns an index into `self.slots`; `Pool::release` writes `None` into `self`): if it hands out memory, mark it `fip::alloc_source` and its release `fip::free_source`; otherwise ignore this note (`--pool-hints`; it changes no verdict)
 pooly/src/lib.rs:43:5: note: fip-prelint: heuristic: `Bump::alloc` looks like an unmarked pool allocation (it writes `self.top` and returns a borrow of `self.buf`; `Bump::reset` resets `self.top`): if it hands out memory, mark it `fip::alloc_source` and its release `fip::free_source`; otherwise ignore this note (`--pool-hints`; it changes no verdict)

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-//! The same bump arena in a crate without `fip::export`: no hint (its functions are
-//! `⊤` for other crates anyway; the hints cover exported crates only).
+//! The same bump arena in a crate without `fip::export`, checked as a workspace
+//! member: a hint too (its own roots use it; since 2026-11-04).
 
 pub struct Bump {
     pub buf: [u8; 32],

@@ -5,7 +5,8 @@
 //!
 //! A **heuristic**, off by default. It never changes a verdict, the exit status or the
 //! summary counts: it only prints `note: fip-prelint: heuristic: ..` for methods of a
-//! crate that declares `fip::export` that look like an unmarked pure-Rust allocator
+//! package the driver checks (with or without `fip::export`) or of a dependency that
+//! declares `fip::export`, that look like an unmarked pure-Rust allocator
 //! (a pool handing out slots of its own buffer, which the analysis treats as ordinary
 //! allocation-free code: the declared assumption of limits plan L7).
 //!
@@ -389,11 +390,14 @@ pub fn hints(tcx: TyCtxt<'_>) -> Vec<(Span, String)> {
     out
 }
 
-/// Prints the pool hints of the local crate, if enabled and the crate declares
-/// `fip::export`. Notes only: no count, no exit status.
-pub fn report(tcx: TyCtxt<'_>) {
+/// Prints the pool hints of the local crate, if enabled: for a package the driver
+/// checks (`primary`, its own roots use its pools), and for a dependency only if it
+/// declares `fip::export` (the driver compiles no other dependency). Notes only: no
+/// count, no exit status.
+pub fn report(tcx: TyCtxt<'_>, primary: bool) {
     if !enabled()
-        || !crate::analysis::declares_export(tcx, rustc_hir::def_id::CRATE_DEF_ID.to_def_id())
+        || !(primary
+            || crate::analysis::declares_export(tcx, rustc_hir::def_id::CRATE_DEF_ID.to_def_id()))
     {
         return;
     }

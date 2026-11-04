@@ -835,7 +835,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     };
     validate_tool_attrs(&mut out);
     // Opt-in heuristic notes (top plan T17): no count, no verdict.
-    crate::poolhint::report(tcx);
+    crate::poolhint::report(tcx, true);
     let mut crates = Crates::new(tcx);
     // A dependency that declares `fip::export` but carries no MIR would otherwise look
     // opted in while giving no bodies: a hard error, whether or not a root calls it.
@@ -1096,7 +1096,7 @@ pub fn check_dependency(tcx: TyCtxt<'_>) {
         warnings: 0,
         notes: 0,
     };
-    crate::poolhint::report(tcx);
+    crate::poolhint::report(tcx, false);
     let mut crates = Crates::new(tcx);
     // Malformed attributes are not reported here (the crate is not checked); only
     // well-formed marks and sources are used.

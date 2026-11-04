@@ -2710,3 +2710,25 @@ allocator shim was shown as its mangled symbol.
 **Left.** Thumb code (`thumbv7*` targets) is refused; Mach-O, COFF and WASM still have
 no frame sizes.
 
+## Resolved 2026-11-04: pool hints on checked packages without `fip::export`
+
+Deviation of "opt-in pool hints" (T17): `top::Pool` (a crate without `fip::export`)
+got no hint, though its own roots use it.
+
+**Change.** `poolhint::report(tcx, primary)`: hints for every package the driver
+checks (`Role::Primary`, with or without `fip::export`) and, as before, for a
+dependency only if it declares `fip::export`. Decided: other dependencies are compiled
+by the plain rustc (`Role::PassThrough`), so the driver sees none of their bodies; an
+exported one is compiled by the driver and its pools are what callers in other
+crates rely on. Still opt-in (`--pool-hints`) and verdict-neutral (the fixture test
+compares the output without the hint lines with the default run).
+
+**Measured** (fixture `pool_hints`):
+
+| case | before | after |
+|---|---|---|
+| member `plain` (no `fip::export`), `Bump::alloc` | no hint | hint |
+| member `pooly` (exported): `Pool::alloc`, `Bump::alloc` / marked arena, stack, cursor | hints / none | unchanged |
+| default run (no `--pool-hints`); verdicts, counts, exit status | — | unchanged |
+| workspace self-check (no `--pool-hints`) | — | unchanged |
+
