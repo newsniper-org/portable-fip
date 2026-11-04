@@ -2921,3 +2921,39 @@ error "have different link symbols"; `strict_dep_other_abi`
 the existing across-ABIs error at the call. Every earlier diagnostic byte-identical;
 summary "14 roots, 7 passed, 10 errors, 8 certified foreign functions" → "17 roots,
 9 passed, 13 errors, 11 certified foreign functions".
+
+## Resolved 2026-11-04: `fip-strict`'s Verus-only constructors merged into single items
+
+**Before.** `Certified::assume` and `Certified::assume_no_panic_macros` were declared
+twice (plain, and inside `#[cfg(verus_keep_ghost)] verus! { }` with `ensures
+r.inner() == f`), so the `fip-strict` sidecar listed 0 functions and skipped both as
+"only in the Verus build".
+
+**Change.** One source each, in `#[cfg_attr(verus_keep_ghost, verus_verify)] impl`
+blocks after the `verus!` block, with the specification in
+`#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r.inner() == f))]` (as
+`fip-core` does for free functions). Probed first: `verus_spec` on an associated
+function in an impl without `verus_verify` fails on both builds (E0425 "cannot find
+function `assume`"); with it, it verifies. `tests/verus_drift.rs` compares the twins
+up to the new `// ---- Shared items` marker (plain items 15 → 13).
+
+**Measured.** Plain build identical: `rustdoc --output-format json` of `fip-strict`
+before/after, 152 items, equal after dropping spans and ids; the `cargo doc` HTML pages
+equal after dropping source-line links; `cargo test -p fip-strict` and the workspace
+tests pass. Verus: fip-strict 19 verified on upstream 0.2026.10.18.7d82994 and the fork
+0.2026.10.31.559ac52; `just verify` and the fork's run pass (47 mutants and controls
+rejected). Sidecar: 2 functions listed (`{impl}::assume`, `{impl}::assume_no_panic_macros`),
+9 skipped (the `impl&%N` numbers renumbered); `fip-core`'s sidecar changes only in the
+`../fip-strict/src/lib.rs` source hash; `fip-alloc` has no such copies (unchanged).
+
+**Not merged: the `call` impls** of `Stateless`, `Compose`, `Then` (and the
+macro-generated `Certified` ones, skipped as macro expansions anyway). Each impl must
+hold the Verus-only spec functions `pre`/`post` in the same block, and Rust parses
+cfg'd-out items, so `open spec fn` cannot appear in a plain impl. Measured on both
+builds with an attribute-mode spec function (`#[cfg(verus_keep_ghost)]
+#[verifier::spec] fn pre(..)` in a `verus_verify` impl): "open/closed is required for
+implementations of non-private traits"; `#[verifier::open]` is "unrecognized verifier
+attribute", `#[verus_verify(open)]` "requires `dual_spec`"; only the internal
+`#[verus::internal(open)]` passes, and then the struct must leave `verus!` too. The
+`Compose`/`Then` bodies also use `forall`/`exists`/`==>`, which plain `rustc` cannot
+parse. Reopen if Verus gains a user-facing attribute for open spec functions.

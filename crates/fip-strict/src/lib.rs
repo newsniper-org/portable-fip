@@ -65,7 +65,9 @@
 //! `pre` / `post`, and `call` requires `pre` and ensures `post`. For [`Certified`]
 //! they are the wrapped closure's `requires` / `ensures`. Plain builds see the
 //! dependency-free declarations; `tests/verus_drift.rs` checks that both declare the
-//! same exec items. Verify with `just verify-strict` (exports the Verus metadata
+//! same exec items. The constructors [`Certified::assume`] and
+//! [`Certified::assume_no_panic_macros`] are single items for both builds, their
+//! Verus `ensures` in `cfg_attr(verus_keep_ghost, verus_spec(..))`. Verify with `just verify-strict` (exports the Verus metadata
 //! `fip-core` imports).
 //!
 //! `#![no_std]`, no `alloc`, no dependencies.
@@ -278,46 +280,6 @@ pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> 
     f: C,
 }
 
-#[cfg(not(verus_keep_ghost))]
-impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
-    /// Wraps `f` without checking anything.
-    ///
-    /// # Safety
-    ///
-    /// Not memory safety: the caller asserts that every call of `f` performs at most
-    /// `ALLOCS` allocations, no deallocation and no recursion. `fip_fn!` calls this
-    /// with a bound computed from the checked closure body.
-    #[allow(
-        unsafe_code,
-        reason = "certificate constructor; `unsafe` marks a trusted claim"
-    )]
-    #[doc(hidden)]
-    #[must_use]
-    pub const unsafe fn assume(f: C) -> Self {
-        Certified { f }
-    }
-}
-
-#[cfg(not(verus_keep_ghost))]
-impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
-    /// [`Certified::assume`] for a closure whose body was also checked with
-    /// `panic_macros = false`.
-    ///
-    /// # Safety
-    ///
-    /// As [`Certified::assume`], and the caller also asserts that the body of `f`
-    /// uses none of the panicking macros `panic_macros = false` rejects.
-    #[allow(
-        unsafe_code,
-        reason = "certificate constructor; `unsafe` marks a trusted claim"
-    )]
-    #[doc(hidden)]
-    #[must_use]
-    pub const unsafe fn assume_no_panic_macros(f: C) -> Self {
-        Certified { f }
-    }
-}
-
 #[allow(
     unsafe_code,
     reason = "the bound was claimed by the `unsafe` constructors `Certified::assume` / `assume_no_panic_macros`"
@@ -470,30 +432,6 @@ pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> 
     f: C,
 }
 
-impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
-    /// Wraps `f` without checking anything; see the plain declaration.
-    #[allow(unsafe_code, reason = "certificate constructor; `unsafe` marks a trusted claim")]
-    #[doc(hidden)]
-    pub const unsafe fn assume(f: C) -> (r: Self)
-        ensures
-            r.inner() == f,
-    {
-        Certified { f }
-    }
-}
-
-impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
-    /// [`Certified::assume`] with `panic_macros = false`; see the plain declaration.
-    #[allow(unsafe_code, reason = "certificate constructor; `unsafe` marks a trusted claim")]
-    #[doc(hidden)]
-    pub const unsafe fn assume_no_panic_macros(f: C) -> (r: Self)
-        ensures
-            r.inner() == f,
-    {
-        Certified { f }
-    }
-}
-
 impl<const ALLOCS: u64, C, const P: bool> Certified<ALLOCS, C, P> {
     /// The wrapped closure.
     pub closed spec fn inner(&self) -> C {
@@ -583,6 +521,58 @@ impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S
 }
 
 } // verus!
+
+// ---- Shared items (both builds): one source, with the Verus specification in
+// `cfg_attr(verus_keep_ghost, ..)`, so the Verus sidecar lists them by their text.
+// Under Verus, `Certified` and `Certified::inner` are those of the `verus!` block.
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
+    /// Wraps `f` without checking anything.
+    ///
+    /// # Safety
+    ///
+    /// Not memory safety: the caller asserts that every call of `f` performs at most
+    /// `ALLOCS` allocations, no deallocation and no recursion. `fip_fn!` calls this
+    /// with a bound computed from the checked closure body.
+    #[allow(
+        unsafe_code,
+        reason = "certificate constructor; `unsafe` marks a trusted claim"
+    )]
+    #[doc(hidden)]
+    #[must_use]
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            r.inner() == f,
+    ))]
+    pub const unsafe fn assume(f: C) -> Self {
+        Certified { f }
+    }
+}
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
+    /// [`Certified::assume`] for a closure whose body was also checked with
+    /// `panic_macros = false`.
+    ///
+    /// # Safety
+    ///
+    /// As [`Certified::assume`], and the caller also asserts that the body of `f`
+    /// uses none of the panicking macros `panic_macros = false` rejects.
+    #[allow(
+        unsafe_code,
+        reason = "certificate constructor; `unsafe` marks a trusted claim"
+    )]
+    #[doc(hidden)]
+    #[must_use]
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            r.inner() == f,
+    ))]
+    pub const unsafe fn assume_no_panic_macros(f: C) -> Self {
+        Certified { f }
+    }
+}
 
 /// `FipFn<(A0, ..)>` for `Certified<N, C>` with `C: Fn(A0, ..) -> R`: one source for
 /// both declarations of the trait. Under Verus, `pre`/`post` are the closure's

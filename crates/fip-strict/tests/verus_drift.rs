@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! `FipBound`, `FipFn` and `Certified` are declared twice in `src/lib.rs`: plainly,
-//! and inside `verus! { }` for the `verus` driver. The Verus declarations may only
+//! and inside `verus! { }` for the `verus` driver (the constructors
+//! `Certified::assume` / `assume_no_panic_macros` are one shared source with their
+//! Verus specification in `cfg_attr`, so they are not compared here). The Verus declarations may only
 //! add ghost items (`spec fn`, `requires`/`ensures`, named returns); everything that
 //! exists at run time must be the same. This test strips the ghost parts and compares.
 
@@ -202,12 +204,11 @@ fn verus_declarations_match_the_plain_ones() {
         "// ---- Plain declarations",
         "// ---- Verus declarations",
     ));
-    let verus_decls = region(
-        "// ---- Verus declarations",
-        "macro_rules! certified_fip_fn",
-    );
+    // The shared items after the `verus!` block (one source for both builds, e.g.
+    // `Certified::assume`) are not twins and are not compared.
+    let verus_decls = region("// ---- Verus declarations", "// ---- Shared items");
     let verus = items(verus_decls);
-    assert_eq!(plain.len(), 15, "plain items: {plain:#?}");
+    assert_eq!(plain.len(), 13, "plain items: {plain:#?}");
     assert_eq!(plain, verus);
 }
 
