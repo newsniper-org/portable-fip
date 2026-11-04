@@ -313,6 +313,8 @@ fn std_summaries(mut args: Vec<String>, toolchain: &str, sysroot: &str, ld: &str
         .env("LD_LIBRARY_PATH", ld)
         .env("FIP_PRELINT_SYSROOT", sysroot)
         .env("FIP_PRELINT_STD_SUMMARIES_OUT", &out)
+        // The other modes' variables, if exported in the shell, would switch modes.
+        .env_remove("FIP_PRELINT_STACK")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("RUSTC")
         .env_remove("CARGO_TARGET_DIR")
@@ -444,6 +446,7 @@ fn stack(args: &[String], toolchain: &str, sysroot: &str, ld: &str, target_dir: 
         .env("LD_LIBRARY_PATH", ld)
         .env("FIP_PRELINT_SYSROOT", sysroot)
         .env("FIP_PRELINT_STACK", "1")
+        .env_remove("FIP_PRELINT_STD_SUMMARIES_OUT")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("RUSTC")
         .env_remove("CARGO_TARGET_DIR")
@@ -929,6 +932,10 @@ fn main() -> ExitCode {
         .env("RUSTC_BOOTSTRAP", "1")
         .env("LD_LIBRARY_PATH", ld)
         .env("FIP_PRELINT_SYSROOT", &sysroot)
+        // Set only by `--stack` and `--std-summaries`: inherited from the shell they
+        // would turn the check into a run without verdicts that exits 0.
+        .env_remove("FIP_PRELINT_STACK")
+        .env_remove("FIP_PRELINT_STD_SUMMARIES_OUT")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("RUSTC")
         .env_remove("CARGO_TARGET_DIR")

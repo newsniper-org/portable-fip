@@ -352,18 +352,20 @@ Requirements: upstream Verus (`verus-lang/verus`) and Singular
 
 ## Gates
 
-`just ci` runs all of them:
+`just ci` runs all of them (`just ci-gates` without `FIP_PRELINT_REQUIRE_TARGETS=1`,
+which turns a driver test skipped for a missing target, tool or host into a failure);
+cargo runs with `--locked`:
 
 | recipe | checks |
 |---|---|
 | `fmt-check`, `lint` | rustfmt; clippy with `all = deny`, `pedantic = warn`, `-D warnings` |
 | `test` | unit, integration, doc tests (allocation tests run in parallel) |
 | `msrv` | the same on rustc 1.99.1 (the workspace `rust-version`) |
-| `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch`, `fip-strict` (only `core`/`alloc` exist there) |
-| `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks |
-| `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected |
+| `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch`, `fip-strict`, `fip-lint-rules` (only `core`/`alloc` exist there) |
+| `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks; `fip-arch`'s unit tests built for `aarch64`/`riscv64gc` musl (linked by `rust-lld`), which assembles the `asm!` templates |
+| `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected with the `build.rs` message |
 | `verify` | Verus proofs of `fip-strict`, `fip-core` (imports `fip-strict`), `fip-alloc`; `#[fip]` and strict composition with `verus_spec`; verified callers of the state-passing variants (imports `fip-core`); the Verus sidecars of verified bodies of `fip-strict`, `fip-core`, `fip-alloc` and of the driver's `verus_sidecar` fixture regenerated and equal to the committed ones, and the generator's refusals (no `--no-cheating`; an `external_body` function fails the run); 33 Verus mutants (incl. one recursive), 7 wrong claims of verified callers, 2 surface-gate mutants and 1 spec-drift mutant must fail |
-| `prelint` | rustfmt and clippy (`-D warnings`) on the driver; `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, allocation and free sources, drops through their glue, declared preconditions, function pointers, trait objects and trait method contracts, std summaries (and a stale one ignored), Verus sidecars (impl methods matched by location; stale, forged, foreign-stamped, missing, moved and differently configured ones not used), bad attributes) a self-check of this workspace against `selfcheck.expected`, the same for every installed target (`targets.expected`), stack bounds of one fixture in two stated builds, and the rejected behaviour examples of `fip-macros` through the driver (mark-only mode) |
+| `prelint` | rustfmt and clippy (`-D warnings`) on the driver; `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, allocation and free sources, drops through their glue, declared preconditions, function pointers, trait objects and trait method contracts, std summaries (and a stale one ignored), Verus sidecars (impl methods matched by location; stale, forged, foreign-stamped, missing, moved and differently configured ones not used), bad attributes) a self-check of this workspace against `selfcheck.expected`, the same for every installed target (`targets.expected`), stack bounds of one fixture in two stated builds, and the rejected behaviour examples of `fip-macros` through the driver (mark-only mode); its `-Zbuild-std` runs fetch the standard library's crates.io dependencies into the cargo registry cache on a cold cache |
 | `prelint-repin` | not in `ci`: `just prelint-repin <version>` runs the checks of a move to another rustc (driver build, probes, entry points, std summaries, driver tests) and lists the pins and tables to re-audit |
 | `prelint-std-summaries` | not in `ci`: regenerates `tools/fip-prelint/std-summaries/<release>-<target>.txt` (`-Zbuild-std` of the seed crate, ~2 min); run after a repin or a seed change, and commit the result |
 | `compile-fail-reasons` | each of the 82 `compile_fail` examples of `fip-macros` (46 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error |

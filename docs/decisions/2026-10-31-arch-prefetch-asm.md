@@ -75,7 +75,11 @@ Measured with rustc 1.99.1 (LLVM of that release):
   with `QEMU_CPU=rv64,zicbop=false`, `rv64,zicbop=true` and `max`
   (`prefetch_accepts_any_pointer` passes null and `usize::MAX`). Recipe
   `just arch-qemu-riscv64` (not in `ci`: needs `qemu-riscv64`); `just cross` checks
-  the three riscv64 targets.
+  the three riscv64 targets and (amendment 2026-11-04) builds `fip-arch`'s unit tests
+  for `aarch64-unknown-linux-musl` and `riscv64gc-unknown-linux-musl` with `rust-lld`:
+  `cargo check` never assembles `asm!`, and only the tests instantiate the generic
+  `prefetch_read` (measured: a bogus mnemonic in the `prfm` or `ori` template passes
+  `cargo check` and fails this build with "unrecognized instruction mnemonic").
 
 ## What would reopen this
 

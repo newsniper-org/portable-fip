@@ -9,8 +9,13 @@ msrv := "1.99.1"
 # Toolchain of `fip-prelint` (the installed Verus toolchain; decision 2026-11-01-fip-prelint).
 prelint_tc := "1.99.1"
 
-# Every gate; a change merges only when this passes.
-ci: fmt-check lint test msrv nostd cross arch-override verify compile-fail-reasons prelint
+# Every gate; a change merges only when this passes. A driver test skipped for a
+# missing target, tool or host fails here (`FIP_PRELINT_REQUIRE_TARGETS=1`).
+ci:
+    FIP_PRELINT_REQUIRE_TARGETS=1 just ci-gates
+
+# The gates of `ci`, without turning skipped driver tests into failures.
+ci-gates: fmt-check lint test msrv nostd cross arch-override verify compile-fail-reasons prelint
 
 # Formatting.
 fmt-check:
@@ -18,27 +23,36 @@ fmt-check:
 
 # Clippy, warnings are errors (workspace lints: all = deny, pedantic = warn).
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # Unit, integration and doc tests (allocation-count tests run in parallel).
 test:
-    cargo test --workspace
+    cargo test --locked --workspace
 
 # Builds and tests on the lowest supported toolchain.
 msrv:
-    cargo +{{msrv}} test --workspace --target-dir target/msrv
+    cargo +{{msrv}} test --locked --workspace --target-dir target/msrv
 
 # Real no_std evidence: this target ships only core/alloc, so any std use fails to link.
 nostd:
-    cargo +{{msrv}} build --release --target x86_64-unknown-none -p fip-core -p fip-alloc -p fip-arch -p fip-strict
+    cargo +{{msrv}} build --locked --release --target x86_64-unknown-none -p fip-core -p fip-alloc -p fip-arch -p fip-strict -p fip-lint-rules
+
+# Linker flags for the musl targets without a C cross toolchain (`rust-lld`, static).
+musl_lld := "-C linker=rust-lld -C linker-flavor=ld.lld -C link-self-contained=yes -C target-feature=+crt-static"
 
 # Other ISAs the arch module realises (incl. Apple aarch64, whose default line is 128 B).
+# `cargo check` does not assemble `asm!` templates, and `prefetch_read` is generic and
+# `#[inline(always)]`, so only `fip-arch`'s unit tests instantiate it: they are built
+# (not run) for aarch64 and riscv64 musl, linked by `rust-lld`, which assembles the
+# `prfm` and `ori` templates (needs both musl targets for the ambient toolchain).
 cross:
-    cargo check -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target aarch64-unknown-linux-gnu
-    cargo check -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target riscv64gc-unknown-linux-gnu
-    cargo check -p fip-arch --target riscv64gc-unknown-linux-musl
-    cargo check -p fip-arch --target riscv64gc-unknown-none-elf
-    cargo check -p fip-arch --target aarch64-apple-darwin
+    cargo check --locked -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target aarch64-unknown-linux-gnu
+    cargo check --locked -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target riscv64gc-unknown-linux-gnu
+    cargo check --locked -p fip-arch --target riscv64gc-unknown-linux-musl
+    cargo check --locked -p fip-arch --target riscv64gc-unknown-none-elf
+    cargo check --locked -p fip-arch --target aarch64-apple-darwin
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="{{musl_lld}}" cargo test --locked -q --no-run -p fip-arch --lib --target aarch64-unknown-linux-musl --target-dir target/cross-asm
+    CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="{{musl_lld}}" cargo test --locked -q --no-run -p fip-arch --lib --target riscv64gc-unknown-linux-musl --target-dir target/cross-asm
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
 verify: verify-strict verify-core verify-alloc verify-compose verify-negative verify-sidecar
@@ -64,9 +78,10 @@ verus_core := "--import fip_core=target/verus-core/fip_core.vir --extern fip_cor
 # plain binary of tools/fip-prelint (no rustc-dev needed to run it).
 sidecar_gen := "tools/fip-prelint/target/debug/cargo-fip-prelint --verus-sidecar"
 
-# Builds the sidecar generator.
+# Builds the sidecar generator (`--target-dir target`: an exported `CARGO_TARGET_DIR`
+# would put it elsewhere, and the recipes would run a stale `sidecar_gen`).
 sidecar-gen:
-    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build --locked -q --bin cargo-fip-prelint --target-dir target
 
 # fip-core proofs, no trusted items (--no-cheating); imports fip-strict's Verus build
 # and exports fip-core's for `verify/compose_state.rs`. The run goes through the
@@ -120,7 +135,7 @@ verify-compose: verify-strict verify-core
     #!/usr/bin/env bash
     set -euo pipefail
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build -q -p fip-macros --target-dir target/verus-macros
+    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
     deps=target/verus-macros/debug/deps
     so=$(ls -t $deps/libfip_macros-*.so | head -1)
     run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
@@ -161,7 +176,7 @@ verify-negative: verify-strict verify-core
     set -euo pipefail
     out=target/verify-negative; rm -rf "$out"; mkdir -p "$out"
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build -q -p fip-macros --target-dir target/verus-macros
+    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
     deps=target/verus-macros/debug/deps
     so=$(ls -t $deps/libfip_macros-*.so | head -1)
     mutate() {  # name, crate dir, file, sed script -> prints mutant dir
@@ -286,7 +301,7 @@ verify-negative: verify-strict verify-core
     # Source gates (fip_testkit::surface) must fail on mutated sources.
     expect_test_fail() {  # name, crate, file, sed script, test name
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if FIP_SURFACE_SRC="$PWD/$d/src" cargo test -q -p "$2" --test verified_surface "$5" > "$d/log" 2>&1; then
+      if FIP_SURFACE_SRC="$PWD/$d/src" cargo test --locked -q -p "$2" --test verified_surface "$5" > "$d/log" 2>&1; then
         echo "FAIL: surface mutant $1 passed"; exit 1
       fi
       grep -q "test result: FAILED" "$d/log" || { echo "FAIL: surface mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
@@ -297,7 +312,7 @@ verify-negative: verify-strict verify-core
     expect_test_fail surface-no-decreases-attr fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/ s/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/#[cfg_attr(verus_keep_ghost, verifier::exec_allows_no_decreases_clause)]\n&/' no_unlisted_verifier_attribute
     # Drift gate (fip-strict): the Verus `FipFn::call` must match the plain one.
     d=$(mutate drift-call fip-strict lib.rs 's/^    fn call(&self, args: Args) -> (r: Self::Output)$/    fn call(\&self, args: Args, extra: u8) -> (r: Self::Output)/')
-    if FIP_DRIFT_SRC="$PWD/$d/src/lib.rs" cargo test -q -p fip-strict --test verus_drift > "$d/log" 2>&1; then
+    if FIP_DRIFT_SRC="$PWD/$d/src/lib.rs" cargo test --locked -q -p fip-strict --test verus_drift > "$d/log" 2>&1; then
       echo "FAIL: drift mutant passed"; exit 1
     fi
     grep -q "test result: FAILED" "$d/log" || { echo "FAIL: drift mutant failed for another reason"; cat "$d/log"; exit 1; }
@@ -315,7 +330,7 @@ verify-negative: verify-strict verify-core
 verify-sidecar: verify-strict
     #!/usr/bin/env bash
     set -euo pipefail
-    (cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build -q --bin cargo-fip-prelint)
+    (cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build --locked -q --bin cargo-fip-prelint --target-dir target)
     gen="$PWD/tools/fip-prelint/target/debug/cargo-fip-prelint --verus-sidecar"
     out="$PWD/target/verify-sidecar"; rm -rf "$out"; mkdir -p "$out"
     fx=tools/fip-prelint/tests/fixtures/verus_sidecar
@@ -370,11 +385,11 @@ verify-sidecar: verify-strict
 arch-qemu-riscv64:
     #!/usr/bin/env bash
     set -euo pipefail
-    export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker=rust-lld -C linker-flavor=ld.lld -C link-self-contained=yes -C target-feature=+crt-static"
+    export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="{{musl_lld}}"
     for cpu in rv64,zicbop=false rv64,zicbop=true max; do
       for profile in "" --release; do
         QEMU_CPU="$cpu" CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUNNER=qemu-riscv64 \
-          cargo test -q $profile -p fip-arch --lib --target riscv64gc-unknown-linux-musl --target-dir target/rv64-qemu
+          cargo test --locked -q $profile -p fip-arch --lib --target riscv64gc-unknown-linux-musl --target-dir target/rv64-qemu
       done
     done
     echo "arch-qemu-riscv64: ok"
@@ -384,12 +399,13 @@ arch-override:
     #!/usr/bin/env bash
     set -euo pipefail
     for v in 32 128; do
-      RUSTFLAGS="--cfg fip_cache_line=\"$v\"" cargo test -q -p fip-arch --target-dir "target/cl$v"
+      RUSTFLAGS="--cfg fip_cache_line=\"$v\"" cargo test --locked -q -p fip-arch --target-dir "target/cl$v"
     done
     for bad in '--cfg fip_cache_line="256"' '--cfg fip_cache_line' '--cfg fip_cache_line="64" --cfg fip_cache_line="128"'; do
-      if RUSTFLAGS="$bad" cargo build -q -p fip-arch --target-dir target/cl-bad 2>/dev/null; then
+      if RUSTFLAGS="$bad" cargo build --locked -q -p fip-arch --target-dir target/cl-bad 2> target/cl-bad.err; then
         echo "FAIL: accepted $bad"; exit 1
       fi
+      grep -q "fip_cache_line must be exactly one of" target/cl-bad.err || { echo "FAIL: $bad rejected for another reason"; cat target/cl-bad.err; exit 1; }
     done
     echo "arch-override: ok"
 
@@ -397,7 +413,7 @@ arch-override:
 # Own target dir: the script needs exactly one build of each crate, by the ambient rustc.
 compile-fail-reasons:
     rm -rf target/compile-fail
-    cargo build -q -p fip-macros -p fip-strict --target-dir target/compile-fail
+    cargo build --locked -q -p fip-macros -p fip-strict --target-dir target/compile-fail
     uv run --no-project python verify/compile_fail_reasons.py target/compile-fail
     uv run --no-project python verify/ctor_spellings.py target/compile-fail
 
@@ -405,10 +421,16 @@ compile-fail-reasons:
 # with `rustc-dev`): rustfmt and clippy (`-D warnings`) on the driver, builds it, runs the fixture workspaces and the workspace
 # self-check against `tools/fip-prelint/tests/*.expected`. Report-only run on the
 # workspace: `tools/fip-prelint/target/debug/cargo-fip-prelint --warn-only`.
+# Network: the `-Zbuild-std` runs (the stack fixture's `-buildstd` variant, the
+# generation-mode tests) resolve the standard library's own crates.io dependencies
+# (`cfg-if`, `hashbrown`, ..) into the cargo registry cache; on a cold cache they need
+# crates.io (measured offline with an empty `CARGO_HOME`: "no matching package named
+# `cfg-if`"). Kept in the gate: they are the only test of `--stack --build-std` and of
+# generation mode. The workspace itself has no crates.io dependency.
 prelint:
     cd tools/fip-prelint && cargo +{{prelint_tc}} fmt --check
-    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} clippy --all-targets -- -D warnings
-    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} clippy --locked --all-targets -- -D warnings
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test --locked
 
 # Moves `fip-prelint` to another rustc (limits plan L10a): toolchain and components,
 # driver build, the decision record's probes, the allocator entry-point dump, the std
@@ -426,7 +448,7 @@ prelint-repin version:
 # Maintainer-run after a repin or a seed change (measured 2026-11-02: 94-131 s cold in 3 runs,
 # 32-45 s of it the analysis); the result is committed. Build directory under /tmp.
 prelint-std-summaries target="x86_64-unknown-linux-gnu":
-    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build --locked
     cd tools/fip-prelint && FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGET_DIR=/tmp/fip-prelint-std-summaries target/debug/cargo-fip-prelint fip-prelint --std-summaries --target {{target}}
 
 # The std summaries for every installed target with `std` (top plan T7j), one after

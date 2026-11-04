@@ -28,7 +28,13 @@ fn self_check(variant: &str, extra: &[&str]) {
     let root = manifest.join("../..");
     let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("selfcheck{variant}"));
     let out = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"))
-        .args(["fip-prelint", "--warn-only", "--message-format", "short"])
+        .args([
+            "fip-prelint",
+            "--warn-only",
+            "--message-format",
+            "short",
+            "--locked",
+        ])
         .args(extra)
         .current_dir(&root)
         .env("FIP_PRELINT_TARGET_DIR", &target)

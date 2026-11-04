@@ -3086,3 +3086,36 @@ not to the sources of the committed sidecar.
      `strict-dedup-no-swap`, `strict-compact-map-no-swap`, `strict-map-st-not-threaded`,
      and the plain `compact-map-st-reverse-order` (state chain regex). All rejected for
      the intended reason; `just verify-negative` passes.
+
+## Resolved 2026-11-04: build and CI hygiene after the audit
+
+1. **Mode variables inherited from the shell** (build audit 1). Before: with
+   `FIP_PRELINT_STACK=1` exported, `cargo fip-prelint` on `cross_crate` (expected:
+   failure with an allocation error) printed no verdict and exited 0; the same with
+   `FIP_PRELINT_STD_SUMMARIES_OUT` set (only "std summaries: 0 functions"). Now the
+   check command removes both, stack mode removes the summaries variable and
+   generation removes the stack variable. `tests/fixtures.rs` no longer removes them
+   (it masked the bug); test `mode_variables_are_not_inherited` runs `cross_crate` with
+   each and compares with `expected.txt`. The two tests that switched generation mode on
+   through the variable (`driver_checked -generate`, `generate_deps`) now run
+   `--std-summaries --manifest-path ..` (≈ 29 s each, a `-Zbuild-std` check).
+2. **`just cross` never assembled `asm!`** (build audit 2): it also builds `fip-arch`'s
+   unit tests (`cargo test --no-run`) for `aarch64-unknown-linux-musl` and
+   `riscv64gc-unknown-linux-musl`, linked by `rust-lld`. Measured: a bogus mnemonic in
+   the `prfm` template, then in the `ori` one, fails `just cross` ("unrecognized
+   instruction mnemonic", lines 54/55 of the justfile); before it passed.
+3. **`CARGO_TARGET_DIR`** (build audit 3): `sidecar-gen` and `verify-sidecar` build with
+   `--target-dir target`, so the hard-coded generator path is the binary just built.
+4. **`-Zbuild-std` needs crates.io on a cold cache** (build audit 4). Decided: kept in
+   the gate (the only test of `--stack --build-std` and of generation mode) and
+   documented in the `prelint` recipe and the README gate table.
+5. **Skips** (build audit 5): `just ci` runs the gates with
+   `FIP_PRELINT_REQUIRE_TARGETS=1` (`just ci-gates` without it), under which every
+   driver-test skip (wasm32 summaries, stack cross targets, `llvm-readobj`, recorded
+   targets not installed, non-x86_64-Linux hosts) panics. Measured here: all needed
+   targets (1.99.1: wasm32, aarch64, i686, armv7; ambient: aarch64/riscv64gc musl) and
+   `llvm-readobj` are installed; the driver tests pass with the variable set.
+6. **`nostd`** builds `fip-lint-rules` too (build audit 8); **`--locked`** on every cargo
+   call of the justfile and of the driver's test harness (build audit 9, fixture runs
+   included); **`arch-override`** greps the `build.rs` message "fip_cache_line must be
+   exactly one of" for each rejected value (build audit 10).

@@ -19,6 +19,16 @@ fn fixtures_dir() -> PathBuf {
         .join("fixtures")
 }
 
+/// A test (or part) skipped for a missing target, tool or host: a failure under
+/// `FIP_PRELINT_REQUIRE_TARGETS=1` (set by `just ci`), else a note on stderr (which
+/// libtest hides for a passing test).
+fn skipped(msg: &str) {
+    if std::env::var_os("FIP_PRELINT_REQUIRE_TARGETS").is_some_and(|v| v == "1") {
+        panic!("{msg} (FIP_PRELINT_REQUIRE_TARGETS=1: install it, or unset the variable)");
+    }
+    eprintln!("{msg}");
+}
+
 fn run(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) -> Vec<String> {
     run_args(name, variant, envs, &["--message-format", "short"])
 }
@@ -48,8 +58,10 @@ fn run_at(
         .join("fixtures")
         .join(target_key);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-fip-prelint"));
+    // `--locked`: a stale fixture `Cargo.lock` fails instead of being rewritten.
     cmd.arg("fip-prelint")
         .args(args)
+        .arg("--locked")
         .current_dir(dir)
         .env("FIP_PRELINT_TARGET_DIR", &target)
         .env("FIP_PRELINT_DRIVER_PATH", env!("CARGO_BIN_EXE_fip-prelint"))
@@ -57,8 +69,6 @@ fn run_at(
         .env_remove("FIP_PRELINT_DUMP")
         .env_remove("FIP_PRELINT_DUMP_MIR")
         .env_remove("FIP_PRELINT_STD_SUMMARIES")
-        .env_remove("FIP_PRELINT_STD_SUMMARIES_OUT")
-        .env_remove("FIP_PRELINT_STACK")
         .env_remove("FIP_MACROS_MARK_ONLY")
         .env_remove("FIP_PRELINT_NO_VERUS")
         .env_remove("CARGO_TARGET_DIR");
@@ -144,6 +154,27 @@ fn compare(name: &str, variant: &str, got: &[String]) {
 #[test]
 fn cross_crate() {
     check("cross_crate");
+}
+
+/// The variables of the other modes (`--stack`, `--std-summaries`) exported in the
+/// shell do not switch the check's mode (build audit, 2026-11-04): before, each made the
+/// check exit 0 without verdicts. The runner does not remove them, so every test runs
+/// with whatever the shell exports.
+#[test]
+fn mode_variables_are_not_inherited() {
+    let out = std::env::temp_dir().join("fip-prelint-inherited-summaries.txt");
+    for (variant, envs) in [
+        ("-inherited-stack", vec![("FIP_PRELINT_STACK", "1".into())]),
+        (
+            "-inherited-summaries",
+            vec![(
+                "FIP_PRELINT_STD_SUMMARIES_OUT",
+                out.clone().into_os_string(),
+            )],
+        ),
+    ] {
+        compare("cross_crate", "", &run("cross_crate", variant, &envs));
+    }
 }
 
 /// Implicit `Drop` (accepted by the token-level `#[fip]`), an allocating `Add` used
@@ -364,7 +395,9 @@ fn std_summaries_wasm32() {
         .expect("rustc --print sysroot");
     let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     if !sysroot.join("lib").join("rustlib").join(triple).is_dir() {
-        eprintln!("std_summaries_wasm32: `{triple}` not installed, skipped");
+        skipped(&format!(
+            "std_summaries_wasm32: `{triple}` not installed, skipped"
+        ));
         return;
     }
     compare(
@@ -388,7 +421,7 @@ fn std_summaries_wasm32() {
 #[test]
 fn std_summaries_cache_key() {
     if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
-        eprintln!("std_summaries_cache_key: x86_64 Linux only (the host sidecar)");
+        skipped("std_summaries_cache_key: x86_64 Linux only (the host sidecar)");
         return;
     }
     let real = std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("std-summaries"))
@@ -473,7 +506,7 @@ fn profiles() {
 #[test]
 fn stack() {
     if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
-        eprintln!("stack fixture: x86_64 Linux only (the expected bounds are for that build)");
+        skipped("stack fixture: x86_64 Linux only (the expected bounds are for that build)");
         return;
     }
     let out = Command::new("rustc")
@@ -511,7 +544,9 @@ fn stack() {
         if let ["--target", t] = extra
             && !installed(t)
         {
-            eprintln!("stack fixture{variant}: `{t}` not installed, skipped");
+            skipped(&format!(
+                "stack fixture{variant}: `{t}` not installed, skipped"
+            ));
             continue;
         }
         let mut args = vec!["--stack"];
@@ -567,7 +602,9 @@ fn stack() {
                 eprintln!("stack fixture{variant}: bound {bound} >= llvm-readobj frame sum {sum}");
             }
             _ => {
-                eprintln!("stack fixture{variant}: llvm-readobj not available, cross-check skipped")
+                skipped(&format!(
+                    "stack fixture{variant}: llvm-readobj not available, cross-check skipped"
+                ));
             }
         }
     }
@@ -649,7 +686,7 @@ const PRELINT_UNCHECKED: &str = "fip_fn!(prelint, ..) is checked only by `cargo 
 /// compile without checking must not accept the mode (`FIP_PRELINT_CHECKS` unset by
 /// the driver): the non-member dependency `drvdep` declaring `fip::export`
 /// (`Role::ExportedDependency`, in the check run), stack mode (`-stack`) and
-/// std-summary generation (`-generate`, `FIP_PRELINT_STD_SUMMARIES_OUT` set) all fail
+/// std-summary generation (`-generate`, `--std-summaries`) all fail
 /// with the `fip-macros` error; stack mode with `FIP_PRELINT_CHECKS=1` inherited from
 /// the environment fails the same way (the driver removes it).
 #[test]
@@ -687,11 +724,23 @@ fn driver_checked() {
     );
     compare("driver_checked", "-stack", &forged);
 
+    // Through `--std-summaries` (an inherited `FIP_PRELINT_STD_SUMMARIES_OUT` no longer
+    // switches a check into generation mode).
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("driver_checked-summaries.txt");
-    let generate = run(
+    let manifest = fixtures_dir().join("driver_checked").join("Cargo.toml");
+    let generate = run_args(
         "driver_checked",
         "-generate",
-        &[("FIP_PRELINT_STD_SUMMARIES_OUT", out.into_os_string())],
+        &[],
+        &[
+            "--std-summaries",
+            "--manifest-path",
+            &manifest.to_string_lossy(),
+            "--out",
+            &out.to_string_lossy(),
+            "--message-format",
+            "short",
+        ],
     );
     compare("driver_checked", "-generate", &generate);
     assert!(
@@ -700,7 +749,7 @@ fn driver_checked() {
     );
 }
 
-/// Std-summary generation (`FIP_PRELINT_STD_SUMMARIES_OUT` set) of a crate that
+/// Std-summary generation (`--std-summaries --manifest-path ..`) of a crate that
 /// depends on a proc-macro crate (`fip-macros`) and on `fip-strict` writes the
 /// summaries. It was an ICE (`rustc_metadata` `def_key`, `Option::unwrap` on `None`):
 /// generation listed the functions of every dependency, the proc-macro crate
@@ -715,13 +764,20 @@ fn generate_deps() {
             .join("fixtures")
             .join("generate_deps-generate"),
     );
-    let got = run(
+    let manifest = fixtures_dir().join("generate_deps").join("Cargo.toml");
+    let got = run_args(
         "generate_deps",
         "-generate",
-        &[(
-            "FIP_PRELINT_STD_SUMMARIES_OUT",
-            out.clone().into_os_string(),
-        )],
+        &[],
+        &[
+            "--std-summaries",
+            "--manifest-path",
+            &manifest.to_string_lossy(),
+            "--out",
+            &out.to_string_lossy(),
+            "--message-format",
+            "short",
+        ],
     );
     assert_eq!(got[0], "exit: success", "generation failed: {got:#?}");
     assert!(

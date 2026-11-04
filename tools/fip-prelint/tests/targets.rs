@@ -13,6 +13,7 @@
 //! summaries (not the notes) are compared with the target's section in
 //! `tests/targets.expected`. An installed target without a section fails (record it
 //! with `FIP_PRELINT_BLESS=1`); a recorded target that is not installed is skipped
+//! (a failure under `FIP_PRELINT_REQUIRE_TARGETS=1`, which `just ci` sets)
 //! with a message.
 
 use std::collections::BTreeMap;
@@ -23,6 +24,16 @@ const NO_STD_PACKAGES: &[&str] = &["fip-core", "fip-alloc", "fip-arch", "fip-str
 
 fn toolchain() -> String {
     std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".to_string())
+}
+
+/// A test (or part) skipped for a missing target, tool or host: a failure under
+/// `FIP_PRELINT_REQUIRE_TARGETS=1` (set by `just ci`), else a note on stderr (which
+/// libtest hides for a passing test).
+fn skipped(msg: &str) {
+    if std::env::var_os("FIP_PRELINT_REQUIRE_TARGETS").is_some_and(|v| v == "1") {
+        panic!("{msg} (FIP_PRELINT_REQUIRE_TARGETS=1: install it, or unset the variable)");
+    }
+    eprintln!("{msg}");
 }
 
 /// Installed targets of the toolchain: `(triple, has std)`.
@@ -71,6 +82,7 @@ fn check_target(root: &Path, triple: &str, std: bool) -> Vec<String> {
         "--warn-only",
         "--message-format",
         "short",
+        "--locked",
         "--target",
         triple,
     ]);
@@ -193,7 +205,9 @@ fn every_installed_target() {
         }
     }
     for t in recorded.keys() {
-        eprintln!("targets.rs: `{t}` is recorded but not installed; skipped");
+        skipped(&format!(
+            "targets.rs: `{t}` is recorded but not installed; skipped"
+        ));
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
