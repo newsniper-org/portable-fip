@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! A `GlobalAlloc` in pure Rust over a static buffer, installed as the global

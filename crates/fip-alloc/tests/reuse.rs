@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! FP²'s `reverse-acc` written with `refill`: every `Cons` cell of the input becomes a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! Without the driver it does not pass: a crate using the driver-checked

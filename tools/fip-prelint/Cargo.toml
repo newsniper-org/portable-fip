@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT OR Apache-2.0
 # SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 # A rustc driver on the pinned Verus toolchain (rustc 1.99.1 + rustc-dev), outside
@@ -9,7 +9,7 @@
 name = "fip-prelint"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 authors = ["윤병익 (BYUNG-IK YEUN) <yeun0908@gmail.com>"]
 publish = false
 description = "MIR-level checker for #[fip] / #[fip(N)] / #[fbip] functions (rustc driver)."

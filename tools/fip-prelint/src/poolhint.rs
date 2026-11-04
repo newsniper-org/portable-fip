@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! Pool hints (top plan T17; `cargo fip-prelint --pool-hints`, `FIP_PRELINT_POOL_HINTS=1`).

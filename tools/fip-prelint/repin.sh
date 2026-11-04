@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT OR Apache-2.0
 # SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 #
 # Moves fip-prelint to another rustc (limits plan L10a; `just prelint-repin <version>`).
