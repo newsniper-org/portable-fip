@@ -44,8 +44,8 @@ each property here has its own mechanism, and the strength differs:
 | property | mechanism | strength |
 |---|---|---|
 | `fip-core` cannot allocate | it does not link `alloc` | by construction |
-| functions do what their spec says | Verus fork `fip` `0.2026.11.05.ca33b04` (pinned in `tools/fip-prelint/verus-trusted.txt`, checked by `just verus-pin`), `--no-cheating -V alloc-check`; the same sources with the allocation layer stripped verify on upstream Verus `0.2026.11.02` (`just verify-upstream`); specs pre-verified against concrete accept/reject cases; 37 functional mutants (plus 1 recursive, 3 surface-gate and 1 spec-drift mutant) and 14 wrong claims of verified callers (final states, missing or unpreserved state invariants, closure specifications, adapters) must fail; a functional mutant must break a loop invariant or the postcondition, and none may hit the resource limit | proof (Verus trust base) |
-| a verified function or closure with an allocation bound allocates at most that much when it returns normally | Verus fork, `-V alloc-check` (`fip-core`'s `Fn`-based functions `allocates 0` or callback sums, `fip-alloc::refill` `allocates 0`, the step functions and `fip_fn!` closures and the verified callers of `compose_state.rs` and `verify/alloc_callers.rs`; 6 allocation mutants in `fip-core`/`fip-alloc` and 6 allocating or unbounded caller controls must fail; decision `docs/decisions/2026-11-06-redesign-verus-allocates.md`, phase 2) | proof (fork trust base, plus vstd's allocation specifications and the fork's allocation pass); frees and panicking paths are not covered |
+| functions do what their spec says | Verus fork `fip` `0.2026.11.05.ca33b04` (pinned in `tools/fip-prelint/verus-trusted.txt`, checked by `just verus-pin`), `--no-cheating -V alloc-check`; the same sources with the allocation layer stripped verify on upstream Verus `0.2026.11.02` (`just verify-upstream`); specs pre-verified against concrete accept/reject cases; 37 functional mutants (plus 1 recursive, 3 surface-gate and 2 spec-drift mutants) and 14 wrong claims of verified callers (final states, missing or unpreserved state invariants, closure specifications, adapters) must fail; a functional mutant must break a loop invariant or the postcondition, and none may hit the resource limit | proof (Verus trust base) |
+| a verified function or closure with an allocation bound allocates at most that much when it returns normally | Verus fork, `-V alloc-check` (`fip-core`'s `Fn`-based functions `allocates 0` or callback sums, `fip-alloc::refill` `allocates 0`; `fip-strict`'s `FipFn::call` `allocates self.allocs()`, where a `Certified<N, _>` has `allocs()` = `N`, checked at each verified call by `Certified::pre` (`call_allocates(closure, args) <= N`), and the adapters the sum of their parts; `fip_core::strict::*` `old(xs)@.len() * f.allocs()` (`update`: `f.allocs()`); the step functions and `fip_fn!` closures and the verified callers of `compose_state.rs`, `verify/alloc_callers.rs` and `verify/fip_fn_types.rs`; 9 allocation mutants in `fip-strict`/`fip-core`/`fip-alloc` and 8 allocating or unbounded caller controls (including a `Certified<0, _>` of an allocating closure, and `fip_fn!(path)` without `bound` of an allocating function) must fail; decision `docs/decisions/2026-11-06-redesign-verus-allocates.md`, phases 2 and 3) | proof (fork trust base, plus vstd's allocation specifications and the fork's allocation pass); frees and panicking paths are not covered |
 | no allocation in a `#[fip]` body | `fip-macros` token scan; constructors of empty std collections that never allocate (`Vec::new`, `String::default`, …) are not sites: audited in the `alloc` sources of rustc 1.97.1/1.99.1 (a test fails on other compilers), measured 0 allocations, agreed by `fip-prelint` | heuristic: blind to callees, trait methods, macros |
 | no allocation when the code runs | `fip-testkit` counts (per thread, or process-wide) | evidence for the tested inputs |
 | bounded stack, verified crates | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases` and `verifier::` attributes outside an allowlist (`exec_allows_no_decreases_clause`); a recursive mutant must fail | proof that the call graph is acyclic (closures passed in excluded) |
@@ -346,16 +346,21 @@ state.
   `requires` / `ensures`. Under Verus `fip_fn!` reads no certificate: a closure keeps
   its scanned bound `N`, `fip_fn!(bound <= K, path)` is `Certified<K, _>` in both
   builds, `fip_fn!(path)` is `Certified<0, _>` (`verify/fip_fn_types.rs` checks the
-  types agree). A closure works too: `fip_fn!` keeps a
+  types agree). Verus checks that number: `Certified<K, _>`'s `pre` requires
+  `call_allocates(f, args) <= K`, so a verified caller of an allocating function
+  writes `fip_fn!(bound <= K, path)` (`boxes_one` in `verify/fip_fn_types.rs`); without
+  `bound` the call fails its precondition. A closure works too: `fip_fn!` keeps a
   `#[cfg_attr(verus_keep_ghost, verus_spec(r: T => requires .., ensures ..))]`
   attribute on it, and `pre` / `post` are its `requires` / `ensures`
   (`number_from_11_closure`).
 
 Measured (`--no-cheating -V alloc-check`, Verus fork 0.2026.11.05.ca33b04, Z3 4.16.0,
-2026-11-06; on stripped sources with upstream 0.2026.11.02.8bf68ee: 19/58/1/3/4/13/2):
-`fip-strict` 19, `fip-core` 64 (58 before the 3 sum spec functions and 3 zero lemmas),
-`fip-alloc` 1, `verify/compose.rs` 3, `verify/compose_strict.rs` 4,
-`verify/compose_state.rs` 13, `verify/alloc_callers.rs` 8, `verify/fip_fn_types.rs` 2.
+2026-11-06; on stripped sources with upstream 0.2026.11.02.8bf68ee: 23/58/1/3/4/13/4):
+`fip-strict` 23 (19 before the per-arity `Compose` impls, 5 instead of 1), `fip-core`
+70 (58 before the 3 sum spec functions, 3 zero lemmas and the 6 `nonlinear_arith`
+steps of the strict loops), `fip-alloc` 1, `verify/compose.rs` 3,
+`verify/compose_strict.rs` 4, `verify/compose_state.rs` 13, `verify/alloc_callers.rs`
+10, `verify/fip_fn_types.rs` 4.
 
 **Pre-verification → implementation → post-verification.** For `dedup_by` and
 `compact_map` the postcondition was first written as a spec predicate

@@ -51,6 +51,74 @@ regenerated sidecars, strip gate `just verify-upstream`. Details: section 5 and
 - Strip gate (`verify-upstream` on stripped sources with upstream 0.2026.11.02): green,
   reproducing the baseline counts 19/58/1/3/4/13/2.
 
+**Phase 3 implemented** 2026-11-06 (section 5):
+- `fip-strict` (Verus block): `FipFn` gains `spec fn allocs(&self) -> nat` and `call`
+  is `allocates self.allocs()`. `Certified<ALLOCS, _>`: `allocs()` = `ALLOCS as nat`,
+  `pre` = the closure's `requires` `&&& call_allocates(self.inner(), args) <= ALLOCS`.
+  So the Verus-side `Certified<0, _>` of `fip_fn!(path)` without `bound`, every scanned
+  closure `N` and every `bound <= K` are checked at each verified call. `Stateless`:
+  the part's `allocs()`; `Then`: the sum. `Compose`: one `FipFn` impl per arity
+  `0..=MAX_ARITY` (`compose_fip_fn!`, Verus only; plain keeps the generic impl), sum of
+  the parts. Argument/result type parameters of the Verus impls are bounded
+  `vstd::alloc_check::AllocFreeDrop`; four Verus-only `unsafe impl AllocFreeDrop`
+  (`Certified<_, C: Copy>`, `Stateless`, `Compose`, `Then`), pinned by
+  `tests/hand_written_certs.rs` (`alloc_free_drop_impls_are_exactly_the_documented_ones`;
+  the `FipBound` pins are unchanged: the new impls are no certificates).
+  `Certified::assume` / `assume_no_panic_macros`: `C: DropFreeFn`, `allocates 0`.
+  Verified: 23 (19 + 4 more `Compose` impls).
+- `tests/verus_drift.rs` learns the Verus-only additions: `allocates` clauses, the bound
+  `: vstd::alloc_check::AllocFreeDrop`, the empty `unsafe impl .. AllocFreeDrop for ..`
+  markers (exactly 4), and compares the `compose_fip_fn!` impl (with `$($A,)*` read as
+  `Args`) with the plain generic `Compose` impl; the number of `compose_fip_fn!` and
+  `certified_fip_fn!` invocations must both be `MAX_ARITY + 1`.
+- `fip_core::strict::*`: `update` `allocates f.allocs()`; `map_in_place`,
+  `map_in_place_st`, `compact`, `dedup_by`, `compact_map`, `compact_map_st`
+  `allocates old(xs)@.len() * f.allocs()`, with the loop invariant
+  `allocated() <= i * f.allocs()` and one `nonlinear_arith` step per loop; callables
+  bounded `+ AllocFreeDrop`. Verified: 70 (64 + the 6 `nonlinear_arith` steps, each a
+  verified item; measured: without them 6 loop invariants fail).
+- `verify/compose_state.rs`: `allocates 0` on the 5 strict callers
+  (`number_from_11_strict`, `number_from_11_closure`, `doubled_stateless`,
+  `quadrupled`, `numbered_doubled`), so every function there is bounded; `fip_fn!(tick_checked)`
+  stays (Verus: `Certified<0, _>`, `pre` proved from `tick_checked`'s `allocates 0`).
+  Hints: `quadrupled` asserts `allocs(&d1) == 0`, `allocs(&c) == 0` and
+  `len * allocs(&c) == 0`; `numbered_doubled` the same for `t`, `d`, `f`. Measured:
+  without the hints these 2 callers fail their `allocates 0`. 13 verified.
+- `verify/compose_strict.rs`: the `fip_fn!` closure passed to `test_one` (`param(keep = 0)`)
+  needs `verus_spec(r: bool => allocates 0)`; without it `Certified::pre` fails (measured).
+- `verify/alloc_callers.rs`: `boxed_once` (a `Certified<1, _>` of a closure with
+  `allocates 1`, caller `allocates 1`) and `incremented_strict`
+  (`fip_core::strict::map_in_place` with a `Certified<0, _>`, caller `allocates 0`, no hint
+  needed). 10 verified.
+- `verify/fip_fn_types.rs`: `boxed` (`#[fip(1, strict = true)]`, `allocates 1`) and its
+  verified caller `boxes_one` through `fip_fn!(bound <= 1, boxed)`. 4 verified; the plain
+  build compiles it.
+- Mutants and controls in `just verify-negative` (each checked for its reason):
+  `strict-compact-calls-twice` (a second `keep.call` per element: invariant
+  `allocated() <= r * keep.allocs()` fails), `compose-sum-minus-one` (`Compose::allocs`
+  one less than the sum: `call`'s `allocates self.allocs()` fails, every arity),
+  `certified-pre-no-alloc` (the `call_allocates` conjunct deleted from `Certified::pre`:
+  `call`'s bound fails), controls `callers-certified0-allocating` (`boxed_once` with
+  `Certified<0, _>`: precondition `self.pre(args)` fails; the closure has no
+  `requires`, so the failing conjunct is `call_allocates(..) <= 0`) and
+  `types-path-no-bound` (`fip_fn!(boxed)` in `boxes_one`: the same), and the drift mutant
+  `drift-compose` (a changed `Compose::call` body in `compose_fip_fn!`). Updated:
+  `certified-pre-true` (the `requires` conjunct replaced by `true`) and the two
+  `strict-*-st-not-threaded` mutants (signature now formatted over several lines).
+  Observed: when `pre` fails at a call, the caller's own `allocates` also fails (also
+  with a caller bound of 5 for a callee bound of 0): the fork assumes the callee's bound
+  only under its precondition.
+- Strip gate: `strip_alloc.py` rewrites only `src/` of crate directories (a crate's
+  `tests/` are plain Rust; `verus_drift.rs` names the syntax in strings), deletes a
+  closure attribute `verus_spec(r: T => allocates E)` whose only clause is the bound,
+  and multi-line `proof! { .. }` blocks holding only `assert(..allocs(..)..);` lines.
+  Upstream 0.2026.11.02 on the stripped sources: 23/58/1/3/4/13/4 (fip-strict counts
+  the 5 `Compose` impls, `fip_fn_types.rs` the 2 new functions).
+- Observed brittleness *(open)*: in the full-crate run of the `strict-compact-calls-twice`
+  mutant, the unchanged `strict::compact_map_st` also fails its final assertion
+  (`compact_map_st_fip_post(..)`); verified alone (`--verify-function`) it passes, as
+  in the unmutated crate. The proof depends on the context of the module run.
+
 Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves
 allocation bounds with the Verus fork's `allocates` clause; the unverified layer stays
