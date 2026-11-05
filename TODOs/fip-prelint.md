@@ -3199,3 +3199,47 @@ with it. Generator and test changes:
   `rust-toolchain.toml` through `build.rs` (`FIP_PRELINT_DEFAULT_TOOLCHAIN`); the
   justfile reads `prelint_tc` from the same file, so `repin.sh` `APPLY=1` rewrites one
   file.
+
+
+## Resolved 2026-11-06: cfg twins and proved allocation bounds (redesign phase 4)
+
+Decision `docs/decisions/2026-11-06-redesign-verus-allocates.md` (phase-4 note, section
+2.4) and the prelint record's amendment "cfg twins and proved allocation bounds (sidecar
+format 5)". Two commits.
+
+1. **The hole (generic or concrete trait call through a cfg-skipped impl).** Probe
+   `/home/ybi/pfip-recheck-tmp/phase4/hole/` (fork `ca33b04`, `--no-cheating
+   -V alloc-check`, 4 verified): before, `run<T: Step>`, `run_s`, `direct` listed, both
+   divisions by `step()` (0 in the plain build) discharged, "2 panic sites discharged".
+   The VIR records name `hole::Step::step` only, also for the concrete call.
+   - Generator: `verus::divergent_traits` (impls and declarations under a cfg naming
+     `verus_keep_ghost`, also in `macro_rules!` bodies), sidecar lines
+     `divergent <trait> <file>:<line>`, callers of their methods skipped to the
+     fixpoint, imported sidecars' divergent traits too. After: 0 listed, 5 skipped.
+   - Driver: `Analysis::verus_unverified_callee`: a listed function's instance whose
+     trait call (not `Fn*`) resolves to a function no sidecar lists, outside std, keeps
+     its sites and counts no call as Verus-checked. After: both divisions kept also
+     with the old listing forged to format 5.
+   - Tests: fixture `verus_sidecar_twin` (`expected-twin.txt`), `-format` is now a
+     format 4 sidecar; `just verify-sidecar` probe `twin`; unit tests
+     `divergent_traits_found_under_ghost_cfgs`,
+     `callers_of_divergent_trait_methods_are_not_listed`.
+   - Consequences: `fip-core` lists 10 (the 7 `strict::*` skipped); release self-check
+     `fip_core` 0 → 1 notes (`strict::dedup_by`'s bounds check); `targets.expected`
+     names `fip-strict`'s sidecar as refused on the ten other targets (54 lines; only
+     that suffix differs, checked by stripping it).
+2. **Format 5 bounds.** `fn` lines end with the proved `allocates` bound
+   (`verusgen::alloc_bound` over the VIR field `:allocates`: literal, `c+k*p..`,
+   `opaque:<sha256>`, `-`); `-V alloc-check` required by generator and driver
+   (`verus::has_alloc_check`). `Analysis::verus_bound` applies a literal bound to a
+   non-generic, `requires`-free listed function whose panic paths are allocation
+   failures only: `∞`/open counts become the bound, a finite count above it is kept and
+   is an error at every root reaching it ("verus-bound:" witness), the crate summary
+   counts bounds taken and exceeded. Fixture `verus_alloc` (`expected.txt`, `-off`,
+   `-exceeded`, `-flags`); unit tests `allocates_bounds_normalised`,
+   `alloc_bound_spellings`, stamp refusal. No workspace verdict changes.
+3. **Open (phase 5 and later):** call-site evaluation of parameter-linear bounds;
+   per-instance re-establishment of `T: AllocFreeDrop` (then the generic `allocates 0`
+   of `fip_core::slice::swap` etc. could be used); opaque bounds of the callback sums;
+   the token-certificate/proved-bound disagreement report (redesign 2.3); the fate of
+   strict mode (D1).

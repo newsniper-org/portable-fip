@@ -16,7 +16,8 @@
 //! reason appended:
 //!
 //! - the file exists and parses; its stamp is the trusted Verus build and Z3
-//!   (`verus-trusted.txt`, compiled into the driver) with `--no-cheating`;
+//!   (`verus-trusted.txt`, compiled into the driver) with `--no-cheating` and
+//!   `-V alloc-check` (sidecar format 5);
 //! - every source file it lists has the recorded SHA-256 (a callee's spec, a spec
 //!   function or an imported crate's source that changed invalidates every entry), and
 //!   none of them tests a cfg other than `verus_keep_ghost` and `feature` or invokes a

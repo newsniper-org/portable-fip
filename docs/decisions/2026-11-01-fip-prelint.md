@@ -1038,6 +1038,82 @@ and derive macros of dependencies and a glob import from a dependency shadowing 
 known macro name are assumed to expand alike in both builds; a call through a trait
 method names the trait's method, so an implementation skipped for a cfg (impl paths
 compared as `{impl}`) taints only callers whose VIR names it.
+*(Closed 2026-11-06 by the amendment "cfg twins and proved allocation bounds": callers
+of a method of a trait with a divergent implementation are skipped, and the driver
+refuses trait calls into implementations no sidecar lists.)*
+
+## Amendment 2026-11-06: cfg twins and proved allocation bounds (sidecar format 5)
+
+Phase 4 of `2026-11-06-redesign-verus-allocates.md` (section 2.4). Two changes, both
+fail closed.
+
+**The cfg-twin hole (the re-audit's open trust boundary "a call through a trait method
+names the trait's method").** Reproduced with a probe (fork `ca33b04`,
+`--no-cheating -V alloc-check`): trait `Step` declared in `verus!` under
+`#[cfg(verus_keep_ghost)]` with `fn step(&self) -> (r: u32) ensures r > 0, allocates 0`
+(Verus impl returns 1), a plain twin declaration and a plain-only `impl Step for S`
+returning 0 after a `Box::new`; `run<T: Step>` (`a / t.step()`), `run_s` (`run(&S, a)`)
+and `direct` (`a / S.step()`), each `allocates 0`, 4 verified. Before: the three were
+listed and both divisions discharged ("2 panic sites discharged by Verus"); the VIR
+records of all three, also of the concrete `direct`, name only `hole::Step::step`, so the
+taint of the Verus-only impl never reached them. Now:
+
+- **Generator.** `verus::divergent_traits` finds every trait implementation and
+  declaration inside an item gated by a cfg naming `verus_keep_ghost` (`#[cfg(P)]` with
+  it in `P`, `#[cfg_attr(P, .. cfg(..))]`; also inside `macro_rules!` bodies) in every
+  source of the run; the sidecar records them (`divergent <trait> <file>:<line>`), and
+  every function whose VIR record names a method of such a trait, or of one an
+  `--import-sidecar` records, is skipped with its callers ("relies on the specification
+  of `vside::Step::step`, a method of trait `Step`, which has an implementation or
+  declaration in only one of the builds"). Matched by trait name (two traits of one name
+  are both divergent). After: the probe lists nothing.
+- **Driver.** Independently of the generator, the Verus results of a listed function are
+  not used for an analysed instance that calls a trait method (not `Fn*`: a closure's
+  specification reaches the body only through its own `requires`) resolved, in this
+  build, to a function that no sidecar lists, outside the standard library (vstd's
+  specifications are trusted). This covers the twins and an unverified implementation in
+  a downstream crate reached through a type parameter. After: with the probe's old
+  listing (forged to format 5) both divisions stay ("it calls the trait method
+  `Step::step`, implemented in this build by `<S as Step>::step`, which no Verus sidecar
+  lists"; a generic root: "whose implementation in this build is not resolved").
+- **Unification of `fip-strict`'s twins into one attribute-mode source: not done.**
+  `Compose` has one plain impl generic over `Args` and one Verus impl per arity (vstd has
+  no `AllocFreeDrop` for a generic tuple); the Verus impls carry `AllocFreeDrop` bounds
+  and spec functions the plain build cannot name; the marker traits are blanket impls in
+  the plain build. Exclusion is the general rule and also covers downstream twins.
+- **Measured consequences.** `fip-strict`'s sidecar records 28 divergent places (`FipFn`
+  10, `FipBound` 10, `AllocFreeDrop` 6, `DropFreeFn` 2); `fip-core`'s 7
+  `fip_core::strict::*` functions are no longer listed (10 listed, 7 skipped); in the
+  release self-check the `strict::dedup_by` bounds check, the one site discharged, is
+  reported again (`fip_core` 0 → 1 notes). On the other installed targets the summaries
+  also name `fip-strict`'s sidecar as refused (it is consulted now for the resolved
+  `FipFn` implementations); no verdict changes.
+
+**Proved `allocates` bounds.** Every `fn` line carries a sixth word, the bound the run
+proved, read from the fork's VIR field `:allocates`: `-` (none), a literal, a
+parameter-linear form `c+k*p..` (constants, unsigned or `nat` parameters, `+` and constant
+`*` over `int`/`nat`), or `opaque:<sha256>` of the expression without spans and ids. The
+generator refuses a run without `-V alloc-check`, the driver a sidecar whose `flags` lack
+it. A **literal** bound `K` replaces the driver's count of the function's body only if the
+function is not generic (a bounded parameter's Verus premise, `T: AllocFreeDrop`, holds
+for every type in the plain build), has no `requires` (the fork assumes a callee's bound
+only under its precondition), its instance passes the trait check above, and every panic
+path of its summary is an allocation failure (the fork bounds normally returning
+executions only; an allocation failure diverges inside the allocation). Then a finite
+count `m <= K` is kept, a finite `m > K` is kept and is an error at every root reaching
+the function ("the proof's trust boundary is violated (or the driver's count is
+imprecise)"), any other count (`∞`, open terms) becomes `K`. Frees, panics, recursion
+and unresolved events stay the driver's; parameter-linear and opaque bounds are not
+evaluated. Fixture `verus_alloc` (crate `valloc`): `twice` (a loop of two `one()`
+calls, proved `allocates 2`) and its plain caller get 2 instead of `∞` and pass `n = 2`
+(9 errors, against 11 with `--no-verus` or a stamp without `-V alloc-check`); `zero`
+(0/0) and `one` (1/1) keep the driver's counts; the linear `times`, `upto` (with
+`requires`) and the generic `twice_with` keep `∞`; `one`'s bound forged to 0 gives the
+violation error at all 7 roots reaching it. No workspace verdict changes: every listed
+workspace function is generic or has a `requires`.
+
+Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-06: cfg twins and proved allocation
+bounds (redesign phase 4)".
 
 ## What would reopen this
 

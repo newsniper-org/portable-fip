@@ -119,6 +119,48 @@ regenerated sidecars, strip gate `just verify-upstream`. Details: section 5 and
   (`compact_map_st_fip_post(..)`); verified alone (`--verify-function`) it passes, as
   in the unmutated crate. The proof depends on the context of the module run.
 
+**Phase 4 implemented** 2026-11-06 (section 5; prelint record amendment "cfg twins
+and proved allocation bounds (sidecar format 5)"):
+- **Cfg-twin hole closed, both sides, fail closed.** Probe
+  `/home/ybi/pfip-recheck-tmp/phase4/hole/` (the `hole/` probe of 2.4 with
+  `ensures r > 0` on the Verus `Step::step`, a plain-only impl returning 0 after a
+  `Box::new`, and three callers): before, `run<T: Step>`, `run_s` and the concrete
+  `direct` were listed and both divisions discharged; the VIR records of all three name
+  only the trait method. Generator: traits with an implementation or declaration under
+  a cfg naming `verus_keep_ghost` are recorded (`divergent`) and every function naming
+  one of their methods is skipped with its callers, also through `--import-sidecar`.
+  Driver: the Verus results of a listed function are not used for an instance calling a
+  trait method (not `Fn*`) implemented, in this build, by a function no sidecar lists
+  (outside std). After: the probe lists nothing; with the old listing forged to format 5
+  the driver keeps both divisions. Fixtures: `verus_sidecar_twin`, `just verify-sidecar`
+  probe `twin`, two unit tests.
+- **Twins not unified** into one attribute-mode source: `Compose` is one generic plain
+  impl and one Verus impl per arity (no `AllocFreeDrop` for a generic tuple), the Verus
+  impls name `AllocFreeDrop` bounds and spec functions the plain build lacks, and the
+  plain marker traits are blanket impls. Exclusion is general (also downstream twins).
+  Cost, measured: `fip_core::strict::*` (7 functions) are no longer listed in `fip-core`'s
+  sidecar, and `strict::dedup_by`'s bounds check is reported again in the release
+  self-check.
+- **Sidecar format 5 with bounds.** `fn` lines carry the proved `allocates` bound (`-`,
+  literal, parameter-linear, `opaque:<sha256>`), `-V alloc-check` is required in the
+  stamp (generator and driver). The driver takes a literal bound `K` of a non-generic
+  function without `requires` whose instance passes the trait check and whose panic paths
+  are allocation failures only, where its own count is `∞` or open; a finite count `m > K`
+  is kept and reported as an error; frees, panics, recursion and `⊤` stay the driver's.
+  Fixture `verus_alloc` (10 verified): `twice` `∞` → 2; equal counts kept; linear,
+  `requires`, generic bounds not used; a forged lower bound reported at 7 roots; a stamp
+  without `-V alloc-check` refused. Committed bounds: `fip-core` 6 × `0` and 4 opaque,
+  `refill` `0`, `Certified::assume*` `0`; all are generic or have a `requires`, so no
+  workspace verdict changes.
+- **Not done in phase 4** *(open)*: evaluating parameter-linear bounds at a call site
+  (the driver's value analysis would have to bind the parameters); per-instance
+  re-establishment of a bounded type parameter's Verus premise (`T: AllocFreeDrop`: the
+  driver would check the instance's drop glue itself), which generic functions such as
+  `fip_core::slice::swap` (`allocates 0`) need before their bounds can be used; the
+  disagreement report between the token-level strict certificate and the proved bound
+  (2.3); the `--compile` requirement of imported crates (2.4) is still enforced only by
+  the fork's import check.
+
 Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves
 allocation bounds with the Verus fork's `allocates` clause; the unverified layer stays
@@ -357,7 +399,9 @@ compiles the allocating impl. Verus cannot see this; the generator must taint ev
 caller of a trait method whose impls (or the trait) have cfg-divergent declarations in
 the scanned sources, and refuse such a crate's trait bounds. `fip-strict`'s twin `FipFn`
 impls are exactly this pattern, so they must either be unified into one attribute-mode
-source or excluded from discharge (phase 4).
+source or excluded from discharge (phase 4). **Closed in phase 4** by exclusion (see the
+phase-4 note at the top): the generator taints callers of divergent traits' methods, the
+driver refuses trait calls into implementations no sidecar lists.
 
 ## 3. Trust basis
 
