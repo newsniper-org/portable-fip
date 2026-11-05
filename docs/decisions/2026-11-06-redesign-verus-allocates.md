@@ -141,6 +141,14 @@ impl<F: ?Sized> DropFreeFn for F {}
 - **Public API, Verus builds:** element types must be `Copy` or `AllocFreeDrop` (user
   types need `unsafe impl` inside `verus!`, impossible under `#![forbid(unsafe_code)]`,
   `c2.rs`); closures must be `Copy` (`c4.rs`).
+- **Downstream impls must be Verus-only (measured 2026-11-06, `down/`):** in the plain
+  build `AllocFreeDrop` is a blanket `impl<T: ?Sized> AllocFreeDrop for T {}`, so a
+  downstream `unsafe impl fip_strict::AllocFreeDrop for Node {}` fails the plain build
+  with E0119 (conflicting implementations) and E0199 (the plain trait is not `unsafe`).
+  With `#[cfg(verus_keep_ghost)]` on the impl the plain build succeeds. Every user type
+  under Verus therefore needs a cfg-gated `unsafe impl` (plus a `check-cfg` entry for
+  `verus_keep_ghost`). Not yet measured: the gated impl inside a Verus build of a
+  downstream crate that depends on the Verus build of `fip-strict`.
 - **Alternative `f: &F`:** accepts every closure under Verus (`c4.rs`), but changes the
   plain API (`map_in_place(xs, h, &|v| ..)`) and `update` loses `FnOnce`. Not chosen as
   default; decision point D2.
@@ -270,9 +278,20 @@ Fix:
 
 1. **`fip-macros`:** under Verus's driver (`fip-macros` already detects it, see the
    `let () = const { .. };` handling in its crate docs) `fip_fn!` emits the Verus arm
-   `unsafe { Certified::<{K}, _, P>::assume(f) }` with `K` the literal of
-   `fip_fn!(bound <= K, ..)` or `0`, never a certificate read. Sound under Verus because
-   `Certified::pre` requires `call_allocates(inner, args) <= K`; plain builds unchanged.
+   `unsafe { Certified::<{K}, _, P>::assume(f) }`, never a certificate read. Sound under
+   Verus because `Certified::pre` requires `call_allocates(inner, args) <= K`; plain
+   builds unchanged. **Which `K`** (amended 2026-11-06, design, unmeasured): the
+   `Certified<N, _>` *type* must be the same in both builds, or code that names the type
+   (struct fields, `param(g = N)` callees, arrays of certified callables) compiles
+   differently under Verus.
+   - **Closure form:** the macro already computes the scanned literal `N` from the body;
+     emit that same `N` in both builds. `bound <= K` keeps its meaning (`N <= K`).
+   - **Path form** (`fip_fn!(tick_checked)`): plain builds read `N` from
+     `Cert::allocs_for`, which Verus cannot see. Under Verus use `K` from
+     `bound <= K`, otherwise `0`. The two builds then agree only if the path's
+     certificate says `K` (or 0): verified callers must write `fip_fn!(bound <= K, path)`
+     for an allocating path, and a test must compare the plain `N` with `K` (plain build:
+     `const _: () = assert!(N == K)` emitted by the macro when `bound <= K` is given).
 2. **`compose_state.rs`:** `allocates 0` on every specified function and closure
    (19 places) and two hints, `assert(old(xs)@.len() * FipFn::<(u32,)>::allocs(&c) == 0)`
    in `quadrupled` and the parts of `Then(t, Stateless(d))` in `numbered_doubled`.
