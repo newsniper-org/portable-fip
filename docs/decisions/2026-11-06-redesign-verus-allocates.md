@@ -3,12 +3,21 @@
 
 # Redesign: the verified layer proves allocation bounds with Verus `allocates`
 
-**Status:** PROPOSED, 2026-11-06. Option A is approved by the user: the verified layer
+**Status:** ACCEPTED by the user, 2026-11-06, with the recommended answers to D1–D6
+(D1 keep `fip-strict` with Verus-checked certificates; D2 `DropFreeFn`; D3 accept
+cfg-gated `unsafe impl AllocFreeDrop` for user types; D4 `-V alloc-check`, panics stay
+with `fip-prelint`; D5 pin the fork commit, keep an upstream-11.02 gate on stripped
+sources; D6 keep 1.99.1 for now). Implemented on branch `redesign/verus-allocates`.
+Schedule note (user, 2026-11-06): stable Rust 1.100.0 is due in 7 days, and the fork
+plans its 1.100 rebase (custom allocators then); keep every toolchain- and
+Verus-version pin in one place so the rebase is a re-pin, not a redesign.
+
+Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves
 allocation bounds with the Verus fork's `allocates` clause; the unverified layer stays
 with `fip-macros` and `fip-prelint`. This record contains the feasibility probes, the
 architecture, the change of the trust basis, the fix for `verify/compose_state.rs` and a
-phased plan. Nothing here is implemented on the branch.
+phased plan.
 
 **Measured with:** Verus fork branch `fip` at `ca33b0438` (version
 `0.2026.11.05.ca33b04`, toolchain 1.99.1), upstream Verus `0.2026.11.02.8bf68ee`
@@ -287,11 +296,12 @@ Fix:
    - **Closure form:** the macro already computes the scanned literal `N` from the body;
      emit that same `N` in both builds. `bound <= K` keeps its meaning (`N <= K`).
    - **Path form** (`fip_fn!(tick_checked)`): plain builds read `N` from
-     `Cert::allocs_for`, which Verus cannot see. Under Verus use `K` from
-     `bound <= K`, otherwise `0`. The two builds then agree only if the path's
-     certificate says `K` (or 0): verified callers must write `fip_fn!(bound <= K, path)`
-     for an allocating path, and a test must compare the plain `N` with `K` (plain build:
-     `const _: () = assert!(N == K)` emitted by the macro when `bound <= K` is given).
+     `Cert::allocs_for`, which Verus cannot see. When `bound <= K` is written, emit
+     `Certified<K, _>` in **both** builds; the plain build keeps the existing check
+     `N <= K` (the `bound <= K` semantics of `a67a878`), and Verus's `Certified::pre`
+     checks `call_allocates(..) <= K`. Only the path form without `bound` differs: plain
+     `Certified<N, _>`, Verus `Certified<0, _>`, so verified callers must write
+     `fip_fn!(bound <= K, path)` for an allocating path (documented).
 2. **`compose_state.rs`:** `allocates 0` on every specified function and closure
    (19 places) and two hints, `assert(old(xs)@.len() * FipFn::<(u32,)>::allocs(&c) == 0)`
    in `quadrupled` and the parts of `Then(t, Stateless(d))` in `numbered_doubled`.
