@@ -20,6 +20,17 @@ Versions used for every measurement below, unless stated otherwise:
 
 Source references to Verus are file:line at commit `7d82994`.
 
+Version note (2026-11-06): the repository's gates now run the Verus fork `fip` at
+`0.2026.11.05.ca33b04` with `-V alloc-check`, and upstream `0.2026.11.02.8bf68ee` on
+sources with the allocation layer stripped
+(`docs/decisions/2026-11-06-redesign-verus-allocates.md`). The measurements below
+were made on the versions above and were not re-run on the new ones unless a section
+says so. Observed while switching: VIR paths mark module and type segments
+(`fip_core::t%slice::compact`; the fork and 11.02), and on the fork the recursion
+error reads "recursive function must have a `decreases` clause" (with backticks) and
+one `dedup_by` mutant needs `--rlimit 1000` instead of 100 to reach its invariant
+failure.
+
 ## 0. Contribution policy facts that shape the plan
 
 - Opinionated changes should start with a GitHub Discussion (`CONTRIBUTING.md:30`).

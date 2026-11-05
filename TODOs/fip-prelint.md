@@ -3169,3 +3169,33 @@ Details and measurements: `docs/decisions/2026-11-01-fip-prelint.md`, amendment
    generator wrote it (variants `-macro`, `-env`, `-path`: refused, the probe's
    division reported) and a format 3 sidecar (`-format`: refused).
 
+
+## Resolved 2026-11-06: the Verus pin moves to the `allocates` fork (redesign phase 1)
+
+Decision `docs/decisions/2026-11-06-redesign-verus-allocates.md`, D5. The trusted pin
+(`verus-trusted.txt`) is the fork `fip` at `0.2026.11.05.ca33b04`
+(`ca33b0438c36b2edb05e47895b6f2e813b0cc291`), Z3 4.16.0; every committed sidecar
+(`fip-strict`, `fip-core`, `fip-alloc`, the `verus_sidecar` fixture) was regenerated
+with it. Generator and test changes:
+
+- **Flags.** `flags` records `-V alloc-check` (two words, after `--no-cheating`) when
+  the run used it (`-V alloc-check`, `-Valloc-check`, `-V=alloc-check`;
+  `verusgen::trust_flags`, unit-tested). Format unchanged (4): the driver still
+  requires only `--no-cheating`. Requiring `-V alloc-check` and recording the proved
+  `allocates` bounds is format 5 (phase 4).
+- **VIR paths.** Verus 0.2026.11 marks module and type segments in VIR paths
+  (`fip_core::t%slice::compact`, `fip_strict::t%FipFn::call`; measured on the fork's
+  `--log vir`). Before the fix the regenerated `fip-core` sidecar listed all 17
+  functions under `t%` paths, which no MIR path of the driver matches, so no panic site
+  would have been discharged. `verusgen::vir_path` drops a one-letter `x%` prefix of a
+  segment (`%` is not part of an identifier; `impl&%N` kept), for function paths and
+  call targets (unit-tested). The regenerated sidecars then differ from the 10.18 ones
+  only in the stamp and `flags` lines.
+- **Pins in tests.** The fixture and self-check tests replace the trusted Verus
+  version, commit prefix and Z3 version of `verus-trusted.txt` by `<trusted verus>`,
+  `<trusted commit>`, `<trusted z3>` before comparing; the stamp-refusal test edits
+  the version read from that file. A re-pin changes no expected file.
+- **Toolchain pin.** `DEFAULT_TOOLCHAIN` and the test toolchain default come from
+  `rust-toolchain.toml` through `build.rs` (`FIP_PRELINT_DEFAULT_TOOLCHAIN`); the
+  justfile reads `prelint_tc` from the same file, so `repin.sh` `APPLY=1` rewrites one
+  file.

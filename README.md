@@ -44,7 +44,8 @@ each property here has its own mechanism, and the strength differs:
 | property | mechanism | strength |
 |---|---|---|
 | `fip-core` cannot allocate | it does not link `alloc` | by construction |
-| functions do what their spec says | Verus, `--no-cheating`; specs pre-verified against concrete accept/reject cases; 37 functional mutants (plus 1 recursive, 3 surface-gate and 1 spec-drift mutant) and 14 wrong claims of verified callers (final states, missing or unpreserved state invariants, closure specifications, adapters) must fail; a functional mutant must break a loop invariant or the postcondition, and none may hit the resource limit | proof (Verus trust base) |
+| functions do what their spec says | Verus fork `fip` `0.2026.11.05.ca33b04` (pinned in `tools/fip-prelint/verus-trusted.txt`, checked by `just verus-pin`), `--no-cheating -V alloc-check`; the same sources with the allocation layer stripped verify on upstream Verus `0.2026.11.02` (`just verify-upstream`); specs pre-verified against concrete accept/reject cases; 37 functional mutants (plus 1 recursive, 3 surface-gate and 1 spec-drift mutant) and 14 wrong claims of verified callers (final states, missing or unpreserved state invariants, closure specifications, adapters) must fail; a functional mutant must break a loop invariant or the postcondition, and none may hit the resource limit | proof (Verus trust base) |
+| a verified function or closure with `allocates 0` allocates nothing when it returns normally | Verus fork, `-V alloc-check` (today: the step functions and `fip_fn!` closures of `verify/compose_state.rs`; two allocating controls must fail; the crates get bounds in later phases of `docs/decisions/2026-11-06-redesign-verus-allocates.md`) | proof (fork trust base, plus vstd's allocation specifications and the fork's allocation pass); frees and panicking paths are not covered |
 | no allocation in a `#[fip]` body | `fip-macros` token scan; constructors of empty std collections that never allocate (`Vec::new`, `String::default`, …) are not sites: audited in the `alloc` sources of rustc 1.97.1/1.99.1 (a test fails on other compilers), measured 0 allocations, agreed by `fip-prelint` | heuristic: blind to callees, trait methods, macros |
 | no allocation when the code runs | `fip-testkit` counts (per thread, or process-wide) | evidence for the tested inputs |
 | bounded stack, verified crates | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases` and `verifier::` attributes outside an allowlist (`exec_allows_no_decreases_clause`); a recursive mutant must fail | proof that the call graph is acyclic (closures passed in excluded) |
@@ -340,20 +341,25 @@ state.
   the call is rejected.
 - **Strict forms.** `fip_core::strict::*_st` have the same specifications with
   `FipFn::pre` / `post`. A verified caller passes a named function as a `FipFn` value
-  (`fip_fn!(tick_checked)`, bounded by the function's generated certificate, no
-  `unsafe` at the call site), whose `pre` / `post` are the function's `requires` /
-  `ensures`. A closure works too: `fip_fn!` keeps a
+  (`fip_fn!(tick_checked)`, bounded by the function's generated certificate in the
+  plain build, no `unsafe` at the call site), whose `pre` / `post` are the function's
+  `requires` / `ensures`. Under Verus `fip_fn!` reads no certificate: a closure keeps
+  its scanned bound `N`, `fip_fn!(bound <= K, path)` is `Certified<K, _>` in both
+  builds, `fip_fn!(path)` is `Certified<0, _>` (`verify/fip_fn_types.rs` checks the
+  types agree). A closure works too: `fip_fn!` keeps a
   `#[cfg_attr(verus_keep_ghost, verus_spec(r: T => requires .., ensures ..))]`
   attribute on it, and `pre` / `post` are its `requires` / `ensures`
   (`number_from_11_closure`).
 
-Measured (`--no-cheating`, Verus 0.2026.10.18.7d82994 and a downstream fork
-0.2026.10.31.559ac52, identical counts): `fip-strict` 19 (7 before the adapters, 11
-before panic strictness and `Then`), `fip-core` 58 (36 before the state-passing
-variants, 51 before the invariants and named traces, 56 before the two
-`*_post_intro` lemmas), `fip-alloc` 1, `verify/compose.rs` 3,
+Measured (`--no-cheating -V alloc-check`, Verus fork 0.2026.11.05.ca33b04, Z3 4.16.0,
+2026-11-06; the same counts without `-V alloc-check`, on the stripped sources with
+upstream 0.2026.11.02.8bf68ee, and before on 0.2026.10.18.7d82994): `fip-strict` 19 (7
+before the adapters, 11 before panic strictness and `Then`), `fip-core` 58 (36 before
+the state-passing variants, 51 before the invariants and named traces, 56 before the
+two `*_post_intro` lemmas), `fip-alloc` 1, `verify/compose.rs` 3,
 `verify/compose_strict.rs` 4, `verify/compose_state.rs` 13 (4 before the strict
-caller, 9 before the specified closure, 10 before the adapters, 12 before `Then`).
+caller, 9 before the specified closure, 10 before the adapters, 12 before `Then`),
+`verify/fip_fn_types.rs` 2.
 
 **Pre-verification → implementation → post-verification.** For `dedup_by` and
 `compact_map` the postcondition was first written as a spec predicate
@@ -369,8 +375,12 @@ must fail.
 agree. Verifying `fip-core` therefore needs the exported `fip-strict` metadata (see
 the `verify-core` recipe).
 
-Requirements: upstream Verus (`verus-lang/verus`) and Singular
-(`VERUS_SINGULAR_PATH`, default `/usr/bin/Singular`).
+Requirements: the Verus fork with `allocates` (branch `fip`, the commit in
+`tools/fip-prelint/verus-trusted.txt`) as `VERUS` (its Z3 is `VERUS_Z3_PATH`, else
+the `z3` next to it; `just verus-pin` fails on any other build), Singular
+(`VERUS_SINGULAR_PATH`, default `/usr/bin/Singular`), and for the strip gate upstream
+Verus `0.2026.11.02` as `VERUS_UPSTREAM` (optional: without it `just verify-upstream`
+prints `SKIPPED`). Pins and where they live: the justfile header.
 
 ## Gates
 
@@ -386,11 +396,12 @@ cargo runs with `--locked`:
 | `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch`, `fip-strict`, `fip-lint-rules` (only `core`/`alloc` exist there) |
 | `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks; `fip-arch`'s unit tests built for `aarch64`/`riscv64gc` musl (linked by `rust-lld`), which assembles the `asm!` templates |
 | `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected with the `build.rs` message |
-| `verify` | Verus proofs of `fip-strict`, `fip-core` (imports `fip-strict`), `fip-alloc`; `#[fip]` and strict composition with `verus_spec`; verified callers of the state-passing variants (imports `fip-core`); the Verus sidecars of verified bodies of `fip-strict`, `fip-core`, `fip-alloc` and of the driver's `verus_sidecar` fixture regenerated and equal to the committed ones, and the generator's refusals (no `--no-cheating`; an `external_body` function fails the run; an item with a Verus-only `cfg` is not listed; a crate testing `fip_prelint` gets no sidecar; an `--import` without the imported crate's committed sidecar, or of a VIR file no generator run exported); 38 Verus mutants (incl. one recursive), 14 wrong claims of verified callers, 3 surface-gate mutants and 1 spec-drift mutant must fail, none on the resource limit |
+| `verify` | `verus-pin` (`VERUS` is the pinned fork, Z3 and toolchain); Verus proofs (`--no-cheating -V alloc-check`) of `fip-strict`, `fip-core` (imports `fip-strict`), `fip-alloc`; `#[fip]` and strict composition with `verus_spec`; verified callers of the state-passing variants (imports `fip-core`), with `allocates 0` on their steps and closures; `fip_fn!` types equal in the plain and the Verus build (`verify/fip_fn_types.rs`, 3 mutated annotations fail both builds, a closure calling a certified function is rejected under Verus); the Verus sidecars of verified bodies of `fip-strict`, `fip-core`, `fip-alloc` and of the driver's `verus_sidecar` fixture regenerated and equal to the committed ones, and the generator's refusals (no `--no-cheating`; an `external_body` function fails the run; an item with a Verus-only `cfg` is not listed; a crate testing `fip_prelint` gets no sidecar; an `--import` without the imported crate's committed sidecar, or of a VIR file no generator run exported); 38 Verus mutants (incl. one recursive), 14 wrong claims of verified callers and 2 allocations under `allocates 0`, 3 surface-gate mutants and 1 spec-drift mutant must fail, none on the resource limit |
+| `verify-upstream` | strip gate: `verify/strip_alloc.py` removes the allocation layer, upstream Verus `0.2026.11.02` (`VERUS_UPSTREAM`) verifies every crate and `verify/` file of the copy with `--no-cheating`; `SKIPPED` without `VERUS_UPSTREAM` |
 | `prelint` | rustfmt and clippy (`-D warnings`) on the driver; `fip-prelint` fixture workspaces (cross-crate export, implicit drop, operator impl, generics, closures, declared parameter bounds at call sites, allocation and free sources, drops through their glue, declared preconditions, function pointers, trait objects and trait method contracts, std summaries (and a stale one ignored), Verus sidecars (impl methods matched by location; stale, forged, foreign-stamped, missing, moved and differently configured ones not used), the soundness audit's probes (tail calls, `dyn` recursion under a contract, standard-library look-alikes, foreign `link_name`s), mode variables of the shell not inherited, bad attributes) a self-check of this workspace against `selfcheck.expected`, the same for every installed target (`targets.expected`), stack bounds of one fixture in two stated builds, and the rejected behaviour examples of `fip-macros` through the driver (mark-only mode); its `-Zbuild-std` runs fetch the standard library's crates.io dependencies into the cargo registry cache on a cold cache |
 | `prelint-repin` | not in `ci`: `just prelint-repin <version>` runs the checks of a move to another rustc (driver build, probes, entry points, std summaries, driver tests) and lists the pins and tables to re-audit |
 | `prelint-std-summaries` | not in `ci`: regenerates `tools/fip-prelint/std-summaries/<release>-<target>.txt` (`-Zbuild-std` of the seed crate, ~2 min); run after a repin or a seed change, and commit the result |
-| `compile-fail-reasons` | each of the 144 `compile_fail` examples of `fip-macros` (99 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error; every constructor spelling of `fip_lint_rules::callee::SPELLINGS` is classified as stated under `#[fip]` and strict mode (`verify/ctor_spellings.py`, 100 checks) |
+| `compile-fail-reasons` | each of the 145 `compile_fail` examples of `fip-macros` (100 of them in the strict-mode section) fails for its stated reason (`# // expect:`), not another error; every constructor spelling of `fip_lint_rules::callee::SPELLINGS` is classified as stated under `#[fip]` and strict mode (`verify/ctor_spellings.py`, 100 checks) |
 
 ## Usage notes
 

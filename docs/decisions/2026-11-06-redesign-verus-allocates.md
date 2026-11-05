@@ -12,6 +12,16 @@ Schedule note (user, 2026-11-06): stable Rust 1.100.0 is due in 7 days, and the 
 plans its 1.100 rebase (custom allocators then); keep every toolchain- and
 Verus-version pin in one place so the rebase is a re-pin, not a redesign.
 
+**Phase 1 implemented** 2026-11-06 (section 5): fork pin and flags, `fip_fn!` Verus arm,
+regenerated sidecars, strip gate `just verify-upstream`. Deviations from the plan,
+measured: `verify/compose_state.rs` gets `allocates 0` only on its step functions and
+`fip_fn!` closures (10 of the 19 places), because the fork refuses an `allocates`
+clause on a caller of a function without one (the `fip_core` callers wait for phase
+2, the adapter hints for phase 3's `allocs()`); the sidecar generator had to drop
+the `t%` namespace marks of 0.2026.11 VIR paths; `fip_fn!` under Verus rejects a
+closure that calls certified functions (no literal `N`). Details:
+`docs/decisions/2026-10-31-verification-layout.md`, amendment 2026-11-06.
+
 Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves
 allocation bounds with the Verus fork's `allocates` clause; the unverified layer stays

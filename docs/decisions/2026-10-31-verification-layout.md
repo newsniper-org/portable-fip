@@ -4,7 +4,8 @@
 # Verification layout: one source, attribute-syntax specs, no `vstd` dependency
 
 **Status:** ACCEPTED, 2026-10-31. Amended 2026-10-31 (`fip-strict` verified and imported by
-`fip-core`); measurements added through 2026-11-04 (`verifier::spinoff_prover` removed).
+`fip-core`) and 2026-11-06 (the Verus fork with `allocates`, upstream strip gate);
+measurements added through 2026-11-04 (`verifier::spinoff_prover` removed).
 Current verified counts: `README.md`, section "Verification".
 
 ## Decision
@@ -52,6 +53,56 @@ together:
 compiled only by the `verus` driver, which supplies `vstd`. `fip-core` gains the
 workspace proc-macro `fip-macros` as a dependency (applied only in plain builds via
 `cfg_attr(not(verus_keep_ghost), fip_macros::fip(..))`).
+
+### Amendment (2026-11-06): the Verus fork with `allocates`, and an upstream strip gate
+
+Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
+
+- **Verus basis.** The gates run the Verus fork, branch `fip`, `0.2026.11.05.ca33b04`
+  (`ca33b0438c36…`), Z3 4.16.0, toolchain 1.99.1. The pin has one site,
+  `tools/fip-prelint/verus-trusted.txt` (also the driver's trusted sidecar stamp);
+  `just verus-pin` checks the binary `VERUS` (version, commit, Z3, toolchain equal to
+  `tools/fip-prelint/rust-toolchain.toml`) before every Verus gate and fails with
+  the pin otherwise. `VERUS` must name the fork build; the justfile does not hold
+  a machine path.
+- **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
+  (justfile `verus_flags`): the fork checks `allocates` clauses only with
+  `-V alloc-check`, and an importing crate needs the imported crate's export from a
+  run with it. Without any `allocates` clause the flag changes no count (measured:
+  `fip-strict` 19, `fip-core` 58, `fip-alloc` 1 with and without it). The sidecar
+  generator records `-V alloc-check` in the `flags` line (format unchanged).
+- **`fip_fn!` under Verus** never reads a certificate (Verus rejected
+  `Cert::allocs_for` and the plain-only `__fip_strict_*` constants, the three errors
+  of `verify/compose_state.rs` on the fork and on 11.02): a closure gets the literal
+  `N` the plain build computes (a closure calling certified functions is rejected
+  under Verus), `fip_fn!(bound <= K, path)` is `Certified<K, _>` in both builds (the
+  plain build checks the certificate's `N <= K`), `fip_fn!(path)` is `Certified<0, _>`
+  under Verus and `Certified<N, _>` in the plain build. `verify/fip_fn_types.rs`
+  is compiled by plain `rustc` and verified by Verus with annotated
+  `Certified<N, _>` types (a closure with `N` = 1, a path with `K` = 2, a struct
+  field); a wrong `N` in any annotation fails both builds (E0308).
+- **`allocates` in verified callers.** `verify/compose_state.rs` puts `allocates 0`
+  on its step functions and on every `fip_fn!` closure (10 places); Verus proves
+  them, and two controls (a `Box::new` in a step, in a closure) fail that clause.
+  The callers of `fip_core` carry none: the fork refuses `allocates` on a caller of a
+  function without an `allocates` specification ("cannot bound the allocations of
+  this call: `fip_core::slice::map_in_place_st` has no `allocates` specification",
+  measured), so they follow when `fip_core` has bounds (phase 2).
+- **Upstream strip gate** (`just verify-upstream`, in `ci`): `verify/strip_alloc.py`
+  removes the allocation layer (and fails on any allocation spelling it does not
+  know); upstream Verus `0.2026.11.02.8bf68ee` (`VERUS_UPSTREAM`, version pinned in
+  the justfile's `verus_upstream_pin`) verifies every crate and `verify/` file of
+  the stripped copy with `--no-cheating`. Without `VERUS_UPSTREAM` the recipe prints
+  `SKIPPED` and succeeds; the fork gates still run.
+- **Differences from 10.18 that needed changes:** VIR paths mark module and type
+  segments (`fip_core::t%slice::compact`; the fork and 11.02), which the
+  sidecar generator drops (a sidecar listed `fip_core::t%slice::compact` before the
+  fix, so the driver would not have matched any `fip-core` entry); on the fork the recursion
+  error reads "recursive function must have a `decreases` clause"; the
+  `dedup-no-swap` mutant needs `--rlimit 1000` (100 and 300 hit the limit, with and
+  without `-V alloc-check`).
+
+`vstd` is still not a build dependency.
 
 ## Why
 

@@ -788,6 +788,11 @@ of its whole crate verified is discharged under that function's Verus `requires`
   `cargo fip-prelint --verus-sidecar`, which accepts only a successful run over the
   entire crate with `--no-cheating` and lists the exec functions of the crate's VIR
   log that have a body and are not `external_body`.
+  **Repinned 2026-11-06** (user decision D5 of
+  `2026-11-06-redesign-verus-allocates.md`): the trusted build is the Verus fork `fip`
+  at `0.2026.11.05.ca33b04` (`ca33b0438c36`), Z3 4.16.0; sidecars record
+  `-V alloc-check` in `flags`, and VIR path namespace marks (`t%`) are dropped
+  (`TODOs/fip-prelint.md`, "Resolved 2026-11-06").
 - **Where.** A package opts in in its manifest (`[package.metadata.fip-prelint]
   verus-sidecar = ".."`); the sidecar is committed next to it
   (`crates/fip-core/verus-verified.txt`). `just verify-core` regenerates it and fails
