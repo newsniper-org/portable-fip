@@ -703,6 +703,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     // Functions an imported crate skipped because their code may differ between the
     // builds: callers verified against their `ensures` are not listed.
     let mut imported_skips: Vec<String> = Vec::new();
+    let mut imported_divergent: Vec<String> = Vec::new();
     for (name, vir) in verusgen::imports(&flags) {
         let Some((_, side)) = import_sidecars.iter().find(|(n, _)| *n == name) else {
             return fail(&format!(
@@ -717,7 +718,10 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
             .map_err(|e| e.to_string())
             .and_then(|t| verus::Sidecar::parse(&t))
         {
-            Ok(sc) => imported_skips.extend(verusgen::imported_cfg_skips(&sc)),
+            Ok(sc) => {
+                imported_skips.extend(verusgen::imported_cfg_skips(&sc));
+                imported_divergent.extend(sc.divergent.iter().map(|(t, _, _)| t.clone()));
+            }
             Err(e) => return fail(&format!("import `{name}` refused: {e}")),
         }
     }
@@ -766,6 +770,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     info.target = target;
     info.features = features;
     info.imported_skips = imported_skips;
+    info.imported_divergent = imported_divergent;
     println!(
         "verification results:: {} verified, 0 errors",
         info.verified

@@ -487,7 +487,8 @@ verify-negative: verify-strict verify-core
 # imported crate's committed sidecar, or of a VIR file no generator run exported, is
 # refused. The re-audit's probes (N3, N4): a crate with a macro-built `cfg!`, an
 # `option_env!` or a `#[path]` module outside `src/` testing `fip_prelint` gets no
-# sidecar; a caller of a function skipped for its cfg is skipped.
+# sidecar; a caller of a function skipped for its cfg is skipped. Phase 4: callers of a
+# method of a trait with a plain-only implementation are skipped.
 verify-sidecar: verify-strict
     #!/usr/bin/env bash
     set -euo pipefail
@@ -547,6 +548,21 @@ verify-sidecar: verify-strict
     (cd "$out/taint" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/taint.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/taint.log" 2>&1
     if grep -q "^fn vside::probe_taint " "$out/taint.txt"; then echo "FAIL: a caller of a cfg-skipped function was listed"; exit 1; fi
     grep -q "^skip vside::probe_taint relies on the specification of \`vside::on\`" "$out/taint.txt"
+    # Phase 4 (cfg twins, decision 2026-11-06-redesign-verus-allocates): a trait with
+    # a plain-only implementation (returning 0 under the Verus declaration's
+    # `ensures r > 0`): the generic caller `run`, its caller `run_s` and the concrete
+    # caller `direct` are skipped and the trait is recorded as `divergent`. Before, all
+    # three were listed and both divisions discharged.
+    cp -r "$fx" "$out/twin"
+    printf '%b' '\n#[cfg(verus_keep_ghost)]\nverus! {\npub trait Step {\n    fn step(&self) -> (r: u32)\n        ensures r > 0,\n        allocates 0;\n}\n\nimpl Step for S {\n    fn step(&self) -> (r: u32) { 1 }\n}\n}\n\n#[cfg(not(verus_keep_ghost))]\npub trait Step {\n    fn step(&self) -> u32;\n}\n\n#[cfg(not(verus_keep_ghost))]\nimpl Step for S {\n    fn step(&self) -> u32 {\n        let b = Box::new(0u32);\n        *b\n    }\n}\n\n#[cfg_attr(verus_keep_ghost, verifier::verify)]\npub struct S;\n\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn run<T: Step>(t: &T, a: u32) -> u32 {\n    a / t.step()\n}\n\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn run_s(a: u32) -> u32 {\n    run(&S, a)\n}\n\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn direct(a: u32) -> u32 {\n    a / S.step()\n}\n' >> "$out/twin/vside/src/lib.rs"
+    (cd "$out/twin" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/twin.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/twin.log" 2>&1
+    for f in run run_s direct; do
+      if grep -q "^fn vside::$f " "$out/twin.txt"; then echo "FAIL: $f, relying on a divergent trait, was listed"; exit 1; fi
+    done
+    grep -q "^skip vside::run relies on the specification of \`vside::Step::step\`, a method of trait \`Step\`" "$out/twin.txt"
+    grep -q "^skip vside::direct relies on the specification of \`vside::Step::step\`, a method of trait \`Step\`" "$out/twin.txt"
+    grep -q "^skip vside::run_s relies on the specification of \`vside::run\`" "$out/twin.txt"
+    grep -q "^divergent Step src/lib.rs:" "$out/twin.txt"
     # Imports: the imported crate's committed sidecar is required, and the VIR file must
     # come from a generator run (fip-strict's, copied without its `.fip-run` record).
     root="$PWD"; vir="$root/target/verus-strict/fip_strict.vir"

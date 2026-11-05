@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! fip-prelint verus sidecar
-//! format 4
+//! format 5
 //! crate <crate name>
 //! verus <version> <commit>
 //! z3 <version>
@@ -34,6 +34,7 @@
 //! source <path relative to the sidecar's directory> <sha256>
 //! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | ->
 //! skip <crate>::<path> <reason>
+//! divergent <trait name> <file relative to the sidecar's directory>:<line>
 //! ```
 //!
 //! Format 3 (2026-11-04) added the `cfg` line: the driver uses a sidecar only for a
@@ -48,6 +49,15 @@
 //! specification of a function skipped because its code differs between the builds is
 //! skipped too (`relies on the specification of ..`).
 //!
+//! Format 5 (2026-11-06, decision 2026-11-06-redesign-verus-allocates, phase 4) adds
+//! the `divergent` lines: every trait with an implementation or a declaration under a
+//! cfg naming `verus_keep_ghost` ([`divergent_traits`]). Verus assumes a trait
+//! method's specification for every implementation, also the plain-only ones it never
+//! compiled, so every function naming a method of such a trait is skipped
+//! (`relies on the specification of ..`), in this crate's run and in every run
+//! importing it. The driver refuses format 4 sidecars, which were written without
+//! this rule.
+//!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
 //! `impl&%N` and rustc `{impl#N}`, both with the `DefPath` disambiguator of their own
@@ -59,7 +69,7 @@
 use std::fmt::Write as _;
 
 /// Version of the format.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
@@ -966,6 +976,189 @@ pub fn ghost_only_regions(src: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Traits whose implementations or declaration may differ between the Verus build and
+/// the driver's (decision 2026-11-06-redesign-verus-allocates, phase 4): the name and
+/// the byte offset of every trait implementation (`impl .. Trait<..> for ..`, also
+/// `unsafe impl` and inside a `macro_rules!` body) and every trait declaration
+/// (`trait Trait`) that lies inside an item gated by a cfg naming `verus_keep_ghost`:
+/// `#[cfg(P)]` with `verus_keep_ghost` anywhere in `P` (`verus_keep_ghost`,
+/// `not(verus_keep_ghost)`, `all(..)`, ..), or `#[cfg_attr(P, .. cfg(..) ..)]` with
+/// `verus_keep_ghost` in `P`.
+///
+/// Verus checks a call of a trait method against the trait's specification and
+/// assumes it holds for every implementation; it never sees a plain-only
+/// implementation, and a Verus-only one is not the code the driver analyses (measured
+/// with the phase-4 probe: a plain-only `impl Step for S` returning 0 under the Verus
+/// declaration's `ensures r > 0` had the divisions by `t.step()` of a generic and of a
+/// concrete caller discharged). The generator taints every function naming a method
+/// of such a trait ([`crate::verusgen::build`]). A trait is found by its name only, so
+/// two traits of one name are both treated as divergent (fail closed).
+pub fn divergent_traits(src: &str) -> Vec<(String, usize)> {
+    let toks: Vec<(Tok, usize, usize)> = lex(src)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let is = |k: usize, s: &str| k < toks.len() && text(k) == s;
+    // The matching closing delimiter of the opening one at `k`.
+    let close = |k: usize| -> usize {
+        let mut depth = 0usize;
+        let mut m = k;
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[' | b'{') => depth += 1,
+                Tok::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return m;
+                    }
+                }
+                _ => {}
+            }
+            m += 1;
+        }
+        toks.len()
+    };
+    // Gated regions: token ranges from the attribute through the item's `;` or `}`.
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    let mut k = 0;
+    while k + 3 < toks.len() {
+        if !(is(k, "#")
+            && is(k + 1, "[")
+            && (is(k + 2, "cfg") || is(k + 2, "cfg_attr"))
+            && is(k + 3, "("))
+        {
+            k += 1;
+            continue;
+        }
+        let attr_kind = text(k + 2);
+        let pclose = close(k + 3);
+        // The predicate: up to the first top-level comma of a `cfg_attr`.
+        let mut pred_end = pclose;
+        if attr_kind == "cfg_attr" {
+            let mut depth = 0usize;
+            for (m, t) in toks
+                .iter()
+                .enumerate()
+                .take(pclose.min(toks.len()))
+                .skip(k + 4)
+            {
+                match t.0 {
+                    Tok::Punct(b'(' | b'[' | b'{') => depth += 1,
+                    Tok::Punct(b')' | b']' | b'}') => depth = depth.saturating_sub(1),
+                    Tok::Punct(b',') if depth == 0 => {
+                        pred_end = m;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let ghost =
+            (k + 4..pred_end).any(|m| toks[m].0 == Tok::Ident && text(m) == "verus_keep_ghost");
+        let gates = attr_kind == "cfg"
+            || (pred_end..pclose).any(|m| toks[m].0 == Tok::Ident && text(m) == "cfg");
+        if !(ghost && gates) {
+            k += 1;
+            continue;
+        }
+        // The item: through its first `;` or balanced `{ .. }` outside `(..)`/`[..]`.
+        let mut m = pclose + 1;
+        if is(m, "]") {
+            m += 1;
+        }
+        let mut depth = 0usize;
+        let mut end = toks.len();
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[') => depth += 1,
+                Tok::Punct(b')' | b']') => depth = depth.saturating_sub(1),
+                Tok::Punct(b';') if depth == 0 => {
+                    end = m;
+                    break;
+                }
+                Tok::Punct(b'{') if depth == 0 => {
+                    end = close(m);
+                    break;
+                }
+                _ => {}
+            }
+            m += 1;
+        }
+        regions.push((k, end.min(toks.len())));
+        k += 4;
+    }
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let inside = |m: usize| regions.iter().any(|&(a, b)| a <= m && m < b);
+    // A `>` that is not the end of `->`/`=>`.
+    let closes_angle = |m: usize| {
+        toks[m].0 == Tok::Punct(b'>')
+            && !(m > 0
+                && matches!(toks[m - 1].0, Tok::Punct(b'-' | b'='))
+                && toks[m - 1].2 == toks[m].1)
+    };
+    for m in 0..toks.len() {
+        if toks[m].0 != Tok::Ident || !inside(m) {
+            continue;
+        }
+        match text(m) {
+            "trait" if m + 1 < toks.len() && toks[m + 1].0 == Tok::Ident => {
+                out.push((text(m + 1).to_string(), toks[m].1));
+            }
+            "impl" => {
+                let mut j = m + 1;
+                let mut angle = 0usize;
+                // The impl's own generics.
+                if is(j, "<") {
+                    while j < toks.len() {
+                        if is(j, "<") {
+                            angle += 1;
+                        } else if closes_angle(j) {
+                            angle -= 1;
+                            if angle == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                }
+                // The trait path, up to `for` at angle depth 0.
+                let mut name: Option<&str> = None;
+                let mut angle = 0usize;
+                while j < toks.len() {
+                    match toks[j].0 {
+                        Tok::Punct(b'<') => angle += 1,
+                        _ if closes_angle(j) => angle = angle.saturating_sub(1),
+                        Tok::Punct(b'(' | b'[') => j = close(j),
+                        Tok::Punct(b'{' | b';' | b')' | b']' | b',') if angle == 0 => break,
+                        Tok::Ident if angle == 0 && text(j) == "for" => {
+                            if let Some(n) = name {
+                                out.push((n.to_string(), toks[m].1));
+                            }
+                            break;
+                        }
+                        Tok::Ident if angle == 0 && text(j) == "where" => break,
+                        Tok::Ident if angle == 0 => name = Some(text(j)),
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The trait of a VIR or rustc path of a trait method (`krate::m::Trait::method`):
+/// its second-to-last segment, if the path has one.
+pub fn trait_segment(path: &str) -> Option<&str> {
+    let mut segs = path.rsplit("::");
+    segs.next()?;
+    segs.next()
+}
+
 // ---------------------------------------------------------------------------------
 // The sidecar.
 
@@ -1003,6 +1196,11 @@ pub struct Sidecar {
     pub fns: Vec<Entry>,
     /// Exec functions of the crate Verus saw but that are not listed, with why.
     pub skipped: Vec<(String, String)>,
+    /// Traits with an implementation or declaration under a cfg naming
+    /// `verus_keep_ghost` in a source of the run ([`divergent_traits`]): trait name,
+    /// file, line. Every function naming one of their methods is skipped, also in an
+    /// importing crate's run.
+    pub divergent: Vec<(String, String, usize)>,
 }
 
 impl Sidecar {
@@ -1087,6 +1285,17 @@ impl Sidecar {
                     let (p, why) = rest.split_once(' ').unwrap_or((rest, ""));
                     s.skipped.push((p.to_string(), why.to_string()));
                 }
+                "divergent" => {
+                    let [t, at] = words[..] else {
+                        return Err(bad());
+                    };
+                    let (f, line) = at.rsplit_once(':').ok_or_else(bad)?;
+                    let line: usize = line.parse().map_err(|_| bad())?;
+                    if line == 0 || f.is_empty() {
+                        return Err(bad());
+                    }
+                    s.divergent.push((t.to_string(), f.to_string(), line));
+                }
                 _ => return Err(format!("unknown line `{l}`")),
             }
         }
@@ -1135,6 +1344,9 @@ impl Sidecar {
         }
         for (p, why) in &self.skipped {
             let _ = writeln!(o, "skip {p} {why}");
+        }
+        for (t, f, line) in &self.divergent {
+            let _ = writeln!(o, "divergent {t} {f}:{line}");
         }
         o
     }
@@ -1514,6 +1726,36 @@ mod tests {
         );
     }
 
+    /// Phase 4 (cfg twins): trait implementations and declarations under a cfg naming
+    /// `verus_keep_ghost` make the trait divergent; ungated ones, inherent impls,
+    /// `impl Trait` types, `feature` gates and Verus-only specification attributes do
+    /// not.
+    #[test]
+    fn divergent_traits_found_under_ghost_cfgs() {
+        let names = |src: &str| -> Vec<String> {
+            divergent_traits(src).into_iter().map(|(t, _)| t).collect()
+        };
+        // The probe's shape: twin declarations and a plain-only implementation.
+        let probe = "#[cfg(verus_keep_ghost)]\nverus! {\npub trait Step { fn step(&self) -> u32; }\nimpl Step for S { fn step(&self) -> u32 { 1 } }\n}\n#[cfg(not(verus_keep_ghost))]\npub trait Step { fn step(&self) -> u32; }\n#[cfg(not(verus_keep_ghost))]\nimpl Step for S { fn step(&self) -> u32 { 0 } }\n";
+        assert_eq!(names(probe), vec!["Step", "Step", "Step", "Step"]);
+        let at: Vec<usize> = divergent_traits(probe)
+            .into_iter()
+            .map(|(_, o)| line_of(probe, o))
+            .collect();
+        assert_eq!(at, vec![3, 4, 7, 9]);
+        // `fip-strict`'s shapes: generics with `->` and `$(..)*`, paths, `unsafe impl`,
+        // a gated impl inside a `macro_rules!` body, any predicate naming the cfg, a
+        // `cfg_attr` whose payload is a `cfg`.
+        let strict = "macro_rules! m { ($($A:ident),*) => {\n    #[cfg(not(verus_keep_ghost))]\n    impl<C: Fn($($A),*) -> R, $($A,)* R> FipFn<($($A,)*)> for Certified<C> where C: Copy { fn call(&self) {} }\n} }\n#[cfg(not(verus_keep_ghost))]\nunsafe impl<F: crate::FipBound> crate::FipBound for Stateless<F> {}\n#[cfg(all(feature = \"x\", not(verus_keep_ghost)))]\nimpl<T> core::ops::Deref for W<T> { type Target = T; fn deref(&self) -> &T { &self.0 } }\n#[cfg_attr(verus_keep_ghost, cfg(any()))]\nimpl Hidden for X {}\n";
+        assert_eq!(names(strict), vec!["FipFn", "FipBound", "Deref", "Hidden"]);
+        // Not divergent.
+        let same = "pub trait Step { fn step(&self) -> u32; }\nimpl Step for S { fn step(&self) -> u32 { 1 } }\n#[cfg(not(verus_keep_ghost))]\nimpl S { fn plain(&self) -> impl Iterator<Item = u8> { None.into_iter() } }\n#[cfg(feature = \"x\")]\nimpl Other for S {}\n#[cfg_attr(verus_keep_ghost, verus_spec(ensures true))]\nimpl Spec for S {}\n#[cfg(verus_keep_ghost)]\nfn ghost(x: impl Step) -> u8 { 0 }\n";
+        assert_eq!(names(same), Vec::<String>::new());
+        assert_eq!(trait_segment("fip_strict::FipFn::call"), Some("FipFn"));
+        assert_eq!(trait_segment("hole::m::Step::step"), Some("Step"));
+        assert_eq!(trait_segment("f"), None);
+    }
+
     #[test]
     fn sidecar_round_trip_and_stamp() {
         let s = Sidecar {
@@ -1536,8 +1778,17 @@ mod tests {
                 requires: true,
             }],
             skipped: vec![("c::g".to_string(), "external body".to_string())],
+            divergent: vec![("Step".to_string(), "src/lib.rs".to_string(), 3)],
         };
         assert_eq!(Sidecar::parse(&s.render()), Ok(s.clone()));
+        assert!(s.render().contains("\ndivergent Step src/lib.rs:3\n"));
+        assert!(
+            Sidecar::parse(
+                &s.render()
+                    .replace("divergent Step src/lib.rs:3", "divergent Step")
+            )
+            .is_err()
+        );
         let t = Trusted {
             verus_version: "0.1".to_string(),
             verus_commit: "abcdef".to_string(),
@@ -1559,8 +1810,13 @@ mod tests {
             ..s.clone()
         };
         assert!(cheat.check_stamp(&t).is_err());
-        assert!(Sidecar::parse(&s.render().replace("format 4", "format 3")).is_err());
-        assert!(Sidecar::parse(&s.render().replace("format 4", "format 2")).is_err());
+        let current = format!("format {FORMAT}");
+        for old in ["format 4", "format 3", "format 2"] {
+            assert!(
+                Sidecar::parse(&s.render().replace(&current, old)).is_err(),
+                "{old}"
+            );
+        }
         // Format 3 and later require the `cfg` line.
         assert!(
             Sidecar::parse(&s.render().replace("cfg x86_64-unknown-linux-gnu a,b\n", "")).is_err()

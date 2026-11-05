@@ -2705,6 +2705,81 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 .is_never()
     }
 
+    /// Why the Verus results of the verified function of `inst` may not be used for
+    /// this instance, if they may not (decision 2026-11-06-redesign-verus-allocates,
+    /// phase 4). Verus proves a body against the specification of each trait method
+    /// it calls and assumes that specification for every implementation; the
+    /// implementation this build calls may be one Verus never compiled (a plain-only
+    /// twin under `#[cfg(not(verus_keep_ghost))]`) or never verified (a downstream
+    /// crate's, through a type parameter). So every call of a trait method in the
+    /// body, resolved with the instance's arguments, must reach a function a Verus
+    /// sidecar lists (and that matches), or the standard library (its
+    /// specifications are vstd's, part of the trusted basis). Calls of the `Fn*`
+    /// traits are exempt: a closure's specification reaches the body only through
+    /// the body's own `requires` (`f.requires(..)`, `call_allocates(..)`), which
+    /// unverified callers are told about. `None` if every call qualifies.
+    fn verus_unverified_callee(
+        &self,
+        inst: Instance<'tcx>,
+        body: &'tcx Body<'tcx>,
+    ) -> Option<String> {
+        let tcx = self.tcx;
+        for data in body.basic_blocks.iter() {
+            if data.is_cleanup {
+                continue;
+            }
+            let (TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. }) =
+                &data.terminator().kind
+            else {
+                continue;
+            };
+            let fty = func.ty(&body.local_decls, tcx);
+            let ty::FnDef(d0, _) = *fty.kind() else {
+                continue;
+            };
+            let Some(tr) = tcx.trait_of_assoc(d0) else {
+                continue;
+            };
+            if tcx.fn_trait_kind_from_def_id(tr).is_some() {
+                continue;
+            }
+            let name = def_path(tcx, d0);
+            let resolved = self
+                .subst(inst, fty)
+                .and_then(|t| match *t.kind() {
+                    ty::FnDef(d, a) => a.no_bound_vars().map(|a| (d, a)),
+                    _ => None,
+                })
+                .and_then(|(d, a)| Instance::try_resolve(tcx, self.env, d, a).ok().flatten());
+            let Some(callee) = resolved else {
+                return Some(format!(
+                    "it calls the trait method `{name}`, whose implementation in this build is not resolved"
+                ));
+            };
+            let InstanceKind::Item(cd) = callee.def else {
+                return Some(format!(
+                    "it calls the trait method `{name}` through `{callee}`, which Verus did not verify"
+                ));
+            };
+            if is_std_like(tcx, cd.krate) {
+                continue;
+            }
+            let listed = tcx.is_mir_available(cd)
+                && self
+                    .crates
+                    .verus
+                    .is_listed(tcx, cd, tcx.optimized_mir(cd).span)
+                    .is_some();
+            if !listed {
+                return Some(format!(
+                    "it calls the trait method `{name}`, implemented in this build by `{}`, which no Verus sidecar lists",
+                    def_path(tcx, cd)
+                ));
+            }
+        }
+        None
+    }
+
     fn scan_body(&mut self, inst: Instance<'tcx>, body: &'tcx Body<'tcx>) -> BodyInfo {
         let tcx = self.tcx;
         let env = self.env;
@@ -2719,6 +2794,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             (node.ctx.clone(), node.depth)
         };
         let proved = crate::value::analyse(tcx, env, inst, body, &self.vsums, &ctx);
+        // A Verus-verified function whose instance calls a trait method implemented,
+        // in this build, by code Verus did not verify: its Verus results are not used
+        // for this instance (phase 4, cfg twins).
+        let verus_refused = match inst.def {
+            InstanceKind::Item(d) if self.crates.verus.is_listed(tcx, d, body.span).is_some() => {
+                self.verus_unverified_callee(inst, body)
+            }
+            _ => None,
+        };
         for (bb, data) in body.basic_blocks.iter_enumerated() {
             if data.is_cleanup {
                 continue;
@@ -2761,6 +2845,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         && let Some((fd, _)) = func.const_fn_def()
                         && self.nodes[*j].inst.def == InstanceKind::Item(fd)
                         && let InstanceKind::Item(caller) = inst.def
+                        && verus_refused.is_none()
                         && let Some(listed) = self.crates.verus.is_listed(tcx, caller, body.span)
                     {
                         self.verus_direct.insert((self.current, *j, span), listed);
@@ -2840,8 +2925,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         // T13.4): discharged under its `requires`, which becomes its
                         // callers' obligation; else kept, with the reason if its
                         // package declares a Verus sidecar.
-                        let verdict = match inst.def {
-                            InstanceKind::Item(d) => {
+                        let verdict = match (inst.def, &verus_refused) {
+                            (InstanceKind::Item(_), Some(why)) => {
+                                crate::verustrust::SiteVerdict::Kept(Some(why.clone()))
+                            }
+                            (InstanceKind::Item(d), None) => {
                                 self.crates.verus.site(tcx, d, body.span, span)
                             }
                             _ => crate::verustrust::SiteVerdict::Kept(None),

@@ -1138,7 +1138,8 @@ fn verus_sidecar_cfg() {
     // - `-env`: `option_env!("CARGO_PKG_NAME")` is set by cargo, not by Verus;
     // - `-path`: `#[path = "../../shared.rs"]` module testing `fip_prelint`, listed
     //   as `source ../shared.rs` (skipped before as if imported);
-    // - `-format`: a format 3 sidecar (written by the earlier generator).
+    // - `-format`: a format 4 sidecar (written by the generator before the phase-4
+    //   rule on divergent traits).
     let d = copy_fixture("verus_sidecar", "verus_macro");
     forge_listed(
         &d,
@@ -1200,8 +1201,8 @@ fn verus_sidecar_cfg() {
     let d = copy_fixture("verus_sidecar", "verus_format");
     edit(
         &d.join("vside/verus-verified.txt"),
+        "\nformat 5\n",
         "\nformat 4\n",
-        "\nformat 3\n",
     );
     compare(
         "verus_sidecar",
@@ -1209,6 +1210,66 @@ fn verus_sidecar_cfg() {
         &run_at(
             &d,
             "verus_sidecar-format",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+}
+
+/// Appends `text` to `vside/src/lib.rs` of the copy `d` without listing anything, with
+/// the forged source hash.
+fn append_unlisted(d: &Path, text: &str) {
+    let lib = d.join("vside/src/lib.rs");
+    let old = sha256_file(&lib);
+    let mut src = std::fs::read_to_string(&lib).expect("read lib.rs");
+    src.push('\n');
+    src.push_str(text);
+    std::fs::write(&lib, src).expect("write lib.rs");
+    let new = sha256_file(&lib);
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}"),
+    );
+}
+
+/// Phase 4 of decision 2026-11-06-redesign-verus-allocates (cfg twins): the probe's
+/// trait `Step` has a Verus declaration with `ensures r > 0` and a plain-only
+/// implementation returning 0, and the sidecar lists `run` (dividing by `t.step()`
+/// through a type parameter), `run_s` and `direct` (dividing by `S.step()`) as the
+/// generator without the phase-4 rule wrote it (it now skips all three,
+/// `just verify-sidecar`). Before, both divisions were discharged ("2 panic sites
+/// discharged"); the driver now keeps them, because the instance calls a trait method
+/// whose implementation in this build no sidecar lists (or, for the generic root, is
+/// not resolved).
+#[test]
+fn verus_sidecar_twin() {
+    let d = copy_fixture("verus_sidecar", "verus_twin");
+    append_unlisted(
+        &d,
+        "#[cfg(verus_keep_ghost)]\nverus! {\npub trait Step {\n    fn step(&self) -> (r: u32)\n        ensures r > 0,\n        allocates 0;\n}\n\nimpl Step for S {\n    fn step(&self) -> (r: u32) { 1 }\n}\n}\n\n#[cfg(not(verus_keep_ghost))]\npub trait Step {\n    fn step(&self) -> u32;\n}\n\n/// Only in the plain build: returns 0 and allocates.\n#[cfg(not(verus_keep_ghost))]\nimpl Step for S {\n    fn step(&self) -> u32 {\n        let b = Box::new(0u32);\n        *b\n    }\n}\n\n#[cfg_attr(verus_keep_ghost, verifier::verify)]\npub struct S;\n",
+    );
+    forge_listed(
+        &d,
+        "run",
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn run<T: Step>(t: &T, a: u32) -> u32 {\n    a / t.step()\n}",
+    );
+    forge_listed(
+        &d,
+        "run_s",
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn run_s(a: u32) -> u32 {\n    run(&S, a)\n}",
+    );
+    forge_listed(
+        &d,
+        "direct",
+        "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn direct(a: u32) -> u32 {\n    a / S.step()\n}",
+    );
+    compare(
+        "verus_sidecar",
+        "-twin",
+        &run_at(
+            &d,
+            "verus_sidecar-twin",
             &[],
             &["--message-format", "short"],
         ),

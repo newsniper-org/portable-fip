@@ -457,6 +457,9 @@ pub struct RunInfo {
     /// Functions the run's `--import-sidecar`s skipped because their code may differ
     /// between the builds ([`imported_cfg_skips`]).
     pub imported_skips: Vec<String>,
+    /// Traits the run's `--import-sidecar`s record as divergent (their `divergent`
+    /// lines): a function naming one of their methods is skipped.
+    pub imported_divergent: Vec<String>,
 }
 
 /// Checks the `--output-json` result: success, no errors, the entire crate.
@@ -489,6 +492,7 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         target: String::new(),
         features: Vec::new(),
         imported_skips: Vec::new(),
+        imported_divergent: Vec::new(),
     })
 }
 
@@ -788,11 +792,30 @@ pub fn build(
     let files: Vec<PathBuf> = sources.iter().map(|s| crate_dir.join(s)).collect();
     cfg_check_files(crate_dir, &files)?;
     let mut source_hashes = Vec::new();
+    // Traits implemented or declared differently in the two builds (phase 4 of
+    // decision 2026-11-06-redesign-verus-allocates): in any source of the run, or
+    // recorded by an imported crate's sidecar.
+    let mut divergent: Vec<(String, String, usize)> = Vec::new();
     for s in &sources {
         let bytes =
             std::fs::read(crate_dir.join(s)).map_err(|e| format!("{s}: cannot read: {e}"))?;
         source_hashes.push((s.clone(), verus::sha256_hex(&bytes)));
+        let text = String::from_utf8_lossy(&bytes);
+        for (t, at) in verus::divergent_traits(&text) {
+            divergent.push((t, s.clone(), verus::line_of(&text, at)));
+        }
     }
+    divergent.sort();
+    divergent.dedup();
+    let divergent_names: BTreeSet<String> = divergent
+        .iter()
+        .map(|(t, _, _)| t.clone())
+        .chain(info.imported_divergent.iter().cloned())
+        .collect();
+    // A function naming a method of a divergent trait (a call, also through a type
+    // parameter, or a spec function in its specification).
+    let names_divergent =
+        |c: &str| verus::trait_segment(c).is_some_and(|t| divergent_names.contains(t));
     let prefix = format!("{krate}::");
     let mut entries: Vec<(Entry, &VirFn)> = Vec::new();
     let mut skipped = Vec::new();
@@ -874,6 +897,11 @@ pub fn build(
     // `cfg!(fip_prelint)`) is not verified for the driver's code. Every function
     // naming a tainted one is tainted, to a fixpoint (a verified but unlisted
     // function passes its callees' assumptions on through its own `ensures`).
+    //
+    // Phase 4 (decision 2026-11-06-redesign-verus-allocates): a function naming a
+    // method of a divergent trait is tainted as well. Verus proved it against the
+    // trait's specification, assumed for every implementation, also those the driver's
+    // build has and Verus never compiled (a plain-only twin impl).
     let mut why_tainted: BTreeMap<String, String> = BTreeMap::new();
     loop {
         let mut changed = false;
@@ -882,12 +910,26 @@ pub fn build(
             if tainted.contains(&key) {
                 continue;
             }
-            if let Some(c) = f
+            let why = if let Some(c) = f
                 .calls
                 .iter()
                 .find(|c| tainted.contains(&verus::impl_key(c)))
             {
-                why_tainted.insert(key.clone(), verus::impl_key(c));
+                Some(format!(
+                    "`{}`, whose code may differ in the driver's build",
+                    verus::impl_key(c)
+                ))
+            } else {
+                f.calls.iter().find(|c| names_divergent(c)).map(|c| {
+                    format!(
+                        "`{}`, a method of trait `{}`, which has an implementation or declaration in only one of the builds",
+                        verus::impl_key(c),
+                        verus::trait_segment(c).unwrap_or("")
+                    )
+                })
+            };
+            if let Some(why) = why {
+                why_tainted.insert(key.clone(), why);
                 tainted.insert(key);
                 changed = true;
             }
@@ -904,14 +946,10 @@ pub fn build(
             }
             // Named through a tainted function, or sharing its path (another impl
             // block's method of that name: `{impl}` paths do not tell them apart).
-            let c = why_tainted
-                .get(&e.path)
-                .cloned()
-                .unwrap_or_else(|| e.path.clone());
-            skipped.push((
-                f.path.clone(),
-                format!("{SKIP_TAINTED}`{c}`, whose code may differ in the driver's build"),
-            ));
+            let why = why_tainted.get(&e.path).cloned().unwrap_or_else(|| {
+                format!("`{}`, whose code may differ in the driver's build", e.path)
+            });
+            skipped.push((f.path.clone(), format!("{SKIP_TAINTED}{why}")));
             None
         })
         .collect();
@@ -946,6 +984,7 @@ pub fn build(
         sources: source_hashes,
         fns: entries,
         skipped,
+        divergent,
     })
 }
 
@@ -1041,6 +1080,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             imported_skips: Vec::new(),
+            imported_divergent: Vec::new(),
         };
         let fns = vir_functions(VIR).unwrap();
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
@@ -1101,6 +1141,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             imported_skips: Vec::new(),
+            imported_divergent: Vec::new(),
         };
         let info = RunInfo {
             imported_skips: vec!["dep::{impl}::x".to_string()],
@@ -1129,6 +1170,76 @@ mod tests {
                 "t::on".to_string()
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Phase 4 (cfg twins, decision 2026-11-06-redesign-verus-allocates): a function
+    /// naming a method of a trait with a plain-only implementation (the probe: `run`
+    /// through a type parameter, `direct` on a concrete type) is skipped, so is its
+    /// caller, and the trait is recorded as `divergent`; a trait an imported sidecar
+    /// records taints this run's callers too.
+    #[test]
+    fn callers_of_divergent_trait_methods_are_not_listed() {
+        let dir = std::env::temp_dir().join(format!("fip-verusgen-twin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let src = "pub trait Step { fn step(&self) -> u32; }\n#[cfg(not(verus_keep_ghost))]\nimpl Step for S { fn step(&self) -> u32 { 0 } }\npub fn run<T: Step>(t: &T, a: u32) -> u32 {\n    a / t.step()\n}\npub fn run_s(a: u32) -> u32 {\n    run(&S, a)\n}\npub fn direct(a: u32) -> u32 {\n    a / S.step()\n}\npub fn other(a: u32) -> u32 {\n    dep::Tick::tick(a)\n}\npub fn k() -> u32 { 1 }\n";
+        std::fs::write(dir.join("src/lib.rs"), src).unwrap();
+        let sp = |a: (usize, usize), b: (usize, usize)| VirSpan {
+            file: "src/lib.rs".to_string(),
+            lo: a,
+            hi: b,
+        };
+        let f = |path: &str, line: usize, end: (usize, usize), calls: &[&str]| VirFn {
+            path: path.to_string(),
+            span: sp((line, 1), (line, 1)),
+            mode: "Exec".to_string(),
+            external_body: false,
+            body: Some(sp((line, 1), end)),
+            requires: false,
+            expanded: false,
+            calls: calls.iter().map(ToString::to_string).collect(),
+        };
+        let fns = vec![
+            f("t::run", 4, (6, 2), &["t::Step::step"]),
+            f("t::run_s", 7, (9, 2), &["t::run"]),
+            f("t::direct", 10, (12, 2), &["t::Step::step"]),
+            f("t::other", 13, (15, 2), &["dep::Tick::tick"]),
+            f("t::k", 16, (16, 24), &[]),
+        ];
+        let info = RunInfo {
+            version: "v".to_string(),
+            commit: "c".to_string(),
+            toolchain: "t".to_string(),
+            verified: 5,
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: Vec::new(),
+            imported_skips: Vec::new(),
+            imported_divergent: vec!["Tick".to_string()],
+        };
+        let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
+        let listed: Vec<&str> = s.fns.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(listed, vec!["t::k"], "{s:?}");
+        let why = |p: &str| {
+            s.skipped
+                .iter()
+                .find(|(q, _)| q == p)
+                .map(|(_, w)| w.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            why("t::run").contains("`t::Step::step`, a method of trait `Step`"),
+            "{s:?}"
+        );
+        assert!(why("t::direct").contains("trait `Step`"), "{s:?}");
+        assert!(why("t::run_s").contains("`t::run`"), "{s:?}");
+        assert!(why("t::other").contains("trait `Tick`"), "{s:?}");
+        assert_eq!(
+            s.divergent,
+            vec![("Step".to_string(), "src/lib.rs".to_string(), 3)]
+        );
+        // Importers taint their callers of these.
+        assert!(imported_cfg_skips(&s).contains(&"t::run".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1178,6 +1289,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             imported_skips: Vec::new(),
+            imported_divergent: Vec::new(),
         };
         let e = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap_err();
         assert!(
@@ -1217,6 +1329,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             imported_skips: Vec::new(),
+            imported_divergent: Vec::new(),
         };
         let fns = vir_functions(vir).unwrap();
         assert!(!fns[0].expanded && fns[2].expanded);
@@ -1385,6 +1498,7 @@ mod tests {
             )],
             fns: Vec::new(),
             skipped: Vec::new(),
+            divergent: Vec::new(),
         };
         let side = dir.join("verus-verified.txt");
         std::fs::write(&side, sc.render()).unwrap();
