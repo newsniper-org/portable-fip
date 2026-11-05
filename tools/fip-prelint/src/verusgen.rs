@@ -253,6 +253,8 @@ pub struct VirFn {
     /// Every other function its record names (`(Fun :path ..)`: call targets, also
     /// resolved trait methods and functions named in its specification).
     pub calls: Vec<String>,
+    /// Its proved `allocates` bound ([`alloc_bound`] of the `:allocates` field).
+    pub allocates: verus::AllocBound,
 }
 
 /// End of the balanced s-expression starting at `open` (a `(`), strings skipped.
@@ -400,6 +402,8 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
                 calls.push(p);
             }
         }
+        // The fork's `:allocates` field (absent before 0.2026.11: nothing proved).
+        let allocates = field(func, ":allocates").map_or(verus::AllocBound::None, alloc_bound);
         out.push(VirFn {
             path,
             span,
@@ -409,9 +413,257 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             requires,
             expanded: !span_text.ends_with(" (#0)"),
             calls,
+            allocates,
         });
     }
     Ok(out)
+}
+
+/// An s-expression of the VIR log: an atom (a string literal keeps its quotes) or a
+/// list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Sexp {
+    Atom(String),
+    List(Vec<Sexp>),
+}
+
+impl Sexp {
+    fn atom(&self) -> Option<&str> {
+        match self {
+            Sexp::Atom(a) => Some(a),
+            Sexp::List(_) => None,
+        }
+    }
+    fn list(&self) -> &[Sexp] {
+        match self {
+            Sexp::List(l) => l,
+            Sexp::Atom(_) => &[],
+        }
+    }
+    /// The list's first element is the atom `head`.
+    fn is(&self, head: &str) -> bool {
+        self.list().first().and_then(Sexp::atom) == Some(head)
+    }
+    /// The text without spans (`"<file>:<line>.."` strings after `@@`/`@`) and without
+    /// `:id <n>` pairs: stable under moves of the source text.
+    fn stable_text(&self, out: &mut String) {
+        match self {
+            Sexp::Atom(a) => out.push_str(a),
+            Sexp::List(l) => {
+                out.push('(');
+                let mut k = 0;
+                while k < l.len() {
+                    let head = l[k].atom();
+                    if k == 1
+                        && matches!(l[0].atom(), Some("@@" | "@"))
+                        && head.is_some_and(|a| a.starts_with('"'))
+                    {
+                        k += 1;
+                        continue;
+                    }
+                    if head == Some(":id") {
+                        k += 2;
+                        continue;
+                    }
+                    if !out.ends_with('(') {
+                        out.push(' ');
+                    }
+                    l[k].stable_text(out);
+                    k += 1;
+                }
+                out.push(')');
+            }
+        }
+    }
+}
+
+/// Parses the s-expressions of `text` (the value of a record field).
+fn parse_sexps(text: &str) -> Option<Vec<Sexp>> {
+    fn one(b: &[u8], i: &mut usize, text: &str) -> Option<Sexp> {
+        while *i < b.len() && b[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+        match b.get(*i)? {
+            b'(' => {
+                *i += 1;
+                let mut items = Vec::new();
+                loop {
+                    while *i < b.len() && b[*i].is_ascii_whitespace() {
+                        *i += 1;
+                    }
+                    match b.get(*i)? {
+                        b')' => {
+                            *i += 1;
+                            return Some(Sexp::List(items));
+                        }
+                        _ => items.push(one(b, i, text)?),
+                    }
+                }
+            }
+            b')' => None,
+            b'"' => {
+                let start = *i;
+                *i += 1;
+                while *i < b.len() && b[*i] != b'"' {
+                    if b[*i] == b'\\' {
+                        *i += 1;
+                    }
+                    *i += 1;
+                }
+                *i += 1;
+                Some(Sexp::Atom(text.get(start..(*i).min(b.len()))?.to_string()))
+            }
+            _ => {
+                let start = *i;
+                while *i < b.len() && !b[*i].is_ascii_whitespace() && b[*i] != b'(' && b[*i] != b')'
+                {
+                    *i += 1;
+                }
+                Some(Sexp::Atom(text[start..*i].to_string()))
+            }
+        }
+    }
+    let b = text.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    loop {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= b.len() {
+            return Some(out);
+        }
+        out.push(one(b, &mut i, text)?);
+    }
+}
+
+/// A linear form `c + Σ kᵢ·pᵢ` (parameter → coefficient).
+type Linear = (u64, BTreeMap<String, u64>);
+
+/// The linear form of a VIR expression `(@@ "<span>" (> <expr>) <type>)`, if it is
+/// one: an integer constant (`Const (Constant Int K)`, `0 <= K < 2^64`), a read of a
+/// local of an unsigned integer type or `nat` (in an `allocates` clause only the
+/// parameters are in scope; a cast `n as nat` of an unsigned `n` is not in the VIR),
+/// or `+` and `*` (one side constant) over `int`/`nat`, which cannot wrap.
+fn linear(e: &Sexp) -> Option<Linear> {
+    let l = e.list();
+    if !(e.is("@@") && l.len() == 4 && l[2].is(">")) {
+        return None;
+    }
+    let ex = &l[2].list()[1..];
+    let unbounded = |t: &Sexp| {
+        let mut s = String::new();
+        t.stable_text(&mut s);
+        s.contains("(IntRange Int)") || s.contains("(IntRange Nat)")
+    };
+    match ex.first()?.atom()? {
+        "Const" => {
+            let c = ex.get(1)?;
+            let cl = c.list();
+            if c.is("Constant") && cl.len() == 3 && cl[1].atom() == Some("Int") {
+                let k: u64 = cl[2].atom()?.parse().ok()?;
+                return Some((k, BTreeMap::new()));
+            }
+            None
+        }
+        "ReadPlace" => {
+            let place = ex.get(1)?;
+            let pl = place.list();
+            if !(place.is("@@") && pl.len() == 4 && pl[2].is("Place")) {
+                return None;
+            }
+            let p = pl[2].list();
+            if p.get(1)?.atom()? != "Local" || !p.get(2)?.is("VarIdent") {
+                return None;
+            }
+            let name = p[2].list().get(1)?.atom()?;
+            let name = name.strip_prefix('"')?.strip_suffix('"')?;
+            let ty = {
+                let mut s = String::new();
+                l[3].stable_text(&mut s);
+                s
+            };
+            let unsigned = ty.starts_with("(Typ Int (IntRange U ")
+                || ty == "(Typ Int (IntRange USize))"
+                || ty == "(Typ Int (IntRange Nat))";
+            let ident = name
+                .bytes()
+                .next()
+                .is_some_and(|b| b == b'_' || b.is_ascii_alphabetic())
+                && name.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric());
+            if !(unsigned && ident) {
+                return None;
+            }
+            Some((0, BTreeMap::from([(name.to_string(), 1)])))
+        }
+        "Binary" => {
+            let op = ex.get(1)?;
+            // `(BinaryOp Arith (ArithOp Add|Mul (OverflowBehavior .. (IntRange Int|Nat))))`
+            let arith = op.list().get(2)?;
+            let kind = arith.list().get(1)?.atom()?;
+            if !(op.list().get(1)?.atom()? == "Arith" && arith.is("ArithOp") && unbounded(arith)) {
+                return None;
+            }
+            let (a, b) = (linear(ex.get(2)?)?, linear(ex.get(3)?)?);
+            match kind {
+                "Add" => {
+                    let mut t = a.1;
+                    for (p, k) in b.1 {
+                        let e = t.entry(p).or_insert(0);
+                        *e = e.checked_add(k)?;
+                    }
+                    Some((a.0.checked_add(b.0)?, t))
+                }
+                "Mul" => {
+                    let (c, (k0, terms)) = if a.1.is_empty() {
+                        (a.0, b)
+                    } else if b.1.is_empty() {
+                        (b.0, a)
+                    } else {
+                        return None;
+                    };
+                    let mut t = BTreeMap::new();
+                    for (p, k) in terms {
+                        let k = k.checked_mul(c)?;
+                        if k > 0 {
+                            t.insert(p, k);
+                        }
+                    }
+                    Some((k0.checked_mul(c)?, t))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The proved bound of a function from the text of its `:allocates` field (fork
+/// `0.2026.11.05.ca33b04`: `None`, or `(@@ "<span>" (> <expr>) <type>)`): a linear form
+/// ([`linear`]) or, for anything else, the SHA-256 of the expression's text without
+/// spans and ids ([`verus::AllocBound::Opaque`]).
+pub fn alloc_bound(field_text: &str) -> verus::AllocBound {
+    let t = field_text.trim();
+    if t == "None" {
+        return verus::AllocBound::None;
+    }
+    let opaque = |t: &str| verus::AllocBound::Opaque(verus::sha256_hex(t.as_bytes()));
+    let Some(sexps) = parse_sexps(t) else {
+        return opaque(t);
+    };
+    let [e] = &sexps[..] else {
+        return opaque(t);
+    };
+    match linear(e) {
+        Some((c, terms)) => {
+            verus::AllocBound::Linear(c, terms.into_iter().filter(|(_, k)| *k > 0).collect())
+        }
+        None => {
+            let mut s = String::new();
+            e.stable_text(&mut s);
+            opaque(&s)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------
@@ -727,6 +979,12 @@ pub fn vir_path(p: &str) -> String {
         .join("::")
 }
 
+/// `true` if a Verus command line uses `-V alloc-check` (spelled `-V alloc-check`,
+/// `-Valloc-check` or `-V=alloc-check`): required since sidecar format 5.
+pub fn uses_alloc_check(flags: &[String]) -> bool {
+    verus::has_alloc_check(&trust_flags(flags))
+}
+
 /// The flags of a run that the sidecar's `flags` line records: `--no-cheating`, then
 /// `-V alloc-check` if the run used it (spelled `-V alloc-check`, `-Valloc-check` or
 /// `-V=alloc-check`), each once.
@@ -888,6 +1146,7 @@ pub fn build(
                 line: verus::line_of(&src, lo),
                 hash: verus::sha256_hex(&src.as_bytes()[lo..hi]),
                 requires: f.requires,
+                allocates: f.allocates.clone(),
             },
             f,
         ));
@@ -1125,6 +1384,7 @@ mod tests {
             requires: false,
             expanded: false,
             calls: calls.iter().map(ToString::to_string).collect(),
+            allocates: verus::AllocBound::None,
         };
         let fns = vec![
             f("t::on", (1, 1), ((1, 21), (5, 2)), &[]),
@@ -1173,6 +1433,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Phase 4: `allocates` clauses as the fork `0.2026.11.05.ca33b04` writes them into
+    /// the VIR log (taken from a `--log vir` run): constants, unsigned parameters
+    /// (`n as nat` leaves no cast), `+` and constant `*` over `nat`/`int` normalise;
+    /// a callback's `call_allocates`, a sequence length, a fixed-width operation or a
+    /// non-constant product are opaque (hashed without spans and ids).
+    #[test]
+    fn allocates_bounds_normalised() {
+        assert_eq!(alloc_bound("None"), verus::AllocBound::None);
+        let c0 =
+            "(@@ \"lib.rs:4:51: 4:52 (#0)\" (> Const (Constant Int 0)) (Typ Int (IntRange Int)))";
+        assert_eq!(alloc_bound(c0), verus::AllocBound::Linear(0, Vec::new()));
+        let c2 = "(@@ \"lib.rs:7:51: 7:52 (#0)\" (> Const (Constant Int 2))\n   (Typ Int (IntRange Int)))";
+        assert_eq!(alloc_bound(c2), verus::AllocBound::Linear(2, Vec::new()));
+        let n = "(@@ \"lib.rs:18:15: 18:16 (#0)\" (> ReadPlace (@@ \"lib.rs:18:15: 18:16 (#0)\" (Place Local (VarIdent \"n\" (VarIdentDisambiguate RustcId 2)) ) (Typ Int (IntRange U 32)) ) (UnfinalizedReadKind :preliminary_kind (ReadKind Copy) :id 5) ) (Typ Int (IntRange U 32)) )";
+        assert_eq!(
+            alloc_bound(n),
+            verus::AllocBound::Linear(0, vec![("n".to_string(), 1)])
+        );
+        let lin = "(@@ \"lib.rs:24:38: 24:56 (#0)\" (> Binary (BinaryOp Arith (ArithOp Add (OverflowBehavior Truncate (IntRange Nat))) ) (@@ \"lib.rs:24:38: 24:52 (#0)\" (> Binary (BinaryOp Arith (ArithOp Mul (OverflowBehavior Truncate (IntRange Nat)))) (@@ \"lib.rs:24:38: 24:39 (#0)\" (> Const (Constant Int 2)) (Typ Int (IntRange Nat)) ) (@@ \"lib.rs:24:43: 24:44 (#0)\" (> ReadPlace (@@ \"lib.rs:24:43: 24:44 (#0)\" (Place Local (VarIdent \"n\" (VarIdentDisambiguate RustcId 2)) ) (Typ Int (IntRange U 32)) ) (UnfinalizedReadKind :preliminary_kind (ReadKind Copy) :id 16) ) (Typ Int (IntRange U 32))) ) (Typ Int (IntRange Nat)) ) (@@ \"lib.rs:24:55: 24:56 (#0)\" (> Const (Constant Int 1)) (Typ Int (IntRange Nat))) ) (Typ Int (IntRange Nat)) )";
+        assert_eq!(
+            alloc_bound(lin),
+            verus::AllocBound::Linear(1, vec![("n".to_string(), 2)])
+        );
+        assert_eq!(
+            verus::AllocBound::Linear(1, vec![("n".to_string(), 2)]).render(),
+            "1+2*n"
+        );
+        // Fixed-width arithmetic could wrap; a signed parameter could be negative.
+        let wrap = lin.replace("(IntRange Nat)", "(IntRange U 64)");
+        assert!(matches!(alloc_bound(&wrap), verus::AllocBound::Opaque(_)));
+        let signed = n.replace("(IntRange U 32)", "(IntRange I 32)");
+        assert!(matches!(alloc_bound(&signed), verus::AllocBound::Opaque(_)));
+        let closure = "(@@ \"lib.rs:28:86: 28:111 (#0)\" (> Call :target (CallTarget BuiltinSpecFun (BuiltinSpecFun ClosureAlloc) ((Typ TypParam \"F\") (Typ Datatype (Dt Tuple 1) ((Typ Int (IntRange U 8))) ())) () ) :args ((@@ \"lib.rs:28:101: 28:102 (#0)\" (> ReadPlace (@@ \"lib.rs:28:101: 28:102 (#0)\" (Place Local (VarIdent \"f\" (VarIdentDisambiguate RustcId 2)) ) (Typ TypParam \"F\") ) (UnfinalizedReadKind :preliminary_kind (ReadKind Copy) :id 21) ) (Typ TypParam \"F\") )) :post_args None :body None ) (Typ Int (IntRange Int)) )";
+        let verus::AllocBound::Opaque(h) = alloc_bound(closure) else {
+            panic!("a closure's bound is opaque");
+        };
+        // Stable under moves of the text (spans) and of VIR ids.
+        let moved = closure
+            .replace("lib.rs:28:", "lib.rs:90:")
+            .replace(":id 21", ":id 7");
+        assert_eq!(alloc_bound(&moved), verus::AllocBound::Opaque(h.clone()));
+        let other = closure.replace("\"f\"", "\"g\"");
+        assert_ne!(alloc_bound(&other), verus::AllocBound::Opaque(h));
+        // A product of two parameters, a negative constant, garbage: opaque.
+        let nn = lin.replace("(Constant Int 2)", "(Constant Int -2)");
+        assert!(matches!(alloc_bound(&nn), verus::AllocBound::Opaque(_)));
+        assert!(matches!(
+            alloc_bound("(@@ \"x\" (> Const"),
+            verus::AllocBound::Opaque(_)
+        ));
+        // `vir_functions` reads the field.
+        let rec = format!(
+            "(@ \"src/lib.rs:1:1: 1:20 (#0)\" (Function :name (Fun :path t::f) :mode Exec :attrs (FunctionAttrs :is_external_body false) :require () :unwind_spec None :allocates {c2} :item_kind (ItemKind Function) :body (@@ \"src/lib.rs:1:15: 1:20 (#0)\" (Block))))\n"
+        );
+        let fns = vir_functions(&rec).unwrap();
+        assert_eq!(fns[0].allocates, verus::AllocBound::Linear(2, Vec::new()));
+    }
+
     /// Phase 4 (cfg twins, decision 2026-11-06-redesign-verus-allocates): a function
     /// naming a method of a trait with a plain-only implementation (the probe: `run`
     /// through a type parameter, `direct` on a concrete type) is skipped, so is its
@@ -1199,6 +1517,7 @@ mod tests {
             requires: false,
             expanded: false,
             calls: calls.iter().map(ToString::to_string).collect(),
+            allocates: verus::AllocBound::None,
         };
         let fns = vec![
             f("t::run", 4, (6, 2), &["t::Step::step"]),
@@ -1280,6 +1599,7 @@ mod tests {
             requires: false,
             expanded: false,
             calls: Vec::new(),
+            allocates: verus::AllocBound::None,
         }];
         let info = RunInfo {
             version: "v".to_string(),
@@ -1488,7 +1808,11 @@ mod tests {
             verus_commit: "c".to_string(),
             z3: "4.16.0".to_string(),
             toolchain: "t".to_string(),
-            flags: vec![NO_CHEATING.to_string()],
+            flags: vec![
+                NO_CHEATING.to_string(),
+                "-V".to_string(),
+                ALLOC_CHECK.to_string(),
+            ],
             target: "x".to_string(),
             features: Vec::new(),
             verified: 1,

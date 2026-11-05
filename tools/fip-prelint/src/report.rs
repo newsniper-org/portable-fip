@@ -698,7 +698,12 @@ fn verdict(
         }
     }
     for w in &s.unknown {
-        if let Some(msg) = w.what.strip_prefix("ffi:") {
+        if let Some(msg) = w.what.strip_prefix("verus-bound:") {
+            out.error(
+                primary(w, fspan),
+                &format!("`{label}` ({tag}): {msg}: {}", render_chain(tcx, label, w)),
+            );
+        } else if let Some(msg) = w.what.strip_prefix("ffi:") {
             out.error(
                 primary(w, fspan),
                 &format!("{msg}: {}", render_chain(tcx, label, w)),
@@ -767,7 +772,7 @@ fn verdict(
 
 /// `true` for the panic leaf of `alloc::alloc::handle_alloc_error` (what an
 /// allocation calls when the allocator returns null).
-fn is_alloc_failure(what: &str) -> bool {
+pub(crate) fn is_alloc_failure(what: &str) -> bool {
     what.starts_with("`alloc::alloc::handle_alloc_error` ")
         || what.starts_with("`std::alloc::handle_alloc_error` ")
 }

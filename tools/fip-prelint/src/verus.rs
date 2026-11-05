@@ -28,11 +28,11 @@
 //! verus <version> <commit>
 //! z3 <version>
 //! toolchain <rust toolchain of the Verus build>
-//! flags <verus flags relevant to trust: --no-cheating, and -V alloc-check if given>
+//! flags <verus flags relevant to trust: --no-cheating -V alloc-check>
 //! cfg <target triple of the run> <its cargo features, comma-separated, or ->
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
-//! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | ->
+//! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | -> <allocates>
 //! skip <crate>::<path> <reason>
 //! divergent <trait name> <file relative to the sidecar's directory>:<line>
 //! ```
@@ -58,6 +58,16 @@
 //! importing it. The driver refuses format 4 sidecars, which were written without
 //! this rule.
 //!
+//! Format 5 also records, per listed function, the `allocates` bound Verus proved
+//! ([`AllocBound`]): `-` (no clause), a literal `c` or a parameter-linear form
+//! `c+k*p+..` (unsigned integer parameters), or `opaque:<sha256>` for any other
+//! expression; and it requires `-V alloc-check` in `flags` (the generator refuses a run
+//! without it, the driver a sidecar without it). The driver takes a literal bound in
+//! place of its own allocation count of the function's body only for a non-generic
+//! function without `requires` whose instance calls no trait method implemented by
+//! unverified code, and only where its own count is not a finite number at most the
+//! bound; a finite count above the bound is an error (`crate::verustrust`).
+//!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
 //! `impl&%N` and rustc `{impl#N}`, both with the `DefPath` disambiguator of their own
@@ -76,8 +86,16 @@ pub const NO_CHEATING: &str = "--no-cheating";
 
 /// The value of the Verus fork's `-V alloc-check` option (`allocates` bounds checked;
 /// decision record 2026-11-06-redesign-verus-allocates). Recorded in `flags` as the two
-/// words `-V alloc-check` when the run used it; not yet required by the driver.
+/// words `-V alloc-check`; required since format 5 (the generator refuses a run
+/// without it, the driver a sidecar whose `flags` lack it).
 pub const ALLOC_CHECK: &str = "alloc-check";
+
+/// `true` if a sidecar's recorded `flags` hold `-V alloc-check`.
+pub fn has_alloc_check(flags: &[String]) -> bool {
+    flags
+        .windows(2)
+        .any(|w| w[0] == "-V" && w[1] == ALLOC_CHECK)
+}
 
 // ---------------------------------------------------------------------------------
 // SHA-256 (FIPS 180-4), dependency-free.
@@ -1162,6 +1180,69 @@ pub fn trait_segment(path: &str) -> Option<&str> {
 // ---------------------------------------------------------------------------------
 // The sidecar.
 
+/// The `allocates` bound Verus proved for a function (`-V alloc-check`), as the
+/// generator records it (decision 2026-11-06-redesign-verus-allocates, phase 4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AllocBound {
+    /// No `allocates` clause: nothing proved about allocations.
+    None,
+    /// `c + Σ kᵢ·pᵢ` over unsigned integer parameters `pᵢ` (sorted by name, every
+    /// `kᵢ > 0`); no parameters: the literal `c`.
+    Linear(u64, Vec<(String, u64)>),
+    /// Any other expression: the SHA-256 of its VIR text without spans and ids.
+    Opaque(String),
+}
+
+impl AllocBound {
+    /// The literal bound, if the bound is one.
+    pub fn literal(&self) -> Option<u64> {
+        match self {
+            AllocBound::Linear(c, terms) if terms.is_empty() => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// The sidecar spelling: `-`, `<c>`, `<c>+<k>*<p>..`, `opaque:<sha256>`.
+    pub fn render(&self) -> String {
+        match self {
+            AllocBound::None => "-".to_string(),
+            AllocBound::Linear(c, terms) => {
+                let mut s = c.to_string();
+                for (p, k) in terms {
+                    let _ = write!(s, "+{k}*{p}");
+                }
+                s
+            }
+            AllocBound::Opaque(h) => format!("opaque:{h}"),
+        }
+    }
+
+    /// Reads [`AllocBound::render`]'s spelling; `None` if malformed.
+    pub fn parse(s: &str) -> Option<AllocBound> {
+        if s == "-" {
+            return Some(AllocBound::None);
+        }
+        if let Some(h) = s.strip_prefix("opaque:") {
+            return (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| AllocBound::Opaque(h.to_string()));
+        }
+        let mut parts = s.split('+');
+        let c: u64 = parts.next()?.parse().ok()?;
+        let mut terms: Vec<(String, u64)> = Vec::new();
+        for t in parts {
+            let (k, p) = t.split_once('*')?;
+            let k: u64 = k.parse().ok()?;
+            let ident =
+                p.bytes().next().is_some_and(is_ident_start) && p.bytes().all(is_ident_continue);
+            if k == 0 || !ident || terms.last().is_some_and(|(q, _)| q.as_str() >= p) {
+                return None;
+            }
+            terms.push((p.to_string(), k));
+        }
+        Some(AllocBound::Linear(c, terms))
+    }
+}
+
 /// One verified function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -1175,6 +1256,8 @@ pub struct Entry {
     pub hash: String,
     /// The function has a Verus `requires`: callers must establish it.
     pub requires: bool,
+    /// Its proved `allocates` bound.
+    pub allocates: AllocBound,
 }
 
 /// A parsed sidecar.
@@ -1260,7 +1343,7 @@ impl Sidecar {
                     s.sources.push((p.to_string(), h.to_string()));
                 }
                 "fn" => {
-                    let [p, at, h, r] = words[..] else {
+                    let [p, at, h, r, a] = words[..] else {
                         return Err(bad());
                     };
                     let (f, line) = at.rsplit_once(':').ok_or_else(bad)?;
@@ -1273,12 +1356,14 @@ impl Sidecar {
                         "-" => false,
                         _ => return Err(bad()),
                     };
+                    let allocates = AllocBound::parse(a).ok_or_else(bad)?;
                     s.fns.push(Entry {
                         path: p.to_string(),
                         file: f.to_string(),
                         line,
                         hash: h.to_string(),
                         requires,
+                        allocates,
                     });
                 }
                 "skip" => {
@@ -1319,8 +1404,9 @@ impl Sidecar {
         o.push_str("fip-prelint verus sidecar\n");
         o.push_str(
             "# Generated by `cargo fip-prelint --verus-sidecar` (just verify); do not edit.\n\
-             # Exec functions Verus verified with --no-cheating, with the SHA-256 of their item\n\
-             # text (outer attributes and doc comments through the body). Top plan T13.4.\n",
+             # Exec functions Verus verified with --no-cheating -V alloc-check, with the SHA-256\n\
+             # of their item text (outer attributes and doc comments through the body) and\n\
+             # their proved `allocates` bound. Top plan T13.4, redesign phase 4.\n",
         );
         let _ = writeln!(o, "format {}", self.format);
         let _ = writeln!(o, "crate {}", self.krate);
@@ -1340,7 +1426,15 @@ impl Sidecar {
         }
         for e in &self.fns {
             let r = if e.requires { "requires" } else { "-" };
-            let _ = writeln!(o, "fn {} {}:{} {} {r}", e.path, e.file, e.line, e.hash);
+            let _ = writeln!(
+                o,
+                "fn {} {}:{} {} {r} {}",
+                e.path,
+                e.file,
+                e.line,
+                e.hash,
+                e.allocates.render()
+            );
         }
         for (p, why) in &self.skipped {
             let _ = writeln!(o, "skip {p} {why}");
@@ -1352,10 +1446,15 @@ impl Sidecar {
     }
 
     /// `Ok` if this sidecar was produced by the trusted Verus build with
-    /// `--no-cheating`; else why not.
+    /// `--no-cheating` and `-V alloc-check`; else why not.
     pub fn check_stamp(&self, trusted: &Trusted) -> Result<(), String> {
         if !self.flags.iter().any(|f| f == NO_CHEATING) {
             return Err(format!("generated without `{NO_CHEATING}`"));
+        }
+        if !has_alloc_check(&self.flags) {
+            return Err(format!(
+                "generated without `-V {ALLOC_CHECK}` (its `allocates` bounds were not checked)"
+            ));
         }
         if self.verus_version != trusted.verus_version || self.verus_commit != trusted.verus_commit
         {
@@ -1756,6 +1855,40 @@ mod tests {
         assert_eq!(trait_segment("f"), None);
     }
 
+    /// Phase 4: the spellings of proved bounds.
+    #[test]
+    fn alloc_bound_spellings() {
+        let h = "ab".repeat(32);
+        for (b, text) in [
+            (AllocBound::None, "-".to_string()),
+            (AllocBound::Linear(0, Vec::new()), "0".to_string()),
+            (AllocBound::Linear(7, Vec::new()), "7".to_string()),
+            (
+                AllocBound::Linear(1, vec![("m".to_string(), 1), ("n".to_string(), 2)]),
+                "1+1*m+2*n".to_string(),
+            ),
+            (AllocBound::Opaque(h.clone()), format!("opaque:{h}")),
+        ] {
+            assert_eq!(b.render(), text);
+            assert_eq!(AllocBound::parse(&text), Some(b));
+        }
+        assert_eq!(AllocBound::parse("7").and_then(|b| b.literal()), Some(7));
+        assert_eq!(AllocBound::parse("0+1*n").and_then(|b| b.literal()), None);
+        for bad in [
+            "",
+            "x",
+            "-1",
+            "1+n",
+            "1+0*n",
+            "1+2*n+1*m",
+            "1+1*n+1*n",
+            "opaque:zz",
+            "1+2*9n",
+        ] {
+            assert_eq!(AllocBound::parse(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn sidecar_round_trip_and_stamp() {
         let s = Sidecar {
@@ -1765,7 +1898,11 @@ mod tests {
             verus_commit: "abcdef".to_string(),
             z3: "4.16.0".to_string(),
             toolchain: "1.99.1".to_string(),
-            flags: vec![NO_CHEATING.to_string()],
+            flags: vec![
+                NO_CHEATING.to_string(),
+                "-V".to_string(),
+                ALLOC_CHECK.to_string(),
+            ],
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: vec!["a".to_string(), "b".to_string()],
             verified: 3,
@@ -1776,6 +1913,7 @@ mod tests {
                 line: 12,
                 hash: "11".to_string(),
                 requires: true,
+                allocates: AllocBound::Linear(2, vec![("n".to_string(), 3)]),
             }],
             skipped: vec![("c::g".to_string(), "external body".to_string())],
             divergent: vec![("Step".to_string(), "src/lib.rs".to_string(), 3)],
@@ -1810,6 +1948,21 @@ mod tests {
             ..s.clone()
         };
         assert!(cheat.check_stamp(&t).is_err());
+        // Format 5: `-V alloc-check` is part of the stamp.
+        let unchecked = Sidecar {
+            flags: vec![NO_CHEATING.to_string()],
+            ..s.clone()
+        };
+        assert!(
+            unchecked
+                .check_stamp(&t)
+                .is_err_and(|e| e.contains("-V alloc-check")),
+            "{:?}",
+            unchecked.check_stamp(&t)
+        );
+        // Every `fn` line has its bound.
+        assert!(s.render().contains(" requires 2+3*n\n"), "{}", s.render());
+        assert!(Sidecar::parse(&s.render().replace(" requires 2+3*n\n", " requires\n")).is_err());
         let current = format!("format {FORMAT}");
         for old in ["format 4", "format 3", "format 2"] {
             assert!(

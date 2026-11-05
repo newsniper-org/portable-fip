@@ -31,7 +31,14 @@
 //!
 //! Then an `Assert` panic site (overflow, bounds, division checks) of the function
 //! whose span lies inside the item text and does not come from a macro expansion is
-//! discharged. Calls, allocations, frees, recursion and `⊤` are unchanged. A listed
+//! discharged, unless the analysed instance calls a trait method implemented, in this
+//! build, by a function no sidecar lists (outside the standard library; `Fn*` calls
+//! exempt): Verus assumed the trait's specification for it (phase 4 of decision
+//! 2026-11-06-redesign-verus-allocates, cfg twins). Calls, frees, recursion and `⊤`
+//! are unchanged. A literal proved `allocates K` of a non-generic function without
+//! `requires` replaces the driver's count of its body where that count is not a finite
+//! number `<= K` and every panic path is an allocation failure; a finite count `> K`
+//! is kept and reported as an error (`crate::analysis`, sidecar format 5). A listed
 //! function with a Verus `requires` passes that obligation to its callers
 //! (`crate::analysis`). `FIP_PRELINT_NO_VERUS=1` (`cargo fip-prelint --no-verus`)
 //! ignores every sidecar.
@@ -77,6 +84,8 @@ pub enum Verdict {
         hi: usize,
         krate: String,
         stamp: String,
+        /// The proved `allocates` bound.
+        allocates: verus::AllocBound,
     },
     /// Its package declares a sidecar, but it cannot be used for this function.
     NotListed(String),
@@ -101,6 +110,11 @@ pub struct VerusTrust {
     discharged: RefCell<Discharged>,
     /// Sidecars that were consulted and refused: shown path → reason.
     refused: RefCell<BTreeMap<String, String>>,
+    /// Per sidecar crate: its stamp and the functions whose proved literal
+    /// `allocates` bound replaced the driver's count (phase 4).
+    bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
+    /// Functions whose driver count exceeds their proved bound.
+    exceeded: RefCell<BTreeSet<String>>,
 }
 
 /// Local path of a source file name, made absolute and canonical.
@@ -135,6 +149,8 @@ impl VerusTrust {
             verdicts: RefCell::new(HashMap::new()),
             discharged: RefCell::new(BTreeMap::new()),
             refused: RefCell::new(BTreeMap::new()),
+            bounds: RefCell::new(BTreeMap::new()),
+            exceeded: RefCell::new(BTreeSet::new()),
         }
     }
 
@@ -390,6 +406,7 @@ impl VerusTrust {
             hi,
             krate,
             stamp: loaded.sidecar.stamp(),
+            allocates: entry.allocates.clone(),
         }
     }
 
@@ -414,6 +431,7 @@ impl VerusTrust {
                 hi,
                 krate,
                 stamp,
+                ..
             } => {
                 if span.from_expansion() {
                     return SiteVerdict::Kept(Some(
@@ -443,14 +461,72 @@ impl VerusTrust {
         }
     }
 
+    /// The literal `allocates` bound Verus proved for `d` and the function's path, if
+    /// `d` is listed with one and has no `requires` (decision
+    /// 2026-11-06-redesign-verus-allocates, phase 4): the fork assumes a callee's bound
+    /// only under its precondition, which a caller Verus did not verify may break.
+    /// Parameter-linear and opaque bounds are not evaluated (`None`).
+    pub fn literal_alloc_bound(
+        &self,
+        tcx: TyCtxt<'_>,
+        d: DefId,
+        body_span: Span,
+    ) -> Option<(u64, String)> {
+        match self.verdict(tcx, d, body_span) {
+            Verdict::Listed {
+                path,
+                requires: false,
+                allocates,
+                ..
+            } => allocates.literal().map(|k| (k, path)),
+            _ => None,
+        }
+    }
+
+    /// Records that the proved bound of `path` replaced the driver's count.
+    pub fn bound_used(&self, tcx: TyCtxt<'_>, d: DefId, body_span: Span, path: &str) {
+        if let Verdict::Listed { krate, stamp, .. } = self.verdict(tcx, d, body_span) {
+            self.bounds
+                .borrow_mut()
+                .entry(krate)
+                .or_insert_with(|| (stamp, BTreeSet::new()))
+                .1
+                .insert(path.to_string());
+        }
+    }
+
+    /// Records that the driver's count of `path` exceeds its proved bound.
+    pub fn bound_exceeded(&self, path: &str) {
+        self.exceeded.borrow_mut().insert(path.to_string());
+    }
+
     /// The suffix of the crate summary: the panic sites discharged by Verus per
-    /// sidecar, with its stamp, and the sidecars consulted but refused.
+    /// sidecar, with its stamp, the allocation bounds taken from it, the bounds the
+    /// driver's count exceeds, and the sidecars consulted but refused.
     pub fn summary(&self) -> String {
         let mut out = String::new();
         for (krate, (stamp, sites)) in self.discharged.borrow().iter() {
             out.push_str(&format!(
                 ", {} panic sites discharged by Verus (sidecar of `{krate}`: {stamp})",
                 sites.len()
+            ));
+        }
+        for (krate, (stamp, fns)) in self.bounds.borrow().iter() {
+            out.push_str(&format!(
+                ", {} allocation bounds taken from Verus (sidecar of `{krate}`: {stamp})",
+                fns.len()
+            ));
+        }
+        let exceeded = self.exceeded.borrow();
+        if !exceeded.is_empty() {
+            out.push_str(&format!(
+                ", {} Verus allocation bounds exceeded by the driver's count ({})",
+                exceeded.len(),
+                exceeded
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         for (path, why) in self.refused.borrow().iter() {

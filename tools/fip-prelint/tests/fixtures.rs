@@ -1052,6 +1052,11 @@ fn verus_sidecar_refused() {
 /// sidecar as verified (`vside::<name>`, the hash of exactly `item`), with the forged
 /// source hash: a sidecar as a generator without the 2026-11-04 cfg checks wrote it.
 fn forge_listed(d: &Path, name: &str, item: &str) {
+    forge_listed_bound(d, name, item, "-");
+}
+
+/// [`forge_listed`] with the proved bound `allocates` (the sidecar spelling).
+fn forge_listed_bound(d: &Path, name: &str, item: &str, allocates: &str) {
     let lib = d.join("vside/src/lib.rs");
     let old = sha256_file(&lib);
     let mut text = std::fs::read_to_string(&lib).expect("read lib.rs");
@@ -1068,7 +1073,9 @@ fn forge_listed(d: &Path, name: &str, item: &str) {
     edit(
         &sidecar,
         &format!("source src/lib.rs {old}"),
-        &format!("source src/lib.rs {new}\nfn vside::{name} src/lib.rs:{line} {hash} -"),
+        &format!(
+            "source src/lib.rs {new}\nfn vside::{name} src/lib.rs:{line} {hash} - {allocates}"
+        ),
     );
 }
 
@@ -1241,7 +1248,9 @@ fn append_unlisted(d: &Path, text: &str) {
 /// `just verify-sidecar`). Before, both divisions were discharged ("2 panic sites
 /// discharged"); the driver now keeps them, because the instance calls a trait method
 /// whose implementation in this build no sidecar lists (or, for the generic root, is
-/// not resolved).
+/// not resolved). The forged entries carry `allocates 0` (sidecar format 5): no bound
+/// is taken from them (`direct`'s instance is refused, `run` is generic, `run_s` has
+/// a division panic path through `run`), so the driver's counts stay.
 #[test]
 fn verus_sidecar_twin() {
     let d = copy_fixture("verus_sidecar", "verus_twin");
@@ -1249,20 +1258,23 @@ fn verus_sidecar_twin() {
         &d,
         "#[cfg(verus_keep_ghost)]\nverus! {\npub trait Step {\n    fn step(&self) -> (r: u32)\n        ensures r > 0,\n        allocates 0;\n}\n\nimpl Step for S {\n    fn step(&self) -> (r: u32) { 1 }\n}\n}\n\n#[cfg(not(verus_keep_ghost))]\npub trait Step {\n    fn step(&self) -> u32;\n}\n\n/// Only in the plain build: returns 0 and allocates.\n#[cfg(not(verus_keep_ghost))]\nimpl Step for S {\n    fn step(&self) -> u32 {\n        let b = Box::new(0u32);\n        *b\n    }\n}\n\n#[cfg_attr(verus_keep_ghost, verifier::verify)]\npub struct S;\n",
     );
-    forge_listed(
+    forge_listed_bound(
         &d,
         "run",
         "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn run<T: Step>(t: &T, a: u32) -> u32 {\n    a / t.step()\n}",
+        "0",
     );
-    forge_listed(
+    forge_listed_bound(
         &d,
         "run_s",
         "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn run_s(a: u32) -> u32 {\n    run(&S, a)\n}",
+        "0",
     );
-    forge_listed(
+    forge_listed_bound(
         &d,
         "direct",
         "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0))]\npub fn direct(a: u32) -> u32 {\n    a / S.step()\n}",
+        "0",
     );
     compare(
         "verus_sidecar",
@@ -1273,6 +1285,64 @@ fn verus_sidecar_twin() {
             &[],
             &["--message-format", "short"],
         ),
+    );
+}
+
+/// Allocation bounds proved by Verus (decision 2026-11-06-redesign-verus-allocates,
+/// phase 4; sidecar format 5). Fixture `verus_alloc`: the crate `valloc`'s sidecar
+/// (`just verify-sidecar`) records `zero` 0, `one` 1, `twice` 2, `times` `0+1*n`,
+/// `upto` 2 (with `requires`) and `twice_with<T>` 2. The driver's own counts: 0, 1 and
+/// `∞` for the four loops. With the sidecar, `twice` (and its plain caller
+/// `use_twice`) get 2 and pass `n = 2` ("1 allocation bounds taken from Verus");
+/// `zero` and `one` keep their equal counts; the linear `times`, `upto` (its
+/// `requires`) and the generic `twice_with` keep `∞`; every free stays reported.
+/// Variants: `-off` (`--no-verus`: `twice` and `use_twice` back to `∞`); `-exceeded`
+/// (`one`'s bound forged to 0: the driver's count 1 is kept and every root reaching
+/// `one` gets the error that the proof's trust boundary is violated); `-flags` (the
+/// stamp without `-V alloc-check`: the sidecar is refused, as `-off`).
+#[test]
+fn verus_alloc_bounds() {
+    check("verus_alloc");
+    compare(
+        "verus_alloc",
+        "-off",
+        &run_args(
+            "verus_alloc",
+            "-off",
+            &[],
+            &["--message-format", "short", "--no-verus"],
+        ),
+    );
+    let d = copy_fixture("verus_alloc", "verus_alloc_exceeded");
+    let sidecar = d.join("valloc/verus-verified.txt");
+    let text = std::fs::read_to_string(&sidecar).expect("read the sidecar");
+    let one = text
+        .lines()
+        .find(|l| l.starts_with("fn valloc::one "))
+        .expect("`one` is listed")
+        .to_string();
+    assert!(one.ends_with(" - 1"), "{one}");
+    edit(&sidecar, &one, &format!("{} - 0", &one[..one.len() - 4]));
+    compare(
+        "verus_alloc",
+        "-exceeded",
+        &run_at(
+            &d,
+            "verus_alloc-exceeded",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+    let d = copy_fixture("verus_alloc", "verus_alloc_flags");
+    edit(
+        &d.join("valloc/verus-verified.txt"),
+        "\nflags --no-cheating -V alloc-check\n",
+        "\nflags --no-cheating\n",
+    );
+    compare(
+        "verus_alloc",
+        "-flags",
+        &run_at(&d, "verus_alloc-flags", &[], &["--message-format", "short"]),
     );
 }
 

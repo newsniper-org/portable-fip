@@ -504,6 +504,17 @@ verify-sidecar: verify-strict
     fi
     grep -q "must use \`--no-cheating\`" "$out/cheat.err"
     test ! -e "$out/cheat.txt"
+    # Without -V alloc-check (sidecar format 5): refused before Verus runs, nothing written.
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/noalloc.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) 2> "$out/noalloc.err"; then
+      echo "FAIL: a sidecar was generated without -V alloc-check"; exit 1
+    fi
+    grep -q "must use \`-V alloc-check\`" "$out/noalloc.err"
+    test ! -e "$out/noalloc.txt"
+    # Allocation bounds (phase 4): the fixture verus_alloc's sidecar records each listed
+    # function's proved `allocates` bound.
+    fa=tools/fip-prelint/tests/fixtures/verus_alloc
+    (cd "$fa" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name valloc --crate-dir valloc --out "$out/valloc.txt" -- {{verus}} --crate-type=lib --crate-name valloc {{verus_flags}} valloc/src/lib.rs)
+    just verus-sidecar-check "$out/valloc.txt" "$fa/valloc/verus-verified.txt"
     # An `external_body` function: Verus rejects the --no-cheating run, nothing written.
     cp -r "$fx" "$out/ext"
     printf '\n#[cfg_attr(verus_keep_ghost, verifier::external_body)]\npub fn ext() -> u32 { 2 }\n' >> "$out/ext/vside/src/lib.rs"

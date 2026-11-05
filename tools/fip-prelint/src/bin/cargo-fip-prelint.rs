@@ -675,6 +675,12 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
             verus::NO_CHEATING
         ));
     }
+    if !verusgen::uses_alloc_check(&flags) {
+        return fail(&format!(
+            "the Verus run must use `-V {}`: without it the `allocates` bounds are not checked and no sidecar is written",
+            verus::ALLOC_CHECK
+        ));
+    }
     if let Some(f) = flags.iter().find(|f| {
         verusgen::REFUSED_FLAGS
             .iter()

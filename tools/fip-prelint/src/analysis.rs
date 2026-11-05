@@ -444,6 +444,10 @@ struct BodyInfo {
     succ: Vec<Vec<usize>>,
     reachable: Vec<bool>,
     in_loop: Vec<bool>,
+    /// The literal `allocates` bound Verus proved for this body, usable for this
+    /// instance (computed by `scan_body`), with the function's path, its definition
+    /// and the span of its MIR body.
+    verus_bound: Option<(u64, String, DefId, Span)>,
 }
 
 enum NodeKind {
@@ -2260,6 +2264,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     succ: vec![Vec::new()],
                     reachable: vec![true],
                     in_loop: vec![false],
+                    verus_bound: None,
                 });
             }
         }
@@ -2360,6 +2365,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     succ: vec![Vec::new()],
                     reachable: vec![true],
                     in_loop: vec![false],
+                    verus_bound: None,
                 });
             }
             // Marks apply by link symbol, so a declaration in `std`, `libc` or any
@@ -2486,6 +2492,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             succ: vec![vec![1], vec![1]],
             reachable: vec![true, true],
             in_loop: vec![false, true],
+            verus_bound: None,
         })
     }
 
@@ -2990,11 +2997,28 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 }
             }
         }
+        // A literal `allocates` bound proved by Verus (phase 4): only for a
+        // non-generic function (a bounded type parameter's Verus premise, such as
+        // `T: AllocFreeDrop`, holds for every type in the plain build) whose instance
+        // calls no trait method implemented by unverified code.
+        let verus_bound = match inst.def {
+            InstanceKind::Item(d)
+                if verus_refused.is_none()
+                    && !tcx.generics_of(d).requires_monomorphization(tcx) =>
+            {
+                self.crates
+                    .verus
+                    .literal_alloc_bound(tcx, d, body.span)
+                    .map(|(k, path)| (k, path, d, body.span))
+            }
+            _ => None,
+        };
         BodyInfo {
             blocks,
             succ,
             reachable,
             in_loop,
+            verus_bound,
         }
     }
 
@@ -5179,9 +5203,60 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     }
                 }
                 s.alloc = longest_path(info, &bcost);
+                if let Some((k, path, d, body_span)) = &info.verus_bound {
+                    self.verus_bound(*k, path, *d, *body_span, &mut s);
+                }
             }
         }
         s
+    }
+
+    /// Applies the literal `allocates k` Verus proved for the body of `path` to its
+    /// summary `s` (decision 2026-11-06-redesign-verus-allocates, phase 4). The fork
+    /// bounds the allocations of normally returning executions only, so the bound is
+    /// used only if every panic path of `s` is an allocation failure (which diverges
+    /// inside the allocation, after at most the allocations of a normal path up to
+    /// there). Then: a finite count `m <= k` is kept (it is at least as precise); a
+    /// finite `m > k` is kept and reported as an error at every root reaching it (the
+    /// proof's trust boundary is violated, or the driver's count is imprecise); any
+    /// other count (`∞`, terms) becomes `k`. Frees, panics, recursion and unresolved
+    /// events stay as the driver found them.
+    fn verus_bound(&self, k: u64, path: &str, d: DefId, body_span: Span, s: &mut Summary) {
+        let normal_only = s.panics.len() < MAX_WITNESSES
+            && s.panics
+                .iter()
+                .all(|w| crate::report::is_alloc_failure(&w.what));
+        if !normal_only {
+            return;
+        }
+        let finite = s.alloc.terms.values().all(|v| v.is_zero());
+        match s.alloc.c {
+            B::Fin(m) if finite => {
+                if m > k {
+                    self.crates.verus.bound_exceeded(path);
+                    push_w(
+                        &mut s.unknown,
+                        Witness {
+                            steps: Vec::new(),
+                            what: format!(
+                                "verus-bound:the driver counts {m} allocation(s) in `{path}`, more than the `allocates {k}` Verus proved for it: the proof's trust boundary is violated (or the driver's count is imprecise); the driver's count is kept"
+                            ),
+                            span: DUMMY_SP,
+                            in_loop: false,
+                        },
+                        MAX_UNKNOWN,
+                        key_what,
+                    );
+                }
+            }
+            _ => {
+                s.alloc = Cost {
+                    c: B::Fin(k),
+                    terms: BTreeMap::new(),
+                };
+                self.crates.verus.bound_used(self.tcx, d, body_span, path);
+            }
+        }
     }
 
     /// The cost of one site of a body (looped if `in_loop`), its events merged into
@@ -7081,6 +7156,7 @@ mod tests {
             succ: vec![vec![1, 2], vec![3], vec![3], Vec::new()],
             reachable: vec![true; 4],
             in_loop: vec![false; 4],
+            verus_bound: None,
         };
         let costs = vec![Cost::default(), Cost::one(), Cost::one(), Cost::one()];
         assert_eq!(longest_path(&info, &costs).c, B::Fin(2));
