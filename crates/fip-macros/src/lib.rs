@@ -4826,7 +4826,12 @@ fn attr_path_use(attr: &TokenTree) -> TokenStream {
 /// the type of a certified function (a struct field, an array, a `param(g = K)`
 /// argument) under Verus writes `fip_fn!(bound <= K, path)`; for a function that
 /// allocates, this is required. The plain build of the same source checks every
-/// certificate.
+/// certificate. Verus checks the Verus-side `K` (and `0`): `Certified<K, _>`'s `pre`
+/// requires `call_allocates(f, args) <= K` (`fip-strict`, decision
+/// `2026-11-06-redesign-verus-allocates`, phase 3), so a verified caller of
+/// `fip_fn!(path)` for a function that may allocate fails that precondition at the
+/// call (`just verify-negative`, control `types-path-no-bound`), and a closure's `N`
+/// must cover its `allocates` bound.
 ///
 /// ```
 /// let f = fip_macros::fip_fn!(bound <= 0, |x: u8| x ^ 1);
@@ -5502,7 +5507,8 @@ fn fip_fn_path(
     if strict::under_verus() {
         // Verus's driver: `Certified<K, _>` for `bound <= K`, as in the plain build;
         // without `bound`, `Certified<0, _>` (the certificate `N` is a constant only
-        // the plain build evaluates). The plain build checks the certificate.
+        // the plain build evaluates). The plain build checks the certificate; Verus
+        // checks `K` at each verified call (`Certified::pre`: `call_allocates <= K`).
         let k = limit.unwrap_or(0);
         return fip_fn_wrapper(
             &strict_scan.krate(),

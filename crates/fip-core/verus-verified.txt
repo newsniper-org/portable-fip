@@ -9,13 +9,13 @@ z3 4.16.0
 toolchain 1.99.1-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu -
-verified 64
-source ../fip-strict/src/lib.rs 2364553bd840aab6d9a1664593042a99008e6997af4a67eb9723824c976534dd
+verified 70
+source ../fip-strict/src/lib.rs dad280bad0c20408825b200193fc3e3e0d1c251ee4ea01d98a31d70d0eee668a
 source src/lib.rs e1276d3eddd1e41b641768c5b1eebf23ebbf376a3a4b9a6aad91f3b6de50785d
 source src/slice.rs 3ef512fdc326d1c7265fc3eee00bf79f598d4ff3d92bfe5fa89faa092acf537c
 source src/slot.rs 2b52e8be82a835cee9438fcd108d1ac03dab86cb9e811a95eefb7241265ef296
 source src/spec.rs 5cf8e8f9b57f4f732ec21cb2eed965d3eb7c476560476f3796ebfcf1fc90d4ce
-source src/strict.rs 7dd8f60b70527397e6a48df70daa1740ff356b55a9703063dbc247900617a0d5
+source src/strict.rs 24a627c3d33a4e39c2ac767e869916741cb9bc25a3aa49ef4441b3e0b0f45ffe
 fn fip_core::slice::compact src/slice.rs:71 62a723a1c0e6a5119518b8eecf446b34d6e5dcbec563eabb3a84041357629955 requires
 fn fip_core::slice::compact_map src/slice.rs:418 c48ff74da155ab71eb652a4d0d64fc4fbc617bb3764e15aee583d59820dd85de requires
 fn fip_core::slice::compact_map_st src/slice.rs:546 76d7f1d268d46eca0d275e22f86cf9d24a9dbb642bfab9c75351f494faeb97aa requires
@@ -26,10 +26,10 @@ fn fip_core::slice::swap src/slice.rs:42 d922fbc370f02e383972629c3d547bab7b8b42a
 fn fip_core::slice::swap_lt src/slice.rs:20 ffc337ba07dc5ab832533e3737a0c8c004dd855f86431d99812da8bf84a7dfab requires
 fn fip_core::slot::replace src/slot.rs:9 c3e97a41a8db9345ccd7bf89bd60ead4185997a54a6217ede266f7fe7b76553a -
 fn fip_core::slot::update src/slot.rs:33 be5160aa6fc8e08cd1770f5584700e338835f10dddbc31a2725791cc1c59f2a1 requires
-fn fip_core::strict::compact src/strict.rs:202 f4a2511dcce02925f379c2d9fc5be34f6206103c6fb76dc16efdf225ee67ab01 requires
-fn fip_core::strict::compact_map src/strict.rs:367 ef528e427068e91ada6e92f11859a2fc6f1d4a5247c8a0e4a4d7c4f1521f09da requires
-fn fip_core::strict::compact_map_st src/strict.rs:482 3570d2552089724777d24eebfbbef22477d414991af1c1fc13c20a2d579aea8d requires
-fn fip_core::strict::dedup_by src/strict.rs:268 bae8348685a9322d262f7a7619b024138a5eacf2c8f0c5defa202ec9d0b77e27 requires
-fn fip_core::strict::map_in_place src/strict.rs:78 83cd681bdc4bd4c852c651fd55e4a2f4c35c30149f7e5adca354c29614590f09 requires
-fn fip_core::strict::map_in_place_st src/strict.rs:125 868b94b2d00ca180c4aafef9a5b60ac455c52a015611796ef0e74a86e284b85b requires
-fn fip_core::strict::update src/strict.rs:49 038cb2dc0e521aa05ea4ceb481eb0a633c7ba9ce576420d41d2979ea486b2e35 requires
+fn fip_core::strict::compact src/strict.rs:223 cd776bad206e6198865b8a43bf5e084b15434b372b178ddcb76b4d4ef736da2a requires
+fn fip_core::strict::compact_map src/strict.rs:400 3e26c97e210c826ed6614618d5f1f88bd8e1808a7d1af641450fc9f9190e2690 requires
+fn fip_core::strict::compact_map_st src/strict.rs:521 8789ef646ca13bea6c74d3d4fd93fd2704c47fcc72abc11f95132181a9e04219 requires
+fn fip_core::strict::dedup_by src/strict.rs:295 2e7f43340167e62c311fc3d209c7730332c070321c260b8caecdb6998804ae7e requires
+fn fip_core::strict::map_in_place src/strict.rs:89 d51f28b81be1279bfee23a1bb7e7740ab268427baa351fda853ce0d6b83ab7f8 requires
+fn fip_core::strict::map_in_place_st src/strict.rs:139 b670810fa8f80b3de39a771b3a2e24a2ea994764475b894a862a843f2a5005ba requires
+fn fip_core::strict::update src/strict.rs:59 0acc0ffa9d85ba9fb13350b72af9883fb62a507757f6aae3804968c5219c3bf4 requires

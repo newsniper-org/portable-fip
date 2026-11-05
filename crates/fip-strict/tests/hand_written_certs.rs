@@ -105,3 +105,44 @@ fn fip_bound_impls_are_exactly_the_documented_ones() {
         4
     );
 }
+
+/// Every `unsafe impl .. AllocFreeDrop` in this crate (decision
+/// 2026-11-06-redesign-verus-allocates, phase 3): Verus-only, inside the `verus!`
+/// block (in plain builds `AllocFreeDrop` is a marker implemented for every type, and
+/// these impls would conflict with it). They state that dropping the value cannot
+/// allocate: `Certified` when the wrapped closure is `Copy` (no drop glue), each
+/// adapter when its parts' drops cannot. The fork's `-V alloc-check` checks each impl
+/// (it rejects one for a type whose `Drop::drop` is not `allocates 0`); they are no
+/// allocation certificate (`FipBound`, above).
+#[test]
+fn alloc_free_drop_impls_are_exactly_the_documented_ones() {
+    let src = include_str!("../src/lib.rs");
+    let verus_start = src
+        .find("// ---- Verus declarations")
+        .expect("Verus region");
+    let verus_end = src.find("} // verus!").expect("end of the verus! block");
+    // Items start at column 0 (the doc comments that mention such an impl do not).
+    let mut impls: Vec<(usize, &str)> = Vec::new();
+    let mut at = 0;
+    for l in src.lines() {
+        if l.starts_with("unsafe impl") && l.contains("AllocFreeDrop for") {
+            impls.push((at, l));
+        }
+        at += l.len() + 1;
+    }
+    assert!(
+        impls.iter().all(|&(p, _)| verus_start < p && p < verus_end),
+        "an `unsafe impl AllocFreeDrop` outside the verus! block: {impls:#?}"
+    );
+    let mut lines: Vec<&str> = impls.iter().map(|&(_, l)| l).collect();
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        [
+            "unsafe impl<F: vstd::alloc_check::AllocFreeDrop, G: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Compose<F, G> {}",
+            "unsafe impl<F: vstd::alloc_check::AllocFreeDrop, G: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Then<F, G> {}",
+            "unsafe impl<F: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Stateless<F> {}",
+            "unsafe impl<const ALLOCS: u64, C: Copy, const P: bool> vstd::alloc_check::AllocFreeDrop for Certified<ALLOCS, C, P> {}",
+        ]
+    );
+}

@@ -24,18 +24,22 @@
 //! - `odd_count` / `keep_odd`: the same for `compact_map_st`, naming the witnesses with
 //!   `compact_map_st_by_witnesses`; `keep_odd`'s count is bounded by the invariant `c <= k`.
 //!
-//! Allocation (the Verus fork's `allocates`, checked with `-V alloc-check`): the step
-//! functions, every `fip_fn!` closure and the `fip_core` callers (`counter`,
-//! `number_from_11`, `odd_count`, `keep_odd`) carry `allocates 0`, which Verus proves
-//! (decision 2026-11-06-redesign-verus-allocates, phase 2). The strict callers
-//! (`number_from_11_strict`, `number_from_11_closure`, `doubled_stateless`,
-//! `quadrupled`, `numbered_doubled`) gain their `allocates 0` and adapter hints in
-//! phase 3 with `FipFn::allocs`.
+//! Allocation (the Verus fork's `allocates`, checked with `-V alloc-check`; decision
+//! 2026-11-06-redesign-verus-allocates, phases 2 and 3): every function here, every
+//! step function and every `fip_fn!` closure carries `allocates 0`, which Verus
+//! proves. The `fip_core` callers use the callbacks' sums; the strict callers use
+//! `fip_core::strict`'s bound `len * f.allocs()`, where `f.allocs()` of a `Certified<N, _>`
+//! is `N` (checked at each call by `Certified::pre`: `call_allocates(..) <= N`) and of
+//! an adapter the sum of its parts. Z3 does not see that a product with a zero factor
+//! built from adapters is zero, so `quadrupled` and `numbered_doubled` assert the
+//! parts' bounds and the product.
 //!
 //! `just verify-negative` checks that wrong final claims, a missing invariant, an
 //! invariant the step does not preserve, a closure without its spec attribute, a
 //! closure whose body breaks its `ensures`, wrong claims through the adapters and an
-//! allocation in a step or closure bounded by `allocates 0` are rejected.
+//! allocation in a step or closure bounded by `allocates 0` are rejected (the
+//! `Certified<0, _>` controls are in `verify/alloc_callers.rs` and
+//! `verify/fip_fn_types.rs`).
 #![no_std]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #[cfg(verus_keep_ghost)]
@@ -122,8 +126,10 @@ pub fn number_from_11(xs: &mut [u32]) -> u32 {
 /// `number_from_11` through `fip_core::strict::map_in_place_st`: `tick_checked` as a
 /// `FipFn` value (`fip_fn!(tick_checked)`, a `Certified` whose `pre` / `post` are the
 /// function's `requires` / `ensures`), with the allocation bound of its generated
-/// certificate in the plain build (`Certified<0, _>` under Verus, which reads no
-/// certificate) and no `unsafe` here.
+/// certificate in the plain build and no `unsafe` here. Under Verus, `fip_fn!` reads
+/// no certificate: the value is a `Certified<0, _>`, whose `pre` requires
+/// `call_allocates(tick_checked, args) <= 0`, proved from `tick_checked`'s
+/// `allocates 0` (an allocating function needs `fip_fn!(bound <= K, ..)`).
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
         old(xs)@.len() < 990,
@@ -131,6 +137,7 @@ pub fn number_from_11(xs: &mut [u32]) -> u32 {
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
         r == 10 + old(xs)@.len(),
+    allocates 0
 ))]
 pub fn number_from_11_strict(xs: &mut [u32]) -> u32 {
     let f = fip_macros::fip_fn!(tick_checked);
@@ -158,6 +165,7 @@ pub fn number_from_11_strict(xs: &mut [u32]) -> u32 {
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
         r == 10 + old(xs)@.len(),
+    allocates 0
 ))]
 pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
     let f = fip_macros::fip_fn!(
@@ -194,6 +202,7 @@ pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 2 * old(xs)@[k],
         r == 7,
+    allocates 0
 ))]
 pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
     let g = fip_macros::fip_fn!(
@@ -219,6 +228,7 @@ pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
     ensures
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 4 * old(xs)@[k],
+    allocates 0
 ))]
 pub fn quadrupled(xs: &mut [u32]) {
     let d1 = fip_macros::fip_fn!(
@@ -229,7 +239,13 @@ pub fn quadrupled(xs: &mut [u32]) {
         #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
         |x: u32| x * 2
     );
-    let _hole = fip_core::strict::map_in_place(xs, 0, fip_strict::Compose(d1, d2));
+    let c = fip_strict::Compose(d1, d2);
+    proof! {
+        assert(fip_strict::FipFn::<(u32,)>::allocs(&d1) == 0);
+        assert(fip_strict::FipFn::<(u32,)>::allocs(&c) == 0);
+        assert(old(xs)@.len() * fip_strict::FipFn::<(u32,)>::allocs(&c) == 0);
+    }
+    let _hole = fip_core::strict::map_in_place(xs, 0, c);
 }
 
 /// Numbers from 11 and doubles in one pass: `fip_strict::Then` runs the counter step
@@ -243,6 +259,7 @@ pub fn quadrupled(xs: &mut [u32]) {
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 2 * (11 + k),
         r == 10 + old(xs)@.len(),
+    allocates 0
 ))]
 pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
     let t = fip_macros::fip_fn!(
@@ -263,6 +280,12 @@ pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
     );
     let f = fip_strict::Then(t, fip_strict::Stateless(d));
     proof! { assert(map_st_fip_inv(old(xs)@, f, 10u32, |k: int, c: u32| c == 10 + k)); }
+    proof! {
+        assert(fip_strict::FipFn::<(u32, u32)>::allocs(&t) == 0);
+        assert(fip_strict::FipFn::<(u32,)>::allocs(&d) == 0);
+        assert(fip_strict::FipFn::<(u32, u32)>::allocs(&f) == 0);
+        assert(old(xs)@.len() * fip_strict::FipFn::<(u32, u32)>::allocs(&f) == 0);
+    }
     let (c, _hole) = fip_core::strict::map_in_place_st(xs, 0, 10, f);
     proof! {
         let ss = map_st_fip_trace(old(xs)@, xs@, f, 10u32, c);

@@ -5,8 +5,16 @@
 //! and inside `verus! { }` for the `verus` driver (the constructors
 //! `Certified::assume` / `assume_no_panic_macros` are one shared source with their
 //! Verus specification in `cfg_attr`, so they are not compared here). The Verus declarations may only
-//! add ghost items (`spec fn`, `requires`/`ensures`, named returns); everything that
-//! exists at run time must be the same. This test strips the ghost parts and compares.
+//! add ghost items (`spec fn`, `requires`/`ensures`/`allocates`, named returns);
+//! everything that exists at run time must be the same. This test strips the ghost
+//! parts and compares.
+//!
+//! Verus-only additions of the allocation check (decision
+//! 2026-11-06-redesign-verus-allocates, phase 3), also stripped: the bound
+//! `: vstd::alloc_check::AllocFreeDrop` on type parameters (the plain marker holds for
+//! every type), the `unsafe impl .. vstd::alloc_check::AllocFreeDrop for ..` markers
+//! with an empty body, and the per-arity `FipFn` impls of `Compose`
+//! (`compose_fip_fn!`), compared with the plain impl generic over `Args`.
 
 /// The checked source; `FIP_DRIFT_SRC` overrides it (the `verify-negative` recipe
 /// uses that to show the test fails on a mutated copy).
@@ -31,12 +39,25 @@ fn normalize(item: &str) -> String {
         .join(" ");
     let mut s = remove_balanced(&no_comments, "#[", '[', ']');
     s = remove_spec_fns(&s);
-    for kw in ["requires", "ensures"] {
+    for kw in ["requires", "ensures", "allocates"] {
         s = remove_clause(&s, kw);
     }
     s = unname_returns(&s);
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    s.replace(",}", "}").replace(",)", ")").replace(",;", ";")
+    s.replace(",}", "}")
+        .replace(",)", ")")
+        .replace(",;", ";")
+        .replace(VERUS_DROP_BOUND, "")
+}
+
+/// The drop bound of `-V alloc-check` on a type parameter (whitespace removed).
+const VERUS_DROP_BOUND: &str = ":vstd::alloc_check::AllocFreeDrop";
+
+/// A Verus-only drop marker impl (normalized): no run-time content.
+fn is_drop_marker(item: &str) -> bool {
+    item.starts_with("unsafeimpl<")
+        && item.contains(">vstd::alloc_check::AllocFreeDropfor")
+        && item.ends_with("{}")
 }
 
 /// Index just past the delimiter matching the opener at `open_at`.
@@ -200,16 +221,55 @@ fn items(region: &str) -> Vec<String> {
 
 #[test]
 fn verus_declarations_match_the_plain_ones() {
-    let plain = items(region(
+    let mut plain = items(region(
         "// ---- Plain declarations",
         "// ---- Verus declarations",
     ));
     // The shared items after the `verus!` block (one source for both builds, e.g.
     // `Certified::assume`) are not twins and are not compared.
     let verus_decls = region("// ---- Verus declarations", "// ---- Shared items");
-    let verus = items(verus_decls);
+    let (markers, verus): (Vec<String>, Vec<String>) = items(verus_decls)
+        .into_iter()
+        .partition(|i| is_drop_marker(i));
     assert_eq!(plain.len(), 13, "plain items: {plain:#?}");
+    assert_eq!(
+        markers.len(),
+        4,
+        "drop markers (Certified, Stateless, Compose, Then): {markers:#?}"
+    );
+    // `Compose`'s `FipFn` impl is per arity under Verus (`compose_fip_fn!`).
+    let compose = plain
+        .iter()
+        .position(|i| i.contains("FipFn<Args>forCompose<F,G>"))
+        .expect("plain Compose impl");
+    plain.remove(compose);
     assert_eq!(plain, verus);
+}
+
+#[test]
+fn compose_impls_match_the_plain_one() {
+    let plain = items(region(
+        "// ---- Plain declarations",
+        "// ---- Verus declarations",
+    ))
+    .into_iter()
+    .find(|i| i.contains("FipFn<Args>forCompose<F,G>"))
+    .expect("plain Compose impl");
+    let mac = region(
+        "macro_rules! compose_fip_fn",
+        "#[cfg(verus_keep_ghost)]\ncompose_fip_fn!();",
+    );
+    let p = mac.find("impl<").expect("impl in compose_fip_fn!");
+    // `$($A,)*` (the arity's argument types) read as one type parameter `Args`.
+    let verus = normalize(&mac[p..item_end(mac, p)])
+        .replace("impl<$($A)*", "impl<Args,")
+        .replace("($($A)*)", "Args");
+    assert_eq!(plain, verus);
+    // One impl per closure arity `0..=MAX_ARITY`, as for `Certified`.
+    let src = src();
+    let arities = |name: &str| src.lines().filter(|l| l.starts_with(name)).count();
+    assert_eq!(arities("compose_fip_fn!("), arities("certified_fip_fn!("));
+    assert_eq!(arities("certified_fip_fn!("), fip_strict::MAX_ARITY + 1);
 }
 
 #[test]
@@ -233,6 +293,19 @@ fn normalization_removes_only_ghost_parts() {
     assert_eq!(
         normalize("trait T { type O; open spec fn pre(&self) -> bool { true } fn f(&self); }"),
         normalize("trait T { type O; fn f(&self); }")
+    );
+    // The drop bound is Verus-only; another bound is not normalized away.
+    assert_eq!(
+        normalize("impl<A: vstd::alloc_check::AllocFreeDrop, B> T for S<A, B> {}"),
+        normalize("impl<A, B> T for S<A, B> {}")
+    );
+    assert_ne!(
+        normalize("impl<A: Copy, B> T for S<A, B> {}"),
+        normalize("impl<A, B> T for S<A, B> {}")
+    );
+    assert_eq!(
+        normalize("fn call(&self, a: A) -> (r: B)\n requires p(a),\n allocates self.allocs()\n ;"),
+        normalize("fn call(&self, a: A) -> B;")
     );
     // An exec difference is not normalized away.
     assert_ne!(

@@ -15,6 +15,16 @@
 //! `compact_map_st_fip_inv` and the named traces `map_st_fip_trace` /
 //! `compact_map_st_fip_witnesses` (`spec::state`). Verified with `--no-cheating`.
 //!
+//! Allocation (Verus fork, `-V alloc-check`; decision
+//! `2026-11-06-redesign-verus-allocates`, phase 3): `update` allocates at most
+//! `f.allocs()`, the loops at most `old(xs)@.len() * f.allocs()` (one call per
+//! element), with no requirement on `f`; `f.allocs()` of a `Certified<N, _>` is `N`
+//! (checked at the caller by `Certified::pre`), of an adapter the sum of its parts.
+//! Each loop carries `allocated() <= i * f.allocs()` and one `nonlinear_arith` step
+//! (without it the invariant fails). A caller proving a zero bound may need to assert
+//! the adapter's `allocs()` and the product (`verify/compose_state.rs`). The callable
+//! is bounded `AllocFreeDrop` (Verus: drop cannot allocate; plain: every type).
+//!
 //! The strict check runs in plain builds only (`cfg_attr(not(verus_keep_ghost))`);
 //! under `verus` the bodies are verified as written.
 //!
@@ -63,9 +73,10 @@ use vstd::prelude::*;
     ensures
         f.post((*old(slot),), *final(slot)),
         r == hole,
+    allocates f.allocs()
 ))]
 #[inline]
-pub fn update<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T>>(
+pub fn update<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate::AllocFreeDrop>(
     slot: &mut T,
     hole: T,
     f: F,
@@ -93,8 +104,9 @@ pub fn update<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T>>(
         final(xs)@.len() == old(xs)@.len(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.post((old(xs)@[i],), final(xs)@[i]),
         h == hole,
+    allocates old(xs)@.len() * f.allocs()
 ))]
-pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T>>(
+pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate::AllocFreeDrop>(
     xs: &mut [T],
     hole: T,
     f: F,
@@ -111,12 +123,14 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T>>(
             forall|k: int| i <= k < n ==> xs@[k] == old(xs)@[k],
             forall|k: int| 0 <= k < i ==> f.post((old(xs)@[k],), xs@[k]),
             forall|k: int| 0 <= k < n ==> f.pre((old(xs)@[k],)),
+            allocated() <= i * f.allocs(),
         decreases n - i,
     ))]
     while i < n {
         let prev = crate::slot::replace(&mut xs[i], spare);
         let next = f.call((prev,));
         spare = crate::slot::replace(&mut xs[i], next);
+        proof! { assert((i as int + 1) * f.allocs() == i as int * f.allocs() + f.allocs()) by (nonlinear_arith); }
         i += 1;
     }
     spare
@@ -149,8 +163,13 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T>>(
         map_st_fip_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0)),
         forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv)
             ==> st_trace_inv(map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
+    allocates old(xs)@.len() * f.allocs()
 ))]
-pub fn map_in_place_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S, T)>>(
+pub fn map_in_place_st<
+    S: crate::AllocFreeDrop,
+    T: crate::AllocFreeDrop,
+    F: FipFn<(S, T), Output = (S, T)> + crate::AllocFreeDrop,
+>(
     xs: &mut [T],
     hole: T,
     s0: S,
@@ -174,6 +193,7 @@ pub fn map_in_place_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S,
             forall|k: int| 0 <= k < i ==> f.post((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
             map_st_fip_ok(old(xs)@, f, s0),
             forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
+            allocated() <= i * f.allocs(),
         decreases n - i,
     ))]
     while i < n {
@@ -188,6 +208,7 @@ pub fn map_in_place_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S,
                 crate::spec::state::lemma_st_trace_inv_push(pss, s, inv);
             };
         }
+        proof! { assert((i as int + 1) * f.allocs() == i as int * f.allocs() + f.allocs()) by (nonlinear_arith); }
         i += 1;
     }
     proof_decl! { let ghost last = s; }
@@ -219,9 +240,13 @@ pub fn map_in_place_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S,
         forall|i: int| 0 <= i < old(xs)@.len() ==> keep.pre((&old(xs)@[i],)),
     ensures
         compact_fip_post(old(xs)@, final(xs)@, w as int, keep),
+    allocates old(xs)@.len() * keep.allocs()
 ))]
 #[must_use = "elements at and after the returned length are the rejected ones"]
-pub fn compact<T: crate::AllocFreeDrop, F: for<'a> FipFn<(&'a T,), Output = bool>>(
+pub fn compact<
+    T: crate::AllocFreeDrop,
+    F: for<'a> FipFn<(&'a T,), Output = bool> + crate::AllocFreeDrop,
+>(
     xs: &mut [T],
     keep: F,
 ) -> usize {
@@ -242,6 +267,7 @@ pub fn compact<T: crate::AllocFreeDrop, F: for<'a> FipFn<(&'a T,), Output = bool
             idx.len() == w,
             strictly_increasing_below(idx, r as int),
             forall|i: int| 0 <= i < w ==> xs@[i] == old(xs)@[idx[i]],
+            allocated() <= r * keep.allocs(),
         decreases n - r,
     ))]
     while r < n {
@@ -256,6 +282,7 @@ pub fn compact<T: crate::AllocFreeDrop, F: for<'a> FipFn<(&'a T,), Output = bool
             proof! { idx = idx.push(r as int); }
             w += 1;
         }
+        proof! { assert((r as int + 1) * keep.allocs() == r as int * keep.allocs() + keep.allocs()) by (nonlinear_arith); }
         r += 1;
     }
     proof! {
@@ -286,9 +313,13 @@ pub fn compact<T: crate::AllocFreeDrop, F: for<'a> FipFn<(&'a T,), Output = bool
     ensures
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_fip_post(old(xs)@, final(xs)@, w as int, same, idx, src),
+    allocates old(xs)@.len() * same.allocs()
 ))]
 #[must_use = "elements at and after the returned length are the removed ones"]
-pub fn dedup_by<T: crate::AllocFreeDrop, F: for<'a, 'b> FipFn<(&'a T, &'b T), Output = bool>>(
+pub fn dedup_by<
+    T: crate::AllocFreeDrop,
+    F: for<'a, 'b> FipFn<(&'a T, &'b T), Output = bool> + crate::AllocFreeDrop,
+>(
     xs: &mut [T],
     same: F,
 ) -> usize {
@@ -325,6 +356,7 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: for<'a, 'b> FipFn<(&'a T, &'b T), Ou
             src.len() == r,
             forall|j: int| 0 <= j < r ==> dedup_src_ok(
                 old(xs)@, w as int, |a: T, b: T, r: bool| same.post((&a, &b), r), idx, #[trigger] src[j], j),
+            allocated() <= r * same.allocs(),
         decreases n - r,
     ))]
     while r < n {
@@ -356,6 +388,7 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: for<'a, 'b> FipFn<(&'a T, &'b T), Ou
                 src = src.push(ow - 1);
             }
         }
+        proof! { assert((r as int + 1) * same.allocs() == r as int * same.allocs() + same.allocs()) by (nonlinear_arith); }
         r += 1;
     }
     proof! {
@@ -385,9 +418,13 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: for<'a, 'b> FipFn<(&'a T, &'b T), Ou
         r.1 == hole,
         exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
             #[trigger] compact_map_fip_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
+    allocates old(xs)@.len() * f.allocs()
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-pub fn compact_map<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = (T, bool)>>(
+pub fn compact_map<
+    T: crate::AllocFreeDrop,
+    F: FipFn<(T,), Output = (T, bool)> + crate::AllocFreeDrop,
+>(
     xs: &mut [T],
     hole: T,
     f: F,
@@ -420,6 +457,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = (T, bool)>>(
             prefix_ok(xs@, ys, ks, idx, w as int),
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+            allocated() <= r * f.allocs(),
         decreases len - r,
     ))]
     while r < len {
@@ -465,6 +503,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = (T, bool)>>(
                 pos = pos.push(-1);
             }
         }
+        proof! { assert((r as int + 1) * f.allocs() == r as int * f.allocs() + f.allocs()) by (nonlinear_arith); }
         r += 1;
     }
     proof! {
@@ -512,9 +551,14 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = (T, bool)>>(
             &&& forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old(xs)@, f, s0, inv)
                 ==> st_trace_inv(ss, inv)
         }),
+    allocates old(xs)@.len() * f.allocs()
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-pub fn compact_map_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S, T, bool)>>(
+pub fn compact_map_st<
+    S: crate::AllocFreeDrop,
+    T: crate::AllocFreeDrop,
+    F: FipFn<(S, T), Output = (S, T, bool)> + crate::AllocFreeDrop,
+>(
     xs: &mut [T],
     hole: T,
     s0: S,
@@ -554,6 +598,7 @@ pub fn compact_map_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S, 
             prefix_ok(xs@, ys, ks, idx, w as int),
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+            allocated() <= r * f.allocs(),
         decreases len - r,
     ))]
     while r < len {
@@ -608,6 +653,7 @@ pub fn compact_map_st<S, T: crate::AllocFreeDrop, F: FipFn<(S, T), Output = (S, 
                 pos = pos.push(-1);
             }
         }
+        proof! { assert((r as int + 1) * f.allocs() == r as int * f.allocs() + f.allocs()) by (nonlinear_arith); }
         r += 1;
     }
     proof_decl! { let ghost last = s; }

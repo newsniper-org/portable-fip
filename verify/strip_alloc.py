@@ -11,12 +11,17 @@ on the fork's allocation pass.
 usage: strip_alloc.py <dst-dir> <src-dir-or-file>..
 
 Each source (a directory tree or one file) is copied under <dst-dir> with its base
-name; every `.rs` file in the copy is rewritten. Removed:
+name; every `.rs` file of the copy that Verus reads is rewritten: a file source, and
+the `src/` tree of a directory source (a crate's `tests/` are plain Rust, never given
+to Verus; `tests/verus_drift.rs` names the allocation syntax in its strings). Removed:
   - `allocates E` clauses: a line starting with `allocates `, or `, allocates E` at
-    the end of a one-line `verus_spec(..)` (E up to the closing parenthesis);
+    the end of a one-line `verus_spec(..)` (E up to the closing parenthesis), and a
+    closure attribute line `#[cfg_attr(verus_keep_ghost, verus_spec(r: T => allocates E))]`
+    whose only clause is the bound;
   - lines mentioning `allocated()` or `call_allocates` (invariants, requires, `pre`
     conjuncts), and `forall` lines whose next line is such a conjunct;
-  - proof hints about adapter bounds (`proof! { assert(..allocs(..)..) }` lines);
+  - proof hints about adapter bounds: `proof! { assert(..allocs(..)..) }` lines, and
+    multi-line `proof! { .. }` blocks holding only `assert(..allocs(..)..);` lines;
   - the `allocs` spec function of `FipFn` and its implementations;
   - `verus! { .. }` blocks whose first item comment starts with `/// \\`allocates\\`
     total` or `/// Callbacks that allocate nothing` (sum spec functions, zero lemmas);
@@ -33,6 +38,9 @@ import re
 import shutil
 import sys
 
+ONLY_ALLOCATES_ATTR = re.compile(
+    r"^\s*#\[cfg_attr\(verus_keep_ghost, verus_spec\(\w+(?:: [^=]+)? => allocates [^()]*(?:\([^()]*\))?\)\)\]$"
+)
 LEFTOVER = re.compile(r"\ballocates\b|\ballocated\(\)|\bcall_allocates\b|\balloc_check\b")
 
 
@@ -58,6 +66,7 @@ def strip_inline_allocates(line: str) -> str:
 def strip(s: str) -> str:
     s = re.sub(r"\n\nverus! \{\n\n/// `allocates` total.*?\} // verus!\n", "\n", s, flags=re.S)
     s = re.sub(r"\n\nverus! \{\n\n/// Callbacks that allocate nothing.*?\} // verus!\n", "\n", s, flags=re.S)
+    s = re.sub(r"\n[ ]*proof! \{\n(?:[ ]*assert\([^\n]*allocs\([^\n]*\);\n)+[ ]*\}(?=\n)", "", s)
     s = re.sub(r"\n[^\n]*forall\|i: int, j: int\|[^\n]*\n[^\n]*==> call_allocates\([^\n]*", "", s)
     lines: list[str] = []
     skip = 0
@@ -65,6 +74,8 @@ def strip(s: str) -> str:
         t = line.strip()
         if skip:
             skip -= 1
+            continue
+        if ONLY_ALLOCATES_ATTR.match(line):
             continue
         if t.startswith("allocates "):
             if t.count("(") != t.count(")"):
@@ -128,7 +139,7 @@ def main() -> None:
             shutil.rmtree(out) if out.is_dir() else out.unlink()
         if src.is_dir():
             shutil.copytree(src, out, ignore=shutil.ignore_patterns("target"))
-            files.extend(sorted(out.rglob("*.rs")))
+            files.extend(sorted((out / "src").rglob("*.rs")))
         else:
             shutil.copy2(src, out)
             files.append(out)

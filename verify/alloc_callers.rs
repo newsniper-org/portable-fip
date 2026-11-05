@@ -15,7 +15,12 @@
 //! Verus-only (`verus!` syntax, verified by `just verify-compose` against the Verus
 //! builds of `fip_strict` and `fip_core`); not in the upstream strip gate, since it
 //! states nothing but allocation bounds. `just verify-negative` checks that an
-//! allocating closure and a closure without a bound are rejected.
+//! allocating closure and a closure without a bound are rejected, and that a
+//! `Certified<0, _>` wrapping a closure that allocates fails `Certified::pre`.
+//!
+//! Phase 3: `boxed_once` and `incremented_strict` call strict callables
+//! (`fip_strict::Certified`, `fip_core::strict::map_in_place`), bounded by
+//! `FipFn::allocs`.
 #![no_std]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 extern crate alloc;
@@ -84,6 +89,36 @@ pub fn kept_state(xs: &mut [u32]) -> (r: (u32, u32))
     allocates 0
 {
     fip_core::map_in_place_st(xs, 0, 0u32, |s: u32, x: u32| -> (r: (u32, u32)) allocates 0 { (s, x) })
+}
+
+// Strict callables (phase 3): `FipFn::call` allocates at most `allocs()`, which is
+// `ALLOCS` for a `Certified<ALLOCS, _>`; `Certified::pre` requires
+// `call_allocates(closure, args) <= ALLOCS`. The values are wrapped by hand with the
+// `unsafe` constructor that `fip_fn!` expands to.
+
+/// A closure that allocates once, certified with 1.
+pub fn boxed_once(x: u32) -> (r: Box<u32>)
+    ensures
+        *r == x,
+    allocates 1
+{
+    let f = unsafe {
+        fip_strict::Certified::<1, _, false>::assume(|v: u32| -> (r: Box<u32>) ensures *r == v allocates 1 { Box::new(v) })
+    };
+    fip_strict::FipFn::call(&f, (x,))
+}
+
+/// `fip_core::strict::map_in_place` allocates at most `len * f.allocs()`, zero for a
+/// `Certified<0, _>`.
+pub fn incremented_strict(xs: &mut [u8]) -> (h: u8)
+    requires
+        forall|i: int| 0 <= i < old(xs)@.len() ==> old(xs)@[i] < 100,
+    allocates 0
+{
+    let f = unsafe {
+        fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) requires v < 100 allocates 0 { v + 1 })
+    };
+    fip_core::strict::map_in_place(xs, 0, f)
 }
 
 } // verus!
