@@ -29,8 +29,9 @@ use vstd::prelude::*;
         i < j < old(xs)@.len(),
     ensures
         final(xs)@ == old(xs)@.update(i as int, old(xs)@[j as int]).update(j as int, old(xs)@[i as int]),
+    allocates 0
 ))]
-pub(crate) fn swap_lt<T>(xs: &mut [T], i: usize, j: usize) {
+pub(crate) fn swap_lt<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize) {
     let (a, b) = <[T]>::split_at_mut(xs, j);
     ::core::mem::swap(&mut a[i], &mut b[0]);
     proof! {
@@ -55,8 +56,9 @@ pub(crate) fn swap_lt<T>(xs: &mut [T], i: usize, j: usize) {
         j < old(xs)@.len(),
     ensures
         final(xs)@ == old(xs)@.update(i as int, old(xs)@[j as int]).update(j as int, old(xs)@[i as int]),
+    allocates 0
 ))]
-pub fn swap<T>(xs: &mut [T], i: usize, j: usize) {
+pub fn swap<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize) {
     if i != j {
         let (lo, hi) = if i < j { (i, j) } else { (j, i) };
         swap_lt(xs, lo, hi);
@@ -100,9 +102,13 @@ pub fn swap<T>(xs: &mut [T], i: usize, j: usize) {
         exists|idx: Seq<int>| idx.len() == w
             && #[trigger] strictly_increasing_below(idx, old(xs)@.len() as int)
             && forall|i: int| 0 <= i < w ==> final(xs)@[i] == old(xs)@[idx[i]],
+    allocates crate::spec::compact_allocs(keep, old(xs)@, old(xs)@.len() as int)
 ))]
 #[must_use = "elements at and after the returned length are the rejected ones"]
-pub fn compact<T, F: Fn(&T) -> bool>(xs: &mut [T], keep: F) -> usize {
+pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
+    xs: &mut [T],
+    keep: F,
+) -> usize {
     let n = xs.len();
     let mut w: usize = 0;
     let mut r: usize = 0;
@@ -120,6 +126,7 @@ pub fn compact<T, F: Fn(&T) -> bool>(xs: &mut [T], keep: F) -> usize {
             idx.len() == w,
             strictly_increasing_below(idx, r as int),
             forall|i: int| 0 <= i < w ==> xs@[i] == old(xs)@[idx[i]],
+            allocated() <= crate::spec::compact_allocs(keep, old(xs)@, r as int),
         decreases n - r,
     ))]
     while r < n {
@@ -164,8 +171,13 @@ pub fn compact<T, F: Fn(&T) -> bool>(xs: &mut [T], keep: F) -> usize {
         final(xs)@.len() == old(xs)@.len(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.ensures((old(xs)@[i],), final(xs)@[i]),
         h == hole,
+    allocates crate::spec::map_allocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
-pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
+pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
+    xs: &mut [T],
+    hole: T,
+    f: F,
+) -> T {
     let n = xs.len();
     let mut spare = hole;
     let mut i: usize = 0;
@@ -178,6 +190,7 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
             forall|k: int| i <= k < n ==> xs@[k] == old(xs)@[k],
             forall|k: int| 0 <= k < i ==> f.ensures((old(xs)@[k],), xs@[k]),
             forall|k: int| 0 <= k < n ==> f.requires((old(xs)@[k],)),
+            allocated() <= crate::spec::map_allocs(f, old(xs)@, i as int),
         decreases n - i,
     ))]
     while i < n {
@@ -224,13 +237,24 @@ pub fn map_in_place<T, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
         map_st_by_ok(old(xs)@, f, s0),
+        forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
     ensures
         r.1 == hole,
         map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0)),
         forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv)
             ==> st_trace_inv(map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
+    allocates 0
 ))]
-pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S, f: F) -> (S, T) {
+pub fn map_in_place_st<
+    S: crate::AllocFreeDrop,
+    T: crate::AllocFreeDrop,
+    F: Fn(S, T) -> (S, T) + crate::DropFreeFn,
+>(
+    xs: &mut [T],
+    hole: T,
+    s0: S,
+    f: F,
+) -> (S, T) {
     let n = xs.len();
     let mut spare = hole;
     proof_decl! { let ghost mut ss: Seq<S> = seq![s0]; }
@@ -249,6 +273,8 @@ pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S
             forall|k: int| 0 <= k < i ==> f.ensures((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
             map_st_by_ok(old(xs)@, f, s0),
             forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
+            forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
+            allocated() <= 0,
         decreases n - i,
     ))]
     while i < n {
@@ -302,12 +328,18 @@ pub fn map_in_place_st<S, T, F: Fn(S, T) -> (S, T)>(xs: &mut [T], hole: T, s0: S
     requires
         forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
             ==> same.requires((&old(xs)@[i], &old(xs)@[j])),
+        forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
+            ==> call_allocates(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
     ensures
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_by_post(old(xs)@, final(xs)@, w as int, same, idx, src),
+    allocates 0
 ))]
 #[must_use = "elements at and after the returned length are the removed ones"]
-pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
+pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFreeFn>(
+    xs: &mut [T],
+    same: F,
+) -> usize {
     let n = xs.len();
     if n == 0 {
         proof! {
@@ -341,6 +373,9 @@ pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
             src.len() == r,
             forall|j: int| 0 <= j < r ==> dedup_src_ok(
                 old(xs)@, w as int, |a: T, b: T, r: bool| same.ensures((&a, &b), r), idx, #[trigger] src[j], j),
+            forall|i: int, j: int| 0 <= i < n && 0 <= j < n
+                ==> call_allocates(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
+            allocated() <= 0,
         decreases n - r,
     ))]
     while r < n {
@@ -412,9 +447,14 @@ pub fn dedup_by<T, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
         r.1 == hole,
         exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
             #[trigger] compact_map_by_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
+    allocates crate::spec::compact_map_allocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (usize, T) {
+pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropFreeFn>(
+    xs: &mut [T],
+    hole: T,
+    f: F,
+) -> (usize, T) {
     let len = xs.len();
     let mut spare = hole;
     let mut w: usize = 0;
@@ -443,6 +483,7 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
             prefix_ok(xs@, ys, ks, idx, w as int),
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+            allocated() <= crate::spec::compact_map_allocs(f, old(xs)@, r as int),
         decreases len - r,
     ))]
     while r < len {
@@ -538,6 +579,7 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
         compact_map_st_by_ok(old(xs)@, f, s0),
+        forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
     ensures
         r.2 == hole,
         ({
@@ -546,9 +588,14 @@ pub fn compact_map<T, F: Fn(T) -> (T, bool)>(xs: &mut [T], hole: T, f: F) -> (us
             &&& forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old(xs)@, f, s0, inv)
                 ==> st_trace_inv(ss, inv)
         }),
+    allocates 0
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
+pub fn compact_map_st<
+    S: crate::AllocFreeDrop,
+    T: crate::AllocFreeDrop,
+    F: Fn(S, T) -> (S, T, bool) + crate::DropFreeFn,
+>(
     xs: &mut [T],
     hole: T,
     s0: S,
@@ -588,6 +635,8 @@ pub fn compact_map_st<S, T, F: Fn(S, T) -> (S, T, bool)>(
             prefix_ok(xs@, ys, ks, idx, w as int),
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
+            forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
+            allocated() <= 0,
         decreases len - r,
     ))]
     while r < len {

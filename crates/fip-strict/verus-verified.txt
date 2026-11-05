@@ -10,9 +10,9 @@ toolchain 1.99.1-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu -
 verified 19
-source src/lib.rs 490adf963a2c48601669610a395b41515887240f0e7b759401a0d34a6028c0dc
-fn fip_strict::{impl}::assume src/lib.rs:575 61dbc7a06221b5774ffcb09b152abb041e4df933ac21f804d825dd8a8b7b40d9 -
-fn fip_strict::{impl}::assume_no_panic_macros src/lib.rs:599 8e9c8454cc45bf2c4474a8cc2c676af0bfa9671e279ec9fe471d63f29ed70e8b -
+source src/lib.rs 2364553bd840aab6d9a1664593042a99008e6997af4a67eb9723824c976534dd
+fn fip_strict::{impl}::assume src/lib.rs:618 61dbc7a06221b5774ffcb09b152abb041e4df933ac21f804d825dd8a8b7b40d9 -
+fn fip_strict::{impl}::assume_no_panic_macros src/lib.rs:642 8e9c8454cc45bf2c4474a8cc2c676af0bfa9671e279ec9fe471d63f29ed70e8b -
 skip fip_strict::FipFn::call no body
 skip fip_strict::impl&%11::call only in the Verus build (inside `#[cfg(verus_keep_ghost)]`)
 skip fip_strict::impl&%13::call only in the Verus build (inside `#[cfg(verus_keep_ghost)]`)

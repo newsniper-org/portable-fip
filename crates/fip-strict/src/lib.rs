@@ -256,6 +256,49 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+// ---- Drop markers of the Verus allocation check (decision
+// 2026-11-06-redesign-verus-allocates, D2/D3). Both builds name them; only Verus
+// restricts them.
+
+/// Types whose drop glue cannot allocate.
+///
+/// Under Verus (`cfg(verus_keep_ghost)`) this is `vstd::alloc_check::AllocFreeDrop`:
+/// the fork's `-V alloc-check` requires every type parameter of a function with an
+/// `allocates` bound to be `Copy` or `AllocFreeDrop`, also where values are only
+/// moved. vstd implements it for the primitive types, references and its trusted std
+/// types; a user type needs an `unsafe impl` that Verus checks (rejected if the type's
+/// `Drop::drop` is not bounded by `allocates 0`).
+///
+/// In plain builds it is a marker implemented for every type, so the bounds
+/// `T: AllocFreeDrop` of `fip-core` and `fip-alloc` restrict nothing and need no
+/// `vstd`. Consequence for downstream crates: an `unsafe impl AllocFreeDrop for Node {}`
+/// must be Verus-only, `#[cfg(verus_keep_ghost)]` (and `verus_keep_ghost` in the crate's
+/// `check-cfg`); ungated it fails the plain build with E0119 (it conflicts with the
+/// blanket impl) and E0199 (the plain trait is not `unsafe`). It also needs `unsafe`,
+/// so a crate under `#![forbid(unsafe_code)]` cannot write it.
+#[cfg(verus_keep_ghost)]
+pub use vstd::alloc_check::AllocFreeDrop;
+/// Plain builds: implemented for every type (see the Verus declaration's docs).
+#[cfg(not(verus_keep_ghost))]
+pub trait AllocFreeDrop {}
+#[cfg(not(verus_keep_ghost))]
+impl<T: ?Sized> AllocFreeDrop for T {}
+
+/// Callables whose drop cannot allocate.
+///
+/// Under Verus this is `Copy` itself (a closure is `Copy` when its captures are): a
+/// closure type cannot implement [`AllocFreeDrop`], and the fork's drop rule accepts
+/// only `Copy` or `AllocFreeDrop` bounds, not a supertrait of `Copy`. So verified
+/// callers of `fip-core`'s higher-order functions pass `Copy` closures. In plain builds
+/// a marker implemented for every type: the plain API is unchanged.
+#[cfg(verus_keep_ghost)]
+pub use core::marker::Copy as DropFreeFn;
+/// Plain builds: implemented for every type (see the Verus declaration's docs).
+#[cfg(not(verus_keep_ghost))]
+pub trait DropFreeFn {}
+#[cfg(not(verus_keep_ghost))]
+impl<F: ?Sized> DropFreeFn for F {}
+
 // ---- Plain declarations (every build except the `verus` driver). Keep the exec
 // items identical to the `verus!` declarations below (`tests/verus_drift.rs`).
 

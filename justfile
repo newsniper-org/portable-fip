@@ -167,10 +167,11 @@ verus-sidecar-check generated committed:
     echo "verus sidecar: {{committed}} is up to date"
 
 # fip-alloc proofs, no trusted items (--no-cheating), through the sidecar generator;
-# the sidecar must equal crates/fip-alloc/verus-verified.txt.
-verify-alloc: verus-pin sidecar-gen
+# imports fip-strict's Verus build (`fip_strict::AllocFreeDrop` bounds `refill`); the
+# sidecar must equal crates/fip-alloc/verus-verified.txt.
+verify-alloc: verify-strict
     rm -rf target/verus-alloc && mkdir -p target/verus-alloc
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc {{verus_flags}} crates/fip-alloc/src/lib.rs
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc {{verus_flags}} crates/fip-alloc/src/lib.rs {{verus_strict}}
     just verus-sidecar-check target/verus-alloc/verus-verified.txt crates/fip-alloc/verus-verified.txt
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
@@ -189,6 +190,7 @@ verify-compose: verify-strict verify-core
     run verify/compose_strict.rs
     run_state() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$1"; }
     run_state verify/compose_state.rs
+    run_state verify/alloc_callers.rs
     out=target/verify-compose; mkdir -p "$out"
     # `fip_fn!` values have one type in both builds: verify/fip_fn_types.rs is compiled
     # by plain rustc and verified by Verus; a wrong `N` in any annotation fails both.
@@ -291,6 +293,31 @@ verify-negative: verify-strict verify-core
     expect_verus_fail compact-map-no-swap  fip-core  slice.rs "/^pub fn compact_map</,/^}/ { s/^                swap_lt(xs, w, r);\$//; $no_swap_asserts }" "$cmap_order"
     expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$spec"
     expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$//' "$spec"
+    # Allocation bounds (`allocates`, decision 2026-11-06-redesign-verus-allocates, phase 2):
+    # each mutant must fail a verification condition whose reported span is the
+    # allocation layer (an `allocates` clause, an `allocated()` invariant or a
+    # `call_allocates` requirement), not a functional one.
+    expect_alloc_fail() {  # name, crate, file, sed script, regex expected in the failing span
+      local d; d=$(mutate "$1" "$2" "$3" "$4")
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
+        echo "FAIL: mutant $1 verified"; exit 1
+      fi
+      if grep -q "rlimit" "$d/log"; then echo "FAIL: mutant $1 hit the resource limit (rlimit)"; cat "$d/log"; exit 1; fi
+      grep -A12 -E "^error: (postcondition|precondition|invariant) not satisfied" "$d/log" | grep -Eq "$5" \
+        || { echo "FAIL: mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
+      echo "mutant $1 rejected by Verus"
+    }
+    # A `Box::new` in an `allocates 0` body (fip-core links no `alloc`, so the mutant
+    # adds `extern crate alloc;` to the module) and in a loop bounded by the callbacks' sum.
+    ext_alloc='0,/^#\[cfg(verus_keep_ghost)\]$/ s//extern crate alloc;\n&/'
+    expect_alloc_fail swap-allocates        fip-core  slice.rs "$ext_alloc"'; /^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        let _b = alloc::boxed::Box::new(0u8);/' 'allocates 0'
+    expect_alloc_fail map-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn map_in_place</,/^}/ s/^        i += 1;$/        let _b = alloc::boxed::Box::new(0u8);\n        i += 1;/' 'allocated\(\) <= crate::spec::map_allocs'
+    expect_alloc_fail refill-allocates      fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _b = Box::new(0u8);/' 'allocates 0'
+    # A sum spec that forgets the last call cannot bound the loop.
+    expect_alloc_fail map-sum-drops-call    fip-core  spec.rs  's/^    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocates(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) }/' 'allocated\(\) <= crate::spec::map_allocs'
+    expect_alloc_fail compact-sum-drops-call fip-core spec.rs  's/^    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocates(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) }/' 'allocated\(\) <= crate::spec::compact_allocs'
+    # `map_in_place_st` is `allocates 0` only because every call is required to be.
+    expect_alloc_fail map-st-alloc-unrequired fip-core slice.rs '/^        map_st_by_ok(old(xs)@, f, s0),$/ { n; /call_allocates/d; }' 'call_allocates\(f, \(s, x\)\) <= 0'
     # Strict variants (`FipFn` callables), same mutations.
     expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$spec"
     expect_verus_fail strict-compact-order       fip-core strict.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
@@ -304,8 +331,8 @@ verify-negative: verify-strict verify-core
     # order. Each must fail on the state-chain invariant or assertion, not elsewhere.
     chain='\(ss\[[jk]\], old\(xs\)@\[[jk]\]\), \(ss\[[jk] \+ 1\]'
     expect_verus_fail map-st-reverse-order              fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
-    expect_verus_fail map-st-not-threaded               fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { s/^pub fn map_in_place_st<S, /pub fn map_in_place_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
-    expect_verus_fail compact-map-st-not-threaded       fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ { s/^pub fn compact_map_st<S, /pub fn compact_map_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail map-st-not-threaded               fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { s/^    S: crate::AllocFreeDrop,$/    S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail compact-map-st-not-threaded       fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ { s/^    S: crate::AllocFreeDrop,$/    S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     expect_verus_fail compact-map-st-reverse-order      fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ s/&mut xs\[r\]/\&mut xs[len - 1 - r]/g' "$chain"
     expect_verus_fail strict-map-st-reverse-order       fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
     expect_verus_fail strict-map-st-not-threaded        fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ { s/^pub fn map_in_place_st<S, /pub fn map_in_place_st<S: Copy, /; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
@@ -375,6 +402,25 @@ verify-negative: verify-strict verify-core
     }
     alloc_fail step-allocates    '/^pub fn tick(/,/^}/ s/^    (n, n)$/    let _b = alloc::boxed::Box::new(n);\n    (n, n)/'
     alloc_fail closure-allocates '/^pub fn doubled_stateless(/,/^}/ s/^        |x: u32| x \* 2$/        |x: u32| { let _b = alloc::boxed::Box::new(x); x * 2 }/'
+    # Verified callers of fip-core's `allocates` bounds (verify/alloc_callers.rs): an
+    # allocating closure fails its own bound; a closure without a bound fails the
+    # caller's `allocates 0` (sum-bounded callee) or the callee's requirement
+    # (`dedup_by`); without the zero-sum lemmas the sum-bounded callers fail.
+    callers_fail() {  # name, sed script, expected error, regex expected in the failing span
+      local f="$out/callers_$1.rs"
+      sed "$2" verify/alloc_callers.rs > "$f"
+      if cmp -s verify/alloc_callers.rs "$f"; then echo "FAIL: control $1 did not apply"; exit 1; fi
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$f" > "$out/callers_$1.log" 2>&1; then
+        echo "FAIL: control $1 verified"; exit 1
+      fi
+      grep -A12 -E "^error: $3" "$out/callers_$1.log" | grep -Eq "$4" \
+        || { echo "FAIL: control $1 failed for another reason"; cat "$out/callers_$1.log"; exit 1; }
+      echo "control callers-$1 rejected by Verus"
+    }
+    callers_fail closure-allocates '/^pub fn evens(/,/^}/ s/allocates 0 { \*v % 2 == 0 }/allocates 0 { let _b = Box::new(0u8); *v % 2 == 0 }/' 'unable to prove post-condition of closure' 'Box::new'
+    callers_fail closure-unbounded '/^pub fn evens(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'postcondition not satisfied' 'allocates 0'
+    callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'precondition not satisfied' 'call_allocates\(same'
+    callers_fail no-zero-lemmas    '/^broadcast use fip_core::spec::group_allocs_zero;$/d' 'postcondition not satisfied' 'allocates 0'
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.

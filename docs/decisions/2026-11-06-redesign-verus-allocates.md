@@ -13,14 +13,43 @@ plans its 1.100 rebase (custom allocators then); keep every toolchain- and
 Verus-version pin in one place so the rebase is a re-pin, not a redesign.
 
 **Phase 1 implemented** 2026-11-06 (section 5): fork pin and flags, `fip_fn!` Verus arm,
-regenerated sidecars, strip gate `just verify-upstream`. Deviations from the plan,
-measured: `verify/compose_state.rs` gets `allocates 0` only on its step functions and
-`fip_fn!` closures (10 of the 19 places), because the fork refuses an `allocates`
-clause on a caller of a function without one (the `fip_core` callers wait for phase
-2, the adapter hints for phase 3's `allocs()`); the sidecar generator had to drop
-the `t%` namespace marks of 0.2026.11 VIR paths; `fip_fn!` under Verus rejects a
-closure that calls certified functions (no literal `N`). Details:
-`docs/decisions/2026-10-31-verification-layout.md`, amendment 2026-11-06.
+regenerated sidecars, strip gate `just verify-upstream`. Details: section 5 and
+`docs/decisions/2026-10-31-verification-layout.md`.
+
+**Phase 2 implemented** 2026-11-06 (section 5):
+- `fip-strict`: `AllocFreeDrop` (Verus: re-export of `vstd::alloc_check::AllocFreeDrop`;
+  plain: empty trait with a blanket impl) and `DropFreeFn` (Verus: `Copy`; plain:
+  blanket impl). Crate docs record the bounds and the downstream cfg requirement.
+- `fip-core`: `T: AllocFreeDrop`, `F: DropFreeFn` on all `Fn`-based functions (`swap`,
+  `swap_lt`, `replace`, `update`, `compact`, `map_in_place`, `compact_map`, `dedup_by`,
+  `_st` variants); `allocates` bounds (`0` on `swap`, `swap_lt`, `replace`, `dedup_by`,
+  `map_in_place_st`, `compact_map_st`; callback sum on `compact`, `map_in_place`,
+  `compact_map`; `call_allocates(f, ..)` on `update`). `fip_core::spec` adds the sum
+  spec functions (`map_allocs`, `compact_allocs`, `compact_map_allocs`) and the
+  broadcast lemmas `group_allocs_zero`. Verified: 64 items (58 baseline + 3 spec
+  functions + 3 lemmas). Sidecar regenerated (all 17 listed functions gained bounds).
+- `fip-alloc`: `refill` gets `T: fip_strict::AllocFreeDrop` and `allocates 0`. Sidecar
+  regenerated.
+- `verify/compose_state.rs`: `allocates 0` added to its 4 `fip_core` callers (`counter`,
+  `number_from_11`, `odd_count`, `keep_odd`).
+- `verify/alloc_callers.rs`: new gate exercising `map_in_place`, `compact`,
+  `compact_map`, `update`, `swap`, `dedup_by`, `map_in_place_st` with `Copy` closures
+  under `allocates 0`, verified with `group_allocs_zero` (8 verified items).
+- Mutants in `just verify-negative`: 6 crate-level allocation mutants (extra
+  `Box::new` in `swap`, `map_in_place`, `refill`; sum spec forgetting the last call;
+  `map_in_place_st` without its `call_allocates <= 0` requirement) and 4 caller
+  controls in `verify/alloc_callers.rs` (allocating closure, unbounded closure,
+  unbounded `dedup_by` closure, zero lemmas omitted).
+- Downstream measurement (user type with `compact`, non-`Copy` `Node`):
+  * without `AllocFreeDrop` impl: plain compiles, Verus rejects (`error[E0277]: the trait bound Node: fip_core::AllocFreeDrop is not satisfied`);
+  * ungated `unsafe impl AllocFreeDrop for Node {}`: plain fails (E0119 conflicting impl with blanket, E0199 safe trait in plain build);
+  * gated `#[cfg(verus_keep_ghost)] unsafe impl fip_core::AllocFreeDrop for Node {}`:
+    plain compiles; Verus requires the struct definition to be verified as well,
+    `#[cfg_attr(verus_keep_ghost, verus_verify)] pub struct Node { .. }` (otherwise:
+    `error: cannot use type down2::Node which is ignored because it is either declared outside the verus! macro or it is marked as external`),
+    and then verifies cleanly (2 verified, 0 errors).
+- Strip gate (`verify-upstream` on stripped sources with upstream 0.2026.11.02): green,
+  reproducing the baseline counts 19/58/1/3/4/13/2.
 
 Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves

@@ -13,10 +13,15 @@
 //!   (`#![forbid(unsafe_code)]`); the strict certificate `__fip_strict_refill` is
 //!   re-exported from `fip_strict::certs`, where it is made without `unsafe`.
 //!   Depends only on `fip-strict`.
-//! - The functions here never allocate or free; that is checked by allocation-count
-//!   tests (`fip-testkit`), not by proof.
+//! - **Allocation bounds, by proof (Verus fork `-V alloc-check`).** [`refill`]
+//!   carries `allocates 0`, which Verus proves under `T: fip_strict::AllocFreeDrop`
+//!   (decision 2026-11-06-redesign-verus-allocates, phase 2). Frees (property F2) are
+//!   not counted by `allocates` (it bounds allocations of normally returning calls);
+//!   allocation-count tests (`fip-testkit`) remain as run-time evidence for both
+//!   allocations and frees.
 //! - Every function carries a Verus specification and is verified with
-//!   `verus --no-cheating`, like `fip-core`.
+//!   `verus --no-cheating -V alloc-check`, like `fip-core`. Plain builds see the
+//!   blanket-implemented marker trait `AllocFreeDrop`, so the API is unchanged.
 //!
 //! Use `fip-core` instead where no heap is involved: that crate cannot allocate at all.
 
@@ -46,9 +51,10 @@ use vstd::prelude::*;
     ensures
         *r.0 == value,
         r.1 == *cell,
+    allocates 0
 ))]
 #[inline]
-pub fn refill<T>(cell: Box<T>, value: T) -> (Box<T>, T) {
+pub fn refill<T: fip_strict::AllocFreeDrop>(cell: Box<T>, value: T) -> (Box<T>, T) {
     let mut cell = cell;
     let mut prev = value;
     ::core::mem::swap(&mut *cell, &mut prev);

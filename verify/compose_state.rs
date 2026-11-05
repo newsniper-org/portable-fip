@@ -25,12 +25,12 @@
 //!   `compact_map_st_by_witnesses`; `keep_odd`'s count is bounded by the invariant `c <= k`.
 //!
 //! Allocation (the Verus fork's `allocates`, checked with `-V alloc-check`): the step
-//! functions and every `fip_fn!` closure carry `allocates 0`, which Verus proves. The
-//! callers of `fip_core` carry none yet: Verus refuses `allocates` on a caller of a
-//! function without an `allocates` specification ("cannot bound the allocations of
-//! this call", measured 2026-11-06), and `fip_core` / `fip_strict` get theirs in
-//! phases 2 and 3 of decision 2026-11-06-redesign-verus-allocates (then the callers get
-//! `allocates 0` and the adapter hints of its section 4).
+//! functions, every `fip_fn!` closure and the `fip_core` callers (`counter`,
+//! `number_from_11`, `odd_count`, `keep_odd`) carry `allocates 0`, which Verus proves
+//! (decision 2026-11-06-redesign-verus-allocates, phase 2). The strict callers
+//! (`number_from_11_strict`, `number_from_11_closure`, `doubled_stateless`,
+//! `quadrupled`, `numbered_doubled`) gain their `allocates 0` and adapter hints in
+//! phase 3 with `FipFn::allocs`.
 //!
 //! `just verify-negative` checks that wrong final claims, a missing invariant, an
 //! invariant the step does not preserve, a closure without its spec attribute, a
@@ -66,6 +66,7 @@ pub fn tick(c: u32, _x: u32) -> (u32, u32) {
     ensures
         final(xs)@ == seq![11u32, 12u32, 13u32],
         r == 13,
+    allocates 0
 ))]
 pub fn counter(xs: &mut [u32]) -> u32 {
     let (c, _hole) = fip_core::map_in_place_st(xs, 0, 10, tick);
@@ -102,6 +103,7 @@ pub fn tick_checked(c: u32, _x: u32) -> (u32, u32) {
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
         r == 10 + old(xs)@.len(),
+    allocates 0
 ))]
 pub fn number_from_11(xs: &mut [u32]) -> u32 {
     proof! { assert(map_st_by_inv(old(xs)@, tick_checked, 10u32, |k: int, c: u32| c == 10 + k)); }
@@ -291,6 +293,7 @@ pub fn count_odd(c: u32, x: u32) -> (u32, u32, bool) {
         old(xs)@ == seq![1u32, 2u32, 3u32],
     ensures
         r == 2,
+    allocates 0
 ))]
 pub fn odd_count(xs: &mut [u32]) -> u32 {
     let (n, odd, _hole) = fip_core::compact_map_st(xs, 0, 0, count_odd);
@@ -325,6 +328,7 @@ pub fn count_odd_checked(c: u32, x: u32) -> (u32, u32, bool) {
         r.0 <= old(xs)@.len(),
         r.1 <= old(xs)@.len(),
         forall|i: int| 0 <= i < r.0 ==> final(xs)@[i] % 2 == 1,
+    allocates 0
 ))]
 pub fn keep_odd(xs: &mut [u32]) -> (usize, u32) {
     proof! { assert(compact_map_st_by_inv(old(xs)@, count_odd_checked, 0u32, |k: int, c: u32| c <= k)); }

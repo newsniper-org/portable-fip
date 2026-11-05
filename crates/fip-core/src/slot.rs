@@ -21,9 +21,10 @@ use vstd::prelude::*;
     ensures
         *final(slot) == new,
         r == *old(slot),
+    allocates 0
 ))]
 #[inline]
-pub fn replace<T>(slot: &mut T, new: T) -> T {
+pub fn replace<T: crate::AllocFreeDrop>(slot: &mut T, new: T) -> T {
     let mut v = new;
     ::core::mem::swap(slot, &mut v);
     v
@@ -47,9 +48,14 @@ pub fn replace<T>(slot: &mut T, new: T) -> T {
     ensures
         f.ensures((*old(slot),), *final(slot)),
         r == hole,
+    allocates call_allocates(f, (*old(slot),))
 ))]
 #[inline]
-pub fn update<T, F: FnOnce(T) -> T>(slot: &mut T, hole: T, f: F) -> T {
+pub fn update<T: crate::AllocFreeDrop, F: FnOnce(T) -> T + crate::DropFreeFn>(
+    slot: &mut T,
+    hole: T,
+    f: F,
+) -> T {
     let prev = replace(slot, hole);
     let next = f(prev);
     replace(slot, next)

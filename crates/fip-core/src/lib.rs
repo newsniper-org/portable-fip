@@ -13,6 +13,18 @@
 //!   and the proc-macro `fip-macros`, which runs on the host). There is no allocator
 //!   API it could call.
 //!   This is a crate-boundary guarantee, not a lint.
+//! - **Allocation bounds, by proof (Verus fork, `-V alloc-check`).** Every `Fn`-based
+//!   function states what one call allocates when it returns normally, and Verus
+//!   proves it: `swap` and `replace` are `allocates 0`; `update` allocates what its one
+//!   call of `f` does (`call_allocates(f, ..)`); `map_in_place`, `compact` and
+//!   `compact_map` the sum over their callback calls (`spec::map_allocs`,
+//!   `spec::compact_allocs`, `spec::compact_map_allocs`; the lemmas of
+//!   `spec::group_allocs_zero` turn "every call allocates nothing" into a zero sum for
+//!   callers); `dedup_by`, `map_in_place_st` and `compact_map_st` are `allocates 0` and
+//!   require every callback call to allocate nothing (their callback arguments are
+//!   known only during the run, so no sum over them can be stated at entry). Frees
+//!   are not counted, panicking paths are not covered (decision
+//!   2026-11-06-redesign-verus-allocates).
 //! - **No `unsafe`** (`#![forbid(unsafe_code)]`). The strict certificates of `swap`
 //!   and `replace` are made in `fip-strict` (`fip_strict::certs`) and re-exported
 //!   here, in plain builds only; Verus never sees them.
@@ -28,7 +40,6 @@
 //!   with `verus --no-cheating`. A plain `cargo` build never sees the specifications:
 //!   the `verus_keep_ghost` cfg is set only by the `verus` driver, so the crate has
 //!   no build-time dependency on Verus or `vstd`.
-//!
 //! - **Bounded stack, by acyclic call graph.** Verus rejects any recursion among
 //!   verified functions that lacks a `decreases` clause; no function here has one,
 //!   and none carries `verifier::exec_allows_no_decreases_clause` or another
@@ -37,12 +48,37 @@
 //!   rejected by `just verify-negative`). With no recursion and fixed-size frames, stack depth is
 //!   bounded by the longest call chain. Every loop has a proved `decreases` measure.
 //!
+//! ## Bounds `AllocFreeDrop` and `DropFreeFn`
+//!
+//! The fork's allocation check needs every type parameter of a bounded function to
+//! have drop glue that cannot allocate, also where values are only moved. So element
+//! and state types are bounded by [`AllocFreeDrop`] and callables by [`DropFreeFn`]
+//! (both from `fip-strict`). In plain builds both are implemented for every type: the
+//! bounds restrict nothing and the API is unchanged. Under Verus, `AllocFreeDrop` is
+//! `vstd::alloc_check::AllocFreeDrop` (primitives, references, vstd's std types such
+//! as `Box<u8>`) and `DropFreeFn` is `Copy`, so verified callers pass `Copy` closures.
+//! A user element type under Verus needs a Verus-only impl in the user's crate:
+//!
+//! ```ignore
+//! #[cfg(verus_keep_ghost)]
+//! verus! {
+//!     unsafe impl fip_core::AllocFreeDrop for Node {}
+//! }
+//! ```
+//!
+//! Verus checks it (rejected if `Node`'s `Drop::drop` is not `allocates 0`). Without
+//! the `cfg` it breaks the user's plain build (E0119 and E0199: the plain trait is a
+//! blanket-implemented safe trait), and it needs `unsafe`, so a crate under
+//! `#![forbid(unsafe_code)]` cannot have verified callers with its own element types.
+//!
 //! ## What it does not guarantee
 //!
-//! - Closures passed in (`keep`, `same`, `f`) are the caller's code; this crate makes
-//!   no claim about what they allocate or how much stack they use. The strict
-//!   variants require certified callables with bound 0, checked when the
-//!   instantiation is built.
+//! - Closures passed in (`keep`, `same`, `f`) are the caller's code. Their
+//!   allocations enter the proved bounds through `call_allocates`, so a verified
+//!   caller learns them from the closures' own `allocates` clauses; an unverified
+//!   caller gets no allocation claim for them, and no stack claim. The strict
+//!   variants require certified callables with bound 0 in plain builds, checked when
+//!   the instantiation is built.
 //! - The stack bound is structural (no recursion), not a byte count.
 //!
 //! ## State-passing variants
@@ -87,6 +123,8 @@ macro_rules! proof {
 macro_rules! proof_decl {
     ($($t:tt)*) => {};
 }
+
+pub use fip_strict::{AllocFreeDrop, DropFreeFn};
 
 pub mod slice;
 pub mod slot;
