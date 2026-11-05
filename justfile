@@ -29,11 +29,13 @@ msrv := `sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml`
 prelint_tc := `sed -n 's/^channel = "\(.*\)"$/\1/p' tools/fip-prelint/rust-toolchain.toml`
 
 # Every gate; a change merges only when this passes. A driver test skipped for a
-# missing target, tool or host fails here (`FIP_PRELINT_REQUIRE_TARGETS=1`).
+# missing target, tool or host fails here (`FIP_PRELINT_REQUIRE_TARGETS=1`), and so does
+# the upstream strip gate when `VERUS_UPSTREAM` is unset (`FIP_REQUIRE_UPSTREAM=1`).
 ci:
-    FIP_PRELINT_REQUIRE_TARGETS=1 just ci-gates
+    FIP_PRELINT_REQUIRE_TARGETS=1 FIP_REQUIRE_UPSTREAM=1 just ci-gates
 
-# The gates of `ci`, without turning skipped driver tests into failures.
+# The gates of `ci`, without turning skipped driver tests or a skipped strip gate
+# into failures.
 ci-gates: fmt-check lint test msrv nostd cross arch-override verify verify-upstream compile-fail-reasons prelint
 
 # Formatting.
@@ -595,12 +597,16 @@ verify-sidecar: verify-strict
 # invariants, `call_allocates`, adapter-bound hints, `AllocFreeDrop` impls; it fails on
 # any spelling it does not know), so the functional proofs do not depend on the fork's
 # allocation pass. The fork's `.vir` files cannot be imported by upstream, so every
-# crate is re-verified, with `--no-cheating` and the fork-only flags left out. In `ci`;
-# without `VERUS_UPSTREAM` it is skipped with a message (the fork remains the gate).
+# crate is re-verified, with `--no-cheating` and the fork-only flags left out. In `ci`
+# a missing `VERUS_UPSTREAM` is a failure (`FIP_REQUIRE_UPSTREAM=1`); run alone or in
+# `ci-gates` it is skipped with a message (the fork remains the gate).
 verify-upstream:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -z "{{verus_upstream}}" ]; then
+      if [ "${FIP_REQUIRE_UPSTREAM:-}" = 1 ]; then
+        echo "FAIL: verify-upstream: VERUS_UPSTREAM is not set (a build of upstream Verus {{verus_upstream_pin}}); \`just ci\` requires the strip gate"; exit 1
+      fi
       echo "verify-upstream: SKIPPED: VERUS_UPSTREAM is not set (a build of upstream Verus {{verus_upstream_pin}})"
       exit 0
     fi
