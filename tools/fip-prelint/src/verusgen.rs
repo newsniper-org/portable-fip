@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::verus::{self, Entry, NO_CHEATING, Sidecar};
+use crate::verus::{self, ALLOC_CHECK, Entry, NO_CHEATING, Sidecar};
 
 /// Flags that restrict or weaken what Verus checks: a run with one of them is never
 /// recorded.
@@ -363,9 +363,8 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             .split(":path")
             .nth(1)
             .and_then(|p| p.split_whitespace().next())
-            .map(|p| p.trim_end_matches(')'))
-            .ok_or_else(|| format!("bad :name `{name}`"))?
-            .to_string();
+            .map(|p| vir_path(p.trim_end_matches(')')))
+            .ok_or_else(|| format!("bad :name `{name}`"))?;
         let mode = field(func, ":mode")
             .map(|m| m.split_whitespace().next().unwrap_or("").to_string())
             .ok_or_else(|| format!("`{path}`: no :mode"))?;
@@ -396,8 +395,9 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
                 .split(|c: char| c.is_whitespace() || c == ')')
                 .next()
                 .unwrap_or("");
-            if !p.is_empty() && p != path && !calls.iter().any(|c| c == p) {
-                calls.push(p.to_string());
+            let p = vir_path(p);
+            if !p.is_empty() && p != path && !calls.contains(&p) {
+                calls.push(p);
             }
         }
         out.push(VirFn {
@@ -700,6 +700,48 @@ pub fn check_import(
     Ok(())
 }
 
+/// A VIR path as the driver spells it: Verus 0.2026.11 marks the namespace of a
+/// module or type segment with a one-letter prefix (`fip_core::t%slice::compact`,
+/// `fip_strict::t%FipFn::call`; measured on the fork `0.2026.11.05.ca33b04`; 10.18
+/// wrote `fip_core::slice::compact`). `%` is not part of a Rust identifier, so dropping
+/// `<letter>%` before an identifier is unambiguous; `impl&%N` segments are kept.
+pub fn vir_path(p: &str) -> String {
+    p.split("::")
+        .map(|seg| {
+            let b = seg.as_bytes();
+            if b.len() > 2
+                && b[0].is_ascii_lowercase()
+                && b[1] == b'%'
+                && (b[2].is_ascii_alphabetic() || b[2] == b'_')
+            {
+                &seg[2..]
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// The flags of a run that the sidecar's `flags` line records: `--no-cheating`, then
+/// `-V alloc-check` if the run used it (spelled `-V alloc-check`, `-Valloc-check` or
+/// `-V=alloc-check`), each once.
+pub fn trust_flags(flags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if flags.iter().any(|f| f == NO_CHEATING) {
+        out.push(NO_CHEATING.to_string());
+    }
+    let alloc_check = flags.iter().enumerate().any(|(k, f)| {
+        (f == "-V" && flags.get(k + 1).is_some_and(|v| v == ALLOC_CHECK))
+            || f.strip_prefix("-V")
+                .is_some_and(|v| v.trim_start_matches('=') == ALLOC_CHECK)
+    });
+    if alloc_check {
+        out.extend(["-V".to_string(), ALLOC_CHECK.to_string()]);
+    }
+    out
+}
+
 /// Builds the sidecar of crate `krate` (its directory `crate_dir`, where the sidecar
 /// is committed; paths are relative to it) from the functions of the VIR log.
 /// Paths in VIR spans are relative to `root`, the directory Verus ran in.
@@ -889,12 +931,7 @@ pub fn build(
     );
     skipped.sort();
     skipped.dedup();
-    let mut flags_kept: Vec<String> = flags
-        .iter()
-        .filter(|f| *f == NO_CHEATING)
-        .cloned()
-        .collect();
-    flags_kept.dedup();
+    let flags_kept = trust_flags(flags);
     Ok(Sidecar {
         format: verus::FORMAT,
         krate: krate.to_string(),
@@ -1233,6 +1270,45 @@ mod tests {
             relative(Path::new("/a/b/c.rs"), Path::new("/a/d")),
             "../b/c.rs"
         );
+    }
+
+    #[test]
+    fn vir_paths_drop_namespace_marks() {
+        assert_eq!(
+            vir_path("fip_core::t%slice::compact"),
+            "fip_core::slice::compact"
+        );
+        assert_eq!(
+            vir_path("fip_strict::t%FipFn::call"),
+            "fip_strict::FipFn::call"
+        );
+        assert_eq!(vir_path("c::t%m::impl&%3::f"), "c::m::impl&%3::f");
+        assert_eq!(vir_path("c::f"), "c::f");
+        assert_eq!(vir_path("c::t%"), "c::t%");
+        assert_eq!(vir_path("c::impl&%0::add"), "c::impl&%0::add");
+    }
+
+    #[test]
+    fn trust_flags_keep_no_cheating_and_alloc_check() {
+        let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            trust_flags(&v(&["--crate-type=lib", "--no-cheating", "x.rs"])),
+            v(&["--no-cheating"])
+        );
+        for spelling in [
+            &["-V", "alloc-check"][..],
+            &["-Valloc-check"],
+            &["-V=alloc-check"],
+        ] {
+            let mut f = v(&["--no-cheating", "--no-cheating"]);
+            f.extend(v(spelling));
+            assert_eq!(trust_flags(&f), v(&["--no-cheating", "-V", "alloc-check"]));
+        }
+        assert_eq!(
+            trust_flags(&v(&["--no-cheating", "-V", "alloc-check-strict"])),
+            v(&["--no-cheating"])
+        );
+        assert!(trust_flags(&v(&["-V", "alloc-check"])).starts_with(&v(&["-V"])));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
 exit: success
-note: fip-prelint: crate `vside`: 12 roots, 12 passed, 0 errors, 0 warnings, 6 notes, 4 panic sites discharged by Verus (sidecar of `vside`: Verus 0.2026.10.18.7d82994 (7d829946231d), Z3 4.16.0, --no-cheating)
+note: fip-prelint: crate `vside`: 12 roots, 12 passed, 0 errors, 0 warnings, 6 notes, 4 panic sites discharged by Verus (sidecar of `vside`: Verus <trusted verus> (<trusted commit>), Z3 <trusted z3>, --no-cheating -V alloc-check)
 vside/src/lib.rs:116:9: note: fip-prelint: `plain::mul` is #[fip(strict = true)]: reachable panic path: `plain::mul`: arithmetic overflow check (Mul) (not discharged by Verus: `vside::plain::mul` is not in the Verus sidecar (not verified by Verus)) (vside/src/lib.rs:116)
 vside/src/lib.rs:124:9: note: fip-prelint: `plain::use_mul` is #[fip(strict = true)]: reachable panic path: `plain::use_mul`: precondition of `vside::mul` verified by Verus only for Verus callers (its body's panic sites are discharged by Verus under its `requires`) (vside/src/lib.rs:124)
 vside/src/lib.rs:137:9: note: fip-prelint: `plain::use_add` is #[fip(strict = true)]: reachable panic path: `plain::use_add` -> `Acc::add` (vside/src/lib.rs:137): arithmetic overflow check (Add) (not discharged by Verus: the item text of `vside::{impl}::add` differs from the one Verus verified (regenerate with `just verify`)) (vside/src/lib.rs:95)

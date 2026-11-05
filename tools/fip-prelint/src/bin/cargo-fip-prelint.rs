@@ -4,7 +4,7 @@
 //! `cargo fip-prelint [--warn-only] [cargo check args..]`
 //!
 //! Runs `cargo check --workspace --all-targets --keep-going` on the pinned toolchain
-//! (`FIP_PRELINT_TOOLCHAIN`, default `1.99.1`) into `<workspace>/target/fip-prelint`
+//! (`FIP_PRELINT_TOOLCHAIN`, default the channel of `rust-toolchain.toml`) into `<workspace>/target/fip-prelint`
 //! (or `FIP_PRELINT_TARGET_DIR`), with the driver `fip-prelint` (next to this binary,
 //! or `FIP_PRELINT_DRIVER_PATH`) as `RUSTC_WRAPPER`, `RUSTC_BOOTSTRAP=1`, and
 //! `LD_LIBRARY_PATH` pointing at the toolchain's `lib` directory.
@@ -63,7 +63,8 @@ mod verus;
 #[path = "../verusgen.rs"]
 mod verusgen;
 
-const DEFAULT_TOOLCHAIN: &str = "1.99.1";
+/// The channel of `tools/fip-prelint/rust-toolchain.toml` (set by `build.rs`).
+const DEFAULT_TOOLCHAIN: &str = env!("FIP_PRELINT_DEFAULT_TOOLCHAIN");
 
 fn driver_path() -> PathBuf {
     if let Some(p) = std::env::var_os("FIP_PRELINT_DRIVER_PATH") {

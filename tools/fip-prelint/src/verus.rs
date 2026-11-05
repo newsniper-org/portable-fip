@@ -28,7 +28,7 @@
 //! verus <version> <commit>
 //! z3 <version>
 //! toolchain <rust toolchain of the Verus build>
-//! flags <verus flags relevant to trust, e.g. --no-cheating>
+//! flags <verus flags relevant to trust: --no-cheating, and -V alloc-check if given>
 //! cfg <target triple of the run> <its cargo features, comma-separated, or ->
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
@@ -63,6 +63,11 @@ pub const FORMAT: u32 = 4;
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
+
+/// The value of the Verus fork's `-V alloc-check` option (`allocates` bounds checked;
+/// decision record 2026-11-06-redesign-verus-allocates). Recorded in `flags` as the two
+/// words `-V alloc-check` when the run used it; not yet required by the driver.
+pub const ALLOC_CHECK: &str = "alloc-check";
 
 // ---------------------------------------------------------------------------------
 // SHA-256 (FIPS 180-4), dependency-free.

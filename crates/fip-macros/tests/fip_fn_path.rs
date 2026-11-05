@@ -197,9 +197,13 @@ fn spec_attributes_stay_on_the_closure() {
 fn creation_site_bounds() {
     let f = fip_fn!(bound <= 0, |x: u32| x + 1);
     assert_eq!(bound(&f), 0);
-    // A limit above the bound is accepted; the value keeps its computed bound.
+    // A limit above the bound is accepted. A path's value takes the limit as its
+    // bound (`Certified<3, _>`, the type the Verus build names too); a closure keeps
+    // its computed bound.
     let b = fip_fn!(bound <= 3, boxed);
-    assert_eq!(bound(&b), 1);
+    assert_eq!(bound(&b), 3);
+    let _: Certified<3, fn(u32) -> Box<u32>> = fip_fn!(bound <= 3, boxed);
+    let _: Certified<0, fn(u32) -> u32> = fip_fn!(bound <= 2, |x: u32| x + 1);
     let c = fip_fn!(
         bound <= 1_u64,
         #[cfg_attr(verus_keep_ghost, verus_spec(r: Box<u32> => ensures *r == x))]

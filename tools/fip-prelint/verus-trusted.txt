@@ -5,5 +5,10 @@
 # a Verus sidecar (`[package.metadata.fip-prelint] verus-sidecar`) is used only if its
 # stamp names exactly this Verus version and commit and this Z3 version. Compiled into
 # the driver; changing it is a trust decision (decision record 2026-11-01-fip-prelint).
-verus 0.2026.10.18.7d82994 7d829946231d6413a398f6e4160cdfe951261dad
+#
+# Since 2026-11-06 (decision record 2026-11-06-redesign-verus-allocates, D5): the
+# `allocates` fork of Verus, branch `fip`, which adds `-V alloc-check`. This file is
+# also the pin of `just verify`: `just verus-pin` checks the binary `VERUS` against
+# these two lines, so a re-pin edits only this file (plus the regenerated sidecars).
+verus 0.2026.11.05.ca33b04 ca33b0438c36b2edb05e47895b6f2e813b0cc291
 z3 4.16.0

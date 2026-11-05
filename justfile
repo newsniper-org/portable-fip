@@ -1,13 +1,32 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-# Upstream Verus (verus-lang/verus) with Singular for `by (integer_ring)`.
+# Pins (decision 2026-11-06-redesign-verus-allocates): each is written in one file and
+# read from there, so a re-pin edits only that file.
+#   - trusted Verus (version, commit) and Z3: tools/fip-prelint/verus-trusted.txt,
+#     checked against the binary `VERUS` by `verus-pin` before every Verus gate;
+#   - toolchain of `fip-prelint` (= the Verus toolchain, checked by `verus-pin`):
+#     tools/fip-prelint/rust-toolchain.toml (also read by the driver's build.rs);
+#   - MSRV: `rust-version` in Cargo.toml;
+#   - upstream Verus of the strip gate: `verus_upstream_pin` below.
+#
+# The Verus fork with `allocates` (branch `fip`, the pin in verus-trusted.txt), with
+# Singular for `by (integer_ring)`. `VERUS` must name that build (`just verus-pin` fails
+# otherwise); its Z3 is `VERUS_Z3_PATH`, else the `z3` next to the binary.
 verus := env_var_or_default("VERUS", "verus")
+# Flags of every Verus run of the gates: no trusted items, and `allocates` bounds checked
+# (the fork's `-V alloc-check`; an importing crate needs the imported crate's export
+# from a run with it).
+verus_flags := "--no-cheating -V alloc-check"
 singular := env_var_or_default("SINGULAR", "/usr/bin/Singular")
+# Upstream Verus for the strip gate `verify-upstream` (decision D5): unset or empty skips
+# the gate with a message; set, it must report `verus_upstream_pin`.
+verus_upstream := env_var_or_default("VERUS_UPSTREAM", "")
+verus_upstream_pin := "0.2026.11.02.8bf68ee"
 # Lowest supported toolchain (workspace `rust-version`).
-msrv := "1.99.1"
-# Toolchain of `fip-prelint` (the installed Verus toolchain; decision 2026-11-01-fip-prelint).
-prelint_tc := "1.99.1"
+msrv := `sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml`
+# Toolchain of `fip-prelint` (the Verus toolchain; decision 2026-11-01-fip-prelint).
+prelint_tc := `sed -n 's/^channel = "\(.*\)"$/\1/p' tools/fip-prelint/rust-toolchain.toml`
 
 # Every gate; a change merges only when this passes. A driver test skipped for a
 # missing target, tool or host fails here (`FIP_PRELINT_REQUIRE_TARGETS=1`).
@@ -15,7 +34,7 @@ ci:
     FIP_PRELINT_REQUIRE_TARGETS=1 just ci-gates
 
 # The gates of `ci`, without turning skipped driver tests into failures.
-ci-gates: fmt-check lint test msrv nostd cross arch-override verify compile-fail-reasons prelint
+ci-gates: fmt-check lint test msrv nostd cross arch-override verify verify-upstream compile-fail-reasons prelint
 
 # Formatting.
 fmt-check:
@@ -55,7 +74,32 @@ cross:
     CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="{{musl_lld}}" cargo test --locked -q --no-run -p fip-arch --lib --target riscv64gc-unknown-linux-musl --target-dir target/cross-asm
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
-verify: verify-strict verify-core verify-alloc verify-compose verify-negative verify-sidecar
+verify: verus-pin verify-strict verify-core verify-alloc verify-compose verify-negative verify-sidecar
+
+# `VERUS` must be the trusted build (tools/fip-prelint/verus-trusted.txt: version, commit
+# and Z3) on the toolchain of `fip-prelint`; every Verus gate depends on this check.
+verus-pin:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pin=tools/fip-prelint/verus-trusted.txt
+    want_v=$(awk '$1 == "verus" {print $2}' $pin); want_c=$(awk '$1 == "verus" {print $3}' $pin)
+    want_z3=$(awk '$1 == "z3" {print $2}' $pin)
+    hint="set VERUS to a build of the pinned Verus ($want_v, commit $want_c; $pin)"
+    json=$({{verus}} --version --output-json 2> /dev/null) || { echo "FAIL: cannot run \`{{verus}} --version\`: $hint"; exit 1; }
+    field() { printf '%s\n' "$json" | sed -n "s/^ *\"$1\": \"\(.*\)\",\{0,1\}$/\1/p" | head -1; }
+    got_v=$(field version); got_c=$(field commit); got_tc=$(field toolchain)
+    if [ "$got_v" != "$want_v" ] || [ "$got_c" != "$want_c" ]; then
+      echo "FAIL: \`{{verus}}\` is Verus $got_v (commit $got_c): $hint"; exit 1
+    fi
+    if [ "${got_tc%%-*}" != "{{prelint_tc}}" ]; then
+      echo "FAIL: Verus $got_v is built on toolchain $got_tc, fip-prelint on {{prelint_tc}} (tools/fip-prelint/rust-toolchain.toml)"; exit 1
+    fi
+    if [ -n "${VERUS_Z3_PATH:-}" ]; then z3=$VERUS_Z3_PATH; else z3=$(dirname "$(readlink -f "$(command -v {{verus}})")")/z3; fi
+    got_z3=$("$z3" --version 2> /dev/null | awk '/Z3 version/ {print $3}') || true
+    if [ "$got_z3" != "$want_z3" ]; then
+      echo "FAIL: Z3 \`$z3\` is ${got_z3:-unreadable}, the pin is $want_z3 ($pin; set VERUS_Z3_PATH)"; exit 1
+    fi
+    echo "verus-pin: Verus $got_v ($got_c), Z3 $got_z3, toolchain $got_tc"
 
 # Verus metadata and library of fip-strict, imported where `FipFn` specs are needed.
 verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern fip_strict=target/verus-strict/libfip_strict.rlib"
@@ -66,9 +110,9 @@ verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern
 # crates/fip-strict/verus-verified.txt (2 functions listed, `Certified::assume` and
 # `Certified::assume_no_panic_macros`; every other verified method is a Verus-only twin
 # or macro-generated, each skipped with the reason).
-verify-strict: sidecar-gen
+verify-strict: verus-pin sidecar-gen
     rm -rf target/verus-strict && mkdir -p target/verus-strict
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_strict --crate-dir crates/fip-strict --out target/verus-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_strict --no-cheating crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_strict --crate-dir crates/fip-strict --out target/verus-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_strict {{verus_flags}} crates/fip-strict/src/lib.rs --export target/verus-strict/fip_strict.vir --compile --out-dir target/verus-strict
     just verus-sidecar-check target/verus-strict/verus-verified.txt crates/fip-strict/verus-verified.txt
 
 # Verus metadata and library of fip-core (needs fip-strict's on the library path),
@@ -93,14 +137,15 @@ sidecar-gen:
 # `verify-strict` (its `.fip-run` record).
 verify-core: verify-strict
     rm -rf target/verus-core && mkdir -p target/verus-core
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core --no-cheating crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core {{verus_flags}} crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
     just verus-sidecar-check target/verus-core/verus-verified.txt crates/fip-core/verus-verified.txt
 
 # A regenerated Verus sidecar must equal the committed one, so a stale sidecar fails
 # `just ci` here (and, in `prelint`, the driver refuses it: the self-check changes).
 # Compared only when the run's stamp is the driver's trusted pin
-# (tools/fip-prelint/verus-trusted.txt): another Verus build (e.g. `VERUS=<fork>`)
-# writes its own sidecar, which the driver would refuse anyway.
+# (tools/fip-prelint/verus-trusted.txt): another Verus build writes its own sidecar,
+# which the driver would refuse anyway (the gates' `verus-pin` already refuses such a
+# build; this recipe is also run by hand).
 # `FIP_VERUS_BLESS=1` copies the regenerated file over the committed one.
 verus-sidecar-check generated committed:
     #!/usr/bin/env bash
@@ -123,9 +168,9 @@ verus-sidecar-check generated committed:
 
 # fip-alloc proofs, no trusted items (--no-cheating), through the sidecar generator;
 # the sidecar must equal crates/fip-alloc/verus-verified.txt.
-verify-alloc: sidecar-gen
+verify-alloc: verus-pin sidecar-gen
     rm -rf target/verus-alloc && mkdir -p target/verus-alloc
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc --no-cheating crates/fip-alloc/src/lib.rs
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc {{verus_flags}} crates/fip-alloc/src/lib.rs
     just verus-sidecar-check target/verus-alloc/verus-verified.txt crates/fip-alloc/verus-verified.txt
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
@@ -139,12 +184,32 @@ verify-compose: verify-strict verify-core
     cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
     deps=target/verus-macros/debug/deps
     so=$(ls -t $deps/libfip_macros-*.so | head -1)
-    run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
+    run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
     run verify/compose.rs
     run verify/compose_strict.rs
-    run_state() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$1"; }
+    run_state() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$1"; }
     run_state verify/compose_state.rs
     out=target/verify-compose; mkdir -p "$out"
+    # `fip_fn!` values have one type in both builds: verify/fip_fn_types.rs is compiled
+    # by plain rustc and verified by Verus; a wrong `N` in any annotation fails both.
+    cargo +"$tc" build --locked -q -p fip-strict --target-dir target/verus-macros
+    rl=$(ls -t $deps/libfip_strict-*.rlib | head -1)
+    plain() { rustc +"$tc" --edition 2024 --crate-type lib --crate-name fip_fn_types --extern fip_macros="$so" --extern fip_strict="$rl" -L "$deps" --out-dir "$out" "$1"; }
+    plain verify/fip_fn_types.rs
+    run verify/fip_fn_types.rs
+    for m in 's/let boxing: Certified<1, _>/let boxing: Certified<0, _>/' 's/let limited: Certified<2, _>/let limited: Certified<0, _>/' 's/step: Certified<1, C>/step: Certified<0, C>/'; do
+      sed "$m" verify/fip_fn_types.rs > "$out/types.rs"
+      if cmp -s verify/fip_fn_types.rs "$out/types.rs"; then echo "FAIL: mutation $m did not apply"; exit 1; fi
+      if plain "$out/types.rs" 2> "$out/types-plain.err"; then echo "FAIL: plain build accepted $m"; exit 1; fi
+      if run "$out/types.rs" 2> "$out/types-verus.err"; then echo "FAIL: Verus accepted $m"; exit 1; fi
+      grep -q "E0308" "$out/types-plain.err" && grep -q "E0308" "$out/types-verus.err" || { echo "FAIL: $m rejected for another reason"; cat "$out/types-plain.err" "$out/types-verus.err"; exit 1; }
+    done
+    # A closure calling a certified function has no literal bound: rejected under Verus.
+    cp verify/fip_fn_types.rs "$out/types.rs"
+    printf '\n#[cfg_attr(verus_keep_ghost, verus_spec())]\npub fn calls() {\n    let _f = fip_fn!(|x: u32| halve(x));\n}\n' >> "$out/types.rs"
+    plain "$out/types.rs"
+    if run "$out/types.rs" 2> "$out/types-verus.err"; then echo "FAIL: Verus accepted a fip_fn! closure without a literal bound"; exit 1; fi
+    grep -q "has no literal allocation bound" "$out/types-verus.err" || { echo "FAIL: closure with calls rejected for another reason"; cat "$out/types-verus.err"; exit 1; }
     sed 's/^#\[fip\]$//; s/^pub fn count/#[fip]\npub fn count/' verify/compose.rs > "$out/below.rs"
     if run "$out/below.rs" 2> "$out/below.err"; then echo "FAIL: #[fip] below verus_spec was accepted"; exit 1; fi
     grep -q "write FIP attributes above" "$out/below.err"
@@ -193,7 +258,7 @@ verify-negative: verify-strict verify-core
     # about the spec. Optional sixth argument: extra Verus flags (e.g. `--rlimit 100`).
     expect_verus_fail() {  # name, crate, file, sed script, expected log regex[, verus flags]
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --multiple-errors 8 ${6:-} "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 ${6:-} "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
       if grep -q "rlimit" "$d/log"; then echo "FAIL: mutant $1 hit the resource limit (rlimit)"; cat "$d/log"; exit 1; fi
@@ -206,8 +271,9 @@ verify-negative: verify-strict verify-core
     # the removed code, the sed script deletes that assertion too (the unmutated
     # function verifies without it, measured 2026-11-04 for `dedup_by`). The `dedup_by`
     # mutants hit the default resource limit on the loop before the invariant fails, so
-    # they run with a larger one (plain 100, strict 1000: measured at 100 and 300 still
-    # rlimit for the strict one).
+    # they run with a larger one (1000 for both: measured at 100 and 300 still rlimit
+    # for the strict one, and on the Verus fork `ca33b04` for the plain one too, with and
+    # without `-V alloc-check`, 2026-11-06; on 10.18 the plain one needed 100).
     spec='postcondition not satisfied|invariant not satisfied'
     # `compact_map` without the swap: the kept element at `w` is not the mapped value,
     # which `lemma_prefix_push` requires (`new_s[w] == ys[r]`); its asserts about the
@@ -220,7 +286,7 @@ verify-negative: verify-strict verify-core
     expect_verus_fail compact-order        fip-core  slice.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
     expect_verus_fail map-skips-store      fip-core  slice.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$spec"
     expect_verus_fail update-keeps-old     fip-core  slot.rs  's/^    let next = f(prev);$/    let next = prev; let _ = f;/' "$spec"
-    expect_verus_fail dedup-no-swap        fip-core  slice.rs '/^pub fn dedup_by</,/^}/ { s/^                swap_lt(xs, w, r);$//; /^                assert(xs@\[ow\] == old(xs)@\[r as int\]);$/d }' "$spec" "--rlimit 100"
+    expect_verus_fail dedup-no-swap        fip-core  slice.rs '/^pub fn dedup_by</,/^}/ { s/^                swap_lt(xs, w, r);$//; /^                assert(xs@\[ow\] == old(xs)@\[r as int\]);$/d }' "$spec" "--rlimit 1000"
     expect_verus_fail dedup-wrong-compare  fip-core  slice.rs '/^pub fn dedup_by</,/^}/ s/same(&xs\[w - 1\], &xs\[r\])/same(\&xs[r - 1], \&xs[r])/' "$spec"
     expect_verus_fail compact-map-no-swap  fip-core  slice.rs "/^pub fn compact_map</,/^}/ { s/^                swap_lt(xs, w, r);\$//; $no_swap_asserts }" "$cmap_order"
     expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$spec"
@@ -267,7 +333,7 @@ verify-negative: verify-strict verify-core
       local f="$out/state_$1.rs"
       sed "$2" verify/compose_state.rs > "$f"
       if cmp -s verify/compose_state.rs "$f"; then echo "FAIL: control $1 did not apply"; exit 1; fi
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$f" > "$out/state_$1.log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$f" > "$out/state_$1.log" 2>&1; then
         echo "FAIL: control $1 verified"; exit 1
       fi
       if grep -q "rlimit" "$out/state_$1.log"; then echo "FAIL: control $1 hit the resource limit (rlimit)"; cat "$out/state_$1.log"; exit 1; fi
@@ -293,12 +359,28 @@ verify-negative: verify-strict verify-core
     # whose output breaks the doubling step's `requires`.
     state_fail then-wrong-final      '/^\/\/\/ Numbers from 11 and doubles/,/^}/ s/final(xs)@\[k\] == 2 \* (11 + k),$/final(xs)@[k] == 2 * (12 + k),/' 'postcondition not satisfied'
     state_fail then-pre-missing      '/^\/\/\/ Numbers from 11 and doubles/,/^}/ s/^        old(xs)@.len() < 990,$/        old(xs)@.len() < 1990,/' 'precondition not satisfied|assertion failed'
+    # `allocates 0` (Verus fork, `-V alloc-check`): a `Box::new` in a step function or
+    # in a `fip_fn!` closure carrying `allocates 0` must fail that clause. Also shows
+    # that the gate runs with `-V alloc-check` (without it both mutants verify).
+    alloc_fail() {  # name, sed script
+      local f="$out/state_$1.rs"
+      sed 's/^use fip_macros::fip;$/use fip_macros::fip;\nextern crate alloc;/'"; $2" verify/compose_state.rs > "$f"
+      if ! grep -q "alloc::boxed::Box::new" "$f"; then echo "FAIL: control $1 did not apply"; exit 1; fi
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$f" > "$out/state_$1.log" 2>&1; then
+        echo "FAIL: control $1 verified"; exit 1
+      fi
+      grep -A3 -E "postcondition not satisfied|unable to prove post-condition of closure" "$out/state_$1.log" | grep -q "allocates 0" \
+        || { echo "FAIL: control $1 failed for another reason"; cat "$out/state_$1.log"; exit 1; }
+      echo "control $1 rejected by Verus"
+    }
+    alloc_fail step-allocates    '/^pub fn tick(/,/^}/ s/^    (n, n)$/    let _b = alloc::boxed::Box::new(n);\n    (n, n)/'
+    alloc_fail closure-allocates '/^pub fn doubled_stateless(/,/^}/ s/^        |x: u32| x \* 2$/        |x: u32| { let _b = alloc::boxed::Box::new(x); x * 2 }/'
     # Pre-verified spec of the strict variants: a wrong relation breaks the lemmas.
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.
     expect_verus_fail certified-pre-true         fip-strict lib.rs  's/^                self.inner().requires(args)$/                true/' "$errs"
     # Stack bound: recursion without `decreases` is rejected.
-    expect_verus_fail swap-recursive       fip-core  slice.rs '/^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        swap(xs, lo, lo);/' 'recursive function must have a decreases clause'
+    expect_verus_fail swap-recursive       fip-core  slice.rs '/^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        swap(xs, lo, lo);/' 'recursive function must have a .?decreases.? clause'
     # Source gates (fip_testkit::surface) must fail on mutated sources.
     expect_test_fail() {  # name, crate, file, sed script, test name
       local d; d=$(mutate "$1" "$2" "$3" "$4")
@@ -337,7 +419,7 @@ verify-sidecar: verify-strict
     gen="$PWD/tools/fip-prelint/target/debug/cargo-fip-prelint --verus-sidecar"
     out="$PWD/target/verify-sidecar"; rm -rf "$out"; mkdir -p "$out"
     fx=tools/fip-prelint/tests/fixtures/verus_sidecar
-    (cd "$fx" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/vside.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs)
+    (cd "$fx" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/vside.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs)
     just verus-sidecar-check "$out/vside.txt" "$fx/vside/verus-verified.txt"
     # Without --no-cheating: refused before Verus runs, nothing written.
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/cheat.txt" -- {{verus}} --crate-type=lib --crate-name vside vside/src/lib.rs) 2> "$out/cheat.err"; then
@@ -348,7 +430,7 @@ verify-sidecar: verify-strict
     # An `external_body` function: Verus rejects the --no-cheating run, nothing written.
     cp -r "$fx" "$out/ext"
     printf '\n#[cfg_attr(verus_keep_ghost, verifier::external_body)]\npub fn ext() -> u32 { 2 }\n' >> "$out/ext/vside/src/lib.rs"
-    if (cd "$out/ext" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/ext.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/ext.log" 2>&1; then
+    if (cd "$out/ext" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/ext.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/ext.log" 2>&1; then
       echo "FAIL: a sidecar was generated for a crate with external_body"; exit 1
     fi
     grep -q "Verus failed: no sidecar written" "$out/ext.log"
@@ -356,13 +438,13 @@ verify-sidecar: verify-strict
     # A Verus-only `cfg_attr` deleting a bounds check: verified, but not listed.
     cp -r "$fx" "$out/cfgitem"
     printf '\n#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(\n    requires\n        i < xs@.len(),\n))]\npub fn probe2(xs: &[u8], i: usize) -> u8 {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    let _x = xs[i + 1];\n    xs[i]\n}\n' >> "$out/cfgitem/vside/src/lib.rs"
-    (cd "$out/cfgitem" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/cfgitem.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/cfgitem.log" 2>&1
+    (cd "$out/cfgitem" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/cfgitem.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/cfgitem.log" 2>&1
     if grep -q "^fn vside::probe2 " "$out/cfgitem.txt"; then echo "FAIL: an item with a Verus-only cfg was listed"; exit 1; fi
     grep -q "^skip vside::probe2 the item text has \`cfg_attr(verus_keep_ghost, cfg(any()))\`" "$out/cfgitem.txt"
     # A crate whose code tests `fip_prelint` (set by the driver, not by Verus): refused.
     cp -r "$fx" "$out/cfgcrate"
     printf '\npub fn probe_cfg(a: u32, b: u32) -> u32 {\n    if cfg!(fip_prelint) { a / b } else { 0 }\n}\n' >> "$out/cfgcrate/vside/src/lib.rs"
-    if (cd "$out/cfgcrate" && $gen --crate-name vside --crate-dir vside --out "$out/cfgcrate.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) 2> "$out/cfgcrate.err"; then
+    if (cd "$out/cfgcrate" && $gen --crate-name vside --crate-dir vside --out "$out/cfgcrate.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) 2> "$out/cfgcrate.err"; then
       echo "FAIL: a sidecar was generated for a crate testing fip_prelint"; exit 1
     fi
     grep -q "tests \`fip_prelint\`.*no sidecar is written" "$out/cfgcrate.err"
@@ -373,7 +455,7 @@ verify-sidecar: verify-strict
       cp -r "$fx" "$out/$1"
       printf '%b' "$2" >> "$out/$1/vside/src/lib.rs"
       if [ $# -ge 5 ]; then printf '%b' "$5" > "$out/$1/$4"; fi
-      if (cd "$out/$1" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/$1.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/$1.log" 2>&1; then
+      if (cd "$out/$1" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/$1.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/$1.log" 2>&1; then
         echo "FAIL: a sidecar was generated for probe $1"; exit 1
       fi
       grep -q "$3" "$out/$1.log" || { echo "FAIL: probe $1 refused for another reason"; cat "$out/$1.log"; exit 1; }
@@ -386,23 +468,68 @@ verify-sidecar: verify-strict
     # `cfg_attr`: skipped too.
     cp -r "$fx" "$out/taint"
     printf '\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        !r,\n))]\npub fn on() -> bool {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    return true;\n    false\n}\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        true,\n))]\npub fn probe_taint(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n' >> "$out/taint/vside/src/lib.rs"
-    (cd "$out/taint" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/taint.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) > "$out/taint.log" 2>&1
+    (cd "$out/taint" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/taint.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/taint.log" 2>&1
     if grep -q "^fn vside::probe_taint " "$out/taint.txt"; then echo "FAIL: a caller of a cfg-skipped function was listed"; exit 1; fi
     grep -q "^skip vside::probe_taint relies on the specification of \`vside::on\`" "$out/taint.txt"
     # Imports: the imported crate's committed sidecar is required, and the VIR file must
     # come from a generator run (fip-strict's, copied without its `.fip-run` record).
     root="$PWD"; vir="$root/target/verus-strict/fip_strict.vir"
-    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/imp.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs --import fip_strict="$vir") 2> "$out/imp.err"; then
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/imp.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs --import fip_strict="$vir") 2> "$out/imp.err"; then
       echo "FAIL: an import without its committed sidecar was accepted"; exit 1
     fi
     grep -q "needs \`--import-sidecar fip_strict=" "$out/imp.err"
     cp "$vir" "$out/plain.vir"
-    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/imp.txt" --import-sidecar fip_strict="$root/crates/fip-strict/verus-verified.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs --import fip_strict="$out/plain.vir") 2> "$out/imp.err"; then
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/imp.txt" --import-sidecar fip_strict="$root/crates/fip-strict/verus-verified.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs --import fip_strict="$out/plain.vir") 2> "$out/imp.err"; then
       echo "FAIL: an import of a VIR file no generator run exported was accepted"; exit 1
     fi
     grep -q "was not exported by a generator run" "$out/imp.err"
     test ! -e "$out/imp.txt"
     echo "verify-sidecar: ok"
+
+# Strip gate (decision 2026-11-06-redesign-verus-allocates, D5): upstream Verus
+# (`VERUS_UPSTREAM`, version `verus_upstream_pin`) verifies the sources with the fork's
+# allocation layer removed (`verify/strip_alloc.py`: `allocates` clauses, `allocated()`
+# invariants, `call_allocates`, adapter-bound hints, `AllocFreeDrop` impls; it fails on
+# any spelling it does not know), so the functional proofs do not depend on the fork's
+# allocation pass. The fork's `.vir` files cannot be imported by upstream, so every
+# crate is re-verified, with `--no-cheating` and the fork-only flags left out. In `ci`;
+# without `VERUS_UPSTREAM` it is skipped with a message (the fork remains the gate).
+verify-upstream:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "{{verus_upstream}}" ]; then
+      echo "verify-upstream: SKIPPED: VERUS_UPSTREAM is not set (a build of upstream Verus {{verus_upstream_pin}})"
+      exit 0
+    fi
+    got=$({{verus_upstream}} --version --output-json 2> /dev/null | sed -n 's/^ *"version": "\(.*\)",\{0,1\}$/\1/p' | head -1) || true
+    if [ "$got" != "{{verus_upstream_pin}}" ]; then
+      echo "FAIL: VERUS_UPSTREAM is Verus ${got:-unreadable}, the strip gate's pin is {{verus_upstream_pin}} (justfile verus_upstream_pin)"; exit 1
+    fi
+    out=target/verify-upstream; rm -rf "$out"; mkdir -p "$out/strict" "$out/core" "$out/alloc"
+    src="$out/src"
+    uv run --no-project python verify/strip_alloc.py "$src" crates/fip-strict crates/fip-core crates/fip-alloc verify/compose.rs verify/compose_strict.rs verify/compose_state.rs verify/fip_fn_types.rs
+    tc=$({{verus_upstream}} --version | awk '/Toolchain/ {print $2}')
+    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
+    deps=target/verus-macros/debug/deps
+    so=$(ls -t $deps/libfip_macros-*.so | head -1)
+    up() {  # name, Verus arguments
+      local name=$1; shift
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating "$@" > "$out/$name.log" 2>&1; then
+        echo "verify-upstream: $name: $(grep -h 'verification results' "$out/$name.log")"
+      else
+        cat "$out/$name.log"; echo "FAIL: upstream Verus rejects the stripped $name"; exit 1
+      fi
+    }
+    strict="--import fip_strict=$out/strict/fip_strict.vir --extern fip_strict=$out/strict/libfip_strict.rlib"
+    core="--import fip_core=$out/core/fip_core.vir --extern fip_core=$out/core/libfip_core.rlib -L $out/strict"
+    up fip-strict --crate-name fip_strict "$src/fip-strict/src/lib.rs" --export "$out/strict/fip_strict.vir" --compile --out-dir "$out/strict"
+    up fip-core --crate-name fip_core "$src/fip-core/src/lib.rs" $strict --export "$out/core/fip_core.vir" --compile --out-dir "$out/core"
+    up fip-alloc --crate-name fip_alloc "$src/fip-alloc/src/lib.rs"
+    up compose.rs --extern fip_macros="$so" -L "$deps" $strict "$src/compose.rs"
+    up compose_strict.rs --extern fip_macros="$so" -L "$deps" $strict "$src/compose_strict.rs"
+    up compose_state.rs --extern fip_macros="$so" -L "$deps" $strict $core "$src/compose_state.rs"
+    up fip_fn_types.rs --extern fip_macros="$so" -L "$deps" $strict "$src/fip_fn_types.rs"
+    echo "verify-upstream: ok"
 
 # `fip-arch`'s unit tests on riscv64 under qemu-user, with and without Zicbop
 # (decision 2026-10-31-arch-prefetch-asm, amendment 2026-11-04). Not in `ci`: needs

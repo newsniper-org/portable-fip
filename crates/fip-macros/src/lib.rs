@@ -1017,6 +1017,14 @@
 //! fn boxed(x: u8) -> Box<u8> { Box::new(x) }
 //! fn main() { let _w = fip_macros::fip_fn!(bound <= 0, boxed); }
 //! ```
+//! a named function with `bound <= K` is a `Certified<K, _>` (the type the Verus
+//! build names too), not the certificate's `Certified<N, _>`:
+//! ```compile_fail
+//! # // expect: mismatched types
+//! #[fip_macros::fip(1, strict = true)]
+//! fn boxed(x: u8) -> Box<u8> { Box::new(x) }
+//! fn main() { let _w: fip_strict::Certified<1, fn(u8) -> Box<u8>> = fip_macros::fip_fn!(bound <= 3, boxed); }
+//! ```
 //! `bound <= ..` without an integer literal:
 //! ```compile_fail
 //! # // expect: fip_fn!: expected `bound <= K, ..` with an integer literal `K`
@@ -4799,7 +4807,26 @@ fn attr_path_use(attr: &TokenTree) -> TokenStream {
 /// <= K`". The check is in the value's type, so `cargo check` reports it, also in an
 /// uncalled generic function; a callee's `param(g = K)` check runs only when the
 /// callee is instantiated (not under `cargo check`). The callee's declaration stays
-/// authoritative; this is an earlier, local error.
+/// authoritative; this is an earlier, local error. A closure keeps its computed bound
+/// (`Certified<N, _>`); a path becomes `Certified<K, _>`, the declared limit, so its
+/// type is the same under Verus (below).
+///
+/// **Under Verus** (Verus's driver, `rust_verify`) the macro never reads a certificate
+/// (Verus cannot evaluate them), and the value's type is the plain build's wherever the
+/// plain build's bound is a literal:
+///
+/// | form | plain build | Verus build |
+/// |---|---|---|
+/// | closure | `Certified<N, _>`, `N` scanned from the body | `Certified<N, _>`, the same `N` |
+/// | closure calling certified functions | `Certified<N, _>`, `N` read from certificates | rejected (no literal `N`) |
+/// | `fip_fn!(bound <= K, path)` | `Certified<K, _>`, checks certificate `N <= K` | `Certified<K, _>` |
+/// | `fip_fn!(path)` | `Certified<N, _>`, `N` the certificate's | `Certified<0, _>` |
+///
+/// Only `fip_fn!(path)` without `bound` differs between the builds, so code that names
+/// the type of a certified function (a struct field, an array, a `param(g = K)`
+/// argument) under Verus writes `fip_fn!(bound <= K, path)`; for a function that
+/// allocates, this is required. The plain build of the same source checks every
+/// certificate.
 ///
 /// ```
 /// let f = fip_macros::fip_fn!(bound <= 0, |x: u8| x ^ 1);
@@ -4936,15 +4963,47 @@ pub fn fip_fn(input: TokenStream) -> TokenStream {
         );
     }
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
+    let bound = if strict::under_verus() {
+        let first = toks.first().map_or_else(Span::call_site, TokenTree::span);
+        match verus_closure_bound(&strict_scan, local, limit, first) {
+            Ok(b) => b,
+            Err(e) => return e,
+        }
+    } else {
+        limited(strict_scan.emit_fip_fn_bound(local), limit, false)
+    };
     let mut closure: TokenStream = toks[..body_start].iter().cloned().collect();
     closure.extend(emitted);
-    fip_fn_wrapper(
-        &strict_scan.krate(),
-        limited(strict_scan.emit_fip_fn_bound(local), limit),
-        closure,
-        no_panic,
-    )
+    fip_fn_wrapper(&strict_scan.krate(), bound, closure, no_panic)
 }
+
+/// The bound of a `fip_fn!` closure under Verus's driver: the same `N` as the plain
+/// build, as a literal (Verus cannot evaluate certificate reads, `Cert::allocs_for`
+/// or `const` blocks of them), checked against `bound <= K` here.
+fn verus_closure_bound(
+    scan: &strict::StrictScan,
+    local: u64,
+    limit: Option<u64>,
+    at: Span,
+) -> Result<TokenStream, TokenStream> {
+    let Some(n) = scan.literal_fip_fn_bound(local) else {
+        return Err(compile_error(at, FIP_FN_VERUS_CALLS));
+    };
+    if let Some(k) = limit
+        && n > k
+    {
+        return Err(compile_error(
+            at,
+            &format!("fip_fn!: the allocation bound exceeds the declared `bound <= {k}`"),
+        ));
+    }
+    Ok(format!("{n}u64").parse().unwrap_or_default())
+}
+
+/// The error for a `fip_fn!` closure that calls certified functions, under Verus's
+/// driver: its bound `N` is a sum of certificate reads that only the plain build
+/// evaluates, so no literal `N` exists for the Verus build's `Certified<N, _>`.
+const FIP_FN_VERUS_CALLS: &str = "fip_fn!: under Verus, a closure that calls certified functions (or `param(..)` callables, or trait methods) has no literal allocation bound: its bound is a sum of certificates that only the plain build evaluates, and the value's type `Certified<N, _>` must be the same in both builds; name a function instead (`fip_fn!(bound <= K, path)`, whose type is `Certified<K, _>` in both builds) or call no certified function in the closure";
 
 /// A leading `panic_macros = false,` (after `crate = ..`): the closure body is
 /// scanned with `panic_macros = false` (no panicking macro), a path must name a
@@ -5046,16 +5105,22 @@ fn bound_limit(toks: Vec<TokenTree>) -> Result<(Option<u64>, Vec<TokenTree>), To
 
 /// The bound block `{ checks; sum }`, asserting `sum <= limit` if a limit is given.
 /// Evaluated with the value's type (also by `cargo check`), where the closure or
-/// function is written.
-fn limited(bound: TokenStream, limit: Option<u64>) -> TokenStream {
+/// function is written. The block's value is `sum`, or the limit `K` itself when
+/// `to_limit` (the path form: `Certified<K, _>`, the type the Verus build names too).
+fn limited(bound: TokenStream, limit: Option<u64>, to_limit: bool) -> TokenStream {
     let Some(k) = limit else {
         return bound;
+    };
+    let value = if to_limit {
+        format!("{k}u64")
+    } else {
+        "__fip_fn_bound".to_string()
     };
     let mut out: TokenStream = "let __fip_fn_bound: u64 = ".parse().unwrap_or_default();
     out.extend([TokenTree::Group(Group::new(Delimiter::Brace, bound))]);
     out.extend(
         format!(
-            "; ::core::assert!(__fip_fn_bound <= {k}u64, {:?}); __fip_fn_bound",
+            "; ::core::assert!(__fip_fn_bound <= {k}u64, {:?}); {value}",
             format!("fip_fn!: the allocation bound exceeds the declared `bound <= {k}`")
         )
         .parse::<TokenStream>()
@@ -5394,9 +5459,11 @@ fn fn_path_shape(toks: &[TokenTree]) -> bool {
 /// `fip_fn!(path)`: the function at `path` with the bound of its certificate, read
 /// as a strict call of it reads it (`Cert::allocs_for(__fip_strict_f, "f")`, the
 /// `#[fip_impl]` / `#[fip_trait]` certificates for methods, the audited `core`
-/// table, std constructors as allocation sites). A function without a certificate
-/// fails to compile as a strict call of it does. No `unsafe` at the call site: the
-/// macro output pairs the function with its own certificate's bound.
+/// table, std constructors as allocation sites); with `bound <= K` the bound is `K`,
+/// checked against the certificate's. A function without a certificate fails to
+/// compile as a strict call of it does. No `unsafe` at the call site: the macro output
+/// pairs the function with its own certificate's bound. Under Verus's driver no
+/// certificate is read: the bound is `K`, or 0 without `bound` (see `fip_fn!`).
 fn fip_fn_path(
     krate: Option<TokenStream>,
     toks: Vec<TokenTree>,
@@ -5432,6 +5499,18 @@ fn fip_fn_path(
             "fip_fn!: a capitalised path (a constructor, or a function, `static` or `const` named like one) cannot be certified; wrap a constructor in a closure, e.g. `fip_fn!(|x: T| Name(x))`",
         );
     }
+    if strict::under_verus() {
+        // Verus's driver: `Certified<K, _>` for `bound <= K`, as in the plain build;
+        // without `bound`, `Certified<0, _>` (the certificate `N` is a constant only
+        // the plain build evaluates). The plain build checks the certificate.
+        let k = limit.unwrap_or(0);
+        return fip_fn_wrapper(
+            &strict_scan.krate(),
+            format!("{k}u64").parse().unwrap_or_default(),
+            toks.into_iter().collect(),
+            no_panic,
+        );
+    }
     let local = u64::try_from(scan.sites.len()).unwrap_or(u64::MAX);
     let mut bound = TokenStream::new();
     if no_panic {
@@ -5443,7 +5522,7 @@ fn fip_fn_path(
         };
         bound.extend(checks);
     }
-    bound.extend(limited(strict_scan.emit_fip_fn_bound(local), limit));
+    bound.extend(limited(strict_scan.emit_fip_fn_bound(local), limit, true));
     fip_fn_wrapper(
         &strict_scan.krate(),
         bound,

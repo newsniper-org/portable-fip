@@ -28,8 +28,9 @@
 #   6. the driver's tests (unit tests, every fixture, the self-check, every installed
 #      target, the compile_fail examples) with the new toolchain; their diffs must be
 #      reviewed one by one before blessing (FIP_PRELINT_BLESS=1);
-#   7. the audit checklist: the pin sites to change (APPLY=1 rewrites the four of the
-#      driver) and the trusted tables to re-audit by hand against the new sources.
+#   7. the audit checklist: the pin site to change (APPLY=1 rewrites
+#      rust-toolchain.toml, from which build.rs and the justfile read the toolchain)
+#      and the trusted tables to re-audit by hand against the new sources.
 #
 # Logs and build directories go to $FIP_PRELINT_REPIN_DIR (default
 # /tmp/fip-prelint-repin-<version>), never to the repository's target/.
@@ -186,19 +187,11 @@ else
 fi
 
 step "7. audit checklist"
-echo "Pin sites (APPLY=1 rewrites the first four from $cur to $v):"
-pins=(
-  "tools/fip-prelint/rust-toolchain.toml"
-  "tools/fip-prelint/src/bin/cargo-fip-prelint.rs"
-  "tools/fip-prelint/tests/targets.rs"
-  "justfile"
-)
-for f in "${pins[@]}"; do grep -n "\"$cur\"" "$repo/$f" | sed "s|^|  $f:|"; done
+echo "Pin site (APPLY=1 rewrites it from $cur to $v): the driver's toolchain is read from"
+echo "it by tools/fip-prelint/build.rs (DEFAULT_TOOLCHAIN, the tests) and by the justfile (prelint_tc):"
+grep -n "\"$cur\"" "$repo/tools/fip-prelint/rust-toolchain.toml" | sed "s|^|  tools/fip-prelint/rust-toolchain.toml:|"
 if [ "${APPLY:-0}" = 1 ] && [ "$v" != "$cur" ]; then
   sed -i "s/^channel = \"$cur\"$/channel = \"$v\"/" "$repo/tools/fip-prelint/rust-toolchain.toml"
-  sed -i "s/^const DEFAULT_TOOLCHAIN: &str = \"$cur\";$/const DEFAULT_TOOLCHAIN: \&str = \"$v\";/" "$repo/tools/fip-prelint/src/bin/cargo-fip-prelint.rs"
-  sed -i "s/unwrap_or_else(|_| \"$cur\".to_string())/unwrap_or_else(|_| \"$v\".to_string())/" "$repo/tools/fip-prelint/tests/targets.rs"
-  sed -i "s/^prelint_tc := \"$cur\"$/prelint_tc := \"$v\"/" "$repo/justfile"
   echo "  rewritten to $v"
 fi
 cat <<EOF
@@ -215,8 +208,9 @@ Re-audit by hand against $sysroot/lib/rustlib/src/rust/library (trusted, not der
     adapters) and the drop_glue lang item used for drops;
   - tools/fip-prelint/src/analysis.rs: core never assigns Formatter::buf after
     building a Formatter (bindings of the std summaries);
-  - the Verus toolchain: the driver's rustc must be the installed Verus's
-    (\`verus --version\`), and the workspace MSRV (Cargo.toml rust-version, justfile msrv).
+  - the Verus toolchain: the driver's rustc must be the pinned Verus's
+    (\`just verus-pin\` checks it, tools/fip-prelint/verus-trusted.txt), and the
+    workspace MSRV (Cargo.toml rust-version, which the justfile's msrv reads).
 Then: amend docs/decisions/2026-11-01-fip-prelint.md, update README and TODOs, and run
 \`just ci\`.
 EOF

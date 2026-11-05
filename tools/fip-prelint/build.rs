@@ -21,5 +21,17 @@ fn main() {
     // (recorded in a Verus sidecar's `cfg` line).
     let host = std::env::var("TARGET").expect("TARGET");
     println!("cargo:rustc-env=FIP_PRELINT_HOST={host}");
+    // The pinned toolchain, read from `rust-toolchain.toml` (its only pin site): the
+    // default of `FIP_PRELINT_TOOLCHAIN` in `cargo-fip-prelint` and the driver tests.
+    let pin = std::fs::read_to_string("rust-toolchain.toml").expect("read rust-toolchain.toml");
+    let channel = pin
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once('=')?;
+            (k.trim() == "channel").then(|| v.trim().trim_matches('"').to_string())
+        })
+        .expect("`channel = \"..\"` in rust-toolchain.toml");
+    println!("cargo:rustc-env=FIP_PRELINT_DEFAULT_TOOLCHAIN={channel}");
+    println!("cargo:rerun-if-changed=rust-toolchain.toml");
     println!("cargo:rerun-if-changed=build.rs");
 }

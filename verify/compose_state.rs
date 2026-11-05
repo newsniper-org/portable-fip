@@ -24,10 +24,18 @@
 //! - `odd_count` / `keep_odd`: the same for `compact_map_st`, naming the witnesses with
 //!   `compact_map_st_by_witnesses`; `keep_odd`'s count is bounded by the invariant `c <= k`.
 //!
+//! Allocation (the Verus fork's `allocates`, checked with `-V alloc-check`): the step
+//! functions and every `fip_fn!` closure carry `allocates 0`, which Verus proves. The
+//! callers of `fip_core` carry none yet: Verus refuses `allocates` on a caller of a
+//! function without an `allocates` specification ("cannot bound the allocations of
+//! this call", measured 2026-11-06), and `fip_core` / `fip_strict` get theirs in
+//! phases 2 and 3 of decision 2026-11-06-redesign-verus-allocates (then the callers get
+//! `allocates 0` and the adapter hints of its section 4).
+//!
 //! `just verify-negative` checks that wrong final claims, a missing invariant, an
 //! invariant the step does not preserve, a closure without its spec attribute, a
-//! closure whose body breaks its `ensures` and wrong claims through the adapters
-//! are rejected.
+//! closure whose body breaks its `ensures`, wrong claims through the adapters and an
+//! allocation in a step or closure bounded by `allocates 0` are rejected.
 #![no_std]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #[cfg(verus_keep_ghost)]
@@ -45,6 +53,7 @@ use vstd::prelude::*;
     ensures
         r.0 == if c < 1000 { (c + 1) as u32 } else { c },
         r.1 == r.0,
+    allocates 0
 ))]
 pub fn tick(c: u32, _x: u32) -> (u32, u32) {
     let n = if c < 1000 { c + 1 } else { c };
@@ -78,6 +87,7 @@ pub fn counter(xs: &mut [u32]) -> u32 {
     ensures
         r.0 == c + 1,
         r.1 == r.0,
+    allocates 0
 ))]
 pub fn tick_checked(c: u32, _x: u32) -> (u32, u32) {
     (c + 1, c + 1)
@@ -110,7 +120,8 @@ pub fn number_from_11(xs: &mut [u32]) -> u32 {
 /// `number_from_11` through `fip_core::strict::map_in_place_st`: `tick_checked` as a
 /// `FipFn` value (`fip_fn!(tick_checked)`, a `Certified` whose `pre` / `post` are the
 /// function's `requires` / `ensures`), with the allocation bound of its generated
-/// certificate and no `unsafe` here.
+/// certificate in the plain build (`Certified<0, _>` under Verus, which reads no
+/// certificate) and no `unsafe` here.
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
         old(xs)@.len() < 990,
@@ -155,6 +166,7 @@ pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
             ensures
                 r.0 == c + 1,
                 r.1 == r.0,
+            allocates 0
         ))]
         |c: u32, _x: u32| (c + 1, c + 1)
     );
@@ -183,7 +195,7 @@ pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
 ))]
 pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
     let g = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
         |x: u32| x * 2
     );
     let f = fip_strict::Stateless(g);
@@ -208,11 +220,11 @@ pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
 ))]
 pub fn quadrupled(xs: &mut [u32]) {
     let d1 = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
         |x: u32| x * 2
     );
     let d2 = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
         |x: u32| x * 2
     );
     let _hole = fip_core::strict::map_in_place(xs, 0, fip_strict::Compose(d1, d2));
@@ -239,11 +251,12 @@ pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
             ensures
                 r.0 == c + 1,
                 r.1 == r.0,
+            allocates 0
         ))]
         |c: u32, _x: u32| (c + 1, c + 1)
     );
     let d = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
         |x: u32| x * 2
     );
     let f = fip_strict::Then(t, fip_strict::Stateless(d));
@@ -266,6 +279,7 @@ pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
         r.0 == if x % 2 == 1 && c < 1000 { (c + 1) as u32 } else { c },
         r.1 == x,
         r.2 == (x % 2 == 1),
+    allocates 0
 ))]
 pub fn count_odd(c: u32, x: u32) -> (u32, u32, bool) {
     let odd = x % 2 == 1;
@@ -295,6 +309,7 @@ pub fn odd_count(xs: &mut [u32]) -> u32 {
         r.0 == if x % 2 == 1 { c + 1 } else { c as int },
         r.1 == x,
         r.2 == (x % 2 == 1),
+    allocates 0
 ))]
 pub fn count_odd_checked(c: u32, x: u32) -> (u32, u32, bool) {
     let odd = x % 2 == 1;

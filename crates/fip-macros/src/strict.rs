@@ -2002,6 +2002,16 @@ impl StrictScan {
         (items, stmt)
     }
 
+    /// The bound of a `fip_fn!` closure as a literal: `local` when the body calls no
+    /// certified function and no `param(..)` callable (no certificate to read), else
+    /// `None`. Under Verus's driver this literal is the value's `ALLOCS`, the same
+    /// number the plain build's constant evaluation of [`Self::emit_fip_fn_bound`]
+    /// yields.
+    pub(crate) fn literal_fip_fn_bound(&self, local: u64) -> Option<u64> {
+        (self.calls.is_empty() && self.param_calls.is_empty() && self.trait_checks.is_empty())
+            .then_some(local)
+    }
+
     /// `checks; sum`: the body of the const argument giving a `fip_fn!` closure's bound.
     pub(crate) fn emit_fip_fn_bound(&self, local: u64) -> TokenStream {
         let mut body = self.checks("fip_fn!", u64::MAX, local, false);

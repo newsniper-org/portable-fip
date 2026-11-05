@@ -23,7 +23,8 @@ use std::process::Command;
 const NO_STD_PACKAGES: &[&str] = &["fip-core", "fip-alloc", "fip-arch", "fip-strict"];
 
 fn toolchain() -> String {
-    std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".to_string())
+    std::env::var("FIP_PRELINT_TOOLCHAIN")
+        .unwrap_or_else(|_| env!("FIP_PRELINT_DEFAULT_TOOLCHAIN").to_string())
 }
 
 /// A test (or part) skipped for a missing target, tool or host: a failure under

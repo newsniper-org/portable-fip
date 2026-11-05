@@ -29,6 +29,37 @@ fn skipped(msg: &str) {
     eprintln!("{msg}");
 }
 
+/// The trusted Verus pin (`verus-trusted.txt`), replaced in compared output by
+/// `<trusted verus>`, `<trusted commit>` and `<trusted z3>`, so a re-pin changes no
+/// expected file: `(version, 12-digit commit prefix, Z3 version)`.
+fn trusted_pin() -> (String, String, String) {
+    let text = include_str!("../verus-trusted.txt");
+    let mut pin = (String::new(), String::new(), String::new());
+    for l in text.lines().filter(|l| !l.starts_with('#')) {
+        match l.split_whitespace().collect::<Vec<_>>()[..] {
+            ["verus", v, c] => {
+                pin.0 = v.to_string();
+                pin.1 = c.chars().take(12).collect();
+            }
+            ["z3", z] => pin.2 = z.to_string(),
+            _ => {}
+        }
+    }
+    assert!(
+        !pin.0.is_empty() && pin.1.len() == 12 && !pin.2.is_empty(),
+        "verus-trusted.txt names no Verus version, commit or Z3"
+    );
+    pin
+}
+
+/// `line` with the trusted pin's words replaced by placeholders ([`trusted_pin`]).
+fn unpin(line: &str) -> String {
+    let (v, c, z) = trusted_pin();
+    line.replace(&format!("Verus {v} "), "Verus <trusted verus> ")
+        .replace(&format!("({c})"), "(<trusted commit>)")
+        .replace(&format!("Z3 {z}"), "Z3 <trusted z3>")
+}
+
 fn run(name: &str, variant: &str, envs: &[(&str, std::ffi::OsString)]) -> Vec<String> {
     run_args(name, variant, envs, &["--message-format", "short"])
 }
@@ -83,7 +114,7 @@ fn run_at(
         .filter(|l| {
             !l.trim_start().starts_with("Checking") && !l.trim_start().starts_with("Compiling")
         })
-        .map(|l| l.trim_end().to_string())
+        .map(|l| unpin(l.trim_end()))
         .collect();
     lines.sort();
     lines.dedup();
@@ -903,7 +934,7 @@ fn verus_sidecar_refused() {
     let d = copy_fixture("verus_sidecar", "verus_stamp");
     edit(
         &d.join("vside/verus-verified.txt"),
-        "verus 0.2026.10.18.7d82994 ",
+        &format!("verus {} ", trusted_pin().0),
         "verus 0.2026.10.31.559ac52 ",
     );
     compare(
