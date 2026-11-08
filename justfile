@@ -93,8 +93,15 @@ verus-pin:
     if [ "$got_v" != "$want_v" ] || [ "$got_c" != "$want_c" ]; then
       echo "FAIL: \`{{verus}}\` is Verus $got_v (commit $got_c): $hint"; exit 1
     fi
-    if [ "${got_tc%%-*}" != "{{prelint_tc}}" ]; then
-      echo "FAIL: Verus $got_v is built on toolchain $got_tc, fip-prelint on {{prelint_tc}} (tools/fip-prelint/rust-toolchain.toml)"; exit 1
+    # `toolchain` is `<channel>-<host triple>`. The channel itself may contain `-`
+    # (`beta-2026-11-05`), so compare the whole string against the pinned channel and
+    # this host's triple; a floating channel (`beta`) does not match a dated build.
+    host=$(rustc +{{prelint_tc}} -vV 2> /dev/null | awk '/^host:/ {print $2}') || true
+    if [ -z "$host" ]; then
+      echo "FAIL: cannot run \`rustc +{{prelint_tc}} -vV\` (install the fip-prelint toolchain, tools/fip-prelint/rust-toolchain.toml)"; exit 1
+    fi
+    if [ "$got_tc" != "{{prelint_tc}}-$host" ]; then
+      echo "FAIL: Verus $got_v is built on toolchain $got_tc, fip-prelint on {{prelint_tc}}-$host (tools/fip-prelint/rust-toolchain.toml)"; exit 1
     fi
     if [ -n "${VERUS_Z3_PATH:-}" ]; then z3=$VERUS_Z3_PATH; else z3=$(dirname "$(readlink -f "$(command -v {{verus}})")")/z3; fi
     got_z3=$("$z3" --version 2> /dev/null | awk '/Z3 version/ {print $3}') || true
