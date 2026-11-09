@@ -12,11 +12,11 @@ Schedule note (user, 2026-11-06): stable Rust 1.100.0 is due in 7 days, and the 
 plans its 1.100 rebase (custom allocators then); keep every toolchain- and
 Verus-version pin in one place so the rebase is a re-pin, not a redesign.
 
-**Phase 5 proposed** 2026-11-09 (D7, section 7), awaiting the user's review: `strict`
+**Phase 5 accepted** by the user 2026-11-09 (D7, section 7): `strict`
 becomes the one-declaration contract generator checked by Verus, `total` the strictest
 grade; the fork's `#[verifier::fip]`/`fip(strict)` were audited first and are used only
-where they are sound and work across crates. Implementation follows the re-pin to fork
-`fip-beta` and the user's decision.
+where they are sound and work across crates. The re-pin to fork `fip-beta` is merged;
+implementation is next.
 
 **Phase 1 implemented** 2026-11-06 (section 5): fork pin and flags, `fip_fn!` Verus arm,
 regenerated sidecars, strip gate `just verify-upstream`. Details: section 5 and
@@ -478,7 +478,7 @@ but without the hints: 2 fail. A bound of the form
 | 2. proofs in `fip-core` / `fip-alloc` | marker traits; `allocates` on the 9 `Fn`-based functions and `refill`; sum spec functions and the zero lemmas; README table rows; `verus_drift.rs` updated; allocation mutants (a bound lowered, a `Box::new` in a callback of an `allocates 0` caller) | `-V alloc-check` gate; strip gate on 11.02; mutants fail | plain API (bounds hold for every type), `no_std`, no `vstd` | 1–2 days |
 | 3. `fip-strict` / strict variants | `FipFn::allocs`, `Certified::pre`, per-arity `Compose` (to `MAX_ARITY`), `unsafe impl AllocFreeDrop` for `Certified`/adapters, bounds on `fip_core::strict::*`, `compose*.rs` with `allocates` | as phase 2; `hand_written_certs` reviewed (new `unsafe impl`s are Verus-only) | plain strict mode | 1–2 days |
 | 4. driver | sidecar format 5 (bounds, flags), consumption rules (2.4), cfg-divergence taint closing the open hole for panics and allocation, unification or exclusion of the twin `FipFn` impls | driver fixtures for each refusal; self-check | panic sidecar behaviour | 3–5 days |
-| 5. strict-mode fate | proposed 2026-11-09, section 7 (awaiting review): `strict` = one-declaration contract generator checked by Verus; `total` = the strictest grade, mapped onto the fork's `no_unwind`/`#[verifier::fip]` where they apply and onto `fip-prelint` elsewhere | section 7.5 | plain strict mode (`strict = true` keeps its meaning) | 3–6 days *(estimate)* |
+| 5. strict-mode fate | accepted 2026-11-09, section 7: `strict` = one-declaration contract generator checked by Verus; `total` = the strictest grade, mapped onto the fork's `no_unwind`/`#[verifier::fip]` where they apply and onto `fip-prelint` elsewhere | section 7.5 | plain strict mode (`strict = true` keeps its meaning) | 3–6 days *(estimate)* |
 
 In parallel, requests to the fork: `AllocFreeDrop` for 1-tuples and longer tuples;
 a way for non-`Copy` closures to pass the drop rule in generic `F` positions; a
@@ -504,18 +504,19 @@ that trait-declaration bounds are clamped at 0.
   `beta-2026-11-05`, and keeps the workspace MSRV at 1.99.1 (`just msrv` passes on
   1.99.1; nothing needs 1.100). See the amendment of that date in
   `2026-11-01-fip-prelint.md`.
-- **D7, phase 5 (proposed 2026-11-09, awaiting the user's review):** names and roles
-  were agreed on 2026-11-06 (chat); the design of section 7 is not yet reviewed: `strict` is the
+- **D7, phase 5 (ACCEPTED by the user 2026-11-09):** names and roles agreed on
+  2026-11-06 (chat), the design of section 7 approved on 2026-11-09: `strict` is the
   contract generator, `total` the strictest grade; neither duplicates the fork's
   `#[verifier::fip]`/`fip(strict)`, both map onto them where those are sound and usable
   across crates.
 
-## 7. Phase 5: `strict` and `total` (proposed 2026-11-09)
+## 7. Phase 5: `strict` and `total` (accepted 2026-11-09)
 
-**Status:** PROPOSED, awaiting the user's review. The names and roles of `strict` and
+**Status:** ACCEPTED by the user, 2026-11-09. The names and roles of `strict` and
 `total` were agreed in the 2026-11-06 discussion (chat, not recorded before this
-section); the design below is new. Implementation after the re-pin to the fork's
-`fip-beta` branch (Rust 1.100) and the user's decision. Facts marked *measured* were measured on fork `fip-beta`
+section); the design below was reviewed and approved on 2026-11-09. The re-pin to the
+fork's `fip-beta` branch (Rust 1.100) is merged into this branch; implementation is
+next. Facts marked *measured* were measured on fork `fip-beta`
 `6f6975af2` (`0.2026.11.08.6f6975a`, clean build) during the fork audit of 2026-11-07..09
 (probes under `/home/ybi/pfip-recheck-tmp/fipbeta/`); everything else is design,
 *unmeasured*.
