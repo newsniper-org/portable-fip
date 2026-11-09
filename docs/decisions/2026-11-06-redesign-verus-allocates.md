@@ -12,6 +12,11 @@ Schedule note (user, 2026-11-06): stable Rust 1.100.0 is due in 7 days, and the 
 plans its 1.100 rebase (custom allocators then); keep every toolchain- and
 Verus-version pin in one place so the rebase is a re-pin, not a redesign.
 
+**Phase 5 decided** 2026-11-09 (D7, section 7): `strict` becomes the one-declaration
+contract generator checked by Verus, `total` the strictest grade; the fork's
+`#[verifier::fip]`/`fip(strict)` were audited first and are used only where they are
+sound and work across crates. Implementation follows the re-pin to fork `fip-beta`.
+
 **Phase 1 implemented** 2026-11-06 (section 5): fork pin and flags, `fip_fn!` Verus arm,
 regenerated sidecars, strip gate `just verify-upstream`. Details: section 5 and
 `docs/decisions/2026-10-31-verification-layout.md`.
@@ -472,7 +477,7 @@ but without the hints: 2 fail. A bound of the form
 | 2. proofs in `fip-core` / `fip-alloc` | marker traits; `allocates` on the 9 `Fn`-based functions and `refill`; sum spec functions and the zero lemmas; README table rows; `verus_drift.rs` updated; allocation mutants (a bound lowered, a `Box::new` in a callback of an `allocates 0` caller) | `-V alloc-check` gate; strip gate on 11.02; mutants fail | plain API (bounds hold for every type), `no_std`, no `vstd` | 1–2 days |
 | 3. `fip-strict` / strict variants | `FipFn::allocs`, `Certified::pre`, per-arity `Compose` (to `MAX_ARITY`), `unsafe impl AllocFreeDrop` for `Certified`/adapters, bounds on `fip_core::strict::*`, `compose*.rs` with `allocates` | as phase 2; `hand_written_certs` reviewed (new `unsafe impl`s are Verus-only) | plain strict mode | 1–2 days |
 | 4. driver | sidecar format 5 (bounds, flags), consumption rules (2.4), cfg-divergence taint closing the open hole for panics and allocation, unification or exclusion of the twin `FipFn` impls | driver fixtures for each refusal; self-check | panic sidecar behaviour | 3–5 days |
-| 5. strict-mode fate | per D1: plain certificates derived from proved bounds (driver-checked), or token-level only for unverified code, or deprecation | per choice | — | 1–5 days |
+| 5. strict-mode fate | decided 2026-11-09, section 7: `strict` = one-declaration contract generator checked by Verus; `total` = the strictest grade, mapped onto the fork's `no_unwind`/`#[verifier::fip]` where they apply and onto `fip-prelint` elsewhere | section 7.5 | plain strict mode (`strict = true` keeps its meaning) | 3–6 days *(estimate)* |
 
 In parallel, requests to the fork: `AllocFreeDrop` for 1-tuples and longer tuples;
 a way for non-`Copy` closures to pass the drop rule in generic `F` positions; a
@@ -493,6 +498,89 @@ that trait-declaration bounds are clamped at 0.
 - **D5, trust pin:** the fork commit as the only trusted Verus for allocation claims;
   keep the upstream strip gate (recommended).
 - **D6, toolchain/MSRV:** no change now (1.99.1 on both); revisit when the fork rebases.
+- **D7, phase 5 (decided 2026-11-09):** names and roles as in section 7: `strict` is the
+  contract generator, `total` the strictest grade; neither duplicates the fork's
+  `#[verifier::fip]`/`fip(strict)`, both map onto them where those are sound and usable
+  across crates.
+
+## 7. Phase 5: `strict` and `total` (decided 2026-11-09)
+
+**Status:** DECIDED by the user (names and roles, 2026-11-06 discussion, confirmed
+2026-11-09); design below, implementation after the re-pin to the fork's `fip-beta`
+branch (Rust 1.100). Facts marked *measured* were measured on fork `fip-beta`
+`6f6975af2` (`0.2026.11.08.6f6975a`, clean build) during the fork audit of 2026-11-07..09
+(probes under `/home/ybi/pfip-recheck-tmp/fipbeta/`); everything else is design,
+*unmeasured*.
+
+### 7.1 Roles
+
+- **`strict`** (option 1 of the earlier discussion): a *single declaration* from which
+  both builds get their contract. `#[fip(N, strict, requires(..))]` keeps the plain
+  certificate (token scan, `Cert`, `param(..)`) and, in a Verus build, also emits the
+  `verus_spec` with the same `requires` and `allocates N`, so the number the plain
+  certificate states is the number Verus proves. Verus checks; the macro never trusts
+  its own scan when Verus is present. `strict = true` stays as an alias of `strict`.
+  Today `requires(..)` is written twice (the macro cannot read a following
+  `cfg_attr(verus_keep_ghost, verus_spec(..))`, measured on 1.97.1 and 1.99.1, crate
+  docs of `fip-macros`); generating it removes that duplication and the drift check.
+- **`total`** (option 2): the strictest grade, a superset of `strict`:
+  allocation 0; termination (`decreases`); no panic and no unwind; no free on a normal
+  return (F2); bounded stack. It absorbs `panic_macros = false`.
+
+### 7.2 What the fork offers, and whether `total` can use it
+
+| property of `total` | fork mechanism | usable? (measured on `6f6975af2`) | so `total` uses |
+|---|---|---|---|
+| allocation 0 | `allocates 0` with `-V alloc-check` | yes; the fork audit found no remaining false bound with the global allocator | Verus, via the `strict` generator (`allocates 0`) |
+| termination | `decreases` | upstream Verus feature, not re-measured in this audit | Verus `decreases`, emitted by the macro when the item recurses |
+| no panic / unwind | `no_unwind` plus overflow and bounds obligations | upstream Verus feature, not re-measured in this audit | Verus `no_unwind`; `fip-prelint` panic sidecar for unverified callers |
+| no free on normal return (F2) | `#[verifier::fip]` | sound in every probe with the global allocator and with library `FipAllocator`s; but closure calls, generic trait-method calls, `?`, `v[i]`, `for` and slice `len` are rejected, and `mem::forget` counts as no free (a leak is allowed) | `#[verifier::fip]` only for non-callback functions (`swap`, `replace`, `refill`-like); `fip-prelint`'s MIR F2 check for everything, and as the only check for callback combinators |
+| bounded stack | `#[verifier::fip(strict)]` | sound after the fixes, but **local only**: a strict function cannot call a function of another crate, nor drop a value whose `Drop` is in another crate (`fipdrop3/xc/u10_strict_libH.rs`) | `fip-prelint --stack` (unchanged); a library cannot offer `fip(strict)` functions to user crates |
+| custom allocators | `BoundedAllocator`, `FipAllocator` | a verified `unsafe impl Allocator` can keep the permission for a block it handed to std and write through it (`toolchain/r4/scribble.rs`: `ensures r == 5` verified under `--no-cheating`, run returns 0); reported to the fork 2026-11-09 | `total` (and `strict` claims checked by Verus) assume the global allocator; a user `Allocator`/`GlobalAlloc` impl is a trust point the gate reports |
+
+So `total` is not a new Verus mode: it is a grade whose Verus part is
+`allocates 0` + `decreases` + `no_unwind` (+ `#[verifier::fip]` where the function takes
+no callback), and whose remaining parts (F2 for callbacks, stack, unverified code) stay
+with `fip-prelint`. `fip-prelint` keeps refusing a `total` mark it cannot discharge.
+
+### 7.3 Callback combinators
+
+`fip_core`'s `Fn`-based functions and `_st` variants call closures. Under the fork,
+`#[verifier::fip]` rejects every closure call (measured), and `-V alloc-check` already
+needs `DropFreeFn` (= `Copy`, D2). Until the fork offers a closure form of `fip` and
+`no_unwind` (requests already filed: closure `no_unwind`, non-`Copy` closures through
+the drop rule), a combinator is `total` only *relative to its callback*: the macro emits
+`allocates` as the callbacks' sum (as phase 2 does), `no_unwind` with a requirement on the
+callback *(unmeasured: whether Verus can state "the callback does not unwind")*, and F2 is
+checked by `fip-prelint` at each instantiation.
+
+### 7.4 Gates added with the re-pin (branch `repin/fip-beta`)
+
+From the fork audit, independent of phase 5 but required for any Verus-backed claim:
+every verified crate runs with `--no-cheating` (it does not reach dependencies: a
+dependency verified without it may hide a `#[verifier::trusted_call]`, measured
+`toolchain/r3/lib1.rs` + `use1.rs`); `#[verifier::trusted_call]` and `--is-vstd` are
+refused; `unsafe impl Allocator`/`GlobalAlloc` in a verified crate is a reported trust
+point (7.2).
+
+### 7.5 Steps
+
+1. `fip-macros`: parse `strict` and `total` (`strict = true` alias; `total` implies
+   `strict`, `panic_macros = false` and bound 0); in a Verus build emit `verus_spec`
+   (`requires`, `allocates N`, and for `total` `no_unwind` and `decreases` when given) and
+   `#[verifier::fip]` for `total` functions without callable parameters. Plain build
+   unchanged apart from the `fip::mark` carrying `total`.
+2. `fip-prelint`: a `total` mark is discharged only if the Verus sidecar lists the
+   function with `allocates 0` and the flags of 7.4, and the driver's own F2, stack and
+   panic checks pass for the instance; otherwise ⊤ with the reason.
+3. Apply to `fip_core`/`fip_alloc`: `swap`, `swap_lt`, `replace`, `refill` as `total`;
+   the combinators as `strict` with callback-relative bounds (7.3).
+4. Gates: a mutant per property (an allocation, a missing `decreases`, a panic path, a
+   free, a deep recursion) must be rejected by the check that owns it; the strip gate
+   on upstream 11.02 keeps passing.
+5. Revisit when the fork answers the cross-crate `fip(strict)` request (2026-11-09) and
+   the closure `fip`/`no_unwind` requests: each answer can move one row of 7.2 from
+   `fip-prelint` to Verus.
 
 ## Probe files
 
