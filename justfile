@@ -357,6 +357,13 @@ verify-negative: verify-strict verify-core
     expect_verus_fail compact-map-no-swap  fip-core  slice.rs "/^pub fn compact_map</,/^}/ { s/^                swap_lt(xs, w, r);\$//; $no_swap_asserts }" "$cmap_order"
     expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$spec"
     expect_verus_fail refill-no-swap       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$//' "$spec"
+    # Phase 5: the macro merges generated clauses into the hand-written `verus_spec`;
+    # these show the hand-written `ensures` of every `strict`/`total` function still
+    # binds after the merge, and that the generated `requires` is really emitted.
+    expect_verus_fail swap-lt-no-swap      fip-core  slice.rs '/^pub(crate) fn swap_lt</,/^}/ { s/^    ::core::mem::swap(&mut a\[i\], &mut b\[0\]);$//; /^        assert(final(xs)@ =~= /d }' "$spec"
+    expect_verus_fail swap-no-op           fip-core  slice.rs '/^pub fn swap</,/^}/ { s/^        swap_lt(xs, lo, hi);$//; /^        assert(final(xs)@ =~= /d }' "$spec"
+    expect_verus_fail replace-keeps-slot   fip-core  slot.rs  '/^pub fn replace</,/^}/ s/^    ::core::mem::swap(slot, &mut v);$//' "$spec"
+    expect_verus_fail swap-lt-requires-dropped fip-core slice.rs 's/#\[fip_macros::fip(strict, requires(i < j, j < xs.len()))\]/#[fip_macros::fip(strict, requires(j < xs.len()))]/' 'precondition not met: index in bounds'
     # Allocation bounds (`allocates`, decision 2026-11-06-redesign-verus-allocates, phase 2):
     # each mutant must fail a verification condition whose reported span is the
     # allocation layer (an `allocates` clause, an `allocated()` invariant or a
