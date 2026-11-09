@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-//! Drift guard for `requires(..)` in `fip-core`. There `#[fip]` is compiled out under
-//! Verus (`cfg_attr(not(verus_keep_ghost), fip_macros::fip(..))`), so the macro never
-//! sees the `verus_spec` next to it and cannot compare the two (it does where it sees
-//! both, e.g. `verify/compose.rs`). This test reads the sources instead: every
-//! conjunct of a `requires(..)` inside `fip_macros::fip(..)` must be among the
-//! conjuncts of the `requires` of the `verus_spec` that follows it.
+//! Guard for `requires(..)` in `fip-core`. Since phase 5 of decision
+//! 2026-11-06-redesign-verus-allocates the attribute `#[fip_macros::fip(..)]` runs in
+//! the Verus build too and, for `strict`/`total`, generates the Verus `requires` from
+//! `requires(..)`: one declaration, so the two cannot drift. This test reads the
+//! sources and checks that this holds for every `requires(..)` there: the attribute is
+//! `strict` or `total` (only then is the Verus `requires` generated), it is not
+//! compiled out under Verus (`cfg_attr(not(verus_keep_ghost), ..)`, which the crate
+//! used before phase 5), and the hand-written `verus_spec` after it has no `requires`
+//! of its own (the macro rejects that under Verus; this test also catches it in a
+//! plain `cargo test`).
 
 use std::path::Path;
-
-use fip_lint_rules::requires::{display, from_verus, not_in, parse};
 
 /// The text inside the parentheses that open at `open` (a `(`).
 fn group(s: &str, open: usize) -> &str {
@@ -30,22 +32,42 @@ fn group(s: &str, open: usize) -> &str {
     &s[open + 1..]
 }
 
-/// `(function head, fip requires, verus spec)` of every `fip_macros::fip(..)` with a
-/// `requires(..)` in `src`; the spec is empty if no `verus_spec` follows before the
-/// function's `fn`.
-fn pairs(src: &str) -> Vec<(String, String, String)> {
+/// One `fip_macros::fip(..)` attribute with `requires(..)`.
+struct Site {
+    /// The item's `fn` line.
+    head: String,
+    /// The attribute's arguments.
+    args: String,
+    /// The arguments of the `verus_spec(..)` between the attribute and the `fn`, if
+    /// any.
+    spec: String,
+    /// The attribute sits in `cfg_attr(not(verus_keep_ghost), ..)`.
+    compiled_out: bool,
+}
+
+/// Every `fip_macros::fip(..)` attribute with a `requires(..)` that starts a line of
+/// code (doc comments and strings are skipped).
+fn sites(src: &str) -> Vec<Site> {
     let mut out = Vec::new();
-    let mut at = 0;
-    while let Some(k) = src[at..].find("fip_macros::fip(") {
-        let open = at + k + "fip_macros::fip".len();
-        let args = group(src, open);
-        at = open + 1;
-        let Some(r) = args.find("requires(") else {
+    let mut offset = 0;
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    for (n, line) in lines.iter().enumerate() {
+        let start = offset;
+        offset += line.len();
+        let t = line.trim_start();
+        let rel = if t.starts_with("#[fip_macros::fip(") {
+            "#[fip_macros::fip".len()
+        } else if t.starts_with("fip_macros::fip(") {
+            "fip_macros::fip".len()
+        } else {
             continue;
         };
-        let fip = group(args, r + "requires".len()).to_string();
+        let open = start + (line.len() - t.len()) + rel;
+        let args = group(src, open);
+        if !args.contains("requires(") {
+            continue;
+        }
         let rest = &src[open + args.len()..];
-        // The item's own `fn`: the first of `\nfn ` and ` fn ` (not a later item's).
         let fn_at = [rest.find("\nfn "), rest.find(" fn ")]
             .into_iter()
             .flatten()
@@ -55,29 +77,51 @@ fn pairs(src: &str) -> Vec<(String, String, String)> {
             .find("verus_spec(")
             .map(|v| group(rest, v + "verus_spec".len()).to_string())
             .unwrap_or_default();
-        let line_start = rest[..=fn_at.min(rest.len().saturating_sub(1))]
-            .rfind('\n')
-            .map_or(0, |k| k + 1);
-        let head = rest[line_start..]
+        let head = rest[fn_at..]
             .lines()
             .find(|l| l.contains("fn "))
             .unwrap_or("")
             .trim()
             .to_string();
-        out.push((head, fip, spec));
+        let compiled_out = (n > 0 && lines[n - 1].contains("not(verus_keep_ghost)"))
+            || t.contains("not(verus_keep_ghost)");
+        out.push(Site {
+            head,
+            args: args.to_string(),
+            spec,
+            compiled_out,
+        });
     }
     out
 }
 
-/// The conjuncts of `fip` missing from the `requires` of `spec`.
-fn drift(fip: &str, spec: &str) -> Vec<String> {
-    let fip = parse(fip).expect("requires(..) parses");
-    let verus = from_verus(spec);
-    not_in(&fip, &verus).into_iter().map(display).collect()
+/// What is wrong with one site (empty: nothing).
+fn problems(s: &Site) -> Vec<String> {
+    let mut out = Vec::new();
+    let words: Vec<&str> = s
+        .args
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .collect();
+    if !words.iter().any(|w| *w == "strict" || *w == "total") {
+        out.push(
+            "`requires(..)` without `strict`/`total`: no Verus `requires` is generated".to_string(),
+        );
+    }
+    if s.compiled_out {
+        out.push("the attribute is compiled out under Verus".to_string());
+    }
+    let spec_words: Vec<&str> = s
+        .spec
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .collect();
+    if spec_words.contains(&"requires") {
+        out.push("the hand-written `verus_spec` states a `requires` of its own".to_string());
+    }
+    out
 }
 
 #[test]
-fn fip_core_requires_match_verus() {
+fn fip_core_requires_are_generated() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fip-core/src");
     let mut checked = Vec::new();
     for entry in std::fs::read_dir(&dir).expect("fip-core/src") {
@@ -86,40 +130,39 @@ fn fip_core_requires_match_verus() {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("read source");
-        for (head, fip, spec) in pairs(&src) {
-            assert!(
-                !spec.is_empty(),
-                "{}: `{head}` has `requires(..)` but no `verus_spec` after it",
-                path.display()
-            );
-            let missing = drift(&fip, &spec);
-            assert!(
-                missing.is_empty(),
-                "{}: `{head}`: `requires(..)` conjuncts not in the verus_spec requires: {missing:?}",
-                path.display()
-            );
-            checked.push(head);
+        for s in sites(&src) {
+            let p = problems(&s);
+            assert!(p.is_empty(), "{}: `{}`: {p:?}", path.display(), s.head);
+            checked.push(s.head);
         }
     }
-    // `slice::swap_lt` at least (its `#[fip]` is compiled out under Verus, so only
-    // this test compares its `requires(..)` with its `verus_spec`).
-    assert!(
-        checked.iter().any(|h| h.contains("fn swap_lt")),
-        "`swap_lt`'s `requires(..)` was not checked; checked: {checked:?}"
-    );
+    for f in ["fn swap_lt", "fn swap<"] {
+        assert!(
+            checked.iter().any(|h| h.contains(f)),
+            "`{f}`'s `requires(..)` was not checked; checked: {checked:?}"
+        );
+    }
 }
 
-/// The guard fails on a drifted copy (negative control).
+/// The guard fails on the forms it exists to reject (negative controls).
 #[test]
-fn drift_is_detected() {
-    let src = "#[cfg_attr(\n    not(verus_keep_ghost),\n    fip_macros::fip(strict = true, requires(i <= j, j < xs.len()))\n)]\n\
-               #[cfg_attr(verus_keep_ghost, verus_spec(\n    requires\n        i < j < old(xs)@.len(),\n))]\n\
-               pub(crate) fn swap_lt<T>(xs: &mut [T], i: usize, j: usize) {}\n";
-    let found = pairs(src);
+fn hand_written_or_compiled_out_requires_is_detected() {
+    let generated = "#[fip_macros::fip(strict, requires(i < j, j < xs.len()))]\n\
+                     #[cfg_attr(verus_keep_ghost, verus_spec(\n    ensures\n        true,\n))]\n\
+                     pub(crate) fn swap_lt<T>(xs: &mut [T], i: usize, j: usize) {}\n";
+    let found = sites(generated);
     assert_eq!(found.len(), 1);
-    let (_, fip, spec) = &found[0];
-    assert_eq!(drift(fip, spec), vec!["i <= j".to_string()]);
-    let ok = src.replace("i <= j", "i < j");
-    let (_, fip, spec) = &pairs(&ok)[0];
-    assert_eq!(drift(fip, spec), Vec::<String>::new());
+    assert_eq!(problems(&found[0]), Vec::<String>::new());
+    let twice = generated.replace(
+        "    ensures\n",
+        "    requires\n        i < j,\n    ensures\n",
+    );
+    assert_eq!(problems(&sites(&twice)[0]).len(), 1);
+    let not_strict = generated.replace("fip(strict, ", "fip(");
+    assert_eq!(problems(&sites(&not_strict)[0]).len(), 1);
+    let compiled_out = generated.replace(
+        "#[fip_macros::fip(strict, requires(i < j, j < xs.len()))]\n",
+        "#[cfg_attr(\n    not(verus_keep_ghost),\n    fip_macros::fip(strict, requires(i < j, j < xs.len()))\n)]\n",
+    );
+    assert_eq!(problems(&sites(&compiled_out)[0]).len(), 1);
 }

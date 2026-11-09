@@ -11,5 +11,5 @@ toolchain beta-2026-11-05-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu -
 verified 1
-source src/lib.rs 0640b4f21764ae168bc666dce6bcc324202fabdfe7ea615cada5b1b8bd6def3f
-fn fip_alloc::refill src/lib.rs:39 3974308de7d725cb8a817b331b96bd737515ea485bb13709f430283bcc734c9f - 0
+source src/lib.rs 0082d1277ac358966ab0a928d4438c12b883fb263bae7148611d3408c5a9aef6
+fn fip_alloc::refill src/lib.rs:42 00a3f094d455d93c5529a95c72fc7f39324573d6e7e7b745a203558669a34e80 - 0

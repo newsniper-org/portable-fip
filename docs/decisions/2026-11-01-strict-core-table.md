@@ -326,6 +326,14 @@ re-exports in each crate):
 `fip_core::strict::*` and the internal `swap_lt` carry generated certificates
 (`#[fip(strict = true)]` in plain builds).
 
+*Amended 2026-11-09 (phase 5 of decision 2026-11-06-redesign-verus-allocates):* the
+module `fip_strict::certs` is gone. `fip_core::swap` is `#[fip_macros::fip(strict,
+requires(..))]`, `fip_core::replace` and `fip_alloc::refill` are
+`#[fip_macros::fip(total)]`; their certificates are generated like any strict
+function's (`fip-core` re-exports `__fip_strict_swap` and `__fip_strict_replace` at its
+root), and no certificate is made without `unsafe` any more (pinned by
+`crates/fip-strict/tests/hand_written_certs.rs`).
+
 ## Name resolution the tokens cannot see (audit 2026-11-04)
 
 Each of these made a strict certificate lower than what the function allocates,

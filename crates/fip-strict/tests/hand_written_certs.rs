@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-//! `fip_strict::certs` is the one place where certificates are made without
-//! `Cert::assume`. Pins its exact contents: adding a certificate means updating this
-//! list and justifying the entry in `src/lib.rs`. Each certificate names the function
-//! its identifier is for.
+//! No certificate is made in this crate without `Cert::assume` (phase 5 of decision
+//! 2026-11-06-redesign-verus-allocates removed the module `certs`: the functions it
+//! certified are `#[fip(strict ..)]`/`#[fip(total)]` now, with generated
+//! certificates). Adding one means updating this test and justifying it.
 
 #[test]
 fn certificates_made_here_are_exactly_the_documented_ones() {
@@ -29,31 +29,14 @@ fn certificates_made_here_are_exactly_the_documented_ones() {
         made.push((ident, name));
     }
     made.sort();
-    let expected: Vec<(String, String)> = ["refill", "replace", "swap"]
-        .iter()
-        .map(|f| (format!("__fip_strict_{f}"), (*f).to_string()))
-        .collect();
-    assert_eq!(made, expected);
+    assert_eq!(made, Vec::<(String, String)>::new());
     // `Self { name, allocs, .. }` in `Cert::assume` and `Cert::assume_no_panic_macros`
-    // are the only other construction sites.
-    assert_eq!(src.matches("Cert {\n        name:").count(), 3);
+    // are the only construction sites.
+    assert_eq!(src.matches("Cert {\n        name:").count(), 0);
     assert_eq!(
         src.matches("Self {\n            name,\n            allocs,")
             .count(),
         2
-    );
-}
-
-#[test]
-fn certificates_carry_their_names() {
-    use fip_strict::certs::{__fip_strict_refill, __fip_strict_replace, __fip_strict_swap};
-    assert_eq!(__fip_strict_swap.allocs_for("swap"), 0);
-    assert_eq!(__fip_strict_replace.name(), "replace");
-    assert_eq!(__fip_strict_refill.name(), "refill");
-    let r = std::panic::catch_unwind(|| __fip_strict_swap.allocs_for("replace"));
-    assert!(
-        r.is_err(),
-        "a certificate must not be accepted for another name"
     );
 }
 

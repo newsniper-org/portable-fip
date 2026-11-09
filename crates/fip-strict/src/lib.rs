@@ -106,11 +106,13 @@
 //!
 //! ## Certificates for other portable-fip crates
 //!
-//! [`certs`] holds the hand-written certificates for functions of `fip-core` and
-//! `fip-alloc`, which re-export them. Being in this crate, they are built without
-//! `Cert::assume`, so those two crates keep `#![forbid(unsafe_code)]`. That makes
-//! [`certs`] the one place where a certificate is made without `unsafe`; its
-//! contents are pinned by a test and justified entry by entry.
+//! None is made here. Until phase 5 of decision 2026-11-06-redesign-verus-allocates a
+//! module `certs` held hand-written certificates for `fip_core::swap`,
+//! `fip_core::replace` and `fip_alloc::refill`; those functions are now declared
+//! `#[fip_macros::fip(strict ..)]` / `#[fip_macros::fip(total)]`, which generates
+//! their certificates (and, under Verus, their allocation contracts) like any other
+//! strict function's. A test pins that no certificate is made in this crate without
+//! `Cert::assume`.
 
 #![no_std]
 #![cfg_attr(fip_prelint, fip::export)]
@@ -779,36 +781,3 @@ compose_fip_fn!(A0, A1);
 compose_fip_fn!(A0, A1, A2);
 #[cfg(verus_keep_ghost)]
 compose_fip_fn!(A0, A1, A2, A3);
-
-/// Hand-written certificates for `fip-core` and `fip-alloc` functions, re-exported by
-/// those crates next to the functions. Each entry states its justification.
-#[doc(hidden)]
-#[allow(non_upper_case_globals)]
-pub mod certs {
-    use super::Cert;
-
-    /// `fip_core::swap`: `fip-core` does not link `alloc`, so it cannot allocate or
-    /// free heap memory; `swap` drops no `T`, calls no user code, and Verus rejects
-    /// recursion without `decreases`, which no `fip-core` function has.
-    pub const __fip_strict_swap: Cert = Cert {
-        name: "swap",
-        allocs: 0,
-        no_panic_macros: false,
-    };
-
-    /// `fip_core::replace`: same reasons as `__fip_strict_swap`.
-    pub const __fip_strict_replace: Cert = Cert {
-        name: "replace",
-        allocs: 0,
-        no_panic_macros: false,
-    };
-
-    /// `fip_alloc::refill`: the body calls only `core::mem::swap` (audited `core`
-    /// table), moves the `Box` without dropping it, and does not recurse;
-    /// allocation-free behaviour is also measured (`fip-alloc/tests/reuse.rs`).
-    pub const __fip_strict_refill: Cert = Cert {
-        name: "refill",
-        allocs: 0,
-        no_panic_macros: false,
-    };
-}

@@ -17,11 +17,15 @@ use vstd::prelude::*;
 /// assert_eq!(fip_core::replace(&mut x, 2), 1);
 /// assert_eq!(x, 2);
 /// ```
+///
+/// `total` (decision 2026-11-06-redesign-verus-allocates, 7.1): the attribute
+/// generates the certificate `__fip_strict_replace` and, under Verus, `no_unwind`,
+/// `allocates 0` and `#[verifier::fip]` (no free on a normal return).
+#[fip_macros::fip(total)]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     ensures
         *final(slot) == new,
         r == *old(slot),
-    allocates 0
 ))]
 #[inline]
 pub fn replace<T: crate::AllocFreeDrop>(slot: &mut T, new: T) -> T {
@@ -60,8 +64,3 @@ pub fn update<T: crate::AllocFreeDrop, F: FnOnce(T) -> T + crate::DropFreeFn>(
     let next = f(prev);
     replace(slot, next)
 }
-
-/// Strict certificate for [`replace`]; made and justified in `fip_strict::certs`.
-#[cfg(not(verus_keep_ghost))]
-#[doc(hidden)]
-pub use fip_strict::certs::__fip_strict_replace;

@@ -10,15 +10,18 @@
 //! explicit instead: the matched `Box` is kept and refilled.
 //!
 //! - `#![no_std]`, links `alloc` (it handles `Box`), no `unsafe` token
-//!   (`#![forbid(unsafe_code)]`); the strict certificate `__fip_strict_refill` is
-//!   re-exported from `fip_strict::certs`, where it is made without `unsafe`.
-//!   Depends only on `fip-strict`.
+//!   (`#![forbid(unsafe_code)]`). [`refill`] is `#[fip_macros::fip(total)]`
+//!   (decision 2026-11-06-redesign-verus-allocates, phase 5): the attribute generates
+//!   its strict certificate `__fip_strict_refill` and, under Verus, the contract
+//!   `no_unwind allocates 0` and `#[verifier::fip]`. Depends on `fip-strict` and the
+//!   proc-macro `fip-macros`.
 //! - **Allocation bounds, by proof (Verus fork `-V alloc-check`).** [`refill`]
 //!   carries `allocates 0`, which Verus proves under `T: fip_strict::AllocFreeDrop`
 //!   (decision 2026-11-06-redesign-verus-allocates, phase 2). Frees (property F2) are
-//!   not counted by `allocates` (it bounds allocations of normally returning calls);
-//!   allocation-count tests (`fip-testkit`) remain as run-time evidence for both
-//!   allocations and frees.
+//!   not counted by `allocates`; since phase 5 the fork's `#[verifier::fip]` proves
+//!   that a normal return of `refill` frees nothing (a free mutant is rejected by
+//!   `just verify-negative`). Allocation-count tests (`fip-testkit`) remain as run-time
+//!   evidence for both allocations and frees.
 //! - Every function carries a Verus specification and is verified with
 //!   `verus --no-cheating -V alloc-check`, like `fip-core`. Plain builds see the
 //!   blanket-implemented marker trait `AllocFreeDrop`, so the API is unchanged.
@@ -47,11 +50,16 @@ use vstd::prelude::*;
 /// let (cell, prev) = fip_alloc::refill(cell, 2);
 /// assert_eq!((*cell, prev), (2, 1));
 /// ```
+///
+/// `total` (decision 2026-11-06-redesign-verus-allocates, 7.1): the attribute
+/// generates the certificate `__fip_strict_refill` and, under Verus, `no_unwind`,
+/// `allocates 0` and `#[verifier::fip]`, which proves that a normal return frees
+/// nothing (the `Box` is reused).
+#[fip_macros::fip(total)]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     ensures
         *r.0 == value,
         r.1 == *cell,
-    allocates 0
 ))]
 #[inline]
 pub fn refill<T: fip_strict::AllocFreeDrop>(cell: Box<T>, value: T) -> (Box<T>, T) {
@@ -60,8 +68,3 @@ pub fn refill<T: fip_strict::AllocFreeDrop>(cell: Box<T>, value: T) -> (Box<T>, 
     ::core::mem::swap(&mut *cell, &mut prev);
     (cell, prev)
 }
-
-/// Strict certificate for [`refill`]; made and justified in `fip_strict::certs`.
-#[cfg(not(verus_keep_ghost))]
-#[doc(hidden)]
-pub use fip_strict::certs::__fip_strict_refill;
