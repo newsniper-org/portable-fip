@@ -1133,8 +1133,8 @@ The workspace MSRV stays 1.99.1 (`just msrv` passes; nothing needs 1.100).
   summary `INTRINSIC_MIN_MAX`; without it every `Vec` growth path was `⊤`); the float
   math intrinsics are generic (`sin`, `cos`, `exp`, `exp2`, `log`, `log10`, `log2`);
   `precondition_check` items of trait methods print as qualified paths
-  (`<usize as core::slice::index::SliceIndex<[T]>>::..`) and are accepted when trait
-  and self type are standard-library ones (orphan rule).
+  (`<usize as core::slice::index::SliceIndex<[T]>>::..`) and are recognised by the
+  crate defining the item (see below).
 - **Allocator entry points** (`FIP_PRELINT_DUMP=1`, step 4 of `repin.sh`): the leaves of
   all seven probes are the same as on 1.99.1.
 - **Std summaries** regenerated for 11 targets (`wasm32-wasip3` new). Against 1.99.1,
@@ -1152,10 +1152,18 @@ The workspace MSRV stays 1.99.1 (`just msrv` passes; nothing needs 1.100).
 - **Gate rules (the fork audit).** The driver refuses a Verus sidecar whose `flags`
   lack `--no-cheating` or record anything besides `--no-cheating -V alloc-check`
   (`--is-vstd`, `--is-core`, `--is-stdlib-outside-of-core` named); the generator refuses
-  those flags. A sidecar whose listed sources implement `Allocator`, `GlobalAlloc`,
-  `GlobalAllocator`, `StaticAllocator` or `AllocatorClone` keeps its panic facts but
-  none of its `allocates` bounds (stated in the crate summary): a trust boundary.
-  Fixture `verus_alloc` variants `-cheat`, `-isvstd`, `-allocimpl`.
+  those flags. Verus can prove false facts about memory of an allocator whose methods
+  touch its state, in the crate using it: a sidecar whose listed sources implement
+  `Allocator`, `GlobalAlloc`, `GlobalAllocator`, `StaticAllocator` or `AllocatorClone`
+  is refused whole, and an entry is not used for a function whose MIR (locals,
+  callees' generic arguments) has a non-std type implementing `Allocator`/`GlobalAlloc`,
+  a type parameter bounded by one or a trait object of one (any type parameter if such
+  an implementation is blanket). Fixture `verus_alloc` variants `-cheat`, `-isvstd`,
+  `-allocimpl`, `-allocuse`.
+- **UB checks by defining crate.** `is_ub_check` takes the crate of the item's `DefId`
+  (`core`/`alloc`/`std`), not its printed path: a user impl of a `core` trait for `u8`
+  or `&Local` can nest a `fn precondition_check` whose path prints alike (fixture
+  `ub_lookalike`: both panics reported).
 
 ## What would reopen this
 

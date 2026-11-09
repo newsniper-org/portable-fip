@@ -20,6 +20,15 @@
 //!   `-V alloc-check` (sidecar format 5), and its `flags` record nothing else (in
 //!   particular not `--is-vstd`, `--is-core` or `--is-stdlib-outside-of-core`, a run
 //!   verifying the crate as a standard-library crate; the fork audit, 2026-11-09);
+//! - no source it lists implements an allocator trait (`Allocator`, `GlobalAlloc`, the
+//!   marker traits; `verus::allocator_impls`): Verus can prove false facts about memory
+//!   of an allocator whose methods touch its state (the fork audit, 2026-11-09), so
+//!   such a sidecar is not used at all;
+//! - the function's MIR uses no allocator other than `Global`/`System`: no type
+//!   outside the standard library implementing `Allocator`/`GlobalAlloc`, no type
+//!   parameter bounded by one, no trait object of one (the false facts arise where the
+//!   allocator is used, `Box::new_in`, `Vec::*_in`, also in a crate without an
+//!   implementation of its own);
 //! - every source file it lists has the recorded SHA-256 (a callee's spec, a spec
 //!   function or an imported crate's source that changed invalidates every entry), and
 //!   none of them tests a cfg other than `verus_keep_ghost` and `feature` or invokes a
@@ -41,17 +50,13 @@
 //! are unchanged. A literal proved `allocates K` of a non-generic function without
 //! `requires` replaces the driver's count of its body where that count is not a finite
 //! number `<= K` and every panic path is an allocation failure; a finite count `> K`
-//! is kept and reported as an error (`crate::analysis`, sidecar format 5), unless a
-//! source the sidecar lists implements `Allocator` or `GlobalAlloc`: such an `unsafe
-//! impl` is a trust point of the fork's `allocates` accounting (the fork audit,
-//! 2026-11-09), so no bound of that sidecar is used (stated in the crate summary;
-//! its panic facts are). A listed
+//! is kept and reported as an error (`crate::analysis`, sidecar format 5). A listed
 //! function with a Verus `requires` passes that obligation to its callers
 //! (`crate::analysis`). `FIP_PRELINT_NO_VERUS=1` (`cargo fip-prelint --no-verus`)
 //! ignores every sidecar.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -74,9 +79,6 @@ type Discharged = BTreeMap<String, (String, BTreeSet<(PathBuf, usize)>)>;
 struct Loaded {
     sidecar: Sidecar,
     dir: PathBuf,
-    /// The first implementation of an allocator trait in a listed source
-    /// (`verus::allocator_impls`), shown: its proved `allocates` bounds are not used.
-    alloc_impl: Option<String>,
 }
 
 /// What the sidecars say about one function.
@@ -96,9 +98,6 @@ pub enum Verdict {
         stamp: String,
         /// The proved `allocates` bound.
         allocates: verus::AllocBound,
-        /// Why the sidecar's `allocates` bounds are not used, if they are not (an
-        /// allocator implementation in a listed source).
-        alloc_impl: Option<String>,
     },
     /// Its package declares a sidecar, but it cannot be used for this function.
     NotListed(String),
@@ -128,9 +127,18 @@ pub struct VerusTrust {
     bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
     /// Functions whose driver count exceeds their proved bound.
     exceeded: RefCell<BTreeSet<String>>,
-    /// Per sidecar crate: why its literal `allocates` bounds were not used (an
-    /// allocator implementation in a listed source).
-    bounds_refused: RefCell<BTreeMap<String, String>>,
+    /// The allocator traits (`core::alloc::Allocator`, `GlobalAlloc`), the types
+    /// outside the standard library implementing one, and whether some such
+    /// implementation is not for a named type (computed on first use).
+    allocators: RefCell<Option<Allocators>>,
+}
+
+/// See [`VerusTrust::allocators`].
+#[derive(Clone)]
+struct Allocators {
+    traits: Vec<DefId>,
+    types: HashSet<DefId>,
+    blanket: Option<String>,
 }
 
 /// Local path of a source file name, made absolute and canonical.
@@ -167,7 +175,7 @@ impl VerusTrust {
             refused: RefCell::new(BTreeMap::new()),
             bounds: RefCell::new(BTreeMap::new()),
             exceeded: RefCell::new(BTreeSet::new()),
-            bounds_refused: RefCell::new(BTreeMap::new()),
+            allocators: RefCell::new(None),
         }
     }
 
@@ -247,19 +255,20 @@ impl VerusTrust {
                 ));
             }
         }
-        // An allocator implementation (`Allocator`, `GlobalAlloc`) in a listed source
-        // is a trust point of the fork's `allocates` accounting (the fork audit,
-        // 2026-11-09): the panic facts are used, the allocation bounds are not.
-        let alloc_impl = texts.iter().find_map(|(file, text)| {
+        // An allocator implementation (`Allocator`, `GlobalAlloc`, the marker traits)
+        // in a listed source: Verus can prove false facts about memory managed by an
+        // allocator whose methods touch its state (the fork audit, 2026-11-09), so no
+        // result of the run is used, neither panic facts nor `allocates` bounds.
+        if let Some(at) = texts.iter().find_map(|(file, text)| {
             verus::allocator_impls(text)
                 .first()
                 .map(|(t, at)| format!("`impl {t}` at {file}:{}", verus::line_of(text, *at)))
-        });
-        Ok(Loaded {
-            sidecar,
-            dir,
-            alloc_impl,
-        })
+        }) {
+            return Err(format!(
+                "its sources implement an allocator trait ({at}): Verus results about memory of such an allocator may be false, so none is used"
+            ));
+        }
+        Ok(Loaded { sidecar, dir })
     }
 
     /// The verdict for function `d`, whose MIR body spans `body_span`.
@@ -402,6 +411,11 @@ impl VerusTrust {
                 "the item text of `{path}` has {c}: the driver's build and Verus's may differ"
             ));
         }
+        if let Some(a) = self.custom_allocator(tcx, d) {
+            return Verdict::NotListed(format!(
+                "`{path}` uses {a}, an allocator other than `Global`/`System`: Verus results about memory of such an allocator may be false"
+            ));
+        }
         // An impl method also depends on its impl block's header (generics, `Self`,
         // the trait): it must not be configured differently for Verus.
         if let Some(imp) = tcx.opt_parent(d)
@@ -436,7 +450,6 @@ impl VerusTrust {
             krate,
             stamp: loaded.sidecar.stamp(),
             allocates: entry.allocates.clone(),
-            alloc_impl: loaded.alloc_impl.clone(),
         }
     }
 
@@ -495,9 +508,7 @@ impl VerusTrust {
     /// `d` is listed with one and has no `requires` (decision
     /// 2026-11-06-redesign-verus-allocates, phase 4): the fork assumes a callee's bound
     /// only under its precondition, which a caller Verus did not verify may break.
-    /// Parameter-linear and opaque bounds are not evaluated (`None`). No bound is
-    /// used from a sidecar whose sources implement an allocator trait (`None`, stated
-    /// in the crate summary).
+    /// Parameter-linear and opaque bounds are not evaluated (`None`).
     pub fn literal_alloc_bound(
         &self,
         tcx: TyCtxt<'_>,
@@ -509,19 +520,118 @@ impl VerusTrust {
                 path,
                 requires: false,
                 allocates,
-                alloc_impl,
-                krate,
                 ..
-            } => {
-                let k = allocates.literal()?;
-                if let Some(why) = alloc_impl {
-                    self.bounds_refused.borrow_mut().entry(krate).or_insert(why);
-                    return None;
-                }
-                Some((k, path))
-            }
+            } => allocates.literal().map(|k| (k, path)),
             _ => None,
         }
+    }
+
+    /// The allocator traits and the types outside `core`/`alloc`/`std` implementing
+    /// one of them, from every crate of the build.
+    fn allocators(&self, tcx: TyCtxt<'_>) -> Allocators {
+        if let Some(a) = self.allocators.borrow().as_ref() {
+            return a.clone();
+        }
+        let path = |d: DefId| {
+            rustc_middle::ty::print::with_no_visible_paths!(
+                rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(d))
+            )
+        };
+        let traits: Vec<DefId> = tcx
+            .all_traits_including_private()
+            .filter(|t| {
+                tcx.crate_name(t.krate).as_str() == "core"
+                    && matches!(
+                        path(*t).as_str(),
+                        "core::alloc::Allocator" | "core::alloc::global::GlobalAlloc"
+                    )
+            })
+            .collect();
+        let mut types = HashSet::new();
+        let mut blanket = None;
+        for t in &traits {
+            for imp in tcx.all_impls(*t) {
+                if matches!(tcx.crate_name(imp.krate).as_str(), "core" | "alloc" | "std") {
+                    continue;
+                }
+                let mut ty = tcx.type_of(imp).instantiate_identity().skip_norm_wip();
+                while let rustc_middle::ty::Ref(_, inner, _) = ty.kind() {
+                    ty = *inner;
+                }
+                match ty.kind() {
+                    rustc_middle::ty::Adt(def, _) => {
+                        types.insert(def.did());
+                    }
+                    _ => {
+                        blanket.get_or_insert_with(|| format!("`{}`", path(imp)));
+                    }
+                }
+            }
+        }
+        let a = Allocators {
+            traits,
+            types,
+            blanket,
+        };
+        *self.allocators.borrow_mut() = Some(a.clone());
+        a
+    }
+
+    /// A type of `d`'s MIR (its locals and the generic arguments of its callees) that
+    /// may be an allocator other than `Global`/`System`, shown: a type outside the
+    /// standard library implementing `Allocator`/`GlobalAlloc`, a type parameter
+    /// bounded by one, a trait object of one; or any type if some such implementation
+    /// is not for a named type (fail closed). The fork audit (2026-11-09): Verus can
+    /// prove false facts about memory of an allocator whose methods touch its state,
+    /// in the crate that uses it (`Box::new_in`, `Vec::*_in`, ..), not only in the
+    /// crate implementing it.
+    fn custom_allocator(&self, tcx: TyCtxt<'_>, d: DefId) -> Option<String> {
+        let a = self.allocators(tcx);
+        if a.traits.is_empty() {
+            return None;
+        }
+        if !tcx.is_mir_available(d) {
+            return Some("an allocator the driver cannot rule out (no MIR)".to_string());
+        }
+        let body = tcx.optimized_mir(d);
+        let env = tcx.param_env(d);
+        let mut tys: Vec<rustc_middle::ty::Ty<'_>> =
+            body.local_decls.iter().map(|l| l.ty).collect();
+        for bb in body.basic_blocks.iter() {
+            if let rustc_middle::mir::TerminatorKind::Call { func, .. } = &bb.terminator().kind {
+                tys.push(func.ty(&body.local_decls, tcx));
+            }
+        }
+        for ty in tys {
+            for arg in ty.walk() {
+                let Some(t) = arg.as_type() else {
+                    continue;
+                };
+                let found = match t.kind() {
+                    rustc_middle::ty::Adt(def, _) => a.types.contains(&def.did()),
+                    rustc_middle::ty::Param(_) => env.caller_bounds().any(|c| {
+                        c.as_trait_clause().is_some_and(|p| {
+                            a.traits.contains(&p.def_id()) && p.self_ty().skip_binder() == t
+                        })
+                    }),
+                    rustc_middle::ty::Dynamic(preds, ..) => preds
+                        .principal_def_id()
+                        .is_some_and(|p| a.traits.contains(&p)),
+                    _ => false,
+                };
+                if found {
+                    return Some(format!("the allocator type `{t}`"));
+                }
+                if let Some(b) = &a.blanket
+                    && matches!(t.kind(), rustc_middle::ty::Param(_))
+                {
+                    return Some(format!(
+                        "the type parameter `{t}`, which the blanket allocator implementation {b} may cover"
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// Records that the proved bound of `path` replaced the driver's count.
@@ -568,11 +678,6 @@ impl VerusTrust {
                     .map(|p| format!("`{p}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ));
-        }
-        for (krate, why) in self.bounds_refused.borrow().iter() {
-            out.push_str(&format!(
-                ", allocation bounds of the Verus sidecar of `{krate}` not used: its sources implement an allocator trait ({why}), a trust point of Verus's `allocates` accounting"
             ));
         }
         for (path, why) in self.refused.borrow().iter() {

@@ -282,11 +282,17 @@ crates are compiled by the real rustc and stay ⊤.
   stamp, `--no-cheating`, unchanged sources) and a VIR file a generator run exported.
   The fork audit (2026-11-09): a sidecar whose `flags` record anything but
   `--no-cheating -V alloc-check` (e.g. `--is-vstd`, which the generator refuses) is
-  not used. **Trust boundary:** an implementation of `Allocator`, `GlobalAlloc` or of
-  the allocator marker traits (`unsafe impl`; `Allocator` is stable since rustc 1.100)
-  in a source a sidecar lists is outside what Verus's `allocates` accounting checks,
-  so no `allocates` bound of that sidecar is used (the crate summary says so; its
-  panic facts are); portable-fip's own verified crates have none (surface gate).
+  not used. **Trust boundary (allocators):** Verus can prove false facts about memory
+  managed by an allocator whose methods touch its state (`Allocator` is stable since
+  rustc 1.100), in the crate that uses it. So a sidecar whose listed sources
+  implement `Allocator`, `GlobalAlloc` or an allocator marker trait is not used at all
+  (neither panic facts nor `allocates` bounds), and an entry is not used for a
+  function whose MIR uses an allocator other than `Global`/`System` (a type outside
+  the standard library implementing one of those traits, a type parameter bounded by
+  one, a trait object of one; any type parameter if such an implementation is
+  blanket); the reason is reported. A `#[global_allocator]` is not covered (Verus
+  models `Global` by its specification). portable-fip's own verified crates have no
+  allocator implementation (surface gate).
   A body-local overflow, bounds or division check of a listed function is discharged
   when the stamp equals `tools/fip-prelint/verus-trusted.txt` and every hash matches;
   the crate summary counts these sites with the stamp. Callers that Verus did not

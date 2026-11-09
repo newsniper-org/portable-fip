@@ -1313,9 +1313,11 @@ fn verus_sidecar_twin() {
 /// stamp without `-V alloc-check`: the sidecar is refused, as `-off`). The fork audit
 /// (2026-11-09): `-cheat` (the stamp without `--no-cheating`) and `-isvstd` (the stamp
 /// with `--is-vstd`): the sidecar is refused, as `-off`; `-allocimpl` (an `unsafe impl
-/// GlobalAlloc` appended to the verified source, its hash forged): the panic sites
-/// stay discharged, no allocation bound is taken (`twice` and `use_twice` back to `∞`),
-/// and the crate summary says why.
+/// GlobalAlloc` appended to the verified source, its hash forged): the whole sidecar
+/// is refused, as `-off`; `-allocuse`: a function taking a `&dyn Allocator`, listed in
+/// a forged entry (bound 0, no `requires`), with an unguarded index: its entry is not
+/// used (the index stays a reachable panic path, with the reason), the other entries
+/// are.
 #[test]
 fn verus_alloc_bounds() {
     check("verus_alloc");
@@ -1401,6 +1403,44 @@ fn verus_alloc_bounds() {
         &run_at(
             &d,
             "verus_alloc-allocimpl",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+    let d = copy_fixture("verus_alloc", "verus_alloc_allocuse");
+    let lib = d.join("valloc/src/lib.rs");
+    let old = sha256_file(&lib);
+    let mut text = std::fs::read_to_string(&lib).expect("read lib.rs");
+    let item = "#[cfg_attr(fip_prelint, fip::mark(kind = \"fip\", strict = true, panic_macros = false))]\npub fn pick_dyn(_a: &dyn core::alloc::Allocator, xs: &[u32], i: usize) -> u32 {\n    xs[i]\n}";
+    text.push('\n');
+    let line = text.lines().count() + 1;
+    text.push_str(item);
+    text.push('\n');
+    std::fs::write(&lib, text).expect("write lib.rs");
+    let item_file = d.join("item.txt");
+    std::fs::write(&item_file, item).expect("write the item text");
+    let item_hash = sha256_file(&item_file);
+    let new = sha256_file(&lib);
+    let sidecar = d.join("valloc/verus-verified.txt");
+    edit(
+        &sidecar,
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}"),
+    );
+    let side = std::fs::read_to_string(&sidecar)
+        .expect("read the sidecar")
+        .replacen(
+            "\nfn valloc::one ",
+            &format!("\nfn valloc::pick_dyn src/lib.rs:{line} {item_hash} - 0\nfn valloc::one "),
+            1,
+        );
+    std::fs::write(&sidecar, side).expect("write the sidecar");
+    compare(
+        "verus_alloc",
+        "-allocuse",
+        &run_at(
+            &d,
+            "verus_alloc-allocuse",
             &[],
             &["--message-format", "short"],
         ),
