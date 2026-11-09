@@ -3,5 +3,5 @@
 
 # The driver links the compiler's own crates: it must be built by the Verus toolchain.
 [toolchain]
-channel = "1.99.1"
+channel = "beta-2026-11-05"
 components = ["rustc-dev", "rust-src"]

@@ -1,6 +1,6 @@
 # Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
 exit: failure
-error: fip-prelint: stack: `boxed` has no bound (⊤): `__rustc::__rust_alloc` (the allocator shim of the executable, symbol `_RNvCs5fGHjzWXRav_7___rustc12___rust_alloc`) is defined in the build but is not a function rustc codegened from MIR for a crate the driver compiled
+error: fip-prelint: stack: `boxed` has no bound (⊤): `__rustc::__rust_alloc` (the allocator shim of the executable, symbol `_RNvCsbRBRIDaJRDc_7___rustc12___rust_alloc`) is defined in the build but is not a function rustc codegened from MIR for a crate the driver compiled
 error: fip-prelint: stack: `copy_big` has no bound (⊤): `memcpy` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
 error: fip-prelint: stack: `ffi` has no bound (⊤): `labs` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
 error: fip-prelint: stack: `precompiled` has no bound (⊤): `std::process::id` has no frame size: it is not defined in the objects of this build (precompiled standard library, foreign or runtime function)
