@@ -681,6 +681,15 @@ fn clean() {
     check("clean");
 }
 
+/// UB checks are recognised by the crate defining the item, not by its printed
+/// path: a user crate's `impl core::ops::Add<Local> for u8` and
+/// `impl core::ops::Index<u8> for &Local` nest a panicking `fn precondition_check`;
+/// both strict roots report the panic path (fixture `ub_lookalike`).
+#[test]
+fn ub_lookalike() {
+    check("ub_lookalike");
+}
+
 /// Foreign functions: certified, excluded, neither, both.
 #[test]
 fn ffi() {

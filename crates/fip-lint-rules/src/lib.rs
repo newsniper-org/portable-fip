@@ -402,8 +402,8 @@ pub mod mir {
     pub const UB_CHECK_MARKERS: &[&str] =
         &["precondition_check", "core::hint::unreachable_unchecked"];
 
-    /// Crates whose `precondition_check` items [`is_ub_check`] accepts.
-    const UB_CHECK_CRATES: &[&str] = &["core::", "alloc::", "std::"];
+    /// Crates whose `precondition_check` items [`is_ub_check`] accepts (crate names).
+    const UB_CHECK_CRATES: &[&str] = &["core", "alloc", "std"];
 
     /// Reason of the `f32`/`f64` math intrinsics in [`ALLOC_FREE_INTRINSICS`] (top
     /// plan T7d). LLVM lowers them to instructions or, depending on the target and
@@ -700,62 +700,26 @@ pub mod mir {
         PANIC_PREFIXES.iter().any(|p| path.starts_with(p))
     }
 
-    /// `true` for a [`UB_CHECK_MARKERS`] item: a `core`/`alloc`/`std` path whose last
-    /// segment is `precondition_check`, or `core::hint::unreachable_unchecked`.
-    ///
-    /// The item of a trait method prints as a qualified path,
-    /// `<Self as Trait>::method::precondition_check` (rustc 1.100 reaches such items
-    /// where 1.99.1 reached none: `<usize as core::slice::index::SliceIndex<[T]>>::
-    /// get_unchecked`, measured 2026-11-09). It is accepted if `Trait` is a
-    /// `core`/`alloc`/`std` path and `Self` is a `core`/`alloc`/`std` type or a
-    /// primitive one: by the orphan rule such an impl is in the standard library.
+    /// `true` for a [`UB_CHECK_MARKERS`] item, decided by the crate that **defines**
+    /// it (`krate`, the crate name of the item's `DefId`), never by parsing its
+    /// printed path: an item defined in `core`, `alloc` or `std` whose last path
+    /// segment is `precondition_check`, or the exact path
+    /// `core::hint::unreachable_unchecked`. A trait method's item prints as a
+    /// qualified path (`<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked::
+    /// precondition_check`, reached on rustc 1.100, measured 2026-11-09); a path is no
+    /// evidence of the defining crate (a user crate may implement a `core` trait for
+    /// `u8` or `&Local` and nest a `fn precondition_check` in the method), so only
+    /// `krate` decides.
     #[must_use]
-    pub fn is_ub_check(path: &str) -> bool {
-        let (marker, exact) = (UB_CHECK_MARKERS[0], &UB_CHECK_MARKERS[1..]);
-        if exact.contains(&path) {
-            return true;
+    pub fn is_ub_check(path: &str, krate: &str) -> bool {
+        if !UB_CHECK_CRATES.contains(&krate) {
+            return false;
         }
-        let std_path = |p: &str| UB_CHECK_CRATES.iter().any(|c| p.starts_with(c));
-        let in_std = std_path(path)
-            || qualified_std_impl(path).is_some_and(|(s, t)| {
-                std_path(t)
-                    && (std_path(s)
-                        || PRIMITIVE_TYPES.contains(&s)
-                        || s.starts_with(['[', '*', '&', '(']))
-            });
-        in_std
-            && path
+        let (marker, exact) = (UB_CHECK_MARKERS[0], &UB_CHECK_MARKERS[1..]);
+        exact.contains(&path)
+            || path
                 .rsplit_once("::")
                 .is_some_and(|(_, last)| last == marker)
-    }
-
-    /// Primitive types a qualified path's `Self` may name ([`is_ub_check`]).
-    const PRIMITIVE_TYPES: &[&str] = &[
-        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
-        "f16", "f32", "f64", "f128", "bool", "char", "str",
-    ];
-
-    /// `(Self, Trait)` of a path starting `<Self as Trait>::`, with `Self` and `Trait`
-    /// balanced in `<..>`.
-    fn qualified_std_impl(path: &str) -> Option<(&str, &str)> {
-        let rest = path.strip_prefix('<')?;
-        let mut depth = 0_usize;
-        let mut as_at = None;
-        for (i, c) in rest.char_indices() {
-            match c {
-                '<' => depth += 1,
-                '>' if depth == 0 => {
-                    let (s, t) = (&rest[..as_at?], &rest[as_at? + 4..i]);
-                    return rest[i + 1..].starts_with("::").then_some((s, t));
-                }
-                '>' => depth -= 1,
-                ' ' if depth == 0 && as_at.is_none() && rest[i..].starts_with(" as ") => {
-                    as_at = Some(i);
-                }
-                _ => {}
-            }
-        }
-        None
     }
 
     /// Results of intrinsics, which have no MIR, as return summaries for the value
@@ -988,45 +952,50 @@ mod tests {
         assert!(mir::is_panic_entry("core::panicking::panic_fmt"));
         assert!(!mir::is_panic_entry("core::panic::Location::caller"));
         assert!(mir::is_ub_check(
-            "core::slice::index::get_unchecked::precondition_check"
-        ));
-        assert!(mir::is_ub_check("core::hint::unreachable_unchecked"));
-        // Exact: a longer last segment, a non-std path or a nested item is not one.
-        assert!(!mir::is_ub_check("S::precondition_check"));
-        assert!(!mir::is_ub_check("m::precondition_check_and_free"));
-        assert!(!mir::is_ub_check(
-            "core::ptr::read::precondition_check_and_free"
-        ));
-        assert!(!mir::is_ub_check(
-            "core::ptr::read::precondition_check::{closure#0}"
-        ));
-        assert!(!mir::is_ub_check(""));
-        // Trait methods of the standard library (rustc 1.100): accepted.
-        assert!(mir::is_ub_check(
-            "<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check"
+            "core::slice::index::get_unchecked::precondition_check",
+            "core"
         ));
         assert!(mir::is_ub_check(
-            "<core::ops::range::Range<usize> as core::slice::index::SliceIndex<[T]>>::get_unchecked_mut::precondition_check"
+            "core::hint::unreachable_unchecked",
+            "core"
         ));
+        // Trait methods of the standard library (rustc 1.100), by defining crate.
         assert!(mir::is_ub_check(
-            "<[T] as core::slice::Foo<(u8, u8)>>::m::precondition_check"
+            "<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check",
+            "core"
         ));
-        // A user type or a user trait, a missing `as`, an unbalanced path: not one.
+        // Exact: a longer last segment or a nested item is not one.
         assert!(!mir::is_ub_check(
-            "<my::Range as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check"
-        ));
-        assert!(!mir::is_ub_check(
-            "<usize as my::SliceIndex<[T]>>::get_unchecked::precondition_check"
-        ));
-        assert!(!mir::is_ub_check(
-            "<core::ops::Range<usize>>::get_unchecked::precondition_check"
+            "core::ptr::read::precondition_check_and_free",
+            "core"
         ));
         assert!(!mir::is_ub_check(
-            "<usize as core::slice::SliceIndex<[T]>::get::precondition_check"
+            "core::ptr::read::precondition_check::{closure#0}",
+            "core"
         ));
-        assert!(!mir::is_ub_check(
-            "<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check_x"
-        ));
+        assert!(!mir::is_ub_check("", "core"));
+        // Defined in another crate, whatever its path prints as: a user impl of a
+        // `core` trait for a primitive or a fundamental type, a local item, a std
+        // dependency.
+        for (path, krate) in [
+            (
+                "<u8 as core::ops::Add<Local>>::add::precondition_check",
+                "user",
+            ),
+            (
+                "<&Local as core::ops::Index<u8>>::index::precondition_check",
+                "user",
+            ),
+            (
+                "core::slice::index::get_unchecked::precondition_check",
+                "user",
+            ),
+            ("S::precondition_check", "user"),
+            ("hashbrown::raw::x::precondition_check", "hashbrown"),
+            ("core::hint::unreachable_unchecked", "user"),
+        ] {
+            assert!(!mir::is_ub_check(path, krate), "{path} in {krate}");
+        }
         assert!(mir::is_alloc_free_intrinsic("typed_swap_nonoverlapping"));
         assert!(!mir::is_alloc_free_intrinsic("catch_unwind"));
         assert!(mir::is_panic_intrinsic("abort"));

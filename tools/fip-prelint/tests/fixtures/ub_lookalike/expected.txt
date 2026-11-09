@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+lookalike/src/lib.rs:44:5: error: fip-prelint: `add_root` is #[fip(strict = true)]: reachable panic path: `add_root` -> `<impl core::ops::arith::Add<Local> for u8>::add` (lookalike/src/lib.rs:44) -> `<impl core::ops::arith::Add<Local> for u8>::add::precondition_check` (lookalike/src/lib.rs:22) -> `core::panicking::panic_fmt` (lookalike/src/lib.rs:20): `core::panicking::panic_fmt` (`panic_macros = false`)
+lookalike/src/lib.rs:52:9: error: fip-prelint: `index_root` is #[fip(strict = true)]: reachable panic path: `index_root` -> `<&Local as core::ops::index::Index<u8>>::index` (lookalike/src/lib.rs:52) -> `<&Local as core::ops::index::Index<u8>>::index::precondition_check` (lookalike/src/lib.rs:34) -> `core::panicking::panic_fmt` (lookalike/src/lib.rs:32): `core::panicking::panic_fmt` (`panic_macros = false`)
+note: fip-prelint: crate `lookalike`: 2 roots, 0 passed, 2 errors, 0 warnings, 0 notes

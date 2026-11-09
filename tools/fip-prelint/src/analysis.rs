@@ -2327,7 +2327,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if rules::is_panic_entry(&std) {
             return NodeKind::Leaf(vec![Ev::Panic(format!("`{path}`"))]);
         }
-        if rules::is_ub_check(&std) {
+        // By the defining crate of the item (not its printed path, which a user impl
+        // of a `core` trait can imitate).
+        if rules::is_ub_check(&std, tcx.crate_name(def_id.krate).as_str()) {
             return NodeKind::Leaf(Vec::new());
         }
         if matches!(tcx.def_kind(def_id), DefKind::Ctor(..)) {
