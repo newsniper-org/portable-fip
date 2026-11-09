@@ -269,6 +269,281 @@ pub fn unlisted_verifier_attributes(dir: &Path) -> Vec<VerifierAttr> {
         .collect()
 }
 
+/// Every `trusted_call` identifier of `text` in code (outside `//` comments and string
+/// literals), in any spelling (`#[verifier::trusted_call]`, `verifier(trusted_call)`,
+/// ..): the fork's `#[verifier::trusted_call] { .. }` block trusts the calls in it
+/// (the fork audit, 2026-11-09). `--no-cheating` rejects the block; this gate rejects
+/// the identifier itself, independently of the Verus build.
+#[must_use]
+pub fn trusted_calls(file: &Path, text: &str) -> Vec<VerifierAttr> {
+    tokens(text)
+        .into_iter()
+        .filter(|(t, _)| t == "trusted_call")
+        .map(|(name, line)| VerifierAttr {
+            file: file.to_path_buf(),
+            line,
+            name,
+        })
+        .collect()
+}
+
+/// The `trusted_call` identifiers under `dir` ([`trusted_calls`]).
+///
+/// # Panics
+///
+/// Panics if `dir` or a file in it cannot be read.
+#[must_use]
+pub fn trusted_calls_in(dir: &Path) -> Vec<VerifierAttr> {
+    let mut files = Vec::new();
+    collect(dir, &mut files);
+    files.sort();
+    files
+        .iter()
+        .flat_map(|p| trusted_calls(p, &fs::read_to_string(p).expect("read source file")))
+        .collect()
+}
+
+/// Traits whose implementation is a trust point of the fork's `allocates`
+/// accounting (the fork audit, 2026-11-09): `allocates` counts calls of the
+/// allocator specifications, and an implementation of one of these `unsafe` traits
+/// is code whose allocator contract Verus does not check. `Allocator` is stable since
+/// rustc 1.100, with the marker traits `GlobalAllocator`, `StaticAllocator` and
+/// `AllocatorClone`. Matched by the last segment of the implemented trait's path.
+pub const ALLOCATOR_TRAITS: &[&str] = &[
+    "Allocator",
+    "GlobalAlloc",
+    "GlobalAllocator",
+    "StaticAllocator",
+    "AllocatorClone",
+];
+
+/// Every implementation of an [`ALLOCATOR_TRAITS`] trait in `text` (`impl`, `unsafe
+/// impl`, generic, any path, also inside `verus! { .. }` and `macro_rules!` bodies),
+/// with the trait's name as `name`.
+#[must_use]
+pub fn allocator_impls(file: &Path, text: &str) -> Vec<VerifierAttr> {
+    let toks = tokens(text);
+    let is = |k: usize, s: &str| toks.get(k).is_some_and(|(t, _)| t == s);
+    // A `>` that does not end `->` or `=>`.
+    let closes_angle = |k: usize| is(k, ">") && !(k > 0 && (is(k - 1, "-") || is(k - 1, "=")));
+    let mut out = Vec::new();
+    for (k, (t, line)) in toks.iter().enumerate() {
+        if t != "impl" {
+            continue;
+        }
+        let mut j = k + 1;
+        // The impl's own generics.
+        if is(j, "<") {
+            let mut angle = 0_usize;
+            while j < toks.len() {
+                if is(j, "<") {
+                    angle += 1;
+                } else if closes_angle(j) {
+                    angle = angle.saturating_sub(1);
+                    if angle == 0 {
+                        j += 1;
+                        break;
+                    }
+                }
+                j += 1;
+            }
+        }
+        // The trait path, up to `for` at angle depth 0 (none: an inherent impl or an
+        // `impl Trait` type); its last identifier is the trait's name.
+        let mut name: Option<&str> = None;
+        let mut angle = 0_usize;
+        let mut paren = 0_usize;
+        while j < toks.len() {
+            let s = toks[j].0.as_str();
+            if s == "(" || s == "[" {
+                paren += 1;
+            } else if s == ")" || s == "]" {
+                if paren == 0 {
+                    break;
+                }
+                paren -= 1;
+            } else if paren > 0 {
+                // Inside `(..)`/`[..]` of the path (`Fn(..)` sugar, array types).
+                j += 1;
+                continue;
+            } else if s == "<" {
+                angle += 1;
+            } else if closes_angle(j) {
+                angle = angle.saturating_sub(1);
+            } else if angle == 0 && (s == "{" || s == ";" || s == "," || s == "where") {
+                break;
+            } else if angle == 0 && s == "for" {
+                if let Some(n) = name
+                    && ALLOCATOR_TRAITS.contains(&n)
+                {
+                    out.push(VerifierAttr {
+                        file: file.to_path_buf(),
+                        line: *line,
+                        name: n.to_string(),
+                    });
+                }
+                break;
+            } else if angle == 0 && s.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+                name = Some(s);
+            }
+            j += 1;
+        }
+    }
+    out
+}
+
+/// The implementations of [`ALLOCATOR_TRAITS`] traits under `dir`
+/// ([`allocator_impls`]).
+///
+/// # Panics
+///
+/// Panics if `dir` or a file in it cannot be read.
+#[must_use]
+pub fn allocator_impls_in(dir: &Path) -> Vec<VerifierAttr> {
+    let mut files = Vec::new();
+    collect(dir, &mut files);
+    files.sort();
+    files
+        .iter()
+        .flat_map(|p| allocator_impls(p, &fs::read_to_string(p).expect("read source file")))
+        .collect()
+}
+
+type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
+
+/// Skips a `/* .. */` comment (nested) after its `/`, counting newlines.
+fn skip_block_comment(it: &mut Chars<'_>, line: &mut usize) {
+    it.next();
+    let mut depth = 1_usize;
+    while depth > 0 {
+        match it.next() {
+            None => break,
+            Some('\n') => *line += 1,
+            Some('*') if it.peek() == Some(&'/') => {
+                it.next();
+                depth -= 1;
+            }
+            Some('/') if it.peek() == Some(&'*') => {
+                it.next();
+                depth += 1;
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+/// Skips a string literal after its opening `"`, counting newlines.
+fn skip_string(it: &mut Chars<'_>, line: &mut usize) {
+    while let Some(d) = it.next() {
+        match d {
+            '\\' => {
+                if it.next() == Some('\n') {
+                    *line += 1;
+                }
+            }
+            '\n' => *line += 1,
+            '"' => break,
+            _ => {}
+        }
+    }
+}
+
+/// After a `'`: skips a character literal (`'x'`, `'\n'`); a lifetime (`'a`) is
+/// left to the identifier branch.
+fn skip_char(it: &mut Chars<'_>) {
+    let mut look = it.clone();
+    let closed = match look.next() {
+        Some('\\') => true,
+        Some(_) => look.next() == Some('\''),
+        None => false,
+    };
+    if closed {
+        while let Some(d) = it.next() {
+            if d == '\\' {
+                it.next();
+            } else if d == '\'' {
+                break;
+            }
+        }
+    }
+}
+
+/// After the prefix `r`/`br`: skips a raw string literal (`r"..."`, `r#"..."#`) and
+/// returns `true`, or returns `false` (an identifier) without consuming anything.
+fn skip_raw_string(it: &mut Chars<'_>, line: &mut usize) -> bool {
+    let mut look = it.clone();
+    let mut hashes = 0_usize;
+    while look.peek() == Some(&'#') {
+        look.next();
+        hashes += 1;
+    }
+    if look.next() != Some('"') {
+        return false;
+    }
+    *it = look;
+    'raw: while let Some(d) = it.next() {
+        if d == '\n' {
+            *line += 1;
+        } else if d == '"' {
+            let mut look = it.clone();
+            for _ in 0..hashes {
+                if look.next() != Some('#') {
+                    continue 'raw;
+                }
+            }
+            *it = look;
+            break;
+        }
+    }
+    true
+}
+
+/// Identifiers and single punctuation characters of `text` with their 1-based line,
+/// outside `//` and `/* .. */` comments, string literals (also raw ones) and
+/// character literals (lifetimes are kept as identifiers after the `'`).
+fn tokens(text: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut line = 1;
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\n' => line += 1,
+            '/' if it.peek() == Some(&'/') => {
+                for d in it.by_ref() {
+                    if d == '\n' {
+                        line += 1;
+                        break;
+                    }
+                }
+            }
+            '/' if it.peek() == Some(&'*') => skip_block_comment(&mut it, &mut line),
+            '"' => skip_string(&mut it, &mut line),
+            '\'' => skip_char(&mut it),
+            c if c.is_alphanumeric() || c == '_' => {
+                let mut s = String::from(c);
+                while let Some(&d) = it.peek() {
+                    if d.is_alphanumeric() || d == '_' {
+                        s.push(d);
+                        it.next();
+                    } else {
+                        break;
+                    }
+                }
+                if (s == "r" || s == "br")
+                    && matches!(it.peek(), Some('#' | '"'))
+                    && skip_raw_string(&mut it, &mut line)
+                {
+                    continue;
+                }
+                out.push((s, line));
+            }
+            c if c.is_whitespace() => {}
+            c => out.push((c.to_string(), line)),
+        }
+    }
+    out
+}
+
 /// Items with no `verus_spec` attribute.
 #[must_use]
 pub fn unspecified(items: &[FnItem]) -> Vec<FnItem> {
@@ -394,5 +669,55 @@ mod tests {
         let d = with_fn_decreases(&items);
         assert_eq!(d.len(), 1);
         assert!(d[0].signature.starts_with("fn f"));
+    }
+
+    #[test]
+    fn trusted_calls_are_found() {
+        let lines = |s: &str| -> Vec<usize> {
+            trusted_calls(Path::new("x.rs"), s)
+                .into_iter()
+                .map(|a| a.line)
+                .collect()
+        };
+        assert_eq!(
+            lines(
+                "fn f() {\n    #[verifier::trusted_call]\n    { g() }\n}\nverus! {\n#[verifier(trusted_call)] { h() }\n}\n#[cfg_attr(verus_keep_ghost, verifier::trusted_call)]\nfn k() {}\n"
+            ),
+            vec![2, 6, 8]
+        );
+        assert_eq!(
+            lines(
+                "// verifier::trusted_call\n/* trusted_call */\nconst S: &str = \"trusted_call\";\nconst R: &str = r#\"trusted_call \"# ;\nfn untrusted_call() {}\nlet c = 'x';\n"
+            ),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn allocator_impls_are_found() {
+        let found = |s: &str| -> Vec<(usize, String)> {
+            allocator_impls(Path::new("x.rs"), s)
+                .into_iter()
+                .map(|a| (a.line, a.name))
+                .collect()
+        };
+        assert_eq!(
+            found(
+                "unsafe impl core::alloc::GlobalAlloc for Arena {}\nverus! {\nunsafe impl<'a, T: Copy> Allocator for &'a Pool<T> where T: Send {}\n}\nmacro_rules! m { ($t:ty) => { unsafe impl ::core::alloc::Allocator for $t {} } }\nunsafe impl<F: Fn() -> u8> std::alloc::GlobalAlloc\n    for Sys<F>\n{\n}\nunsafe impl core::alloc::StaticAllocator for Arena {}\n"
+            ),
+            vec![
+                (1, "GlobalAlloc".to_string()),
+                (3, "Allocator".to_string()),
+                (5, "Allocator".to_string()),
+                (6, "GlobalAlloc".to_string()),
+                (10, "StaticAllocator".to_string()),
+            ]
+        );
+        assert_eq!(
+            found(
+                "impl<A: Allocator> Vec2<A> { fn f(a: A) {} }\nimpl<A: GlobalAlloc> Wrap for Holder<A> {}\nimpl dyn Allocator {}\n// unsafe impl Allocator for X {}\nconst S: &str = \"unsafe impl GlobalAlloc for Y {}\";\nimpl AllocatorLike for Z {}\nfn g(x: impl Allocator) {}\nunsafe impl crate::AllocFreeDrop for Node {}\n"
+            ),
+            Vec::<(usize, String)>::new()
+        );
     }
 }

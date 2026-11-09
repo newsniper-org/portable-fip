@@ -41,6 +41,9 @@ dependencies = [
 [[package]]
 name = "fip-strict"
 version = "0.1.0"
+dependencies = [
+ "fip-testkit",
+]
 
 [[package]]
 name = "fip-testkit"

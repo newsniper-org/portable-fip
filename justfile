@@ -76,7 +76,32 @@ cross:
     CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="{{musl_lld}}" cargo test --locked -q --no-run -p fip-arch --lib --target riscv64gc-unknown-linux-musl --target-dir target/cross-asm
 
 # All Verus gates: proofs, composition with #[fip], and negative controls.
-verify: verus-pin verify-strict verify-core verify-alloc verify-compose verify-negative verify-sidecar
+verify: verus-pin verify-flags verify-strict verify-core verify-alloc verify-compose verify-negative verify-sidecar
+
+# Every Verus run of this justfile uses `--no-cheating` and none verifies a crate as a
+# standard-library crate (`--is-vstd`, ..): `verify/no_cheating_flags.py`, the fork
+# audit (2026-11-09). Mutated copies of the justfile (the flag dropped from
+# `verus_flags`, from the upstream runs or from the mutant runs; `--is-vstd` added)
+# must fail the check.
+verify-flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=target/verify-flags; rm -rf "$out"; mkdir -p "$out"
+    uv run --no-project python verify/no_cheating_flags.py justfile
+    flags_mutant() {  # name, sed script, expected message
+      sed "$2" justfile > "$out/$1"
+      if cmp -s justfile "$out/$1"; then echo "FAIL: flags mutant $1 did not apply"; exit 1; fi
+      if uv run --no-project python verify/no_cheating_flags.py "$out/$1" > "$out/$1.log" 2>&1; then
+        echo "FAIL: flags mutant $1 passed"; exit 1
+      fi
+      grep -q "$3" "$out/$1.log" || { echo "FAIL: flags mutant $1 failed for another reason"; cat "$out/$1.log"; exit 1; }
+      echo "flags mutant $1 rejected"
+    }
+    flags_mutant verus-flags 's/^verus_flags := "--no-cheating -V alloc-check"$/verus_flags := "-V alloc-check"/' 'lacks --no-cheating'
+    flags_mutant upstream-run 's/ --crate-type=lib --no-cheating "\$@"/ --crate-type=lib "\$@"/' 'Verus run without --no-cheating'
+    flags_mutant mutant-run 's/ [{][{]verus_flags[}][}] --multiple-errors 8 / --multiple-errors 8 /' 'Verus run without --no-cheating'
+    flags_mutant is-vstd 's/^verus_flags := "--no-cheating -V alloc-check"$/verus_flags := "--no-cheating --is-vstd -V alloc-check"/' 'a standard-library crate flag' # negative probe
+    echo "verify-flags: ok"
 
 # `VERUS` must be the trusted build (tools/fip-prelint/verus-trusted.txt: version, commit
 # and Z3) on the toolchain of `fip-prelint`; every Verus gate depends on this check.
@@ -480,6 +505,26 @@ verify-negative: verify-strict verify-core
     }
     expect_test_fail surface-unspecified fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/{/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/,/^))\]$/d}' every_function_is_specified
     expect_test_fail surface-decreases   fip-core slot.rs '0,/^    ensures$/ s/^    ensures$/    decreases 0nat,\n    ensures/' no_function_may_recurse
+    # The fork audit (2026-11-09): a `trusted_call` block and an allocator trait
+    # implementation in a verified crate (fip-core, fip-alloc, fip-strict) are rejected.
+    expect_test_fail surface-trusted-call fip-alloc lib.rs 's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    #[verifier::trusted_call]\n    {\n        ::core::mem::swap(\&mut *cell, \&mut prev);\n    }/' no_trusted_call
+    expect_test_fail surface-allocator-impl fip-core slot.rs '$ s/$/\nunsafe impl<T> core::alloc::GlobalAlloc for Pool<T> {}/' no_allocator_impl
+    expect_test_fail surface-strict-trusted-call fip-strict lib.rs '$ s/$/\nfn t() {\n    #[cfg_attr(verus_keep_ghost, verifier::trusted_call)]\n    {}\n}/' no_trusted_call
+    expect_test_fail surface-strict-allocator-impl fip-strict lib.rs '$ s/$/\nunsafe impl core::alloc::Allocator for Arena {}/' no_allocator_impl
+    # The same gates on the verified callers in `verify/` (fip-testkit's
+    # `verified_sources` test).
+    verify_surface_fail() {  # name, file, sed script, test name
+      local d="$out/$1"; mkdir -p "$d"; cp verify/*.rs "$d/"
+      sed -i "$3" "$d/$2"
+      if cmp -s "verify/$2" "$d/$2"; then echo "FAIL: mutation $1 did not apply"; exit 1; fi
+      if FIP_SURFACE_SRC="$PWD/$d" cargo test --locked -q -p fip-testkit --test verified_sources "$4" > "$d/log" 2>&1; then
+        echo "FAIL: surface mutant $1 passed"; exit 1
+      fi
+      grep -q "test result: FAILED" "$d/log" || { echo "FAIL: surface mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
+      echo "mutant $1 rejected by the surface gate"
+    }
+    verify_surface_fail surface-verify-trusted-call compose.rs '$ s/$/\n#[verifier::trusted_call]\nfn t() {}/' no_trusted_call
+    verify_surface_fail surface-verify-allocator-impl alloc_callers.rs '$ s/$/\nunsafe impl std::alloc::GlobalAlloc for Arena {}/' no_allocator_impl
     expect_test_fail surface-no-decreases-attr fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/ s/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/#[cfg_attr(verus_keep_ghost, verifier::exec_allows_no_decreases_clause)]\n&/' no_unlisted_verifier_attribute
     # Drift gate (fip-strict): the Verus `FipFn::call` must match the plain one.
     d=$(mutate drift-call fip-strict lib.rs 's/^    fn call(&self, args: Args) -> (r: Self::Output)$/    fn call(\&self, args: Args, extra: u8) -> (r: Self::Output)/')
@@ -518,7 +563,7 @@ verify-sidecar: verify-strict
     (cd "$fx" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/vside.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs)
     just verus-sidecar-check "$out/vside.txt" "$fx/vside/verus-verified.txt"
     # Without --no-cheating: refused before Verus runs, nothing written.
-    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/cheat.txt" -- {{verus}} --crate-type=lib --crate-name vside vside/src/lib.rs) 2> "$out/cheat.err"; then
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/cheat.txt" -- {{verus}} --crate-type=lib --crate-name vside vside/src/lib.rs) 2> "$out/cheat.err"; then # negative probe
       echo "FAIL: a sidecar was generated without --no-cheating"; exit 1
     fi
     grep -q "must use \`--no-cheating\`" "$out/cheat.err"
@@ -529,6 +574,13 @@ verify-sidecar: verify-strict
     fi
     grep -q "must use \`-V alloc-check\`" "$out/noalloc.err"
     test ! -e "$out/noalloc.txt"
+    # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
+    # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe
+      echo "FAIL: a sidecar was generated for a run with --is-vstd"; exit 1
+    fi
+    grep -q "refused Verus flag \`--is-vstd\`" "$out/isvstd.err"
+    test ! -e "$out/isvstd.txt"
     # Allocation bounds (phase 4): the fixture verus_alloc's sidecar records each listed
     # function's proved `allocates` bound.
     fa=tools/fip-prelint/tests/fixtures/verus_alloc

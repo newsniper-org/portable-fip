@@ -7,13 +7,18 @@
 //! 2. no function-level spec has `decreases`, so Verus has accepted no recursion
 //!    among this crate's functions and the call graph is acyclic;
 //! 3. no `verifier::..` attribute outside `fip_testkit::surface::VERIFIER_ALLOWED`
-//!    (`exec_allows_no_decreases_clause` admits recursion without `decreases`).
+//!    (`exec_allows_no_decreases_clause` admits recursion without `decreases`);
+//! 4. no `trusted_call` in any spelling (the fork's trusted-call block; the fork
+//!    audit, 2026-11-09);
+//! 5. no implementation of an allocator trait (`fip_testkit::surface::ALLOCATOR_TRAITS`),
+//!    a trust point of Verus's `allocates` accounting (the fork audit, 2026-11-09).
 //!
 //! `FIP_SURFACE_SRC` overrides the scanned directory; the `verify-negative` recipe
 //! uses it to show the gates fail on mutated copies.
 
 use fip_testkit::surface::{
-    scan_dir, unlisted_verifier_attributes, unspecified, with_fn_decreases,
+    allocator_impls_in, scan_dir, trusted_calls_in, unlisted_verifier_attributes, unspecified,
+    with_fn_decreases,
 };
 use std::path::PathBuf;
 
@@ -54,5 +59,23 @@ fn no_unlisted_verifier_attribute() {
     assert!(
         attrs.is_empty(),
         "`verifier::..` attributes outside the allowlist:\n{attrs:#?}"
+    );
+}
+
+#[test]
+fn no_trusted_call() {
+    let found = trusted_calls_in(&src());
+    assert!(
+        found.is_empty(),
+        "`trusted_call` (calls trusted, not verified):\n{found:#?}"
+    );
+}
+
+#[test]
+fn no_allocator_impl() {
+    let found = allocator_impls_in(&src());
+    assert!(
+        found.is_empty(),
+        "allocator trait implementations (a trust point of `allocates`):\n{found:#?}"
     );
 }
