@@ -41,7 +41,7 @@ use rustc_middle::mir::{Operand, TerminatorKind};
 use rustc_middle::mono::MonoItem;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, TyCtxt, TypingEnv};
-use rustc_session::config::CrateType;
+use rustc_structures::CrateType;
 
 use crate::analysis::is_std_crate;
 use crate::marks::{Mark, StackLeaves};

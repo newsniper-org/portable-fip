@@ -53,6 +53,7 @@ extern crate rustc_parse;
 extern crate rustc_public;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_structures;
 
 mod analysis;
 mod export;
