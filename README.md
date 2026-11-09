@@ -133,10 +133,10 @@ without a listed proof is named: its termination is unchecked).
 | termination | every loop needs `decreases` | ⊤ unless the sidecar lists the function |
 | no panic / unwind | generated `no_unwind` | `panic_macros = false`; MIR panic analysis |
 
-`fip_core::replace` and `fip_alloc::refill` are `total`; `fip_core::swap` and its
-helper `swap_lt` are `strict` only (the fork's `#[verifier::fip]` rejects the call of
-`split_at_mut`, whose vstd specification has no `deallocates_when` condition,
-measured 2026-11-09); the combinators stay `strict` with callback-relative bounds
+`fip_core::replace`, `fip_core::swap` (and its helper `swap_lt`) and `fip_alloc::refill`
+are `total` (`swap`/`swap_lt` since the fork `1b27c1101`, whose slice views carry
+`deallocates_when(0, false)`; on `6f6975af2` the fork's `#[verifier::fip]` rejected their
+call of `split_at_mut`, measured 2026-11-09); the combinators stay `strict` with callback-relative bounds
 written by hand (Verus cannot state that a closure call does not unwind, measured on
 the fork; `total` with callable parameters is a compile error).
 

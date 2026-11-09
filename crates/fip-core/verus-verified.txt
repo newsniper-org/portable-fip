@@ -12,19 +12,19 @@ flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu -
 verified 70
 source ../fip-strict/src/lib.rs 53708ed96305a0d82a106b84bcd08a531a513b0c25db9aa0931569a5c5ea8a9c
-source src/lib.rs 0fcdced2f8dfa9772552d95c248b71079346b5089737b043a5acc5c395c6c689
-source src/slice.rs f9971af8aaa02424cdc79689fa44a1e38bb5c88e27559b0427baf6c5bf4af9fc
+source src/lib.rs 1ca2a5044542d4116f2a4d66e684bcb8b90726f82838e02b71a9af5f2251bd06
+source src/slice.rs 1a76ab38edc1b2e5792481346a4e5cde623a5a1a8ac8f1b5acd774306a8f6ede
 source src/slot.rs 6a9547f93583f1e65d311d1b8038c61f17ed04855f7379a950bd1b705ad762ef
 source src/spec.rs 5cf8e8f9b57f4f732ec21cb2eed965d3eb7c476560476f3796ebfcf1fc90d4ce
 source src/strict.rs 24a627c3d33a4e39c2ac767e869916741cb9bc25a3aa49ef4441b3e0b0f45ffe
-fn fip_core::slice::compact src/slice.rs:73 62a723a1c0e6a5119518b8eecf446b34d6e5dcbec563eabb3a84041357629955 requires opaque:fc29c6b3b887286917709a1e00ceecc511d8ce836c6e1a21ea57995fb20a348c
-fn fip_core::slice::compact_map src/slice.rs:420 c48ff74da155ab71eb652a4d0d64fc4fbc617bb3764e15aee583d59820dd85de requires opaque:437c817418fb910cf368a480996a659c62a758c5f68995d62fcf54521e38102d
-fn fip_core::slice::compact_map_st src/slice.rs:548 76d7f1d268d46eca0d275e22f86cf9d24a9dbb642bfab9c75351f494faeb97aa requires 0
-fn fip_core::slice::dedup_by src/slice.rs:305 0d40a3d79540613d904a68c5a1b169f6bf15fc02ed17dcf6fad0f086aa755023 requires 0
-fn fip_core::slice::map_in_place src/slice.rs:151 5e8220aa4db487abee7e7feb9895da21e9d03b6d681e4dee99d8bb7b7c8aebed requires opaque:51d3a7724c5f4aa937bba6cb683cd8690a606eff225a081894ac37513b628c3b
-fn fip_core::slice::map_in_place_st src/slice.rs:207 6771d4b3499ff79e2d95c89ef059b3c2ef6a9c3e923ed6e783de799a87d547fa requires 0
-fn fip_core::slice::swap src/slice.rs:43 31d150578a8414761b35360a082170102072361b8c6c463fc8a92a28d5e4e736 requires 0
-fn fip_core::slice::swap_lt src/slice.rs:20 3dea4f1afc21a0b20ecee762d28eb9d3f14ab2761a126713a74e03016aa61cbe requires 0
+fn fip_core::slice::compact src/slice.rs:75 62a723a1c0e6a5119518b8eecf446b34d6e5dcbec563eabb3a84041357629955 requires opaque:fc29c6b3b887286917709a1e00ceecc511d8ce836c6e1a21ea57995fb20a348c
+fn fip_core::slice::compact_map src/slice.rs:422 c48ff74da155ab71eb652a4d0d64fc4fbc617bb3764e15aee583d59820dd85de requires opaque:437c817418fb910cf368a480996a659c62a758c5f68995d62fcf54521e38102d
+fn fip_core::slice::compact_map_st src/slice.rs:550 76d7f1d268d46eca0d275e22f86cf9d24a9dbb642bfab9c75351f494faeb97aa requires 0
+fn fip_core::slice::dedup_by src/slice.rs:307 0d40a3d79540613d904a68c5a1b169f6bf15fc02ed17dcf6fad0f086aa755023 requires 0
+fn fip_core::slice::map_in_place src/slice.rs:153 5e8220aa4db487abee7e7feb9895da21e9d03b6d681e4dee99d8bb7b7c8aebed requires opaque:51d3a7724c5f4aa937bba6cb683cd8690a606eff225a081894ac37513b628c3b
+fn fip_core::slice::map_in_place_st src/slice.rs:209 6771d4b3499ff79e2d95c89ef059b3c2ef6a9c3e923ed6e783de799a87d547fa requires 0
+fn fip_core::slice::swap src/slice.rs:42 992f78b06c3ab9834acafc7de75d45568307c2bb4afd5873e3e811c8b91828d3 requires 0
+fn fip_core::slice::swap_lt src/slice.rs:20 030931a27211171eb5ab4f8ad139ddb5a2142723a0f4e64df56832db9e36b5fe requires 0
 fn fip_core::slot::replace src/slot.rs:9 7ca5661694dc2e6f4f29fcfc02cfe5280d9714655290f9815d416b785e93e25e - 0
 fn fip_core::slot::update src/slot.rs:37 be5160aa6fc8e08cd1770f5584700e338835f10dddbc31a2725791cc1c59f2a1 requires opaque:693d3ba4a3a57f4368f7002a50466ae08f3551a2353113e55bd33c5c9c5e1246
 skip fip_core::strict::compact relies on the specification of `fip_core::spec::compact_fip_post`, whose code may differ in the driver's build

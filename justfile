@@ -361,9 +361,9 @@ verify-negative: verify-strict verify-core
     # these show the hand-written `ensures` of every `strict`/`total` function still
     # binds after the merge, and that the generated `requires` is really emitted.
     expect_verus_fail swap-lt-no-swap      fip-core  slice.rs '/^pub(crate) fn swap_lt</,/^}/ { s/^    ::core::mem::swap(&mut a\[i\], &mut b\[0\]);$//; /^        assert(final(xs)@ =~= /d }' "$spec"
-    expect_verus_fail swap-no-op           fip-core  slice.rs '/^pub fn swap</,/^}/ { s/^        swap_lt(xs, lo, hi);$//; /^        assert(final(xs)@ =~= /d }' "$spec"
+    expect_verus_fail swap-no-op           fip-core  slice.rs '/^pub fn swap</,/^}/ { /^        swap_lt(xs, [ij], [ij]);$/d; /^        assert(final(xs)@ =~= /d }' "$spec"
     expect_verus_fail replace-keeps-slot   fip-core  slot.rs  '/^pub fn replace</,/^}/ s/^    ::core::mem::swap(slot, &mut v);$//' "$spec"
-    expect_verus_fail swap-lt-requires-dropped fip-core slice.rs 's/#\[fip_macros::fip(strict, requires(i < j, j < xs.len()))\]/#[fip_macros::fip(strict, requires(j < xs.len()))]/' 'precondition not met: index in bounds'
+    expect_verus_fail swap-lt-requires-dropped fip-core slice.rs 's/#\[fip_macros::fip(total, requires(i < j, j < xs.len()))\]/#[fip_macros::fip(total, requires(j < xs.len()))]/' 'precondition not met: index in bounds'
     # Allocation bounds (`allocates`, decision 2026-11-06-redesign-verus-allocates, phase 2):
     # each mutant must fail a verification condition whose reported span is the
     # allocation layer (an `allocates` clause, an `allocated()` invariant or a
@@ -393,7 +393,7 @@ verify-negative: verify-strict verify-core
       grep -q "allocation site \`Box::new\` in the body" "$d/log" || { echo "FAIL: mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
       echo "mutant $1 rejected by the fip-macros token scan"
     }
-    expect_scan_fail swap-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        let _b = alloc::boxed::Box::new(0u8);/'
+    expect_scan_fail swap-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn swap</,/^}/ s/^        swap_lt(xs, i, j);$/        swap_lt(xs, i, j);\n        let _b = alloc::boxed::Box::new(0u8);/'
     expect_alloc_fail map-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn map_in_place</,/^}/ s/^        i += 1;$/        let _b = alloc::boxed::Box::new(0u8);\n        i += 1;/' 'allocated\(\) <= crate::spec::map_allocs'
     expect_scan_fail refill-allocates       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _b = Box::new(0u8);/'
     # A free in `total` `refill` (an `Option<Box<u8>>` dropped on the normal return):

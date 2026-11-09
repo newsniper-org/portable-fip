@@ -26,13 +26,13 @@
 //!   are not counted, panicking paths are not covered (decision
 //!   2026-11-06-redesign-verus-allocates).
 //! - **No `unsafe`** (`#![forbid(unsafe_code)]`). `replace` is
-//!   `#[fip_macros::fip(total)]`, `swap` `#[fip_macros::fip(strict, requires(..))]`
+//!   `#[fip_macros::fip(total)]`, `swap` `#[fip_macros::fip(total, requires(..))]`
 //!   (decision 2026-11-06-redesign-verus-allocates, phase 5): the attribute generates
 //!   their strict certificates (re-exported at the crate root) and, under Verus, their
-//!   `requires` and `allocates 0`, and for `replace` also `no_unwind` and
-//!   `#[verifier::fip]` (no free on a normal return). `swap` is not `total`: the
-//!   fork's `#[verifier::fip]` rejects its call of `split_at_mut`, whose vstd
-//!   specification has no `deallocates_when` condition (measured 2026-11-09).
+//!   `requires`, `allocates 0`, `no_unwind` and `#[verifier::fip]` (no free on a
+//!   normal return). `swap` is `total` since the fork `1b27c1101` (slice views with
+//!   `deallocates_when(0, false)`); before, `#[verifier::fip]` rejected its call of
+//!   `split_at_mut` (measured 2026-11-09 on `6f6975af2`).
 //! - **Strict variants** ([`strict`]): `compact`, `dedup_by`, `compact_map`,
 //!   `map_in_place`, `update`, `map_in_place_st` and `compact_map_st` taking
 //!   `fip_strict::FipFn` callables, with

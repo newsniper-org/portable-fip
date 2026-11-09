@@ -176,6 +176,8 @@ strip gate, Z3 4.16.0): `strict` (bare, alias `strict = true`) and `total` in
 `allocates 0` proof; `fip_core::replace` and `fip_alloc::refill` are `total`,
 `fip_core::swap` and `swap_lt` `strict` (measured reason in 7.6); closure `no_unwind`
 measured as not expressible (7.3); 5 new mutants/controls and a driver fixture.
+*Amended 2026-11-09:* `swap` and `swap_lt` are `total` too since the re-pin to fork
+`1b27c1101` (7.6, "Not done / open").
 
 Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves
@@ -756,9 +758,17 @@ at `#[fip(total ..)]`). `verify/strip_alloc.py` also removes hand-written
 **Not done / open:**
 - `total` for callback combinators: not expressible (7.3, measured); F2 for them stays
   with the driver.
-- `swap`/`swap_lt` as `total`: blocked by vstd's `split_at_mut` specification (no
-  `deallocates_when`) and by the driver's value analysis (the note above); a fork or
-  vstd request *(not filed)*.
+- ~~`swap`/`swap_lt` as `total`~~ **done 2026-11-09:** the fork `1b27c1101` gives the
+  slice views (`split_at_mut` among them) `deallocates_when(0, false)` (requested
+  2026-11-09), so `#[verifier::fip]` accepts `swap_lt`; and `swap` now calls `swap_lt` in
+  two branches (`if i < j { swap_lt(xs, i, j) } else if j < i { swap_lt(xs, j, i) }`)
+  instead of through a `(lo, hi)` tuple, so the driver proves `swap_lt`'s precondition
+  at both calls (with the tuple it could not, which `total` makes an error). Measured:
+  Verus fip-core 70 verified; the driver passes all 10 fip-core roots on x86_64 (self-check notes 1 instead of 2
+  in debug, 0 instead of 1 in release) and no longer needs a Verus-discharged panic site; on the other
+  10 targets `swap`/`swap_lt` are refused as ⊤ like `replace` (the sidecar is
+  x86_64-only). The mutants `swap-no-op`, `swap-allocates` and
+  `swap-lt-requires-dropped` follow the new body and attribute.
 - `total` on `#[fip_impl]` methods and trait contracts: rejected, not designed.
 - A `total` function in a user crate is refused by the driver unless the crate
   publishes a Verus sidecar (by design of 7.5 step 2).

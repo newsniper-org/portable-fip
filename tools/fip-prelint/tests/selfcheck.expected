@@ -6,7 +6,7 @@ crates/fip-macros/tests/strict_impl.rs:36:9: warning: fip-prelint: `shapes::Slot
 note: fip-prelint: crate `accept`: 14 roots, 14 passed, 0 errors, 0 warnings, 0 notes
 note: fip-prelint: crate `adapters`: 7 roots, 7 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `fip_alloc`: 1 roots, 1 passed, 0 errors, 0 warnings, 0 notes
-note: fip-prelint: crate `fip_core`: 10 roots, 10 passed, 0 errors, 0 warnings, 1 notes, 1 panic sites discharged by Verus (sidecar of `fip_core`: Verus <trusted verus> (<trusted commit>), Z3 <trusted z3>, --no-cheating -V alloc-check)
+note: fip-prelint: crate `fip_core`: 10 roots, 10 passed, 0 errors, 0 warnings, 0 notes
 note: fip-prelint: crate `fip_fn_path`: 14 roots, 14 passed, 0 errors, 0 warnings, 2 notes
 note: fip-prelint: crate `non_allocating_ctors`: 18 roots, 18 passed, 0 errors, 0 warnings, 0 notes
 note: fip-prelint: crate `strict_accept`: 11 roots, 11 passed, 0 errors, 0 warnings, 8 notes
