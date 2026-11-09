@@ -178,6 +178,11 @@ warn `unexpected_cfgs`, so plain builds now get no extra token at all.
 
 ### Allocator entry points on rustc 1.99.1 (measured with `FIP_PRELINT_DUMP=1`)
 
+Re-measured on 1.100.0-beta.10 (2026-11-09, `just prelint-repin beta-2026-11-05`): the
+same leaves for all seven probes (`Box::new`/`vec!` → `__rust_alloc_zeroed`;
+`with_capacity`, `String::from`, `format!` → `Global::allocate_zeroed`; `push` →
+`Global::allocate` and `Global::grow`; a `Box` drop → `Global::deallocate`).
+
 The `std`/`alloc` MIR shipped with the toolchain is optimized MIR (inlined), so
 `alloc::alloc::alloc` does not appear on these paths; the `__rust_*` symbols do.
 
@@ -3243,3 +3248,15 @@ format 5)". Two commits.
    of `fip_core::slice::swap` etc. could be used); opaque bounds of the callback sums;
    the token-certificate/proved-bound disagreement report (redesign 2.3); the fate of
    strict mode (D1).
+
+
+## Resolved 2026-11-09: re-pin to the fork 6f6975a (rustc 1.100.0-beta.10), fork audit gates
+
+See the amendment of that date in `docs/decisions/2026-11-01-fip-prelint.md`. Verus
+sidecars regenerated: only the stamps and three `requires opaque:` hashes
+(`fip_core::slice::{compact, compact_map, map_in_place}`) changed; the fork's commit
+96147d172 adds a `trusted_call` field to VIR's `CallTargetAttrs`, and the opaque hash
+is the SHA-256 of the VIR text of the `allocates` expression (a `call_allocates`
+call). The driver never evaluates opaque bounds. Surface gate: `trusted_call` and
+allocator trait implementations are rejected in `fip-core`, `fip-alloc`, `fip-strict`
+and `verify/`; `just verify-flags` checks every Verus run uses `--no-cheating`.

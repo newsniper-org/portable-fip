@@ -64,7 +64,9 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   `just verus-pin` checks the binary `VERUS` (version, commit, Z3, toolchain equal to
   `tools/fip-prelint/rust-toolchain.toml`) before every Verus gate and fails with
   the pin otherwise. `VERUS` must name the fork build; the justfile does not hold
-  a machine path.
+  a machine path. Re-pinned 2026-11-09 to `0.2026.11.08.6f6975a` (`6f6975af2411…`),
+  toolchain `beta-2026-11-05` (rustc 1.100.0-beta.10); see the amendment of that date
+  in `2026-11-01-fip-prelint.md`.
 - **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
   (justfile `verus_flags`): the fork checks `allocates` clauses only with
   `-V alloc-check`, and an importing crate needs the imported crate's export from a

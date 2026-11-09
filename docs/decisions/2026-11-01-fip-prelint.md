@@ -1115,6 +1115,48 @@ workspace function is generic or has a `requires`.
 Details: `TODOs/fip-prelint.md`, "Resolved 2026-11-06: cfg twins and proved allocation
 bounds (redesign phase 4)".
 
+## Amendment 2026-11-09: re-pin to rustc 1.100.0-beta.10 and the fork audit's gate rules
+
+The Verus fork moves to `0.2026.11.08.6f6975a` (`6f6975af2411…`, toolchain
+`beta-2026-11-05`, rustc 1.100.0-beta.10); `fip-prelint` follows (`rust-toolchain.toml`).
+The workspace MSRV stays 1.99.1 (`just msrv` passes; nothing needs 1.100).
+
+- **Driver API.** `rustc_session::config::CrateType` is now `rustc_structures::CrateType`;
+  `try_to_leaf`/`try_to_target_usize` need `rustc_middle::ty::consts::ConstExt` in scope.
+- **Trusted tables re-read against the 1.100 sources** (`rust-src` of the toolchain;
+  files unchanged against 1.99.1 re-checked by diff, changed ones read): entry points,
+  `__rust_no_alloc_shim_is_unstable_v2`, `GlobalAlloc`/`Allocator` methods (unchanged;
+  `Allocator` is stable since 1.100), panic prefixes, UB check markers, intrinsics,
+  `NON_ALLOCATING_CONSTRUCTORS`, `CORE_TABLE` (audited-at markers gain 1.100.0-beta.10),
+  the iterator contracts, `drop_glue`, `Formatter::buf`. Changes: `Ord::min`/`max` of
+  integers are the intrinsics `integer_min`/`integer_max` (allocation-free, and a value
+  summary `INTRINSIC_MIN_MAX`; without it every `Vec` growth path was `⊤`); the float
+  math intrinsics are generic (`sin`, `cos`, `exp`, `exp2`, `log`, `log10`, `log2`);
+  `precondition_check` items of trait methods print as qualified paths
+  (`<usize as core::slice::index::SliceIndex<[T]>>::..`) and are accepted when trait
+  and self type are standard-library ones (orphan rule).
+- **Allocator entry points** (`FIP_PRELINT_DUMP=1`, step 4 of `repin.sh`): the leaves of
+  all seven probes are the same as on 1.99.1.
+- **Std summaries** regenerated for 11 targets (`wasm32-wasip3` new). Against 1.99.1,
+  per function: no change of allocation, free or term lines except renamed symbols
+  (`Big32x40` → `Big64x20`, new `Big*::from_u64` on 32-bit targets, wasip crate hashes
+  in `§ffi` terms); panic witnesses differ in paths only.
+- **Cargo 1.100 build-dir layout.** The stack mode ignores build scripts (cargo now
+  lists the driver-compiled file, without kept objects) and finds an uplifted
+  executable's original under `build/<package>/<hash>/out/`; the justfile locates
+  artifacts with `one_artifact` (exactly one candidate, else a failure).
+- **Fixture diffs accepted:** rustc version strings (`-stale`), the allocator shim's
+  mangled symbol (`stack -tests`), one fewer panic path in `std_summaries`
+  (`Chunks::next`'s `split_at` is now proved in bounds through `integer_min`), the new
+  target section `wasm32-wasip3`.
+- **Gate rules (the fork audit).** The driver refuses a Verus sidecar whose `flags`
+  lack `--no-cheating` or record anything besides `--no-cheating -V alloc-check`
+  (`--is-vstd`, `--is-core`, `--is-stdlib-outside-of-core` named); the generator refuses
+  those flags. A sidecar whose listed sources implement `Allocator`, `GlobalAlloc`,
+  `GlobalAllocator`, `StaticAllocator` or `AllocatorClone` keeps its panic facts but
+  none of its `allocates` bounds (stated in the crate summary): a trust boundary.
+  Fixture `verus_alloc` variants `-cheat`, `-isvstd`, `-allocimpl`.
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).
