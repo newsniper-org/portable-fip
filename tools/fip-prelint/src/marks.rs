@@ -9,7 +9,10 @@
 //!   `fip-macros`. Arguments, all optional except `kind`:
 //!   `kind = "fip" | "fbip"`, `n = N` (allocation bound, default 0),
 //!   `strict = true | false` (default false), `panic_macros = true | false`
-//!   (default true), `param(name = K, ..)` (declared bounds of callable parameters:
+//!   (default true), `total = true | false` (default false; decision
+//!   2026-11-06-redesign-verus-allocates, 7.1: needs `kind = "fip"`, `n = 0`,
+//!   `strict = true` and `panic_macros = false`, and is discharged only with a Verus
+//!   proof listed in the crate's sidecar, `crate::report`), `param(name = K, ..)` (declared bounds of callable parameters:
 //!   of a generic type, a function pointer or `&dyn Fn*`/`&dyn FipFn`). On a trait
 //!   method declaration (emitted by `#[fip]`/`#[fip(N)]`/`#[fbip]` there, or written
 //!   by hand for a strict contract): a contract that every implementation is checked
@@ -344,6 +347,8 @@ pub struct Mark {
     pub n: u64,
     pub strict: bool,
     pub panic_macros: bool,
+    /// `total`: the strictest grade (decision 2026-11-06-redesign-verus-allocates, 7.1).
+    pub total: bool,
     pub params: Vec<(String, u64)>,
 }
 
@@ -355,7 +360,9 @@ impl Mark {
         if self.kind == Kind::Fip && self.n > 0 {
             args.push(self.n.to_string());
         }
-        if self.strict {
+        if self.total {
+            args.push("total".to_string());
+        } else if self.strict {
             args.push("strict = true".to_string());
         }
         let kind = match self.kind {
@@ -402,6 +409,9 @@ impl Mark {
         }
         if self.kind == Kind::Fbip && c.kind == Kind::Fip {
             v.push("it allows frees and recursion (`fbip`), the contract does not".to_string());
+        }
+        if c.total && !self.total {
+            v.push("the contract is `total`, the implementation is not".to_string());
         }
         if self.panic_rank() < c.panic_rank() {
             v.push(match c.panic_rank() {
@@ -470,6 +480,7 @@ pub fn parse_mark(args: &str) -> Result<Mark, String> {
         n: 0,
         strict: false,
         panic_macros: true,
+        total: false,
         params: Vec::new(),
     };
     for part in split_top(args) {
@@ -503,6 +514,7 @@ pub fn parse_mark(args: &str) -> Result<Mark, String> {
             "n" => mark.n = parse_u64(key, value)?,
             "strict" => mark.strict = parse_bool(key, value)?,
             "panic_macros" => mark.panic_macros = parse_bool(key, value)?,
+            "total" => mark.total = parse_bool(key, value)?,
             other => return Err(format!("unknown key `{other}` in `fip::mark(..)`")),
         }
     }
@@ -510,6 +522,14 @@ pub fn parse_mark(args: &str) -> Result<Mark, String> {
         .ok_or_else(|| "`fip::mark(..)` needs `kind = \"fip\"` or `kind = \"fbip\"`".to_string())?;
     if mark.kind == Kind::Fbip && mark.n != 0 {
         return Err("`kind = \"fbip\"` takes no bound `n`".to_string());
+    }
+    // `total` implies the rest of the grade; a mark claiming it with a weaker
+    // setting is malformed rather than silently weakened.
+    if mark.total && (mark.kind != Kind::Fip || mark.n != 0 || !mark.strict || mark.panic_macros) {
+        return Err(
+            "`total = true` needs `kind = \"fip\"`, `n = 0`, `strict = true` and `panic_macros = false`"
+                .to_string(),
+        );
     }
     Ok(mark)
 }
@@ -561,6 +581,26 @@ mod tests {
         assert!(m.strict && !m.panic_macros);
         assert_eq!(m.params, vec![("g".to_string(), 0), ("h".to_string(), 1)]);
         assert_eq!(m.tag(), "#[fip(2, strict = true)]");
+    }
+
+    #[test]
+    fn total_mark() {
+        let m =
+            parse_mark(r#"kind = "fip", n = 0, strict = true, panic_macros = false, total = true"#)
+                .unwrap();
+        assert!(m.total && m.strict && !m.panic_macros);
+        assert_eq!(m.tag(), "#[fip(total)]");
+        let strict = parse_mark(r#"kind = "fip", strict = true, panic_macros = false"#).unwrap();
+        assert_eq!(strict.weaker_than(&m).len(), 1);
+        assert!(m.weaker_than(&strict).is_empty());
+        for bad in [
+            r#"kind = "fip", n = 1, strict = true, panic_macros = false, total = true"#,
+            r#"kind = "fip", strict = true, total = true"#,
+            r#"kind = "fip", panic_macros = false, total = true"#,
+            r#"kind = "fbip", strict = true, panic_macros = false, total = true"#,
+        ] {
+            assert!(parse_mark(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -1447,6 +1447,51 @@ fn verus_alloc_bounds() {
     );
 }
 
+/// `total` marks (decision 2026-11-06-redesign-verus-allocates, 7.5 step 2). Fixture
+/// `verus_total`: the crate `vtotal`'s sidecar (`just verify-sidecar`) lists `ok`,
+/// `ok_loop`, `frees`, `recurses` and `panics` with `allocates 0` and `bound_one` with
+/// `allocates 1`; `unlisted` and `unlisted_loop` are `verifier::external`. Discharged:
+/// `ok` and `ok_loop` (the one success; a loop is fine with the proof). Refused (⊤):
+/// `bound_one` (another bound), `unlisted` (not listed), `unlisted_loop` (not listed,
+/// the reason names the unchecked termination). Rejected by the driver's own checks
+/// although listed: `frees` (F2), `recurses` (recursion), `panics` (the panic path of
+/// `unwrap`, which Verus proved unreachable only under a `requires` the driver does not
+/// know). Variants: `-off` (`--no-verus`: every `total` mark refused, no sidecar);
+/// `-flags` and `-cheat` (the stamp without `-V alloc-check` or `--no-cheating`: the
+/// sidecar is refused, so every `total` mark is too).
+#[test]
+fn verus_total_marks() {
+    check("verus_total");
+    compare(
+        "verus_total",
+        "-off",
+        &run_args(
+            "verus_total",
+            "-off",
+            &[],
+            &["--message-format", "short", "--no-verus"],
+        ),
+    );
+    for (variant, flags) in [("flags", "--no-cheating"), ("cheat", "-V alloc-check")] {
+        let d = copy_fixture("verus_total", &format!("verus_total_{variant}"));
+        edit(
+            &d.join("vtotal/verus-verified.txt"),
+            "\nflags --no-cheating -V alloc-check\n",
+            &format!("\nflags {flags}\n"),
+        );
+        compare(
+            "verus_total",
+            &format!("-{variant}"),
+            &run_at(
+                &d,
+                &format!("verus_total-{variant}"),
+                &[],
+                &["--message-format", "short"],
+            ),
+        );
+    }
+}
+
 /// The analysis cache follows every source a sidecar lists (the soundness audit,
 /// 2026-11-04): a Verus-only module (`#[cfg(verus_keep_ghost)] mod spec;`, in no
 /// dep-info of rustc's) edited after a passing run re-checks the crate, and the sidecar

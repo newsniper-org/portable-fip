@@ -23,6 +23,8 @@
 //! | `fip::requires(..)` in a trait method contract; `param(g = ..)` in one whose `g` is not a function-pointer or callable trait-object parameter | error |
 //! | an implementation's own `param(g = K)` below the contract's bound for that parameter | error |
 //! | a standard-library function without MIR not covered by the std summaries, or summaries not used (missing file, stamp of another rustc, target or settings, a `core` that is not the sysroot's) | `⊤` (error), with the reason |
+//! | a `total` mark (`fip::mark(.., total = true)`, decision 2026-11-06-redesign-verus-allocates, 7.5 step 2) on a function its crate's Verus sidecar does not list with the literal bound `allocates 0` (no sidecar, not listed, any reason the sidecar is not used, another bound); with a loop in the body the reason says that its termination has no proof (P4) | `⊤` (error), with the reason; the driver's own allocation, free, recursion and panic checks of the root run as for `strict = true, panic_macros = false` |
+//! | a `total` mark on a trait method declaration (a contract) | error |
 //!
 //! `FIP_PRELINT_WARN_ONLY=1` turns the errors into warnings tagged `[error]`.
 //! The per-crate summary note ends with the number of declared sources when the crate
@@ -770,6 +772,84 @@ fn verdict(
     }
 }
 
+/// Why a `total` root is not discharged (decision 2026-11-06-redesign-verus-allocates,
+/// 7.5 step 2), or `None`: its crate's Verus sidecar must list it with the literal
+/// bound `allocates 0`. The sidecar is used only with the trusted pin and the flags
+/// `--no-cheating -V alloc-check`, unchanged sources and item text
+/// (`crate::verustrust`); the Verus proof then also covers termination (every loop has
+/// a proved `decreases`, recursion needs one, and the verified crates' surface gate
+/// forbids function-level `decreases`). Frees, recursion and panic paths of the
+/// instance are the driver's own checks (`verdict`, as for any
+/// `strict = true, panic_macros = false` root); a proof never replaces them. A body
+/// with a loop is named in the reason: without the proof its termination is
+/// unchecked (P4 of 7.1).
+fn total_refusal(tcx: TyCtxt<'_>, crates: &Crates, def_id: DefId) -> Option<String> {
+    use crate::verustrust::Verdict;
+    if !tcx.is_mir_available(def_id) {
+        return Some("its MIR is not available".to_string());
+    }
+    let body = tcx.optimized_mir(def_id);
+    let looped = has_cycle(body);
+    let why = match crates.verus.verdict(tcx, def_id, body.span) {
+        Verdict::Listed { allocates, .. } => match allocates.literal() {
+            Some(0) => return None,
+            _ => format!(
+                "its Verus sidecar lists it with `allocates {}`, not the literal `allocates 0` `total` requires",
+                allocates.render()
+            ),
+        },
+        Verdict::NoSidecar => {
+            "no Verus sidecar covers it (`total` needs a Verus proof of `allocates 0` with `--no-cheating -V alloc-check`, listed in the crate's sidecar)".to_string()
+        }
+        Verdict::NotListed(why) => format!("no usable Verus proof: {why}"),
+    };
+    Some(if looped {
+        format!(
+            "{why}; it has a loop, and without a Verus proof (a `decreases` per loop) its termination is not checked"
+        )
+    } else {
+        why
+    })
+}
+
+/// `true` if the control-flow graph of `body` has a cycle (a loop), cleanup edges
+/// included (iterative depth-first search, grey/black colouring).
+fn has_cycle(body: &rustc_middle::mir::Body<'_>) -> bool {
+    use rustc_middle::mir::BasicBlock;
+    let n = body.basic_blocks.len();
+    // 0 white, 1 on the stack, 2 done.
+    let mut colour = vec![0u8; n];
+    for root in 0..n {
+        if colour[root] != 0 {
+            continue;
+        }
+        let mut stack: Vec<(BasicBlock, Vec<BasicBlock>)> = Vec::new();
+        let start = BasicBlock::from_usize(root);
+        colour[root] = 1;
+        stack.push((
+            start,
+            body.basic_blocks[start].terminator().successors().collect(),
+        ));
+        while let Some((bb, succ)) = stack.last_mut() {
+            if let Some(next) = succ.pop() {
+                match colour[next.as_usize()] {
+                    1 => return true,
+                    0 => {
+                        colour[next.as_usize()] = 1;
+                        let s = body.basic_blocks[next].terminator().successors().collect();
+                        stack.push((next, s));
+                    }
+                    _ => {}
+                }
+            } else {
+                colour[bb.as_usize()] = 2;
+                stack.pop();
+            }
+        }
+    }
+    false
+}
+
 /// `true` for the panic leaf of `alloc::alloc::handle_alloc_error` (what an
 /// allocation calls when the allocator returns null).
 pub(crate) fn is_alloc_failure(what: &str) -> bool {
@@ -990,6 +1070,12 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
                 }
             }
         }
+        if decl && mark.total {
+            out.error(
+                tcx.def_span(*def_id),
+                "`total` is not supported in the contract of a trait method: a dynamic call reaches implementations no Verus proof covers; declare the contract `strict = true, panic_macros = false`",
+            );
+        }
         if decl && crates.requires_of(*def_id).is_some() {
             out.error(
                 tcx.def_span(*def_id),
@@ -1056,6 +1142,17 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             None,
             &r,
         );
+        if mark.total
+            && let Some(why) = total_refusal(tcx, &crates, *def_id)
+        {
+            out.error(
+                tcx.def_span(*def_id),
+                &format!(
+                    "`{}` is #[fip(total)] but cannot be discharged (⊤): {why}",
+                    r.label
+                ),
+            );
+        }
         for v in &r.args {
             if seen.insert(v.key()) {
                 report_argument(&mut out, tcx.def_span(*def_id), None, v);

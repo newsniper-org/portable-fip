@@ -1,0 +1,9 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+note: fip-prelint: crate `vtotal`: 8 roots, 2 passed, 6 errors, 0 warnings, 0 notes
+vtotal/src/lib.rs:103:28: error: fip-prelint: `recurses` is #[fip(total)] but recurses: `recurses` -> `recurses` (vtotal/src/lib.rs:103): recursion
+vtotal/src/lib.rs:118:5: error: fip-prelint: `panics` is #[fip(total)]: reachable panic path: `panics` -> `core::option::Option::<u32>::unwrap` (vtotal/src/lib.rs:118) -> `core::option::unwrap_failed`: `core::option::unwrap_failed` (diverges) (`panic_macros = false`)
+vtotal/src/lib.rs:57:1: error: fip-prelint: `bound_one` is #[fip(total)] but cannot be discharged (⊤): its Verus sidecar lists it with `allocates 1`, not the literal `allocates 0` `total` requires
+vtotal/src/lib.rs:64:1: error: fip-prelint: `unlisted` is #[fip(total)] but cannot be discharged (⊤): no usable Verus proof: `vtotal::unlisted` is not in the Verus sidecar (not verified by Verus)
+vtotal/src/lib.rs:72:1: error: fip-prelint: `unlisted_loop` is #[fip(total)] but cannot be discharged (⊤): no usable Verus proof: `vtotal::unlisted_loop` is not in the Verus sidecar (not verified by Verus); it has a loop, and without a Verus proof (a `decreases` per loop) its termination is not checked
+vtotal/src/lib.rs:90:1: error: fip-prelint: `frees` is #[fip(total)] but may free: `frees` -> `drop glue of alloc::boxed::Box<u32>` (vtotal/src/lib.rs:90) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`

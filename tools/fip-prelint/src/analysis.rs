@@ -4570,6 +4570,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 n,
                 strict: false,
                 panic_macros: true,
+                total: false,
                 params: vec![("f".to_string(), n)],
             }),
             certifying: false,
