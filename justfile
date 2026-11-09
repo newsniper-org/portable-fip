@@ -113,6 +113,14 @@ verus-pin:
 # Verus metadata and library of fip-strict, imported where `FipFn` specs are needed.
 verus_strict := "--import fip_strict=target/verus-strict/fip_strict.vir --extern fip_strict=target/verus-strict/libfip_strict.rlib"
 
+# Shell function `one_artifact <target dir> <crate> <ext>`: the one cargo artifact
+# `lib<crate>-<hash>.<ext>` of a debug build into <target dir>, in cargo's layout up
+# to 1.99 (`debug/deps/`) or the build-dir layout of cargo 1.100 (`debug/build/<package>/<hash>/out/`,
+# measured with cargo 1.100.0-beta.10, 2026-11-09). Zero or several candidates fail
+# (no guess); the recipes build into a fresh directory, so a second one is a stale
+# or foreign build.
+one_artifact := 'one_artifact() { local c=() f; shopt -s nullglob; for f in "$1"/debug/deps/lib"$2"-*."$3" "$1"/debug/build/*/*/out/lib"$2"-*."$3"; do c+=("$f"); done; shopt -u nullglob; if [ "${#c[@]}" -ne 1 ]; then echo "FAIL: expected exactly one lib$2-*.$3 under $1, found ${#c[@]}: ${c[*]:-none}" >&2; return 1; fi; printf "%s\n" "${c[0]}"; }'
+
 # fip-strict proofs (`FipFn` with `pre`/`post`, `Certified`), no trusted items;
 # exports the Verus metadata that fip-core and verify-compose import. The run goes
 # through the sidecar generator (top plan T13.4); its sidecar must equal
@@ -191,9 +199,11 @@ verify-compose: verify-strict verify-core
     #!/usr/bin/env bash
     set -euo pipefail
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
-    deps=target/verus-macros/debug/deps
-    so=$(ls -t $deps/libfip_macros-*.so | head -1)
+    m=target/verus-macros; rm -rf "$m"
+    cargo +"$tc" build --locked -q -p fip-macros -p fip-strict --target-dir "$m"
+    {{one_artifact}}
+    so=$(one_artifact "$m" fip_macros so); rl=$(one_artifact "$m" fip_strict rlib)
+    deps=$(dirname "$so")
     run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
     run verify/compose.rs
     run verify/compose_strict.rs
@@ -203,8 +213,6 @@ verify-compose: verify-strict verify-core
     out=target/verify-compose; mkdir -p "$out"
     # `fip_fn!` values have one type in both builds: verify/fip_fn_types.rs is compiled
     # by plain rustc and verified by Verus; a wrong `N` in any annotation fails both.
-    cargo +"$tc" build --locked -q -p fip-strict --target-dir target/verus-macros
-    rl=$(ls -t $deps/libfip_strict-*.rlib | head -1)
     plain() { rustc +"$tc" --edition 2024 --crate-type lib --crate-name fip_fn_types --extern fip_macros="$so" --extern fip_strict="$rl" -L "$deps" --out-dir "$out" "$1"; }
     plain verify/fip_fn_types.rs
     run verify/fip_fn_types.rs
@@ -253,9 +261,11 @@ verify-negative: verify-strict verify-core
     set -euo pipefail
     out=target/verify-negative; rm -rf "$out"; mkdir -p "$out"
     tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
-    deps=target/verus-macros/debug/deps
-    so=$(ls -t $deps/libfip_macros-*.so | head -1)
+    m=target/verus-macros; rm -rf "$m"
+    cargo +"$tc" build --locked -q -p fip-macros --target-dir "$m"
+    {{one_artifact}}
+    so=$(one_artifact "$m" fip_macros so)
+    deps=$(dirname "$so")
     mutate() {  # name, crate dir, file, sed script -> prints mutant dir
       local d="$out/$1"; cp -r "crates/$2" "$d"
       sed -i "$4" "$d/src/$3"
@@ -624,10 +634,15 @@ verify-upstream:
     out=target/verify-upstream; rm -rf "$out"; mkdir -p "$out/strict" "$out/core" "$out/alloc"
     src="$out/src"
     uv run --no-project python verify/strip_alloc.py "$src" crates/fip-strict crates/fip-core crates/fip-alloc verify/compose.rs verify/compose_strict.rs verify/compose_state.rs verify/fip_fn_types.rs
+    # The proc-macro is loaded by the upstream Verus's rustc: built with its toolchain
+    # (not the fork's), into its own directory.
     tc=$({{verus_upstream}} --version | awk '/Toolchain/ {print $2}')
-    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-macros
-    deps=target/verus-macros/debug/deps
-    so=$(ls -t $deps/libfip_macros-*.so | head -1)
+    if [ -z "$tc" ]; then echo "FAIL: cannot read the toolchain of \`{{verus_upstream}}\`"; exit 1; fi
+    m=target/verus-macros-upstream; rm -rf "$m"
+    cargo +"$tc" build --locked -q -p fip-macros --target-dir "$m"
+    {{one_artifact}}
+    so=$(one_artifact "$m" fip_macros so)
+    deps=$(dirname "$so")
     up() {  # name, Verus arguments
       local name=$1; shift
       if VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating "$@" > "$out/$name.log" 2>&1; then
@@ -714,13 +729,14 @@ prelint-repin version:
 # `tools/fip-prelint/std-summaries/seed` with the release settings of the shipped std,
 # analysed by the driver; writes `tools/fip-prelint/std-summaries/<release>-<target>.txt`.
 # Maintainer-run after a repin or a seed change (measured 2026-11-02: 94-131 s cold in 3 runs,
-# 32-45 s of it the analysis); the result is committed. Build directory under /tmp.
+# 32-45 s of it the analysis); the result is committed. Build directory
+# `FIP_PRELINT_TARGET_DIR`, else under /tmp.
 prelint-std-summaries target="x86_64-unknown-linux-gnu":
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build --locked
-    cd tools/fip-prelint && FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGET_DIR=/tmp/fip-prelint-std-summaries target/debug/cargo-fip-prelint fip-prelint --std-summaries --target {{target}}
+    cd tools/fip-prelint && FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGET_DIR="${FIP_PRELINT_TARGET_DIR:-/tmp/fip-prelint-std-summaries}" target/debug/cargo-fip-prelint fip-prelint --std-summaries --target {{target}}
 
 # The std summaries for every installed target with `std` (top plan T7j), one after
-# the other, into one build directory under /tmp (measured 2026-11-03: 3.8-12.4
+# the other, into one build directory (`FIP_PRELINT_TARGET_DIR`, else under /tmp; measured 2026-11-03: 3.8-12.4
 # min per target with three in parallel at load average ~34).
 prelint-std-summaries-all:
     #!/usr/bin/env bash

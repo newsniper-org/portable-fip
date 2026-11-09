@@ -349,11 +349,18 @@ fn std_summaries(mut args: Vec<String>, toolchain: &str, sysroot: &str, ld: &str
     }
 }
 
-/// The `"filenames":[..]` of cargo's `compiler-artifact` JSON messages.
+/// The `"filenames":[..]` of cargo's `compiler-artifact` JSON messages, except those
+/// of build scripts (`"kind":["custom-build"]`): a build script runs on the host
+/// while building, none of its code is reached from a root. Cargo up to 1.99 listed
+/// only its uplifted copy, which no driver record is next to; cargo 1.100's build-dir
+/// layout lists the file the driver compiled (`build/<package>/<hash>/out/`), whose
+/// objects `-Csave-temps` does not keep there (measured 2026-11-09, `--build-std`).
 fn artifact_files(json: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for line in json.lines() {
-        if !line.contains("\"reason\":\"compiler-artifact\"") {
+        if !line.contains("\"reason\":\"compiler-artifact\"")
+            || line.contains("\"kind\":[\"custom-build\"]")
+        {
             continue;
         }
         let Some(i) = line.find("\"filenames\":[") else {
@@ -383,21 +390,38 @@ fn artifact_files(json: &str) -> Vec<PathBuf> {
     out
 }
 
-/// The file in `<dir>/deps/` that the uplifted executable `p` is a copy of (same
-/// content; cargo hard-links it), whose `.fip-stack` record the driver wrote.
+/// The file that the uplifted executable `p` is a copy of (same content; cargo
+/// hard-links it), whose `.fip-stack` record the driver wrote: in `<dir>/deps/` (cargo
+/// up to 1.99) or in `<dir>/build/<package>/<hash>/out/` (the build-dir layout of
+/// cargo 1.100).
 fn deps_copy_of(p: &Path) -> Option<PathBuf> {
     let name = p.file_stem()?.to_string_lossy().replace('-', "_");
-    let deps = p.parent()?.join("deps");
+    let dir = p.parent()?;
     let bytes = std::fs::read(p).ok()?;
     let prefix = format!("{name}-");
-    std::fs::read_dir(&deps)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
+    let subdirs = |d: PathBuf| -> Vec<PathBuf> {
+        std::fs::read_dir(d)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default()
+    };
+    let mut dirs = vec![dir.join("deps")];
+    for package in subdirs(dir.join("build")) {
+        dirs.extend(subdirs(package).into_iter().map(|h| h.join("out")));
+    }
+    dirs.into_iter()
+        .flat_map(|d| {
+            std::fs::read_dir(d)
+                .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        })
         .filter(|c| {
+            // `<name>-<hash>` in `deps/`; `<name>` in the build-dir layout (measured
+            // with cargo 1.100.0-beta.10: `build/<package>/<hash>/out/<name>`).
             c.extension().is_none()
-                && c.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+                && c.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy().replace('-', "_");
+                    n == name || n.starts_with(&prefix)
+                })
         })
         .find(|c| {
             std::fs::metadata(c).is_ok_and(|m| m.len() == bytes.len() as u64)
