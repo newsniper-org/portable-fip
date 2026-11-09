@@ -85,6 +85,7 @@ use rustc_middle::mir::{
     TerminatorKind, UnOp,
 };
 use rustc_middle::ty::adjustment::PointerCoercion;
+use rustc_middle::ty::consts::ConstExt as _;
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
@@ -410,12 +411,33 @@ pub fn entails(ctx: &[Fact], req: &[Fact]) -> bool {
 }
 
 /// The summary of an intrinsic from `fip_lint_rules::mir::INTRINSIC_RESULT_BOUNDS`:
-/// the result lies in `0..=w - k` for the bit width `w` of its integer type argument.
+/// the result lies in `0..=w - k` for the bit width `w` of its integer type argument;
+/// or from `fip_lint_rules::mir::INTRINSIC_MIN_MAX`: the result of `integer_min` is
+/// at most both arguments, that of `integer_max` at least both.
 fn intrinsic_summary<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
     callee: Instance<'tcx>,
 ) -> Option<RetSummary> {
+    let fact = |a, b, c| Fact { a, b, c };
+    if let Some(is_max) = fip_lint_rules::mir::intrinsic_min_max(tcx.item_name(def_id).as_str()) {
+        let facts = if is_max {
+            vec![
+                fact(SVar::Arg(0), SVar::Ret, 0),
+                fact(SVar::Arg(1), SVar::Ret, 0),
+            ]
+        } else {
+            vec![
+                fact(SVar::Ret, SVar::Arg(0), 0),
+                fact(SVar::Ret, SVar::Arg(1), 0),
+            ]
+        };
+        return Some(RetSummary {
+            facts,
+            cond: None,
+            never_returns: false,
+        });
+    }
     let width = match callee.args.types().next()?.kind() {
         ty::Uint(u) => u.bit_width(),
         ty::Int(i) => i.bit_width(),
@@ -426,7 +448,6 @@ fn intrinsic_summary<'tcx>(
         tcx.item_name(def_id).as_str(),
         u32::try_from(width).ok()?,
     )?;
-    let fact = |a, b, c| Fact { a, b, c };
     Some(RetSummary {
         facts: vec![
             fact(SVar::Ret, SVar::Zero, i128::from(hi)),

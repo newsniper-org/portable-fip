@@ -83,7 +83,8 @@ pub const NON_ALLOCATING_CONSTRUCTORS: &[(&str, &str)] = &[
 /// rustc versions whose `alloc` sources were read for [`NON_ALLOCATING_CONSTRUCTORS`].
 /// A build with any other version is not covered by the audit (`fip-macros` tests
 /// fail on it).
-pub const NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1"];
+pub const NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT: &[&str] =
+    &["1.97.1", "1.99.1", "1.100.0-beta.10"];
 
 /// `true` if `ty::ctor(..)` (by the last segment of the type path) is an allocation
 /// site: a [`HEAP_TYPES`] type, a [`HEAP_CONSTRUCTORS`] constructor, and not a
@@ -209,7 +210,7 @@ pub const CORE_TABLE: &[&str] = &[
 
 /// rustc versions whose `core` sources were read for [`CORE_TABLE`]. A build with
 /// any other version is not covered by the audit (`fip-macros` tests fail on it).
-pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1"];
+pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1", "1.100.0-beta.10"];
 
 /// Method names the crate-wide checker treats as allocation-free **by name** when no
 /// method of that name is defined in the scanned sources: the slice/integer methods
@@ -508,6 +509,14 @@ pub mod mir {
         ("bswap", "byte swap"),
         ("bitreverse", "bit reversal"),
         ("three_way_compare", "integer comparison"),
+        (
+            "integer_min",
+            "integer comparison (`Ord::min` of the integer types since rustc 1.100)",
+        ),
+        (
+            "integer_max",
+            "integer comparison (`Ord::max` of the integer types since rustc 1.100)",
+        ),
         ("discriminant_value", "reads an enum tag"),
         ("assume", "optimizer hint"),
         ("likely", "optimizer hint"),
@@ -577,6 +586,16 @@ pub mod mir {
         ("minimum_number_nsz_f64", FLOAT_MATH),
         ("maximum_number_nsz_f32", FLOAT_MATH),
         ("maximum_number_nsz_f64", FLOAT_MATH),
+        // Since rustc 1.100 one generic intrinsic per operation (`sin::<T>`, ..)
+        // replaces the per-width ones above (kept for older toolchains); `f16`
+        // widens to `f32`, `f128` calls the `*f128` function of the math library.
+        ("sin", FLOAT_MATH),
+        ("cos", FLOAT_MATH),
+        ("exp", FLOAT_MATH),
+        ("exp2", FLOAT_MATH),
+        ("log", FLOAT_MATH),
+        ("log10", FLOAT_MATH),
+        ("log2", FLOAT_MATH),
         ("simd_add", SIMD_LANES),
         ("simd_sub", SIMD_LANES),
         ("simd_mul", SIMD_LANES),
@@ -683,16 +702,60 @@ pub mod mir {
 
     /// `true` for a [`UB_CHECK_MARKERS`] item: a `core`/`alloc`/`std` path whose last
     /// segment is `precondition_check`, or `core::hint::unreachable_unchecked`.
+    ///
+    /// The item of a trait method prints as a qualified path,
+    /// `<Self as Trait>::method::precondition_check` (rustc 1.100 reaches such items
+    /// where 1.99.1 reached none: `<usize as core::slice::index::SliceIndex<[T]>>::
+    /// get_unchecked`, measured 2026-11-09). It is accepted if `Trait` is a
+    /// `core`/`alloc`/`std` path and `Self` is a `core`/`alloc`/`std` type or a
+    /// primitive one: by the orphan rule such an impl is in the standard library.
     #[must_use]
     pub fn is_ub_check(path: &str) -> bool {
         let (marker, exact) = (UB_CHECK_MARKERS[0], &UB_CHECK_MARKERS[1..]);
         if exact.contains(&path) {
             return true;
         }
-        UB_CHECK_CRATES.iter().any(|c| path.starts_with(c))
+        let std_path = |p: &str| UB_CHECK_CRATES.iter().any(|c| p.starts_with(c));
+        let in_std = std_path(path)
+            || qualified_std_impl(path).is_some_and(|(s, t)| {
+                std_path(t)
+                    && (std_path(s)
+                        || PRIMITIVE_TYPES.contains(&s)
+                        || s.starts_with(['[', '*', '&', '(']))
+            });
+        in_std
             && path
                 .rsplit_once("::")
                 .is_some_and(|(_, last)| last == marker)
+    }
+
+    /// Primitive types a qualified path's `Self` may name ([`is_ub_check`]).
+    const PRIMITIVE_TYPES: &[&str] = &[
+        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+        "f16", "f32", "f64", "f128", "bool", "char", "str",
+    ];
+
+    /// `(Self, Trait)` of a path starting `<Self as Trait>::`, with `Self` and `Trait`
+    /// balanced in `<..>`.
+    fn qualified_std_impl(path: &str) -> Option<(&str, &str)> {
+        let rest = path.strip_prefix('<')?;
+        let mut depth = 0_usize;
+        let mut as_at = None;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' if depth == 0 => {
+                    let (s, t) = (&rest[..as_at?], &rest[as_at? + 4..i]);
+                    return rest[i + 1..].starts_with("::").then_some((s, t));
+                }
+                '>' => depth -= 1,
+                ' ' if depth == 0 && as_at.is_none() && rest[i..].starts_with(" as ") => {
+                    as_at = Some(i);
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Results of intrinsics, which have no MIR, as return summaries for the value
@@ -712,6 +775,24 @@ pub mod mir {
         ("ctlz_nonzero", 1),
         ("cttz_nonzero", 1),
     ];
+
+    /// Integer `min`/`max` intrinsics (`Ord::min`/`Ord::max` of the integer types call
+    /// them since rustc 1.100; before, those had MIR): `(name, is_max)`. The result
+    /// is one of the two arguments, at most both (`min`) or at least both (`max`):
+    /// the intrinsics' fallback bodies, which `#[miri::intrinsic_fallback_is_spec]`
+    /// declares to be their specification, are `if a < b { a } else { b }` and
+    /// `if a < b { b } else { a }` (`core/src/intrinsics/mod.rs`, rustc 1.100.0-beta.10).
+    /// Differential test against the real `min`/`max` on boundary inputs.
+    pub const INTRINSIC_MIN_MAX: &[(&str, bool)] = &[("integer_min", false), ("integer_max", true)];
+
+    /// `Some(is_max)` for an [`INTRINSIC_MIN_MAX`] intrinsic.
+    #[must_use]
+    pub fn intrinsic_min_max(name: &str) -> Option<bool> {
+        INTRINSIC_MIN_MAX
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|&(_, m)| m)
+    }
 
     /// The largest result of the intrinsic `name` for an integer type of bit width
     /// `width` ([`INTRINSIC_RESULT_BOUNDS`]); its smallest result is 0.
@@ -858,6 +939,32 @@ mod tests {
         assert_eq!(mir::intrinsic_result_bound("add_with_overflow", 32), None);
     }
 
+    /// Differential test of `mir::INTRINSIC_MIN_MAX`: the real `Ord::min`/`Ord::max`
+    /// of every integer width, on boundary inputs, return one of the arguments, at most
+    /// (`min`) or at least (`max`) both.
+    #[test]
+    fn intrinsic_min_max() {
+        assert_eq!(mir::intrinsic_min_max("integer_min"), Some(false));
+        assert_eq!(mir::intrinsic_min_max("integer_max"), Some(true));
+        assert_eq!(mir::intrinsic_min_max("three_way_compare"), None);
+        macro_rules! check {
+            ($($t:ty),*) => {$({
+                let inputs: [$t; 6] = [0, 1, <$t>::MAX, <$t>::MIN, <$t>::MAX >> 1, <$t>::MIN / 2];
+                for a in inputs {
+                    for b in inputs {
+                        let (lo, hi) = (Ord::min(a, b), Ord::max(a, b));
+                        assert!(lo == a || lo == b, "min({a}, {b}) for {}", stringify!($t));
+                        assert!(hi == a || hi == b, "max({a}, {b}) for {}", stringify!($t));
+                        assert!(lo <= a && lo <= b && hi >= a && hi >= b);
+                    }
+                }
+            })*};
+        }
+        check!(
+            u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
+        );
+    }
+
     #[test]
     fn core_table_lookup() {
         assert!(in_core_table("core", &["mem"], "swap"));
@@ -894,6 +1001,32 @@ mod tests {
             "core::ptr::read::precondition_check::{closure#0}"
         ));
         assert!(!mir::is_ub_check(""));
+        // Trait methods of the standard library (rustc 1.100): accepted.
+        assert!(mir::is_ub_check(
+            "<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check"
+        ));
+        assert!(mir::is_ub_check(
+            "<core::ops::range::Range<usize> as core::slice::index::SliceIndex<[T]>>::get_unchecked_mut::precondition_check"
+        ));
+        assert!(mir::is_ub_check(
+            "<[T] as core::slice::Foo<(u8, u8)>>::m::precondition_check"
+        ));
+        // A user type or a user trait, a missing `as`, an unbalanced path: not one.
+        assert!(!mir::is_ub_check(
+            "<my::Range as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check"
+        ));
+        assert!(!mir::is_ub_check(
+            "<usize as my::SliceIndex<[T]>>::get_unchecked::precondition_check"
+        ));
+        assert!(!mir::is_ub_check(
+            "<core::ops::Range<usize>>::get_unchecked::precondition_check"
+        ));
+        assert!(!mir::is_ub_check(
+            "<usize as core::slice::SliceIndex<[T]>::get::precondition_check"
+        ));
+        assert!(!mir::is_ub_check(
+            "<usize as core::slice::index::SliceIndex<[T]>>::get_unchecked::precondition_check_x"
+        ));
         assert!(mir::is_alloc_free_intrinsic("typed_swap_nonoverlapping"));
         assert!(!mir::is_alloc_free_intrinsic("catch_unwind"));
         assert!(mir::is_panic_intrinsic("abort"));
