@@ -540,7 +540,7 @@ next. Facts marked *measured* were measured on fork `fip-beta`
 | P1 no allocation | `allocates 0` (fork `-V alloc-check`) | `fip-macros` token scan (bound 0); `fip-prelint` MIR allocation analysis | — |
 | P2 no free (F2) | `#[verifier::fip]`, only without callbacks (7.2) | `fip-prelint` MIR free analysis (implicit drops through their glue) | — |
 | P3 bounded stack | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases` (README "bounded stack, verified crates") | `fip-macros` rejects direct self-recursion; `fip-prelint` rejects recursion through callees; `fip-prelint --stack` measures bytes per build | stack bytes are a per-build measurement, not a proof |
-| P4 termination | `decreases` on recursion and loops (Verus) | none for loops: no recursion (P3) is checked, but a loop may run forever | **loops in unverified `total` code**: the plain build has no termination check; `fip-prelint` must refuse a `total` mark on a function with a loop unless a Verus sidecar lists it |
+| P4 termination | Verus: loops need `decreases` (`exec_allows_no_decreases_clause` is not allowed by the surface gate), recursion is forbidden (no function-level `decreases`) | none for loops: no recursion (P3) is checked, but a loop may run forever | **loops in unverified `total` code**: the plain build has no termination check; `fip-prelint` must refuse a `total` mark on a function with a loop unless a Verus sidecar lists it |
 | P5 no panic / unwind | `no_unwind` with overflow and bounds obligations | `panic_macros = false` (token level) and `fip-prelint` panic analysis (panic paths through callees, overflow checks as the profile has them) | — |
 
   Before this section `total` was defined only in the 2026-11-06 discussion; this table
@@ -551,7 +551,7 @@ next. Facts marked *measured* were measured on fork `fip-beta`
 | property of `total` | fork mechanism | usable? (measured on `6f6975af2`) | so `total` uses |
 |---|---|---|---|
 | allocation 0 | `allocates 0` with `-V alloc-check` | yes; the fork audit found no remaining false bound with the global allocator | Verus, via the `strict` generator (`allocates 0`) |
-| termination | `decreases` | upstream Verus feature, not re-measured in this audit | Verus `decreases`, emitted by the macro when the item recurses |
+| termination | `decreases` | upstream Verus feature, not re-measured in this audit | the existing surface gate, no new emission: in portable-fip's verified crates function-level `decreases` is forbidden (`with_fn_decreases`, so no recursion, which the stack claim needs) and every loop needs `decreases` because `exec_allows_no_decreases_clause` is not in `VERIFIER_ALLOWED`; a `total` function in a user crate gets the same rule from Verus only if it is verified |
 | no panic / unwind | `no_unwind` plus overflow and bounds obligations | upstream Verus feature, not re-measured in this audit | Verus `no_unwind`; `fip-prelint` panic sidecar for unverified callers |
 | no free on normal return (F2) | `#[verifier::fip]` | sound in every probe with the global allocator and with library `FipAllocator`s; but closure calls, generic trait-method calls, `?`, `v[i]`, `for` and slice `len` are rejected, and `mem::forget` counts as no free (a leak is allowed) | `#[verifier::fip]` only for non-callback functions (`swap`, `replace`, `refill`-like); `fip-prelint`'s MIR F2 check for everything, and as the only check for callback combinators |
 | bounded stack | `#[verifier::fip(strict)]` | sound after the fixes, but **local only**: a strict function cannot call a function of another crate, nor drop a value whose `Drop` is in another crate (`fipdrop3/xc/u10_strict_libH.rs`) | `fip-prelint --stack` (unchanged); a library cannot offer `fip(strict)` functions to user crates |
@@ -586,9 +586,18 @@ point (7.2).
 
 1. `fip-macros`: parse `strict` and `total` (`strict = true` alias; `total` implies
    `strict`, `panic_macros = false` and bound 0); in a Verus build emit `verus_spec`
-   (`requires`, `allocates N`, and for `total` `no_unwind` and `decreases` when given) and
-   `#[verifier::fip]` for `total` functions without callable parameters. Plain build
-   unchanged apart from the `fip::mark` carrying `total`.
+   (`requires`, `allocates N`, and for `total` the `no_unwind` clause; never `decreases`,
+   see 7.2) and `#[verifier::fip]` for `total` functions without callable parameters.
+   Plain build unchanged apart from the `fip::mark` carrying `total`.
+   **Surface gate (decided 2026-11-09):** `fip` is added to `VERIFIER_ALLOWED`
+   (`fip-testkit::surface`), because `#[verifier::fip]`/`fip(strict)` only add
+   obligations (no free, constant stack) and cannot make Verus accept more; this is a
+   change of the trust surface and is recorded here. The line-based scanner sees only
+   attributes written in the source, so a macro-emitted `#[verifier::fip]` is invisible
+   to it; that is acceptable because a missed restriction cannot weaken a proof. To keep
+   the macro from emitting a weakening attribute, a `fip-macros` test asserts that every
+   `verifier::..` it emits is in `VERIFIER_ALLOWED` and that its `verus_spec` never
+   contains `decreases`.
 2. `fip-prelint`: a `total` mark is discharged only if the Verus sidecar lists the
    function with `allocates 0` and the flags of 7.4, and the driver's own F2, stack and
    panic checks pass for the instance; otherwise ⊤ with the reason.

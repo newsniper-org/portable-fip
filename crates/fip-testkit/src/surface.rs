@@ -193,10 +193,14 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// `verifier::..` attributes that only steer the solver (nonlinear arithmetic, a
-/// separate prover process, a resource limit, loop isolation): they cannot make Verus
-/// accept recursion or skip a body.
-pub const VERIFIER_ALLOWED: &[&str] = &["nonlinear", "spinoff_prover", "rlimit", "loop_isolation"];
+/// `verifier::..` attributes that cannot make Verus accept more: the ones that only
+/// steer the solver (nonlinear arithmetic, a separate prover process, a resource limit,
+/// loop isolation), and the fork's `fip` (also `fip(strict)`, scanned as `fip`), which
+/// only adds obligations (no free on a normal return; constant stack) and requires
+/// `-V alloc-check` (decision record 2026-11-06-redesign-verus-allocates, 7.2). They
+/// cannot make Verus accept recursion or skip a body.
+pub const VERIFIER_ALLOWED: &[&str] =
+    &["nonlinear", "spinoff_prover", "rlimit", "loop_isolation", "fip"];
 
 /// One `verifier::<name>` (or `verifier(<name>)`) in code, outside comments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -599,6 +603,16 @@ mod tests {
             names("#[cfg_attr(verus_keep_ghost, verifier::nonlinear)]\n"),
             vec!["nonlinear"]
         );
+        // The fork's `fip` and `fip(strict)` scan as `fip`, which is allowed; the
+        // attributes that change what is verified stay unlisted.
+        assert_eq!(
+            names("#[cfg_attr(verus_keep_ghost, verifier::fip)]\n#[verifier::fip(strict)]\n"),
+            vec!["fip", "fip"]
+        );
+        assert!(VERIFIER_ALLOWED.contains(&"fip"));
+        for weakening in ["external_body", "external", "exec_allows_no_decreases_clause"] {
+            assert!(!VERIFIER_ALLOWED.contains(&weakening), "{weakening}");
+        }
     }
 
     #[test]
