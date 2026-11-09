@@ -177,10 +177,24 @@ sidecar-gen:
 # The import is accepted only with fip-strict's committed sidecar (trusted stamp,
 # --no-cheating, unchanged sources) and a VIR file exported by the generator run of
 # `verify-strict` (its `.fip-run` record).
-verify-core: verify-strict
+verify-core: verify-strict verus-lib-macros
+    #!/usr/bin/env bash
+    set -euo pipefail
     rm -rf target/verus-core && mkdir -p target/verus-core
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core {{verus_flags}} crates/fip-core/src/lib.rs {{verus_strict}} --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
+    {{one_artifact}}
+    so=$(one_artifact target/verus-lib-macros fip_macros so)
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_core --crate-dir crates/fip-core --out target/verus-core/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_core {{verus_flags}} crates/fip-core/src/lib.rs {{verus_strict}} --extern fip_macros="$so" -L "$(dirname "$so")" --export target/verus-core/fip_core.vir --compile --out-dir target/verus-core
     just verus-sidecar-check target/verus-core/verus-verified.txt crates/fip-core/verus-verified.txt
+
+# `fip-macros` built with the Verus toolchain, for the crates whose functions carry
+# `#[fip_macros::fip(strict ..)]`/`(total)` in both builds (phase 5: under Verus the
+# macro generates their `requires`/`allocates`/`no_unwind`/`#[verifier::fip]`).
+verus-lib-macros: verus-pin
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tc=$({{verus}} --version | awk '/Toolchain/ {print $2}')
+    rm -rf target/verus-lib-macros
+    cargo +"$tc" build --locked -q -p fip-macros --target-dir target/verus-lib-macros
 
 # A regenerated Verus sidecar must equal the committed one, so a stale sidecar fails
 # `just ci` here (and, in `prelint`, the driver refuses it: the self-check changes).
@@ -211,9 +225,13 @@ verus-sidecar-check generated committed:
 # fip-alloc proofs, no trusted items (--no-cheating), through the sidecar generator;
 # imports fip-strict's Verus build (`fip_strict::AllocFreeDrop` bounds `refill`); the
 # sidecar must equal crates/fip-alloc/verus-verified.txt.
-verify-alloc: verify-strict
+verify-alloc: verify-strict verus-lib-macros
+    #!/usr/bin/env bash
+    set -euo pipefail
     rm -rf target/verus-alloc && mkdir -p target/verus-alloc
-    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc {{verus_flags}} crates/fip-alloc/src/lib.rs {{verus_strict}}
+    {{one_artifact}}
+    so=$(one_artifact target/verus-lib-macros fip_macros so)
+    VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_alloc --crate-dir crates/fip-alloc --out target/verus-alloc/verus-verified.txt --import-sidecar fip_strict=crates/fip-strict/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name fip_alloc {{verus_flags}} crates/fip-alloc/src/lib.rs {{verus_strict}} --extern fip_macros="$so" -L "$(dirname "$so")"
     just verus-sidecar-check target/verus-alloc/verus-verified.txt crates/fip-alloc/verus-verified.txt
 
 # `#[fip]` above `verus_spec` verifies; below it, or with an allocation, it is rejected.
@@ -232,6 +250,8 @@ verify-compose: verify-strict verify-core
     run() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" {{verus_strict}} -L "$deps" "$1"; }
     run verify/compose.rs
     run verify/compose_strict.rs
+    # Phase 5: `strict`/`total` generate the Verus contract (verify/total.rs).
+    run verify/total.rs
     run_state() { VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} {{verus_core}} "$1"; }
     run_state verify/compose_state.rs
     run_state verify/alloc_callers.rs
@@ -304,7 +324,7 @@ verify-negative: verify-strict verify-core
     # about the spec. Optional sixth argument: extra Verus flags (e.g. `--rlimit 100`).
     expect_verus_fail() {  # name, crate, file, sed script, expected log regex[, verus flags]
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 ${6:-} "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 ${6:-} "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
       if grep -q "rlimit" "$d/log"; then echo "FAIL: mutant $1 hit the resource limit (rlimit)"; cat "$d/log"; exit 1; fi
@@ -343,7 +363,7 @@ verify-negative: verify-strict verify-core
     # `call_allocates` requirement), not a functional one.
     expect_alloc_fail() {  # name, crate, file, sed script, regex expected in the failing span
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 "$d/src/lib.rs" {{verus_strict}} > "$d/log" 2>&1; then
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
       if grep -q "rlimit" "$d/log"; then echo "FAIL: mutant $1 hit the resource limit (rlimit)"; cat "$d/log"; exit 1; fi
@@ -354,9 +374,29 @@ verify-negative: verify-strict verify-core
     # A `Box::new` in an `allocates 0` body (fip-core links no `alloc`, so the mutant
     # adds `extern crate alloc;` to the module) and in a loop bounded by the callbacks' sum.
     ext_alloc='0,/^#\[cfg(verus_keep_ghost)\]$/ s//extern crate alloc;\n&/'
-    expect_alloc_fail swap-allocates        fip-core  slice.rs "$ext_alloc"'; /^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        let _b = alloc::boxed::Box::new(0u8);/' 'allocates 0'
+    # `swap` (`strict`) and `refill` (`total`) carry `#[fip_macros::fip(..)]` in the
+    # Verus build too (phase 5): a visible `Box::new` is rejected by its token scan,
+    # before Verus; an allocation hidden from the scan fails the generated `allocates 0`
+    # (control `total-hidden-alloc` below).
+    expect_scan_fail() {  # name, crate, file, sed script
+      local d; d=$(mutate "$1" "$2" "$3" "$4")
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
+        echo "FAIL: mutant $1 verified"; exit 1
+      fi
+      grep -q "allocation site \`Box::new\` in the body" "$d/log" || { echo "FAIL: mutant $1 failed for another reason"; cat "$d/log"; exit 1; }
+      echo "mutant $1 rejected by the fip-macros token scan"
+    }
+    expect_scan_fail swap-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        let _b = alloc::boxed::Box::new(0u8);/'
     expect_alloc_fail map-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn map_in_place</,/^}/ s/^        i += 1;$/        let _b = alloc::boxed::Box::new(0u8);\n        i += 1;/' 'allocated\(\) <= crate::spec::map_allocs'
-    expect_alloc_fail refill-allocates      fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _b = Box::new(0u8);/' 'allocates 0'
+    expect_scan_fail refill-allocates       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _b = Box::new(0u8);/'
+    # A free in `total` `refill` (an `Option<Box<u8>>` dropped on the normal return):
+    # the generated `#[verifier::fip]` rejects it (no `allocates`/token check sees it).
+    d=$(mutate refill-frees fip-alloc lib.rs 's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _spare: Option<Box<u8>> = None;/')
+    if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
+      echo "FAIL: mutant refill-frees verified"; exit 1
+    fi
+    grep -q "a \`#\[verifier::fip\]\` function must not deallocate" "$d/log" || { echo "FAIL: mutant refill-frees failed for another reason"; cat "$d/log"; exit 1; }
+    echo "mutant refill-frees rejected by Verus (#[verifier::fip])"
     # A sum spec that forgets the last call cannot bound the loop.
     expect_alloc_fail map-sum-drops-call    fip-core  spec.rs  's/^    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocates(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) }/' 'allocated\(\) <= crate::spec::map_allocs'
     expect_alloc_fail compact-sum-drops-call fip-core spec.rs  's/^    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocates(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) }/' 'allocated\(\) <= crate::spec::compact_allocs'
@@ -492,8 +532,35 @@ verify-negative: verify-strict verify-core
     expect_verus_fail spec-fip-wrong-relation    fip-core spec.rs   '/^pub open spec fn compact_fip_post</,/^}/ s/keep.post((&a,), r)/keep.post((\&a,), !r)/' "$errs"
     # fip-strict: `Certified::pre` must be the closure's `requires`.
     expect_verus_fail certified-pre-true         fip-strict lib.rs  's/^                &&& self.inner().requires(args)$/                \&\&\& true/' "$errs"
-    # Stack bound: recursion without `decreases` is rejected.
-    expect_verus_fail swap-recursive       fip-core  slice.rs '/^pub fn swap</,/^}/ s/^        swap_lt(xs, lo, hi);$/        swap_lt(xs, lo, hi);\n        swap(xs, lo, lo);/' 'recursive function must have a .?decreases.? clause'
+    # Stack bound: recursion without `decreases` is rejected (in `compact`, which has no
+    # `#[fip]` attribute, so Verus is the check; on a `strict`/`total` function the
+    # macro's direct-recursion check rejects it first).
+    expect_verus_fail compact-recursive    fip-core  slice.rs '/^pub fn compact</,/^}/ s/^    let n = xs.len();$/    let _again = compact(xs, keep);\n    let n = xs.len();/' 'recursive function must have a .?decreases.? clause'
+    # Termination (P4 of `total`): a loop without `decreases` in verified code is
+    # rejected by Verus (`exec_allows_no_decreases_clause` is refused by the surface
+    # gate, mutant `surface-no-decreases-attr`).
+    expect_verus_fail compact-loop-no-decreases fip-core slice.rs '/^pub fn compact</,/^}/ { /^        decreases n - r,$/d }' 'loop must have a .?decreases.? clause'
+    # Phase 5 (`total`, verify/total.rs): a `total` caller of a callee that may unwind
+    # fails the generated `no_unwind`; an allocation hidden from the token scan behind a
+    # hand-written certificate fails a `strict` caller's generated `allocates 0`; a free
+    # in a `total` function fails the generated `#[verifier::fip]`.
+    total_fail() {  # name, sed script or `append:<text>`, expected regex
+      local f="$out/total_$1.rs"
+      case "$2" in
+        append:*) cp verify/total.rs "$f"; printf '%b' "${2#append:}" >> "$f" ;;
+        *) sed "$2" verify/total.rs > "$f" ;;
+      esac
+      if cmp -s verify/total.rs "$f"; then echo "FAIL: control total-$1 did not apply"; exit 1; fi
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --extern fip_macros="$so" -L "$deps" {{verus_strict}} "$f" > "$out/total_$1.log" 2>&1; then
+        echo "FAIL: control total-$1 verified"; exit 1
+      fi
+      grep -Eq "$3" "$out/total_$1.log" || { echo "FAIL: control total-$1 failed for another reason"; cat "$out/total_$1.log"; exit 1; }
+      echo "control total-$1 rejected by Verus"
+    }
+    total_fail unwind 's/^    inc(same_total(x))$/    inc(same_fip(x))/' 'cannot show this call will not unwind'
+    total_fail hidden-alloc 'append:\n/// Claims 0 allocations, allocates one.\npub const __fip_strict_claim: fip_strict::Cert = unsafe { fip_strict::Cert::assume("claim", 0) };\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n    allocates 1\n))]\npub fn claim() -> u32 {\n    let b = alloc::boxed::Box::new(1u32);\n    *b\n}\n\n#[fip(strict)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n))]\npub fn calls_claim() -> u32 {\n    claim()\n}\n' 'postcondition not satisfied'
+    grep -A3 "postcondition not satisfied" "$out/total_hidden-alloc.log" | grep -q '#\[fip(strict)\]' || { echo "FAIL: control total-hidden-alloc failed elsewhere than the generated bound"; cat "$out/total_hidden-alloc.log"; exit 1; }
+    total_fail free 'append:\n#[fip(total)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == x,\n))]\npub fn frees(x: u32) -> u32 {\n    let _spare: Option<alloc::boxed::Box<u32>> = None;\n    x\n}\n' 'function must not deallocate'
     # Source gates (fip_testkit::surface) must fail on mutated sources.
     expect_test_fail() {  # name, crate, file, sed script, test name
       local d; d=$(mutate "$1" "$2" "$3" "$4")
@@ -586,6 +653,11 @@ verify-sidecar: verify-strict
     fa=tools/fip-prelint/tests/fixtures/verus_alloc
     (cd "$fa" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name valloc --crate-dir valloc --out "$out/valloc.txt" -- {{verus}} --crate-type=lib --crate-name valloc {{verus_flags}} valloc/src/lib.rs)
     just verus-sidecar-check "$out/valloc.txt" "$fa/valloc/verus-verified.txt"
+    # `total` marks (phase 5): the fixture verus_total's sidecar lists the functions the
+    # driver discharges or refuses as `total` (tests/fixtures.rs `verus_total_marks`).
+    ft=tools/fip-prelint/tests/fixtures/verus_total
+    (cd "$ft" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vtotal --crate-dir vtotal --out "$out/vtotal.txt" -- {{verus}} --crate-type=lib --crate-name vtotal {{verus_flags}} vtotal/src/lib.rs)
+    just verus-sidecar-check "$out/vtotal.txt" "$ft/vtotal/verus-verified.txt"
     # An `external_body` function: Verus rejects the --no-cheating run, nothing written.
     cp -r "$fx" "$out/ext"
     printf '\n#[cfg_attr(verus_keep_ghost, verifier::external_body)]\npub fn ext() -> u32 { 2 }\n' >> "$out/ext/vside/src/lib.rs"
@@ -685,7 +757,7 @@ verify-upstream:
     fi
     out=target/verify-upstream; rm -rf "$out"; mkdir -p "$out/strict" "$out/core" "$out/alloc"
     src="$out/src"
-    uv run --no-project python verify/strip_alloc.py "$src" crates/fip-strict crates/fip-core crates/fip-alloc verify/compose.rs verify/compose_strict.rs verify/compose_state.rs verify/fip_fn_types.rs
+    uv run --no-project python verify/strip_alloc.py "$src" crates/fip-strict crates/fip-core crates/fip-alloc verify/compose.rs verify/compose_strict.rs verify/compose_state.rs verify/fip_fn_types.rs verify/total.rs
     # The proc-macro is loaded by the upstream Verus's rustc: built with its toolchain
     # (not the fork's), into its own directory.
     tc=$({{verus_upstream}} --version | awk '/Toolchain/ {print $2}')
@@ -695,9 +767,13 @@ verify-upstream:
     {{one_artifact}}
     so=$(one_artifact "$m" fip_macros so)
     deps=$(dirname "$so")
+    # `#[fip_macros::fip(strict ..)]`/`(total)` emit fork-only clauses under Verus
+    # (phase 5), which the script cannot strip: `FIP_MACROS_UPSTREAM=1` makes the macro
+    # leave out `allocates` and `#[verifier::fip]` (never `requires` or `no_unwind`,
+    # which upstream verifies).
     up() {  # name, Verus arguments
       local name=$1; shift
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating "$@" > "$out/$name.log" 2>&1; then
+      if FIP_MACROS_UPSTREAM=1 VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating "$@" > "$out/$name.log" 2>&1; then
         echo "verify-upstream: $name: $(grep -h 'verification results' "$out/$name.log")"
       else
         cat "$out/$name.log"; echo "FAIL: upstream Verus rejects the stripped $name"; exit 1
@@ -706,12 +782,21 @@ verify-upstream:
     strict="--import fip_strict=$out/strict/fip_strict.vir --extern fip_strict=$out/strict/libfip_strict.rlib"
     core="--import fip_core=$out/core/fip_core.vir --extern fip_core=$out/core/libfip_core.rlib -L $out/strict"
     up fip-strict --crate-name fip_strict "$src/fip-strict/src/lib.rs" --export "$out/strict/fip_strict.vir" --compile --out-dir "$out/strict"
-    up fip-core --crate-name fip_core "$src/fip-core/src/lib.rs" $strict --export "$out/core/fip_core.vir" --compile --out-dir "$out/core"
-    up fip-alloc --crate-name fip_alloc "$src/fip-alloc/src/lib.rs"
+    up fip-core --crate-name fip_core "$src/fip-core/src/lib.rs" $strict --extern fip_macros="$so" -L "$deps" --export "$out/core/fip_core.vir" --compile --out-dir "$out/core"
+    up fip-alloc --crate-name fip_alloc "$src/fip-alloc/src/lib.rs" $strict --extern fip_macros="$so" -L "$deps"
     up compose.rs --extern fip_macros="$so" -L "$deps" $strict "$src/compose.rs"
     up compose_strict.rs --extern fip_macros="$so" -L "$deps" $strict "$src/compose_strict.rs"
     up compose_state.rs --extern fip_macros="$so" -L "$deps" $strict $core "$src/compose_state.rs"
     up fip_fn_types.rs --extern fip_macros="$so" -L "$deps" $strict "$src/fip_fn_types.rs"
+    up total.rs --extern fip_macros="$so" -L "$deps" $strict "$src/total.rs"
+    # Control: without the switch the macro emits `allocates` (at the `strict`/`total`
+    # key of the attribute), which upstream does not parse, so the switch is what makes
+    # the stripped `total.rs` pass.
+    if VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" $strict "$src/total.rs" > "$out/total-noswitch.log" 2>&1; then
+      echo "FAIL: upstream Verus accepted total.rs without FIP_MACROS_UPSTREAM=1"; exit 1
+    fi
+    grep -A3 "^error: unexpected token" "$out/total-noswitch.log" | grep -q "#\[fip(total" || { echo "FAIL: upstream rejected total.rs without the switch for another reason"; cat "$out/total-noswitch.log"; exit 1; }
+    echo "verify-upstream: control: without FIP_MACROS_UPSTREAM=1 the stripped total.rs is rejected"
     echo "verify-upstream: ok"
 
 # `fip-arch`'s unit tests on riscv64 under qemu-user, with and without Zicbop

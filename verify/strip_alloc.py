@@ -27,10 +27,17 @@ to Verus; `tests/verus_drift.rs` names the allocation syntax in its strings). Re
     total` or `/// Callbacks that allocate nothing` (sum spec functions, zero lemmas);
   - `unsafe impl .. vstd::alloc_check::AllocFreeDrop for ..` and the bounds on it;
     the Verus-only re-exports of `AllocFreeDrop` / `DropFreeFn` become marker traits
-    with a blanket impl, as in plain builds.
+    with a blanket impl, as in plain builds;
+  - hand-written `#[cfg_attr(verus_keep_ghost, verifier::fip)]` attribute lines (the
+    fork's `fip`, phase 5; upstream has no such attribute).
+What `#[fip_macros::fip(strict ..)]`/`(total)` generate is macro output, which this
+script cannot see: `just verify-upstream` sets `FIP_MACROS_UPSTREAM=1` for that
+(`fip-macros` then leaves out `allocates` and `#[verifier::fip]`, never `requires`
+or `no_unwind`).
 The script then fails if any code line (comments excluded) still names `allocates`,
-`allocated()`, `call_allocates` or `alloc_check`: a new spelling must be taught here,
-never passed silently to upstream Verus (where it would be a parse error anyway).
+`allocated()`, `call_allocates`, `alloc_check` or `verifier::fip`: a new spelling must
+be taught here, never passed silently to upstream Verus (where it would be an error
+anyway).
 """
 
 import pathlib
@@ -41,7 +48,10 @@ import sys
 ONLY_ALLOCATES_ATTR = re.compile(
     r"^\s*#\[cfg_attr\(verus_keep_ghost, verus_spec\(\w+(?:: [^=]+)? => allocates [^()]*(?:\([^()]*\))?\)\)\]$"
 )
-LEFTOVER = re.compile(r"\ballocates\b|\ballocated\(\)|\bcall_allocates\b|\balloc_check\b")
+LEFTOVER = re.compile(
+    r"\ballocates\b|\ballocated\(\)|\bcall_allocates\b|\balloc_check\b|\bverifier::fip\b"
+)
+FIP_ATTR = re.compile(r"^\s*#\[cfg_attr\(verus_keep_ghost, verifier::fip(?:\(strict\))?\)\]$")
 
 
 def strip_inline_allocates(line: str) -> str:
@@ -75,7 +85,7 @@ def strip(s: str) -> str:
         if skip:
             skip -= 1
             continue
-        if ONLY_ALLOCATES_ATTR.match(line):
+        if ONLY_ALLOCATES_ATTR.match(line) or FIP_ATTR.match(line):
             continue
         if t.startswith("allocates "):
             if t.count("(") != t.count(")"):
