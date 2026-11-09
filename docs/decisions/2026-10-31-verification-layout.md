@@ -69,7 +69,9 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   in `2026-11-01-fip-prelint.md`. Re-pinned again 2026-11-09 to `0.2026.11.09.1b27c11`
   (`1b27c1101…`, same toolchain), after the fork closed the custom-allocator findings of
   the audit of `ad55cd10a`; same verification counts, the sidecars differ only in
-  their stamp line.
+  their stamp line. Re-pinned again 2026-11-10 to `0.2026.11.09.c716c2b` (`c716c2bfd…`,
+  same toolchain) for the strict check of std calls that drop nothing (`total` emits
+  `#[verifier::fip(strict)]` since then).
 - **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
   (justfile `verus_flags`): the fork checks `allocates` clauses only with
   `-V alloc-check`, and an importing crate needs the imported crate's export from a

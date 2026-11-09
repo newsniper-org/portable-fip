@@ -1173,7 +1173,10 @@ user allocators (`hand_out`/`reclaim`), block size and alignment postconditions,
 `deallocates_when(0, false)` on the slice and `Vec` views; portable-fip still refuses
 allocator impls (surface gate, driver), so none of its claims depend on those rules.
 Measured: `just verify` gives the same counts; the Verus sidecars and the `targets`
-fixture differ only in the stamp (version and commit).
+fixture differ only in the stamp (version and commit). Re-pinned again 2026-11-10 to
+`0.2026.11.09.c716c2b` (`c716c2bfd…`, same toolchain): the fork's strict check accepts
+std calls marked as dropping nothing with a non-`Copy` `T`, so `total` emits
+`#[verifier::fip(strict)]` (redesign record 7.6).
 
 ## What would reopen this
 

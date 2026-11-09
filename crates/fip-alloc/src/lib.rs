@@ -13,12 +13,12 @@
 //!   (`#![forbid(unsafe_code)]`). [`refill`] is `#[fip_macros::fip(total)]`
 //!   (decision 2026-11-06-redesign-verus-allocates, phase 5): the attribute generates
 //!   its strict certificate `__fip_strict_refill` and, under Verus, the contract
-//!   `no_unwind allocates 0` and `#[verifier::fip]`. Depends on `fip-strict` and the
+//!   `no_unwind allocates 0` and `#[verifier::fip(strict)]`. Depends on `fip-strict` and the
 //!   proc-macro `fip-macros`.
 //! - **Allocation bounds, by proof (Verus fork `-V alloc-check`).** [`refill`]
 //!   carries `allocates 0`, which Verus proves under `T: fip_strict::AllocFreeDrop`
 //!   (decision 2026-11-06-redesign-verus-allocates, phase 2). Frees (property F2) are
-//!   not counted by `allocates`; since phase 5 the fork's `#[verifier::fip]` proves
+//!   not counted by `allocates`; since phase 5 the fork's `#[verifier::fip(strict)]` proves
 //!   that a normal return of `refill` frees nothing (a free mutant is rejected by
 //!   `just verify-negative`). Allocation-count tests (`fip-testkit`) remain as run-time
 //!   evidence for both allocations and frees.
@@ -53,8 +53,8 @@ use vstd::prelude::*;
 ///
 /// `total` (decision 2026-11-06-redesign-verus-allocates, 7.1): the attribute
 /// generates the certificate `__fip_strict_refill` and, under Verus, `no_unwind`,
-/// `allocates 0` and `#[verifier::fip]`, which proves that a normal return frees
-/// nothing (the `Box` is reused).
+/// `allocates 0` and `#[verifier::fip(strict)]`, which proves that a normal return frees
+/// nothing (the `Box` is reused) and that the stack is constant.
 #[fip_macros::fip(total)]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     ensures

@@ -17,12 +17,14 @@
 //!   its callbacks (`f.allocs()`, `call_allocates(..)`) and must be written by hand
 //!   (section 7.3), and is then required;
 //! - `total`: `no_unwind` (a hand-written one is an error) and
-//!   `#[verifier::fip]`; `total` with callable parameters is an error (measured
+//!   `#[verifier::fip(strict)]` (no free on a normal return and constant stack; plain
+//!   `#[verifier::fip]` until fork `c716c2bfd`, whose strict check accepts std calls that
+//!   drop nothing with a non-`Copy` `T`); `total` with callable parameters is an error (measured
 //!   2026-11-09 on the fork `6f6975af2`: a closure call is never `no_unwind`);
 //! - never `decreases` (a hand-written function-level `decreases` is an error: the
 //!   surface gate forbids recursion in the verified crates, section 7.2);
 //! - [`UPSTREAM_ENV`] (honoured by the caller only under Verus's driver): the
-//!   fork-only parts (`allocates`, `#[verifier::fip]`) are left out, `requires` and
+//!   fork-only parts (`allocates`, `#[verifier::fip(strict)]`) are left out, `requires` and
 //!   `no_unwind` (an upstream clause, accepted by upstream 0.2026.11.02, measured
 //!   2026-11-09) stay, so the strip gate `just verify-upstream` can run upstream Verus
 //!   on the macro's output.
@@ -222,7 +224,7 @@ pub(crate) fn plain_errors(inp: &Input<'_>) -> Vec<String> {
 /// and the clauses appended after it.
 pub(crate) struct Parts {
     /// Whole attributes emitted before the spec (`#[cfg_attr(verus_keep_ghost,
-    /// verifier::fip)]`).
+    /// verifier::fip(strict))]`).
     pub(crate) attrs: Vec<String>,
     /// `requires <conjuncts>,`.
     pub(crate) requires: Option<String>,
@@ -261,7 +263,7 @@ pub(crate) fn parts(inp: &Input<'_>) -> Result<Parts, Vec<String>> {
     }
     let mut attrs = Vec::new();
     if inp.total && !inp.upstream {
-        attrs.push("#[cfg_attr(verus_keep_ghost, verifier::fip)]".to_string());
+        attrs.push("#[cfg_attr(verus_keep_ghost, verifier::fip(strict))]".to_string());
     }
     Ok(Parts {
         attrs,
@@ -356,7 +358,7 @@ mod tests {
         assert_eq!(
             a,
             vec![
-                "#[cfg_attr(verus_keep_ghost, verifier::fip)]".to_string(),
+                "#[cfg_attr(verus_keep_ghost, verifier::fip(strict))]".to_string(),
                 "#[cfg_attr(verus_keep_ghost, verus_spec(r => requires i < j, j < old(xs)@.len(), ensures r == 1, no_unwind allocates 0))]".to_string(),
             ]
         );

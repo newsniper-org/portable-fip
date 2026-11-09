@@ -779,8 +779,9 @@
 //! - `allocates N`, the declared bound, so the number of the plain certificate is the
 //!   number Verus proves (Verus does not read certificates: a callee whose certificate
 //!   claims less than its proved bound fails the caller's generated `allocates`);
-//! - for `total`, `no_unwind` and `#[cfg_attr(verus_keep_ghost, verifier::fip)]`
-//!   (no free on a normal return); never `decreases`.
+//! - for `total`, `no_unwind` and `#[cfg_attr(verus_keep_ghost, verifier::fip(strict))]`
+//!   (no free on a normal return, and constant stack: callees strict or std calls the
+//!   fork knows drop nothing, recursion only through `become`); never `decreases`.
 //!
 //! The generated clauses are reported at the `strict`/`total` key of the attribute.
 //! **One source per clause (fail closed):** a hand-written `requires` next to
@@ -798,7 +799,7 @@
 //! (a unit test of this crate checks both).
 //!
 //! **Strip switch `FIP_MACROS_UPSTREAM=1`** (honoured only under Verus's driver): the
-//! fork-only parts (`allocates`, `#[verifier::fip]`) are left out; `requires` and
+//! fork-only parts (`allocates`, `#[verifier::fip(strict)]`) are left out; `requires` and
 //! `no_unwind` (accepted by upstream Verus 0.2026.11.02, measured) are always kept.
 //! `just verify-upstream` sets it, so upstream Verus can verify the macro's output;
 //! a control there shows that without it upstream rejects the output.
@@ -2760,7 +2761,7 @@ fn expand_parts(
         strict_args.map(|a| run_strict_scan(a, &shape, &body, &tag, ctx, &mut errors));
     // `strict`/`total` generate the Verus contract (decision
     // 2026-11-06-redesign-verus-allocates, 7.1): under Verus's driver the merged
-    // `verus_spec` (and `#[verifier::fip]` for `total`) replaces the hand-written one;
+    // `verus_spec` (and `#[verifier::fip(strict)]` for `total`) replaces the hand-written one;
     // in every build a hand-written spec that duplicates a generated clause is an error.
     let verus_contract = strict_args.and_then(|a| {
         contract_or_errors(a, mode, &toks, &shape, &body, ctx.is_some(), &mut errors)
@@ -3664,7 +3665,7 @@ fn fip_doc(mode: Mode, strict: bool, args: Option<&FipArgs>) -> TokenStream {
     }
     if total {
         doc.extend(
-            "#[doc = \"\"] #[doc = \"Total: strict, bound 0 and no panicking macro; a Verus build proves `allocates 0`, `no_unwind` and `#[verifier::fip]`, and `fip-prelint` discharges the mark only with that proof listed in the crate's Verus sidecar.\"]"
+            "#[doc = \"\"] #[doc = \"Total: strict, bound 0 and no panicking macro; a Verus build proves `allocates 0`, `no_unwind` and `#[verifier::fip(strict)]` (no free, constant stack), and `fip-prelint` discharges the mark only with that proof listed in the crate's Verus sidecar.\"]"
                 .parse::<TokenStream>()
                 .unwrap_or_default(),
         );

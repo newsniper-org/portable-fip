@@ -45,7 +45,7 @@ each property here has its own mechanism, and the strength differs:
 | property | mechanism | strength |
 |---|---|---|
 | `fip-core` cannot allocate | it does not link `alloc` | by construction |
-| functions do what their spec says | Verus fork `fip` `0.2026.11.09.1b27c11` (pinned in `tools/fip-prelint/verus-trusted.txt`, checked by `just verus-pin`), `--no-cheating -V alloc-check` on every run (`just verify-flags`); the same sources with the allocation layer stripped verify on upstream Verus `0.2026.11.02` (`just verify-upstream`); specs pre-verified against concrete accept/reject cases; 37 functional mutants (plus 4 that check the hand-written `ensures` and the generated `requires` survive the `strict`/`total` merge, 1 recursive, 1 loop without `decreases`, 9 surface-gate and 2 spec-drift mutants; the surface gate also rejects `trusted_call` and allocator trait implementations in the verified sources) and 14 wrong claims of verified callers (final states, missing or unpreserved state invariants, closure specifications, adapters) must fail; a functional mutant must break a loop invariant or the postcondition, and none may hit the resource limit | proof (Verus trust base) |
+| functions do what their spec says | Verus fork `fip` `0.2026.11.09.c716c2b` (pinned in `tools/fip-prelint/verus-trusted.txt`, checked by `just verus-pin`), `--no-cheating -V alloc-check` on every run (`just verify-flags`); the same sources with the allocation layer stripped verify on upstream Verus `0.2026.11.02` (`just verify-upstream`); specs pre-verified against concrete accept/reject cases; 37 functional mutants (plus 4 that check the hand-written `ensures` and the generated `requires` survive the `strict`/`total` merge, 1 recursive, 1 loop without `decreases`, 9 surface-gate and 2 spec-drift mutants; the surface gate also rejects `trusted_call` and allocator trait implementations in the verified sources) and 14 wrong claims of verified callers (final states, missing or unpreserved state invariants, closure specifications, adapters) must fail; a functional mutant must break a loop invariant or the postcondition, and none may hit the resource limit | proof (Verus trust base) |
 | a verified function or closure with an allocation bound allocates at most that much when it returns normally | Verus fork, `-V alloc-check` (`fip-core`'s `Fn`-based functions `allocates 0` or callback sums, `fip-alloc::refill` `allocates 0`; `fip-strict`'s `FipFn::call` `allocates self.allocs()`, where a `Certified<N, _>` has `allocs()` = `N`, checked at each verified call by `Certified::pre` (`call_allocates(closure, args) <= N`), and the adapters the sum of their parts; `fip_core::strict::*` `old(xs)@.len() * f.allocs()` (`update`: `f.allocs()`); the step functions and `fip_fn!` closures and the verified callers of `compose_state.rs`, `verify/alloc_callers.rs` and `verify/fip_fn_types.rs`; 9 allocation mutants in `fip-strict`/`fip-core`/`fip-alloc` (2 of them, in the `strict` `swap` and the `total` `refill`, are rejected first by the `fip-macros` token scan, which runs in the Verus build since phase 5) and 8 allocating or unbounded caller controls (including a `Certified<0, _>` of an allocating closure, and `fip_fn!(path)` without `bound` of an allocating function) must fail; since phase 5 `strict`/`total` functions get `allocates N` generated from `#[fip(N, ..)]`, and an allocation hidden from the token scan behind a hand-written certificate fails it (`verify/total.rs`); decision `docs/decisions/2026-11-06-redesign-verus-allocates.md`, phases 2, 3 and 5). `cargo fip-prelint` reads the proved bounds from the Verus sidecars (format 5, phase 4) and takes a literal bound `K` in place of its own count of a listed non-generic function without `requires` whose panic paths are allocation failures only, where its count is not a finite number `<= K`; a finite count above `K` is an error (fixture `verus_alloc`) | proof (fork trust base, plus vstd's allocation specifications and the fork's allocation pass); frees and panicking paths are not covered by `allocates`; for `total` functions the generated `#[verifier::fip]` proves no free on a normal return and `no_unwind` no unwinding (controls in `just verify-negative`) |
 | no allocation in a `#[fip]` body | `fip-macros` token scan; constructors of empty std collections that never allocate (`Vec::new`, `String::default`, …) are not sites: audited in the `alloc` sources of rustc 1.97.1/1.99.1/1.100.0-beta.10 (a test fails on other compilers), measured 0 allocations, agreed by `fip-prelint` | heuristic: blind to callees, trait methods, macros |
 | no allocation when the code runs | `fip-testkit` counts (per thread, or process-wide) | evidence for the tested inputs |
@@ -119,7 +119,8 @@ Verus contract* from the one declaration: `requires(..)` becomes the Verus
 `total`) `no_unwind` next to the generated one is a compile error, so the number of the
 plain certificate is the number Verus proves. `#[fip(total)]` is the strictest grade:
 `strict`, bound 0, `panic_macros = false`, and under Verus `no_unwind` and the fork's
-`#[verifier::fip]` (no free on a normal return); `fip-prelint` discharges a `total`
+`#[verifier::fip(strict)]` (no free on a normal return, constant stack; plain
+`#[verifier::fip]` before the fork `c716c2bfd`); `fip-prelint` discharges a `total`
 mark only if the crate's Verus sidecar lists the function with `allocates 0` (a
 sidecar is used only from a `--no-cheating -V alloc-check` run of the pinned fork) and
 the driver's own free, recursion and panic checks pass, else ⊤ with the reason (a loop
@@ -128,8 +129,8 @@ without a listed proof is named: its termination is unchecked).
 | property of `total` | Verus build | plain build / `fip-prelint` |
 |---|---|---|
 | no allocation | generated `allocates 0` | token scan (bound 0); MIR allocation analysis |
-| no free (F2) | generated `#[verifier::fip]` (functions without callbacks) | MIR free analysis |
-| bounded stack | recursion needs `decreases`, which the surface gate forbids | `#[fip]` direct recursion; MIR recursion check; `--stack` per build |
+| no free (F2) | generated `#[verifier::fip(strict)]` (functions without callbacks) | MIR free analysis |
+| bounded stack | generated `#[verifier::fip(strict)]`: callees strict (also across checked crates) or std calls the fork knows drop nothing, recursion only through `become`; and recursion needs `decreases`, which the surface gate forbids | `#[fip]` direct recursion; MIR recursion check; `--stack` per build |
 | termination | every loop needs `decreases` | ⊤ unless the sidecar lists the function |
 | no panic / unwind | generated `no_unwind` | `panic_macros = false`; MIR panic analysis |
 
@@ -412,7 +413,7 @@ state.
   (`number_from_11_closure`).
 
 Measured (`--no-cheating -V alloc-check`, Verus fork 0.2026.11.05.ca33b04, Z3 4.16.0,
-2026-11-06, and the same counts on the forks 0.2026.11.08.6f6975a and 0.2026.11.09.1b27c11, rustc
+2026-11-06, and the same counts on the forks 0.2026.11.08.6f6975a, 0.2026.11.09.1b27c11 and 0.2026.11.09.c716c2b, rustc
 1.100.0-beta.10, 2026-11-09; on stripped sources with upstream 0.2026.11.02.8bf68ee:
 23/58/1/3/4/13/4, and 6 for `verify/total.rs` (phase 5, 2026-11-09)):
 `fip-strict` 23 (19 before the per-arity `Compose` impls, 5 instead of 1), `fip-core`

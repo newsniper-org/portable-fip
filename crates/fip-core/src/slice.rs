@@ -22,7 +22,7 @@ use vstd::prelude::*;
 /// and upstream `0.2026.11.02`, upstream #3357); the construction is kept as it is.
 /// `total` (certificate `__fip_strict_swap_lt`, so `crate::strict` can call it): the
 /// attribute generates its Verus `requires`, `allocates 0`, `no_unwind` and
-/// `#[verifier::fip]` (decision 2026-11-06-redesign-verus-allocates, 7.1). Until fork
+/// `#[verifier::fip(strict)]` (decision 2026-11-06-redesign-verus-allocates, 7.1). Until fork
 /// `1b27c1101` it was `strict` only, because `#[verifier::fip]` rejected the call of
 /// `split_at_mut`, whose vstd specification had no `deallocates_when` condition (measured
 /// 2026-11-09 on `6f6975af2`; the fork added `deallocates_when(0, false)` to the slice views).
@@ -52,7 +52,7 @@ pub(crate) fn swap_lt<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize)
 /// ```
 ///
 /// `total`: certificate `__fip_strict_swap`, and under Verus the generated `requires`,
-/// `allocates 0`, `no_unwind` and `#[verifier::fip]`. Each branch calls `swap_lt` with
+/// `allocates 0`, `no_unwind` and `#[verifier::fip(strict)]`. Each branch calls `swap_lt` with
 /// its order established by the branch condition (`i < j` or `j < i`), so `fip-prelint`
 /// proves `swap_lt`'s precondition at both calls; with the earlier `(lo, hi)` tuple it
 /// could not, which a `total` mark turns into an error (measured 2026-11-09).

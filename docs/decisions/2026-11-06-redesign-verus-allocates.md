@@ -551,7 +551,7 @@ next. Facts marked *measured* were measured on fork `fip-beta`
 |---|---|---|---|
 | P1 no allocation | `allocates 0` (fork `-V alloc-check`) | `fip-macros` token scan (bound 0); `fip-prelint` MIR allocation analysis | — |
 | P2 no free (F2) | `#[verifier::fip]`, only without callbacks (7.2) | `fip-prelint` MIR free analysis (implicit drops through their glue) | — |
-| P3 bounded stack | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases` (README "bounded stack, verified crates") | `fip-macros` rejects direct self-recursion; `fip-prelint` rejects recursion through callees; `fip-prelint --stack` measures bytes per build | stack bytes are a per-build measurement, not a proof |
+| P3 bounded stack | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases` (README "bounded stack, verified crates") | `fip-macros` rejects direct self-recursion; `fip-prelint` rejects recursion through callees; `fip-prelint --stack` measures bytes per build | stack bytes are a per-build measurement, not a proof; since 2026-11-10 `total` functions also get Verus's constant-stack check (`#[verifier::fip(strict)]`, 7.6) |
 | P4 termination | Verus: loops need `decreases` (`exec_allows_no_decreases_clause` is not allowed by the surface gate), recursion is forbidden (no function-level `decreases`) | none for loops: no recursion (P3) is checked, but a loop may run forever | **loops in unverified `total` code**: the plain build has no termination check; `fip-prelint` must refuse a `total` mark on a function with a loop unless a Verus sidecar lists it |
 | P5 no panic / unwind | `no_unwind` with overflow and bounds obligations | `panic_macros = false` (token level) and `fip-prelint` panic analysis (panic paths through callees, overflow checks as the profile has them) | — |
 
@@ -566,7 +566,7 @@ next. Facts marked *measured* were measured on fork `fip-beta`
 | termination | `decreases` | upstream Verus feature, not re-measured in this audit | the existing surface gate, no new emission: in portable-fip's verified crates function-level `decreases` is forbidden (`with_fn_decreases`, so no recursion, which the stack claim needs) and every loop needs `decreases` because `exec_allows_no_decreases_clause` is not in `VERIFIER_ALLOWED`; a `total` function in a user crate gets the same rule from Verus only if it is verified |
 | no panic / unwind | `no_unwind` plus overflow and bounds obligations | upstream Verus feature, not re-measured in this audit | Verus `no_unwind`; `fip-prelint` panic sidecar for unverified callers |
 | no free on normal return (F2) | `#[verifier::fip]` | sound in every probe with the global allocator and with library `FipAllocator`s; but closure calls, generic trait-method calls, `?`, `v[i]`, `for` and slice `len` are rejected, and `mem::forget` counts as no free (a leak is allowed) | `#[verifier::fip]` only for non-callback functions (`swap`, `replace`, `refill`-like); `fip-prelint`'s MIR F2 check for everything, and as the only check for callback combinators |
-| bounded stack | `#[verifier::fip(strict)]` | sound after the fixes, but **local only**: a strict function cannot call a function of another crate, nor drop a value whose `Drop` is in another crate (`fipdrop3/xc/u10_strict_libH.rs`) | `fip-prelint --stack` (unchanged); a library cannot offer `fip(strict)` functions to user crates |
+| bounded stack | `#[verifier::fip(strict)]` | sound after the fixes, but **local only**: a strict function cannot call a function of another crate, nor drop a value whose `Drop` is in another crate (`fipdrop3/xc/u10_strict_libH.rs`) | `fip-prelint --stack` (unchanged); a library cannot offer `fip(strict)` functions to user crates. *Updated 2026-11-10:* cross-crate strict calls landed (fork `afac674b1`) and std calls that drop nothing take a non-`Copy` `T` (`c716c2bfd`); `total` now emits `#[verifier::fip(strict)]`, `--stack` stays as the cross-check (7.6) |
 | custom allocators | `BoundedAllocator`, `FipAllocator` | a verified `unsafe impl Allocator` can keep the permission for a block it handed to std and write through it (`toolchain/r4/scribble.rs`: `ensures r == 5` verified under `--no-cheating`, run returns 0); reported to the fork 2026-11-09 | `total` (and `strict` claims checked by Verus) assume the global allocator; a user `Allocator`/`GlobalAlloc` impl is a trust point the gate reports |
 
 So `total` is not a new Verus mode: it is a grade whose Verus part is
@@ -769,6 +769,21 @@ at `#[fip(total ..)]`). `verify/strip_alloc.py` also removes hand-written
   10 targets `swap`/`swap_lt` are refused as ⊤ like `replace` (the sidecar is
   x86_64-only). The mutants `swap-no-op`, `swap-allocates` and
   `swap-lt-requires-dropped` follow the new body and attribute.
+- **Constant stack by Verus, done 2026-11-10:** with fork `c716c2bfd` (std calls the fork
+  marks as dropping nothing, `alloc_check_skip_drops` on their specifications, may take a
+  non-`Copy` `T` in a strict function; requested 2026-11-09), `total` emits
+  `#[verifier::fip(strict)]` instead of `#[verifier::fip]`. On `1b27c1101` the four
+  `total` functions failed the strict check (`core::mem::swap` / `split_at_mut` "may
+  drop a value of type `T`"); on `c716c2bfd` they pass (fip-core 70, fip-alloc 1
+  verified, strict check included; it runs without `--compile` as well, measured). Row
+  "bounded stack" of 7.2 thereby moves to Verus for these functions; `fip-prelint`'s
+  recursion check and `--stack` stay as the cross-check. New control
+  `total-nonstrict-callee` (a `total` caller of a callee that is `#[verifier::fip]`,
+  `no_unwind`, `allocates 0` but not strict) is rejected by the strict call check. New
+  trust: vstd's `alloc_check_skip_drops` on std specifications (checked against the
+  rustc 1.100.0-beta.10 sources for all 31 functions and 6 trait impls on 2026-11-10: no
+  drop, `drop_in_place`, `truncate`, `clear` or `drain` in their bodies; negative
+  controls `Vec::clear`/`truncate`, `xs[0] = x`, `v[0] = x` stay rejected).
 - `total` on `#[fip_impl]` methods and trait contracts: rejected, not designed.
 - A `total` function in a user crate is refused by the driver unless the crate
   publishes a Verus sidecar (by design of 7.5 step 2).

@@ -188,7 +188,7 @@ verify-core: verify-strict verus-lib-macros
 
 # `fip-macros` built with the Verus toolchain, for the crates whose functions carry
 # `#[fip_macros::fip(strict ..)]`/`(total)` in both builds (phase 5: under Verus the
-# macro generates their `requires`/`allocates`/`no_unwind`/`#[verifier::fip]`).
+# macro generates their `requires`/`allocates`/`no_unwind`/`#[verifier::fip(strict)]`).
 verus-lib-macros: verus-pin
     #!/usr/bin/env bash
     set -euo pipefail
@@ -397,13 +397,13 @@ verify-negative: verify-strict verify-core
     expect_alloc_fail map-allocates         fip-core  slice.rs "$ext_alloc"'; /^pub fn map_in_place</,/^}/ s/^        i += 1;$/        let _b = alloc::boxed::Box::new(0u8);\n        i += 1;/' 'allocated\(\) <= crate::spec::map_allocs'
     expect_scan_fail refill-allocates       fip-alloc lib.rs   's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _b = Box::new(0u8);/'
     # A free in `total` `refill` (an `Option<Box<u8>>` dropped on the normal return):
-    # the generated `#[verifier::fip]` rejects it (no `allocates`/token check sees it).
+    # the generated `#[verifier::fip(strict)]` rejects it (the fork words its error for both forms as "a `#[verifier::fip]` function must not deallocate") (no `allocates`/token check sees it).
     d=$(mutate refill-frees fip-alloc lib.rs 's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    ::core::mem::swap(\&mut *cell, \&mut prev);\n    let _spare: Option<Box<u8>> = None;/')
     if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
       echo "FAIL: mutant refill-frees verified"; exit 1
     fi
     grep -q "a \`#\[verifier::fip\]\` function must not deallocate" "$d/log" || { echo "FAIL: mutant refill-frees failed for another reason"; cat "$d/log"; exit 1; }
-    echo "mutant refill-frees rejected by Verus (#[verifier::fip])"
+    echo "mutant refill-frees rejected by Verus (#[verifier::fip(strict)])"
     # A sum spec that forgets the last call cannot bound the loop.
     expect_alloc_fail map-sum-drops-call    fip-core  spec.rs  's/^    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocates(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) }/' 'allocated\(\) <= crate::spec::map_allocs'
     expect_alloc_fail compact-sum-drops-call fip-core spec.rs  's/^    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocates(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) }/' 'allocated\(\) <= crate::spec::compact_allocs'
@@ -550,7 +550,7 @@ verify-negative: verify-strict verify-core
     # Phase 5 (`total`, verify/total.rs): a `total` caller of a callee that may unwind
     # fails the generated `no_unwind`; an allocation hidden from the token scan behind a
     # hand-written certificate fails a `strict` caller's generated `allocates 0`; a free
-    # in a `total` function fails the generated `#[verifier::fip]`.
+    # in a `total` function fails the generated `#[verifier::fip(strict)]`.
     total_fail() {  # name, sed script or `append:<text>`, expected regex
       local f="$out/total_$1.rs"
       case "$2" in
@@ -567,6 +567,10 @@ verify-negative: verify-strict verify-core
     total_fail unwind 's/^    inc(same_total(x))$/    inc(same_fip(x))/' 'cannot show this call will not unwind'
     total_fail hidden-alloc 'append:\n/// Claims 0 allocations, allocates one.\npub const __fip_strict_claim: fip_strict::Cert = unsafe { fip_strict::Cert::assume("claim", 0) };\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n    allocates 1\n))]\npub fn claim() -> u32 {\n    let b = alloc::boxed::Box::new(1u32);\n    *b\n}\n\n#[fip(strict)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n))]\npub fn calls_claim() -> u32 {\n    claim()\n}\n' 'postcondition not satisfied'
     grep -A3 "postcondition not satisfied" "$out/total_hidden-alloc.log" | grep -q '#\[fip(strict)\]' || { echo "FAIL: control total-hidden-alloc failed elsewhere than the generated bound"; cat "$out/total_hidden-alloc.log"; exit 1; }
+    # Since fork c716c2bfd `total` emits `#[verifier::fip(strict)]` (constant stack): a
+    # `total` caller of a callee that is `#[verifier::fip]`, `no_unwind` and
+    # `allocates 0` but not strict fails the fork's strict call check.
+    total_fail nonstrict-callee 'append:\n/// Certified for the token scan (0, no panicking macro); not strict for Verus.\npub const __fip_strict_plain_fip: fip_strict::Cert = unsafe { fip_strict::Cert::assume_no_panic_macros("plain_fip", 0) };\n\n#[cfg_attr(verus_keep_ghost, verifier::fip)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == x,\n    no_unwind allocates 0\n))]\npub fn plain_fip(x: u32) -> u32 {\n    x\n}\n\n#[fip(total)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == x,\n))]\npub fn calls_plain_fip(x: u32) -> u32 {\n    plain_fip(x)\n}\n' 'must use constant stack space, but it calls .plain_fip., which is not .#\[verifier::fip\(strict\)\]'
     total_fail free 'append:\n#[fip(total)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == x,\n))]\npub fn frees(x: u32) -> u32 {\n    let _spare: Option<alloc::boxed::Box<u32>> = None;\n    x\n}\n' 'function must not deallocate'
     # Source gates (fip_testkit::surface) must fail on mutated sources.
     expect_test_fail() {  # name, crate, file, sed script, test name
@@ -776,7 +780,7 @@ verify-upstream:
     deps=$(dirname "$so")
     # `#[fip_macros::fip(strict ..)]`/`(total)` emit fork-only clauses under Verus
     # (phase 5), which the script cannot strip: `FIP_MACROS_UPSTREAM=1` makes the macro
-    # leave out `allocates` and `#[verifier::fip]` (never `requires` or `no_unwind`,
+    # leave out `allocates` and `#[verifier::fip(strict)]` (never `requires` or `no_unwind`,
     # which upstream verifies).
     up() {  # name, Verus arguments
       local name=$1; shift

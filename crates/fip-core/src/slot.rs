@@ -20,7 +20,8 @@ use vstd::prelude::*;
 ///
 /// `total` (decision 2026-11-06-redesign-verus-allocates, 7.1): the attribute
 /// generates the certificate `__fip_strict_replace` and, under Verus, `no_unwind`,
-/// `allocates 0` and `#[verifier::fip]` (no free on a normal return).
+/// `allocates 0` and `#[verifier::fip(strict)]` (no free on a normal return, constant
+/// stack).
 #[fip_macros::fip(total)]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     ensures

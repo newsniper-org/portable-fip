@@ -5,7 +5,7 @@
 //! 2026-11-06-redesign-verus-allocates, section 7). Under Verus's driver the macro
 //! merges into the hand-written `verus_spec` (which keeps `ensures`) the `requires` of
 //! `requires(..)`, `allocates N`, and for `total` `no_unwind` and
-//! `#[verifier::fip]`. `just verify-compose` verifies this file with the fork
+//! `#[verifier::fip(strict)]`. `just verify-compose` verifies this file with the fork
 //! (`-V alloc-check`); `just verify-negative` rejects controls appended to a copy
 //! (a callee that may unwind, an allocation hidden from the token scan behind a
 //! hand-written certificate, a free); `just verify-upstream` verifies it with
@@ -52,7 +52,9 @@ pub fn same_fip(x: u32) -> u32 {
 }
 
 /// A `total` caller of `total` callees: each callee is `no_unwind`, `allocates 0` and
-/// `#[verifier::fip]`, which the caller's generated contract needs.
+/// `#[verifier::fip(strict)]`, which the caller's generated contract needs (a callee
+/// that is only `#[verifier::fip]` fails the strict call check: control
+/// `total-nonstrict-callee` of `just verify-negative`).
 #[fip(total, requires(x < 50))]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     ensures
