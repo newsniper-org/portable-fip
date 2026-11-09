@@ -167,6 +167,16 @@ and proved allocation bounds (sidecar format 5)"):
   (2.3); the `--compile` requirement of imported crates (2.4) is still enforced only by
   the fork's import check.
 
+**Phase 5 implemented** 2026-11-09 (section 7, details in 7.6; branch
+`phase5/strict-total`, fork `fip-beta` `6f6975af2`, upstream 0.2026.11.02 for the
+strip gate, Z3 4.16.0): `strict` (bare, alias `strict = true`) and `total` in
+`fip-macros`, generating the Verus contract under Verus's driver (`requires`,
+`allocates N`, for `total` `no_unwind` and `#[verifier::fip]`), with the strip switch
+`FIP_MACROS_UPSTREAM=1`; `fip-prelint` discharges a `total` mark only with a listed
+`allocates 0` proof; `fip_core::replace` and `fip_alloc::refill` are `total`,
+`fip_core::swap` and `swap_lt` `strict` (measured reason in 7.6); closure `no_unwind`
+measured as not expressible (7.3); 5 new mutants/controls and a driver fixture.
+
 Option A (user-approved): the verified layer
 (`fip-core`, `fip-alloc`, `fip-strict` under Verus, verified callers) states and proves
 allocation bounds with the Verus fork's `allocates` clause; the unverified layer stays
@@ -573,6 +583,22 @@ the drop rule), a combinator is `total` only *relative to its callback*: the mac
 callback *(unmeasured: whether Verus can state "the callback does not unwind")*, and F2 is
 checked by `fip-prelint` at each instantiation.
 
+**Measured 2026-11-09** (fork `6f6975af2`, probes under
+`/home/ybi/pfip-recheck-tmp/phase5/closure/`, `--no-cheating -V alloc-check`): Verus
+cannot state "the callback does not unwind" for a closure parameter.
+
+| probe | result |
+|---|---|
+| `c1.rs`: `fn apply<F: Fn(u8) -> u8>(f: F, x: u8) .. requires f.requires((x,)) no_unwind { f(x) }` | error "cannot show this call will not unwind": the call goes through `vstd::pervasive::exec_nonstatic_call`, which may unwind |
+| `c2.rs`: a closure with its own clause, `\|y: u8\| -> (r: u8) no_unwind { y }` | parse error ("expected curly braces"): closures take no `no_unwind` |
+| `c3.rs`: a bound specification `F: Fn(u8) -> u8 with { fn call(..) no_unwind; }` | error "a bound specification may only have `requires`, `ensures` and `allocates`" |
+| `c4.rs`: a local closure without clause, called in a `no_unwind` function | same error as `c1.rs` (the fork's `sst_to_air.rs`: "Right now all closures are assumed to unwind") |
+| `c5.rs`: a trait method declared `no_unwind`, called through `F: Cb` | verifies (3 verified); not usable for closures: an impl wrapping a closure (`Certified`) would call it, which `c1.rs` shows cannot be `no_unwind` |
+
+So the combinators stay `strict` with hand-written callback-relative bounds, and
+`total` with callable parameters is a compile error of `fip-macros` (in every build).
+F2 of the combinators stays with `fip-prelint` at each instantiation, as above.
+
 ### 7.4 Gates added with the re-pin (branch `repin/fip-beta`)
 
 From the fork audit, independent of phase 5 but required for any Verus-backed claim:
@@ -609,6 +635,136 @@ point (7.2).
 5. Revisit when the fork answers the cross-crate `fip(strict)` request (2026-11-09) and
    the closure `fip`/`no_unwind` requests: each answer can move one row of 7.2 from
    `fip-prelint` to Verus.
+
+### 7.6 Implemented (2026-11-09)
+
+Branch `phase5/strict-total` (from `redesign/verus-allocates` `34a8188`). Verus fork
+`fip-beta` `6f6975af2` (`0.2026.11.08.6f6975a`), upstream `0.2026.11.02.8bf68ee` for the
+strip gate, Z3 4.16.0, rustc 1.100.0-beta.10 (Verus/driver), 1.99.1 (MSRV). Every
+statement below is measured unless marked *(unmeasured)*.
+
+**Step 1, `fip-macros`.**
+- Grammar: `strict` (bare) and `strict = true` (alias); `total`, which implies
+  `strict`, `panic_macros = false` and bound 0. Rejected with a compile error (each a
+  `compile_fail` example, checked for its reason by `just compile-fail-reasons`, now
+  151 examples): `#[fip(1, total)]`, `total` with `panic_macros = true`, `total` with
+  `strict = false`, `total` with a callable parameter, `total` on a trait method
+  declaration; a panicking macro in a `total` body is rejected as under
+  `panic_macros = false`. `total` on a method under `#[fip_impl]` is rejected
+  (*unmeasured* beyond the code path: no example).
+- Plain build: unchanged apart from `fip::mark(.., total = true)` under the driver
+  (the key is emitted only when set, so no other mark changes).
+- Verus build (`rust_verify`): the macro merges the generated clauses into the
+  hand-written `verus_spec` (module `verus_gen`): the `requires` translated from
+  `requires(..)` (`xs.len()` of a `&mut` parameter is `old(xs)@.len()`, else
+  `xs@.len()`; an element access `xs[0]` is an error), `allocates N` (the declared
+  bound), and for `total` `no_unwind` and `#[cfg_attr(verus_keep_ghost,
+  verifier::fip)]`; never `decreases`. Generated tokens carry the span of the
+  `strict`/`total` key, so Verus reports a failed generated bound there (measured:
+  "postcondition not satisfied" pointing at `#[fip(strict)]`).
+- **Hand-written spec, fail-closed choice:** one source per clause. A hand-written
+  `requires` next to `requires(..)`, a hand-written `allocates` (except on a function
+  with callable parameters, whose callback-relative bound must be written by hand and
+  is then required), a hand-written `no_unwind` with `total`, or a function-level
+  `decreases` is a compile error under Verus (wrapped in `#[cfg(verus_keep_ghost)]` so
+  the erasing pass of the same run, which no longer sees the `cfg_attr` spec, does not
+  report it). The former drift check (`requires(..)` ⊆ the Verus `requires`) remains
+  for non-strict `#[fip]`; for `fip-core` the source test
+  `crates/fip-macros/tests/requires_drift.rs` now checks that every `requires(..)` is
+  on a `strict`/`total` attribute that is not compiled out under Verus and whose
+  `verus_spec` has no `requires` of its own (2 tests, 3 negative cases).
+- **Strip switch** `FIP_MACROS_UPSTREAM=1`, honoured only under Verus's driver: leaves
+  out `allocates` and `#[verifier::fip]` (fork-only) and the requirement of a
+  hand-written callback-relative `allocates` (stripped from the source by
+  `verify/strip_alloc.py`); `requires` and `no_unwind` stay. Upstream 0.2026.11.02
+  accepts `no_unwind` (measured: `u1.rs`, 2 verified). Unit tests: the switch never
+  changes the generated `requires` (5 grammar forms), and every emitted `verifier::..`
+  is in `fip_testkit::surface::VERIFIER_ALLOWED` with no `decreases` in any emitted
+  spec (4 hand-written spec shapes × grade × switch × `requires`).
+- Certificates: the module `fip_strict::certs` (hand-written certificates of `swap`,
+  `replace`, `refill`) is removed; the attributes generate them. No certificate is made
+  without `unsafe` any more (pinned by `fip-strict`'s `hand_written_certs`).
+
+**Step 2, `fip-prelint`.** `fip::mark` takes `total = true` (malformed unless
+`kind = "fip"`, `n = 0`, `strict = true`, `panic_macros = false`; a contract with
+`total` is an error). A `total` root is discharged only if its crate's Verus sidecar
+lists it with the literal bound `allocates 0` (sidecars are used only with the trusted
+pin and the flags `--no-cheating -V alloc-check`, unchanged sources and item text,
+`crate::verustrust`), and the driver's own allocation, F2, recursion and panic checks
+of the root pass (they run as for `strict = true, panic_macros = false`); otherwise
+⊤ with the reason; a body with a loop (a cycle in its MIR CFG) adds that its
+termination is unchecked without the proof (P4). Fixture `verus_total` (`vtotal`, 7
+verified, sidecar regenerated by `just verify-sidecar`): 8 roots, 2 passed (`ok`,
+`ok_loop`: the success cases), 6 errors: `bound_one` (listed with `allocates 1`),
+`unlisted` (not verified), `unlisted_loop` (not verified, reason names the loop),
+`frees` (listed, F2 error), `recurses` (listed with `decreases`, recursion error),
+`panics` (listed with a `requires`; the `unwrap` panic path stays). Variants `-off`
+(`--no-verus`), `-flags` (stamp without `-V alloc-check`), `-cheat` (without
+`--no-cheating`): 0 passed, 11 errors, every `total` refused with the reason.
+Self-check: `fip_core` 10 roots, 10 passed (was 8: `swap` and `replace` are roots
+now), 1 note (`swap`: the driver does not establish `swap_lt`'s precondition
+`i < j, j < xs.len()` from `(lo, hi) = if i < j { (i, j) } else { (j, i) }`; a note
+under `strict`, it would be an error under `total`), 1 panic site discharged by
+Verus; `fip_alloc` 1 root (`refill`, `total`), passed.
+
+**Step 3, application.**
+- `fip_core::replace` and `fip_alloc::refill`: `#[fip_macros::fip(total)]`, verified
+  with the generated `no_unwind allocates 0` and `#[verifier::fip]` (fip-core 70
+  verified, fip-alloc 1, unchanged counts).
+- `fip_core::swap` (`requires(i < xs.len(), j < xs.len())`) and `slice::swap_lt`
+  (`requires(i < j, j < xs.len())`): **`strict` only.** With `#[verifier::fip]` the
+  fork rejects `swap_lt`'s call of `<[T]>::split_at_mut` ("is not
+  `#[verifier::fip]` and has no `deallocates_when` condition": vstd's
+  `assume_specification` of `split_at_mut` has `no_unwind allocates 0` but no
+  `deallocates_when`), and `swap` because it calls `swap_lt` (probe
+  `phase5/closure/f1.rs`–`f3.rs`; `allocates 0` and `no_unwind` alone verify). The
+  driver's note above is a second, independent obstacle for `swap`.
+- Combinators (`update`, `compact`, `map_in_place`, .., `fip_core::strict::*`):
+  unchanged, `strict` in plain builds with hand-written callback-relative bounds under
+  Verus (7.3). `verify/compose_strict.rs`'s `test_one` (`param(keep = 0)`) now states
+  `allocates keep.allocs()` by hand (required) and `F: AllocFreeDrop`.
+- Verified callers: `tick_checked` and `boxed` drop their hand-written `allocates`
+  (generated now). New gate `verify/total.rs` (6 verified): `total` with and without
+  `requires(..)`, a `total` caller of `total` callees, `#[fip(1, strict)]`, a `strict`
+  caller of a callee that may unwind.
+- Sidecars regenerated: `fip-core` 10 listed / 7 skipped (bounds unchanged: `swap`,
+  `swap_lt`, `replace` `0`), `fip-alloc` 1 (`refill` `0`), `fip-strict` 2 / 13
+  (line numbers only).
+
+**Step 4, gates.** `just verify-negative`: 85 mutants and controls, each rejected by
+the check that owns its property (80 before: 5 new, 2 changed):
+
+| property | mutant / control | rejected by |
+|---|---|---|
+| allocation | `swap-allocates`, `refill-allocates` (a `Box::new` in `strict`/`total` bodies) | `fip-macros` token scan (it runs in the Verus build now; before, Verus `allocates 0`) |
+| allocation | control `total-hidden-alloc` (a callee whose hand-written certificate claims 0 but which allocates once, called by a `strict` function) | Verus: the generated `allocates 0` ("postcondition not satisfied" at `#[fip(strict)]`) |
+| free | `refill-frees` (an `Option<Box<u8>>` dropped in `refill`), control `total-free` | Verus: the generated `#[verifier::fip]` ("must not deallocate") |
+| free | fixture `verus_total` `frees` | driver F2 |
+| recursion | `compact-recursive` (was `swap-recursive`; `swap` is `strict` now, where the macro's direct-recursion check fires first) | Verus ("recursive function must have a `decreases` clause"); surface gate `surface-decreases` |
+| recursion | fixture `verus_total` `recurses` | driver recursion check |
+| panic / unwind | control `total-unwind` (a `total` caller of a callee without `no_unwind`) | Verus: the generated `no_unwind` ("cannot show this call will not unwind") |
+| panic / unwind | fixture `verus_total` `panics` | driver panic analysis |
+| loop without `decreases` | `compact-loop-no-decreases` | Verus ("loop must have a `decreases` clause"); surface gate `surface-no-decreases-attr` (the attribute that would allow it) |
+
+Strip gate `just verify-upstream` (with `FIP_MACROS_UPSTREAM=1`): 23/58/1/3/4/13/4 as
+before plus `verify/total.rs` 6; control: without the switch upstream rejects the
+stripped `verify/total.rs` ("unexpected token" at the generated `allocates`, reported
+at `#[fip(total ..)]`). `verify/strip_alloc.py` also removes hand-written
+`#[cfg_attr(verus_keep_ghost, verifier::fip)]` lines and fails on a leftover
+`verifier::fip`.
+
+**Not done / open:**
+- `total` for callback combinators: not expressible (7.3, measured); F2 for them stays
+  with the driver.
+- `swap`/`swap_lt` as `total`: blocked by vstd's `split_at_mut` specification (no
+  `deallocates_when`) and by the driver's value analysis (the note above); a fork or
+  vstd request *(not filed)*.
+- `total` on `#[fip_impl]` methods and trait contracts: rejected, not designed.
+- A `total` function in a user crate is refused by the driver unless the crate
+  publishes a Verus sidecar (by design of 7.5 step 2).
+- The generator's `requires` translation covers the `fip_lint_rules::requires`
+  grammar except element accesses (`xs[0]`, an error); whether `w.f` of a reference
+  parameter verifies as written is *unmeasured* (no such function in the workspace).
 
 ## Probe files
 
