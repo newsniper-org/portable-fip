@@ -12,10 +12,11 @@ Schedule note (user, 2026-11-06): stable Rust 1.100.0 is due in 7 days, and the 
 plans its 1.100 rebase (custom allocators then); keep every toolchain- and
 Verus-version pin in one place so the rebase is a re-pin, not a redesign.
 
-**Phase 5 decided** 2026-11-09 (D7, section 7): `strict` becomes the one-declaration
-contract generator checked by Verus, `total` the strictest grade; the fork's
-`#[verifier::fip]`/`fip(strict)` were audited first and are used only where they are
-sound and work across crates. Implementation follows the re-pin to fork `fip-beta`.
+**Phase 5 proposed** 2026-11-09 (D7, section 7), awaiting the user's review: `strict`
+becomes the one-declaration contract generator checked by Verus, `total` the strictest
+grade; the fork's `#[verifier::fip]`/`fip(strict)` were audited first and are used only
+where they are sound and work across crates. Implementation follows the re-pin to fork
+`fip-beta` and the user's decision.
 
 **Phase 1 implemented** 2026-11-06 (section 5): fork pin and flags, `fip_fn!` Verus arm,
 regenerated sidecars, strip gate `just verify-upstream`. Details: section 5 and
@@ -477,7 +478,7 @@ but without the hints: 2 fail. A bound of the form
 | 2. proofs in `fip-core` / `fip-alloc` | marker traits; `allocates` on the 9 `Fn`-based functions and `refill`; sum spec functions and the zero lemmas; README table rows; `verus_drift.rs` updated; allocation mutants (a bound lowered, a `Box::new` in a callback of an `allocates 0` caller) | `-V alloc-check` gate; strip gate on 11.02; mutants fail | plain API (bounds hold for every type), `no_std`, no `vstd` | 1–2 days |
 | 3. `fip-strict` / strict variants | `FipFn::allocs`, `Certified::pre`, per-arity `Compose` (to `MAX_ARITY`), `unsafe impl AllocFreeDrop` for `Certified`/adapters, bounds on `fip_core::strict::*`, `compose*.rs` with `allocates` | as phase 2; `hand_written_certs` reviewed (new `unsafe impl`s are Verus-only) | plain strict mode | 1–2 days |
 | 4. driver | sidecar format 5 (bounds, flags), consumption rules (2.4), cfg-divergence taint closing the open hole for panics and allocation, unification or exclusion of the twin `FipFn` impls | driver fixtures for each refusal; self-check | panic sidecar behaviour | 3–5 days |
-| 5. strict-mode fate | decided 2026-11-09, section 7: `strict` = one-declaration contract generator checked by Verus; `total` = the strictest grade, mapped onto the fork's `no_unwind`/`#[verifier::fip]` where they apply and onto `fip-prelint` elsewhere | section 7.5 | plain strict mode (`strict = true` keeps its meaning) | 3–6 days *(estimate)* |
+| 5. strict-mode fate | proposed 2026-11-09, section 7 (awaiting review): `strict` = one-declaration contract generator checked by Verus; `total` = the strictest grade, mapped onto the fork's `no_unwind`/`#[verifier::fip]` where they apply and onto `fip-prelint` elsewhere | section 7.5 | plain strict mode (`strict = true` keeps its meaning) | 3–6 days *(estimate)* |
 
 In parallel, requests to the fork: `AllocFreeDrop` for 1-tuples and longer tuples;
 a way for non-`Copy` closures to pass the drop rule in generic `F` positions; a
@@ -498,16 +499,23 @@ that trait-declaration bounds are clamped at 0.
 - **D5, trust pin:** the fork commit as the only trusted Verus for allocation claims;
   keep the upstream strip gate (recommended).
 - **D6, toolchain/MSRV:** no change now (1.99.1 on both); revisit when the fork rebases.
-- **D7, phase 5 (decided 2026-11-09):** names and roles as in section 7: `strict` is the
+  *Amended 2026-11-09:* the fork rebased onto rustc 1.100.0-beta.10 (`fip-beta`); the
+  re-pin (branch `repin/fip-beta`) moves the Verus pin and `fip-prelint`'s toolchain to
+  `beta-2026-11-05`, and keeps the workspace MSRV at 1.99.1 (`just msrv` passes on
+  1.99.1; nothing needs 1.100). See the amendment of that date in
+  `2026-11-01-fip-prelint.md`.
+- **D7, phase 5 (proposed 2026-11-09, awaiting the user's review):** names and roles
+  were agreed on 2026-11-06 (chat); the design of section 7 is not yet reviewed: `strict` is the
   contract generator, `total` the strictest grade; neither duplicates the fork's
   `#[verifier::fip]`/`fip(strict)`, both map onto them where those are sound and usable
   across crates.
 
-## 7. Phase 5: `strict` and `total` (decided 2026-11-09)
+## 7. Phase 5: `strict` and `total` (proposed 2026-11-09)
 
-**Status:** DECIDED by the user (names and roles, 2026-11-06 discussion, confirmed
-2026-11-09); design below, implementation after the re-pin to the fork's `fip-beta`
-branch (Rust 1.100). Facts marked *measured* were measured on fork `fip-beta`
+**Status:** PROPOSED, awaiting the user's review. The names and roles of `strict` and
+`total` were agreed in the 2026-11-06 discussion (chat, not recorded before this
+section); the design below is new. Implementation after the re-pin to the fork's
+`fip-beta` branch (Rust 1.100) and the user's decision. Facts marked *measured* were measured on fork `fip-beta`
 `6f6975af2` (`0.2026.11.08.6f6975a`, clean build) during the fork audit of 2026-11-07..09
 (probes under `/home/ybi/pfip-recheck-tmp/fipbeta/`); everything else is design,
 *unmeasured*.
@@ -523,9 +531,19 @@ branch (Rust 1.100). Facts marked *measured* were measured on fork `fip-beta`
   Today `requires(..)` is written twice (the macro cannot read a following
   `cfg_attr(verus_keep_ghost, verus_spec(..))`, measured on 1.97.1 and 1.99.1, crate
   docs of `fip-macros`); generating it removes that duplication and the drift check.
-- **`total`** (option 2): the strictest grade, a superset of `strict`:
-  allocation 0; termination (`decreases`); no panic and no unwind; no free on a normal
-  return (F2); bounded stack. It absorbs `panic_macros = false`.
+- **`total`** (option 2): the strictest grade, a superset of `strict`, defined by five
+  properties of every call on a normal return. It absorbs `panic_macros = false`.
+
+| property of `total` | Verus build (verified crates) | plain build (any `#[fip]` code) | not covered |
+|---|---|---|---|
+| P1 no allocation | `allocates 0` (fork `-V alloc-check`) | `fip-macros` token scan (bound 0); `fip-prelint` MIR allocation analysis | — |
+| P2 no free (F2) | `#[verifier::fip]`, only without callbacks (7.2) | `fip-prelint` MIR free analysis (implicit drops through their glue) | — |
+| P3 bounded stack | Verus rejects recursion without `decreases`; the surface gate forbids function-level `decreases` (README "bounded stack, verified crates") | `fip-macros` rejects direct self-recursion; `fip-prelint` rejects recursion through callees; `fip-prelint --stack` measures bytes per build | stack bytes are a per-build measurement, not a proof |
+| P4 termination | `decreases` on recursion and loops (Verus) | none for loops: no recursion (P3) is checked, but a loop may run forever | **loops in unverified `total` code**: the plain build has no termination check; `fip-prelint` must refuse a `total` mark on a function with a loop unless a Verus sidecar lists it |
+| P5 no panic / unwind | `no_unwind` with overflow and bounds obligations | `panic_macros = false` (token level) and `fip-prelint` panic analysis (panic paths through callees, overflow checks as the profile has them) | — |
+
+  Before this section `total` was defined only in the 2026-11-06 discussion; this table
+  is its definition.
 
 ### 7.2 What the fork offers, and whether `total` can use it
 
