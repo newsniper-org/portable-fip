@@ -17,7 +17,9 @@
 //!
 //! - the file exists and parses; its stamp is the trusted Verus build and Z3
 //!   (`verus-trusted.txt`, compiled into the driver) with `--no-cheating` and
-//!   `-V alloc-check` (sidecar format 5);
+//!   `-V alloc-check` (sidecar format 5), and its `flags` record nothing else (in
+//!   particular not `--is-vstd`, `--is-core` or `--is-stdlib-outside-of-core`, a run
+//!   verifying the crate as a standard-library crate; the fork audit, 2026-11-09);
 //! - every source file it lists has the recorded SHA-256 (a callee's spec, a spec
 //!   function or an imported crate's source that changed invalidates every entry), and
 //!   none of them tests a cfg other than `verus_keep_ghost` and `feature` or invokes a
@@ -39,7 +41,11 @@
 //! are unchanged. A literal proved `allocates K` of a non-generic function without
 //! `requires` replaces the driver's count of its body where that count is not a finite
 //! number `<= K` and every panic path is an allocation failure; a finite count `> K`
-//! is kept and reported as an error (`crate::analysis`, sidecar format 5). A listed
+//! is kept and reported as an error (`crate::analysis`, sidecar format 5), unless a
+//! source the sidecar lists implements `Allocator` or `GlobalAlloc`: such an `unsafe
+//! impl` is a trust point of the fork's `allocates` accounting (the fork audit,
+//! 2026-11-09), so no bound of that sidecar is used (stated in the crate summary;
+//! its panic facts are). A listed
 //! function with a Verus `requires` passes that obligation to its callers
 //! (`crate::analysis`). `FIP_PRELINT_NO_VERUS=1` (`cargo fip-prelint --no-verus`)
 //! ignores every sidecar.
@@ -68,6 +74,9 @@ type Discharged = BTreeMap<String, (String, BTreeSet<(PathBuf, usize)>)>;
 struct Loaded {
     sidecar: Sidecar,
     dir: PathBuf,
+    /// The first implementation of an allocator trait in a listed source
+    /// (`verus::allocator_impls`), shown: its proved `allocates` bounds are not used.
+    alloc_impl: Option<String>,
 }
 
 /// What the sidecars say about one function.
@@ -87,6 +96,9 @@ pub enum Verdict {
         stamp: String,
         /// The proved `allocates` bound.
         allocates: verus::AllocBound,
+        /// Why the sidecar's `allocates` bounds are not used, if they are not (an
+        /// allocator implementation in a listed source).
+        alloc_impl: Option<String>,
     },
     /// Its package declares a sidecar, but it cannot be used for this function.
     NotListed(String),
@@ -116,6 +128,9 @@ pub struct VerusTrust {
     bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
     /// Functions whose driver count exceeds their proved bound.
     exceeded: RefCell<BTreeSet<String>>,
+    /// Per sidecar crate: why its literal `allocates` bounds were not used (an
+    /// allocator implementation in a listed source).
+    bounds_refused: RefCell<BTreeMap<String, String>>,
 }
 
 /// Local path of a source file name, made absolute and canonical.
@@ -152,6 +167,7 @@ impl VerusTrust {
             refused: RefCell::new(BTreeMap::new()),
             bounds: RefCell::new(BTreeMap::new()),
             exceeded: RefCell::new(BTreeSet::new()),
+            bounds_refused: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -231,7 +247,19 @@ impl VerusTrust {
                 ));
             }
         }
-        Ok(Loaded { sidecar, dir })
+        // An allocator implementation (`Allocator`, `GlobalAlloc`) in a listed source
+        // is a trust point of the fork's `allocates` accounting (the fork audit,
+        // 2026-11-09): the panic facts are used, the allocation bounds are not.
+        let alloc_impl = texts.iter().find_map(|(file, text)| {
+            verus::allocator_impls(text)
+                .first()
+                .map(|(t, at)| format!("`impl {t}` at {file}:{}", verus::line_of(text, *at)))
+        });
+        Ok(Loaded {
+            sidecar,
+            dir,
+            alloc_impl,
+        })
     }
 
     /// The verdict for function `d`, whose MIR body spans `body_span`.
@@ -408,6 +436,7 @@ impl VerusTrust {
             krate,
             stamp: loaded.sidecar.stamp(),
             allocates: entry.allocates.clone(),
+            alloc_impl: loaded.alloc_impl.clone(),
         }
     }
 
@@ -466,7 +495,9 @@ impl VerusTrust {
     /// `d` is listed with one and has no `requires` (decision
     /// 2026-11-06-redesign-verus-allocates, phase 4): the fork assumes a callee's bound
     /// only under its precondition, which a caller Verus did not verify may break.
-    /// Parameter-linear and opaque bounds are not evaluated (`None`).
+    /// Parameter-linear and opaque bounds are not evaluated (`None`). No bound is
+    /// used from a sidecar whose sources implement an allocator trait (`None`, stated
+    /// in the crate summary).
     pub fn literal_alloc_bound(
         &self,
         tcx: TyCtxt<'_>,
@@ -478,8 +509,17 @@ impl VerusTrust {
                 path,
                 requires: false,
                 allocates,
+                alloc_impl,
+                krate,
                 ..
-            } => allocates.literal().map(|k| (k, path)),
+            } => {
+                let k = allocates.literal()?;
+                if let Some(why) = alloc_impl {
+                    self.bounds_refused.borrow_mut().entry(krate).or_insert(why);
+                    return None;
+                }
+                Some((k, path))
+            }
             _ => None,
         }
     }
@@ -528,6 +568,11 @@ impl VerusTrust {
                     .map(|p| format!("`{p}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ));
+        }
+        for (krate, why) in self.bounds_refused.borrow().iter() {
+            out.push_str(&format!(
+                ", allocation bounds of the Verus sidecar of `{krate}` not used: its sources implement an allocator trait ({why}), a trust point of Verus's `allocates` accounting"
             ));
         }
         for (path, why) in self.refused.borrow().iter() {

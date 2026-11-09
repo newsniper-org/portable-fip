@@ -24,6 +24,13 @@ pub const REFUSED_FLAGS: &[&str] = &[
     "--verify-function",
     "--no-builtin",
     "--no-vstd",
+    "--no-erasure-check",
+    "--no-trait-conflicts",
+    // `verus::STD_CRATE_FLAGS` (the fork audit, 2026-11-09): the crate verified as
+    // vstd, core or std.
+    "--is-vstd",
+    "--is-core",
+    "--is-stdlib-outside-of-core",
 ];
 
 // ---------------------------------------------------------------------------------
@@ -986,12 +993,19 @@ pub fn uses_alloc_check(flags: &[String]) -> bool {
 }
 
 /// The flags of a run that the sidecar's `flags` line records: `--no-cheating`, then
-/// `-V alloc-check` if the run used it (spelled `-V alloc-check`, `-Valloc-check` or
-/// `-V=alloc-check`), each once.
+/// any of `verus::STD_CRATE_FLAGS` the run used (the generator refuses such a run;
+/// recorded so that the driver refuses the sidecar should one be written anyway),
+/// then `-V alloc-check` if the run used it (spelled `-V alloc-check`, `-Valloc-check`
+/// or `-V=alloc-check`), each once.
 pub fn trust_flags(flags: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     if flags.iter().any(|f| f == NO_CHEATING) {
         out.push(NO_CHEATING.to_string());
+    }
+    for s in verus::STD_CRATE_FLAGS {
+        if flags.iter().any(|f| f == s) {
+            out.push((*s).to_string());
+        }
     }
     let alloc_check = flags.iter().enumerate().any(|(k, f)| {
         (f == "-V" && flags.get(k + 1).is_some_and(|v| v == ALLOC_CHECK))
@@ -1742,6 +1756,14 @@ mod tests {
             v(&["--no-cheating"])
         );
         assert!(trust_flags(&v(&["-V", "alloc-check"])).starts_with(&v(&["-V"])));
+        // A standard-library crate run is recorded (the driver refuses its sidecar).
+        assert_eq!(
+            trust_flags(&v(&["--is-vstd", "--no-cheating", "-V", "alloc-check"])),
+            v(&["--no-cheating", "--is-vstd", "-V", "alloc-check"])
+        );
+        for f in verus::STD_CRATE_FLAGS {
+            assert!(REFUSED_FLAGS.contains(f), "{f}");
+        }
     }
 
     #[test]

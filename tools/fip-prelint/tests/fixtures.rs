@@ -419,7 +419,8 @@ fn std_summaries_wasm32() {
     let out = Command::new("rustc")
         .env(
             "RUSTUP_TOOLCHAIN",
-            std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".to_string()),
+            std::env::var("FIP_PRELINT_TOOLCHAIN")
+                .unwrap_or_else(|_| env!("FIP_PRELINT_DEFAULT_TOOLCHAIN").to_string()),
         )
         .args(["--print", "sysroot"])
         .output()
@@ -543,7 +544,8 @@ fn stack() {
     let out = Command::new("rustc")
         .env(
             "RUSTUP_TOOLCHAIN",
-            std::env::var("FIP_PRELINT_TOOLCHAIN").unwrap_or_else(|_| "1.99.1".to_string()),
+            std::env::var("FIP_PRELINT_TOOLCHAIN")
+                .unwrap_or_else(|_| env!("FIP_PRELINT_DEFAULT_TOOLCHAIN").to_string()),
         )
         .args(["--print", "sysroot"])
         .output()
@@ -1299,7 +1301,12 @@ fn verus_sidecar_twin() {
 /// Variants: `-off` (`--no-verus`: `twice` and `use_twice` back to `∞`); `-exceeded`
 /// (`one`'s bound forged to 0: the driver's count 1 is kept and every root reaching
 /// `one` gets the error that the proof's trust boundary is violated); `-flags` (the
-/// stamp without `-V alloc-check`: the sidecar is refused, as `-off`).
+/// stamp without `-V alloc-check`: the sidecar is refused, as `-off`). The fork audit
+/// (2026-11-09): `-cheat` (the stamp without `--no-cheating`) and `-isvstd` (the stamp
+/// with `--is-vstd`): the sidecar is refused, as `-off`; `-allocimpl` (an `unsafe impl
+/// GlobalAlloc` appended to the verified source, its hash forged): the panic sites
+/// stay discharged, no allocation bound is taken (`twice` and `use_twice` back to `∞`),
+/// and the crate summary says why.
 #[test]
 fn verus_alloc_bounds() {
     check("verus_alloc");
@@ -1343,6 +1350,51 @@ fn verus_alloc_bounds() {
         "verus_alloc",
         "-flags",
         &run_at(&d, "verus_alloc-flags", &[], &["--message-format", "short"]),
+    );
+    for (variant, flags) in [
+        ("cheat", "-V alloc-check"),
+        ("isvstd", "--no-cheating --is-vstd -V alloc-check"),
+    ] {
+        let d = copy_fixture("verus_alloc", &format!("verus_alloc_{variant}"));
+        edit(
+            &d.join("valloc/verus-verified.txt"),
+            "\nflags --no-cheating -V alloc-check\n",
+            &format!("\nflags {flags}\n"),
+        );
+        compare(
+            "verus_alloc",
+            &format!("-{variant}"),
+            &run_at(
+                &d,
+                &format!("verus_alloc-{variant}"),
+                &[],
+                &["--message-format", "short"],
+            ),
+        );
+    }
+    let d = copy_fixture("verus_alloc", "verus_alloc_allocimpl");
+    let lib = d.join("valloc/src/lib.rs");
+    let old = sha256_file(&lib);
+    let mut text = std::fs::read_to_string(&lib).expect("read lib.rs");
+    text.push_str(
+        "\npub struct Arena;\n\nunsafe impl core::alloc::GlobalAlloc for Arena {\n    unsafe fn alloc(&self, _: core::alloc::Layout) -> *mut u8 {\n        core::ptr::null_mut()\n    }\n\n    unsafe fn dealloc(&self, _: *mut u8, _: core::alloc::Layout) {}\n}\n",
+    );
+    std::fs::write(&lib, text).expect("write lib.rs");
+    let new = sha256_file(&lib);
+    edit(
+        &d.join("valloc/verus-verified.txt"),
+        &format!("source src/lib.rs {old}"),
+        &format!("source src/lib.rs {new}"),
+    );
+    compare(
+        "verus_alloc",
+        "-allocimpl",
+        &run_at(
+            &d,
+            "verus_alloc-allocimpl",
+            &[],
+            &["--message-format", "short"],
+        ),
     );
 }
 

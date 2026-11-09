@@ -97,6 +97,14 @@ pub fn has_alloc_check(flags: &[String]) -> bool {
         .any(|w| w[0] == "-V" && w[1] == ALLOC_CHECK)
 }
 
+/// Verus flags that verify the crate as a standard-library crate (vstd, core, std),
+/// whose trusted items and `assume_specification`s are not user code (the fork
+/// audit, 2026-11-09). The fork rejects them with `--no-cheating`; independently of
+/// that, the generator refuses a run with one ([`crate::verusgen::REFUSED_FLAGS`]) and
+/// records it in `flags` if present, and the driver refuses a sidecar whose `flags`
+/// hold one.
+pub const STD_CRATE_FLAGS: &[&str] = &["--is-vstd", "--is-core", "--is-stdlib-outside-of-core"];
+
 // ---------------------------------------------------------------------------------
 // SHA-256 (FIPS 180-4), dependency-free.
 
@@ -1177,6 +1185,107 @@ pub fn trait_segment(path: &str) -> Option<&str> {
     segs.next()
 }
 
+/// Traits whose implementation is a trust point of the fork's allocation accounting:
+/// `allocates` counts calls of the allocator specifications, and an `unsafe impl` of
+/// one of these traits is code whose allocator contract Verus does not check (the
+/// fork audit, 2026-11-09). `Allocator` is stable since rustc 1.100, with the unsafe
+/// marker traits `GlobalAllocator`, `StaticAllocator` and `AllocatorClone` (claims
+/// about the allocator's blocks, `core::alloc`).
+pub const ALLOCATOR_TRAITS: &[&str] = &[
+    "Allocator",
+    "GlobalAlloc",
+    "GlobalAllocator",
+    "StaticAllocator",
+    "AllocatorClone",
+];
+
+/// Every implementation of a trait named in [`ALLOCATOR_TRAITS`] in `src`, gated or
+/// not, also inside `verus! { .. }` and `macro_rules!` bodies, as `(trait, byte offset
+/// of `impl`)`. A trait is found by the last segment of its path, so any trait of one
+/// of these names counts (fail closed).
+pub fn allocator_impls(src: &str) -> Vec<(String, usize)> {
+    let toks: Vec<(Tok, usize, usize)> = lex(src)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let is = |k: usize, s: &str| k < toks.len() && text(k) == s;
+    // The matching closing delimiter of the opening one at `k`.
+    let close = |k: usize| -> usize {
+        let mut depth = 0usize;
+        let mut m = k;
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[' | b'{') => depth += 1,
+                Tok::Punct(b')' | b']' | b'}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return m;
+                    }
+                }
+                _ => {}
+            }
+            m += 1;
+        }
+        toks.len()
+    };
+    // A `>` that is not the end of `->`/`=>`.
+    let closes_angle = |m: usize| {
+        toks[m].0 == Tok::Punct(b'>')
+            && !(m > 0
+                && matches!(toks[m - 1].0, Tok::Punct(b'-' | b'='))
+                && toks[m - 1].2 == toks[m].1)
+    };
+    let mut out = Vec::new();
+    for m in 0..toks.len() {
+        if toks[m].0 != Tok::Ident || text(m) != "impl" {
+            continue;
+        }
+        let mut j = m + 1;
+        // The impl's own generics.
+        if is(j, "<") {
+            let mut angle = 0usize;
+            while j < toks.len() {
+                if is(j, "<") {
+                    angle += 1;
+                } else if closes_angle(j) {
+                    angle = angle.saturating_sub(1);
+                    if angle == 0 {
+                        j += 1;
+                        break;
+                    }
+                }
+                j += 1;
+            }
+        }
+        // The trait path, up to `for` at angle depth 0; its last segment is the
+        // trait's name.
+        let mut name: Option<&str> = None;
+        let mut angle = 0usize;
+        while j < toks.len() {
+            match toks[j].0 {
+                Tok::Punct(b'<') => angle += 1,
+                _ if closes_angle(j) => angle = angle.saturating_sub(1),
+                Tok::Punct(b'(' | b'[') => j = close(j),
+                Tok::Punct(b'{' | b';' | b')' | b']' | b',') if angle == 0 => break,
+                Tok::Ident if angle == 0 && text(j) == "for" => {
+                    if let Some(n) = name
+                        && ALLOCATOR_TRAITS.contains(&n)
+                    {
+                        out.push((n.to_string(), toks[m].1));
+                    }
+                    break;
+                }
+                Tok::Ident if angle == 0 && text(j) == "where" => break,
+                Tok::Ident if angle == 0 => name = Some(text(j)),
+                _ => {}
+            }
+            j += 1;
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------------
 // The sidecar.
 
@@ -1446,7 +1555,8 @@ impl Sidecar {
     }
 
     /// `Ok` if this sidecar was produced by the trusted Verus build with
-    /// `--no-cheating` and `-V alloc-check`; else why not.
+    /// `--no-cheating` and `-V alloc-check`, and with no other recorded flag (in
+    /// particular none of [`STD_CRATE_FLAGS`]); else why not.
     pub fn check_stamp(&self, trusted: &Trusted) -> Result<(), String> {
         if !self.flags.iter().any(|f| f == NO_CHEATING) {
             return Err(format!("generated without `{NO_CHEATING}`"));
@@ -1454,6 +1564,24 @@ impl Sidecar {
         if !has_alloc_check(&self.flags) {
             return Err(format!(
                 "generated without `-V {ALLOC_CHECK}` (its `allocates` bounds were not checked)"
+            ));
+        }
+        if let Some(f) = self
+            .flags
+            .iter()
+            .find(|f| STD_CRATE_FLAGS.contains(&f.as_str()))
+        {
+            return Err(format!(
+                "generated with `{f}` (the crate was verified as a standard-library crate, not as user code)"
+            ));
+        }
+        if let Some(f) = self
+            .flags
+            .iter()
+            .find(|f| ![NO_CHEATING, "-V", ALLOC_CHECK].contains(&f.as_str()))
+        {
+            return Err(format!(
+                "its `flags` record `{f}`, which the driver does not know"
             ));
         }
         if self.verus_version != trusted.verus_version || self.verus_commit != trusted.verus_commit
@@ -1855,6 +1983,35 @@ mod tests {
         assert_eq!(trait_segment("f"), None);
     }
 
+    /// The fork audit (2026-11-09): implementations of `Allocator` / `GlobalAlloc`,
+    /// by any path, generic, gated, inside `verus!` or a `macro_rules!` body, are
+    /// found; a bound or a parameter of that name, an inherent impl, a comment and a
+    /// string are not.
+    #[test]
+    fn allocator_impls_found() {
+        let names = |src: &str| -> Vec<String> {
+            allocator_impls(src).into_iter().map(|(t, _)| t).collect()
+        };
+        let found = "unsafe impl core::alloc::GlobalAlloc for Arena {}\nverus! {\nunsafe impl<'a, T: Copy> Allocator for &'a Pool<T> where T: Send {}\n}\nmacro_rules! m { ($t:ty) => { unsafe impl ::core::alloc::Allocator for $t {} } }\n#[cfg(not(verus_keep_ghost))]\nunsafe impl<F: Fn() -> u8> std::alloc::GlobalAlloc for Sys<F> {}\nunsafe impl core::alloc::StaticAllocator for Arena {}\n";
+        assert_eq!(
+            names(found),
+            vec![
+                "GlobalAlloc",
+                "Allocator",
+                "Allocator",
+                "GlobalAlloc",
+                "StaticAllocator"
+            ]
+        );
+        let at: Vec<usize> = allocator_impls(found)
+            .into_iter()
+            .map(|(_, o)| line_of(found, o))
+            .collect();
+        assert_eq!(at, vec![1, 3, 5, 7, 8]);
+        let none = "impl<A: Allocator> Vec2<A> { fn f(a: A) {} }\nimpl<A: GlobalAlloc> Wrap for Holder<A> {}\nimpl dyn Allocator {}\n// unsafe impl Allocator for X {}\nconst S: &str = \"unsafe impl GlobalAlloc for Y {}\";\nimpl AllocatorLike for Z {}\nfn g(x: impl Allocator) {}\n";
+        assert_eq!(names(none), Vec::<String>::new());
+    }
+
     /// Phase 4: the spellings of proved bounds.
     #[test]
     fn alloc_bound_spellings() {
@@ -1943,11 +2100,54 @@ mod tests {
             ..t.clone()
         };
         assert!(s.check_stamp(&z3).is_err());
-        let cheat = Sidecar {
-            flags: Vec::new(),
+        // Without `--no-cheating` (also with `-V alloc-check`): refused.
+        for flags in [Vec::new(), vec!["-V".to_string(), ALLOC_CHECK.to_string()]] {
+            let cheat = Sidecar { flags, ..s.clone() };
+            assert!(
+                cheat
+                    .check_stamp(&t)
+                    .is_err_and(|e| e.contains("without `--no-cheating`")),
+                "{:?}",
+                cheat.check_stamp(&t)
+            );
+        }
+        // A standard-library crate run (the fork audit): refused, whatever else the
+        // flags hold; so is any flag the driver does not know.
+        for f in STD_CRATE_FLAGS {
+            let std_crate = Sidecar {
+                flags: vec![
+                    NO_CHEATING.to_string(),
+                    (*f).to_string(),
+                    "-V".to_string(),
+                    ALLOC_CHECK.to_string(),
+                ],
+                ..s.clone()
+            };
+            assert!(
+                std_crate
+                    .check_stamp(&t)
+                    .is_err_and(|e| e.contains(&format!("generated with `{f}`"))),
+                "{:?}",
+                std_crate.check_stamp(&t)
+            );
+            assert!(Sidecar::parse(&std_crate.render()).is_ok_and(|p| p == std_crate));
+        }
+        let unknown = Sidecar {
+            flags: vec![
+                NO_CHEATING.to_string(),
+                "-V".to_string(),
+                ALLOC_CHECK.to_string(),
+                "--no-lifetime".to_string(),
+            ],
             ..s.clone()
         };
-        assert!(cheat.check_stamp(&t).is_err());
+        assert!(
+            unknown
+                .check_stamp(&t)
+                .is_err_and(|e| e.contains("`--no-lifetime`")),
+            "{:?}",
+            unknown.check_stamp(&t)
+        );
         // Format 5: `-V alloc-check` is part of the stamp.
         let unchecked = Sidecar {
             flags: vec![NO_CHEATING.to_string()],
