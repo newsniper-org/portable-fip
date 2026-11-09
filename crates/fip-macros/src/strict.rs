@@ -5,8 +5,7 @@
 //!
 //! 1. functions from the table of audited `core` functions ([`CORE_TABLE`]), or
 //! 2. functions that are themselves `#[fip(strict = true)]` / `#[fip(N, strict = true)]`
-//!    (or carry a hand-written certificate, as `fip-core` and `fip-alloc` do via
-//!    `fip_strict::certs`).
+//!    / `#[fip(total)]` (or carry a hand-written certificate, made with `unsafe`).
 //!
 //! Every strict function `f` gets a certificate `__fip_strict_f: fip_strict::Cert`
 //! naming `f` and carrying an upper bound on the allocations one call of `f`

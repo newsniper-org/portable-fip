@@ -37,8 +37,12 @@ pub fn swap_twice(a: &mut u32, b: &mut u32) {
         keep.pre((&x,)),
     ensures
         keep.post((&x,), r),
+    allocates keep.allocs()
 ))]
-pub fn test_one<F: for<'a> FipFn<(&'a u32,), Output = bool>>(x: u32, keep: F) -> bool {
+pub fn test_one<F: for<'a> FipFn<(&'a u32,), Output = bool> + fip_strict::AllocFreeDrop>(
+    x: u32,
+    keep: F,
+) -> bool {
     keep.call((&x,))
 }
 

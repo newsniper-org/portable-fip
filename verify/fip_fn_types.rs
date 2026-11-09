@@ -55,7 +55,6 @@ pub fn types_agree() {
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     ensures
         *r == x,
-    allocates 1
 ))]
 pub fn boxed(x: u32) -> Box<u32> {
     Box::new(x)

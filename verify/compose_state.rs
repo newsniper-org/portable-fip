@@ -92,7 +92,6 @@ pub fn counter(xs: &mut [u32]) -> u32 {
     ensures
         r.0 == c + 1,
         r.1 == r.0,
-    allocates 0
 ))]
 pub fn tick_checked(c: u32, _x: u32) -> (u32, u32) {
     (c + 1, c + 1)

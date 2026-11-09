@@ -90,7 +90,9 @@
 //! `cfg_attr(verus_keep_ghost, ..)` when that cfg is off; measured on rustc
 //! 1.97.1 and 1.99.1), so it is written by hand; when the macro does see a
 //! `verus_spec` (a Verus build, `#[fip]` above it), every conjunct must appear in
-//! its `requires`, else the macro reports the drift.
+//! its `requires`, else the macro reports the drift. A `strict`/`total` function does
+//! not write it twice: the macro generates the Verus `requires` from `requires(..)`
+//! ([`strict` and `total`](#strict-and-total-the-verus-contract)).
 //!
 //! ## Examples
 //!
@@ -755,6 +757,95 @@
 //! # // expect: #[fip] strict: `Default::default`: the type it builds is inferred
 //! #[fip_macros::fip(strict = true)]
 //! fn f() -> Box<u8> { Default::default() }
+//! # fn main() {}
+//! ```
+//!
+//! ### `strict` and `total`: the Verus contract
+//!
+//! `strict` (bare) is the same as `strict = true`. `total` is the strictest grade
+//! (decision `2026-11-06-redesign-verus-allocates`, section 7): it implies `strict`,
+//! `panic_macros = false` and the bound 0 (`#[fip(0, total)]` is accepted, any other
+//! bound is rejected), and adds what only a proof gives. Plain builds are unchanged
+//! apart from the driver's `fip::mark(.., total = true)`.
+//!
+//! Under Verus's driver the attribute **generates the Verus contract** of a
+//! `strict`/`total` function and merges it into the hand-written
+//! `#[cfg_attr(verus_keep_ghost, verus_spec(..))]` below it (which keeps the
+//! functional clauses, `ensures`, ..; without one the macro writes the whole spec):
+//!
+//! - `requires(..)` of the attribute becomes the Verus `requires` (`xs.len()` of a
+//!   `&mut` parameter is `old(xs)@.len()`, of any other `xs@.len()`; an element access
+//!   `xs[0]` is not translated and is an error);
+//! - `allocates N`, the declared bound, so the number of the plain certificate is the
+//!   number Verus proves (Verus does not read certificates: a callee whose certificate
+//!   claims less than its proved bound fails the caller's generated `allocates`);
+//! - for `total`, `no_unwind` and `#[cfg_attr(verus_keep_ghost, verifier::fip)]`
+//!   (no free on a normal return); never `decreases`.
+//!
+//! The generated clauses are reported at the `strict`/`total` key of the attribute.
+//! **One source per clause (fail closed):** a hand-written `requires` next to
+//! `requires(..)`, a hand-written `allocates`, a hand-written `no_unwind` with `total`,
+//! or a function-level `decreases` is an error under Verus, so the two can never
+//! disagree. Exception: a `strict` function with callable parameters (`Fn*`, `FipFn`,
+//! `fn(..)`, `dyn`, or `param(..)`) states its callback-relative bound by hand
+//! (`allocates f.allocs()`), and must; `total` with callable parameters is an error
+//! in every build (measured 2026-11-09 on the fork: Verus cannot state that a closure
+//! call does not unwind). `total` is also rejected on trait method declarations and
+//! on methods under [`macro@fip_impl`].
+//!
+//! The emitted `verifier::` attributes are only those in
+//! `fip_testkit::surface::VERIFIER_ALLOWED` and the spec never contains `decreases`
+//! (a unit test of this crate checks both).
+//!
+//! **Strip switch `FIP_MACROS_UPSTREAM=1`** (honoured only under Verus's driver): the
+//! fork-only parts (`allocates`, `#[verifier::fip]`) are left out; `requires` and
+//! `no_unwind` (accepted by upstream Verus 0.2026.11.02, measured) are always kept.
+//! `just verify-upstream` sets it, so upstream Verus can verify the macro's output;
+//! a control there shows that without it upstream rejects the output.
+//!
+//! `total` with a bound other than 0:
+//! ```compile_fail
+//! # // expect: `total` implies the allocation bound 0
+//! #[fip_macros::fip(1, total)]
+//! fn f() -> u8 { 1 }
+//! # fn main() {}
+//! ```
+//! `total` with `panic_macros = true`:
+//! ```compile_fail
+//! # // expect: `total` implies `panic_macros = false`
+//! #[fip_macros::fip(total, panic_macros = true)]
+//! fn f() -> u8 { 1 }
+//! # fn main() {}
+//! ```
+//! `total` with `strict = false`:
+//! ```compile_fail
+//! # // expect: `total` implies `strict`; `strict = false` contradicts it
+//! #[fip_macros::fip(total, strict = false)]
+//! fn f() -> u8 { 1 }
+//! # fn main() {}
+//! ```
+//! `total` rejects the panicking macros, as `panic_macros = false` does:
+//! ```compile_fail
+//! # // expect: `assert!` may panic, and `panic_macros = false` rejects panicking macros
+//! #[fip_macros::fip(total)]
+//! fn f(x: u8) -> u8 { assert!(x > 0); x }
+//! # fn main() {}
+//! ```
+//! `total` with a callable parameter:
+//! ```compile_fail
+//! # // expect: `total` with callable parameters
+//! use fip_strict::FipFn;
+//! #[fip_macros::fip(total, param(g = 0))]
+//! fn f<G: FipFn<(u8,), Output = u8>>(g: G) -> u8 { g.call((1,)) }
+//! # fn main() {}
+//! ```
+//! `total` on a trait method declaration:
+//! ```compile_fail
+//! # // expect: `total` is not supported on a trait method declaration
+//! pub trait Step {
+//!     #[fip_macros::fip(total)]
+//!     fn step(&self) -> u8;
+//! }
 //! # fn main() {}
 //! ```
 //!
@@ -1671,6 +1762,7 @@ use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenSt
 mod context;
 mod flow;
 mod strict;
+mod verus_gen;
 
 use fip_lint_rules::{ALLOC_MACROS, ALLOC_METHODS, GHOST_MACROS, callee};
 
@@ -1714,8 +1806,15 @@ pub fn fip(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct FipArgs {
     mode: Mode,
     strict: bool,
+    /// `total` (decision 2026-11-06-redesign-verus-allocates, 7.1): implies `strict`,
+    /// `panic_macros = false` and bound 0; under Verus also `no_unwind` and
+    /// `#[verifier::fip]`. `Some` with the span of the key.
+    total: Option<Span>,
+    /// Span of `strict`/`total` in the attribute: the generated Verus clauses are
+    /// reported there.
+    grade_span: Option<Span>,
     trait_checked: bool,
-    params: Vec<(String, u64, Span)>,
+    params: Vec<ParamDecl>,
     /// `param(..)` written without `strict = true` before it: rejected on a function
     /// with a body ("requires `strict = true`"), accepted on a trait method
     /// declaration (a contract's parameter bounds, checked by `fip-prelint`).
@@ -1732,7 +1831,7 @@ struct FipArgs {
     ffi: Vec<strict::FfiMap>,
 }
 
-const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict = true)]`, `#[fip(N, strict = true)]`, optionally with `param(name = K, ..)`, `panic_macros = false`, `crate = path::to::fip_strict` and `ffi(dep::sym = local::sym)` after `strict = true`, and `requires(i < j, j < xs.len())`";
+const FIP_ARGS_HELP: &str = "expected `#[fip]`, `#[fip(N)]`, `#[fip(strict)]` (or `strict = true`), `#[fip(N, strict)]`, `#[fip(total)]`, optionally with `param(name = K, ..)`, `panic_macros = false`, `crate = path::to::fip_strict` and `ffi(dep::sym = local::sym)` after `strict`/`total`, and `requires(i < j, j < xs.len())`";
 
 const KRATE_HELP: &str = "`crate = ..` takes the path of the `fip_strict` crate as the caller sees it, e.g. `crate = my_facade::fip_strict` or `crate = \"my_facade::fip_strict\"`";
 
@@ -1901,34 +2000,67 @@ fn needs_strict(strict: bool, key: &Ident, what: &str) -> Result<(), (Span, Stri
 
 const FFI_TWICE: &str = "`ffi(..)` is given twice; list every mapping in one `ffi(..)`";
 
+impl FipArgs {
+    /// `#[fip]` without arguments.
+    fn plain() -> FipArgs {
+        FipArgs {
+            mode: Mode::Fip,
+            strict: false,
+            total: None,
+            grade_span: None,
+            trait_checked: false,
+            params: Vec::new(),
+            panic_macros: true,
+            param_unstrict: None,
+            krate: None,
+            requires: None,
+            ffi: Vec::new(),
+        }
+    }
+}
+
 fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
-    let mut args = FipArgs {
-        mode: Mode::Fip,
-        strict: false,
-        trait_checked: false,
-        params: Vec::new(),
-        panic_macros: true,
-        param_unstrict: None,
-        krate: None,
-        requires: None,
-        ffi: Vec::new(),
-    };
+    let mut args = FipArgs::plain();
     let mut seen_strict = false;
+    let mut strict_false: Option<Span> = None;
+    let mut panic_macros_true: Option<Span> = None;
+    let mut bound_span: Option<Span> = None;
     for (k, part) in split_commas(attr).into_iter().enumerate() {
         let sp = part.first().map_or_else(Span::call_site, TokenTree::span);
         match part.as_slice() {
             [lit] if k == 0 && int_literal(lit).is_some() => {
                 args.mode = Mode::FipN(int_literal(lit).unwrap_or(0));
+                bound_span = Some(lit.span());
+            }
+            // `strict` and its alias `strict = true` (decision
+            // 2026-11-06-redesign-verus-allocates, 7.1).
+            [TokenTree::Ident(key)] if key.to_string() == "strict" && !seen_strict => {
+                args.strict = true;
+                seen_strict = true;
+                args.grade_span.get_or_insert(key.span());
             }
             [TokenTree::Ident(key), eq, TokenTree::Ident(v)]
                 if key.to_string() == "strict" && is_punct(eq, '=') && !seen_strict =>
             {
-                args.strict = match v.to_string().as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => return Err((v.span(), "`strict` takes `true` or `false`".to_string())),
-                };
+                if bool_value(v, "strict")? {
+                    args.strict = true;
+                    args.grade_span.get_or_insert(key.span());
+                } else {
+                    // `total` before it already made the function strict.
+                    if args.total.is_none() {
+                        args.strict = false;
+                    }
+                    strict_false = Some(v.span());
+                }
                 seen_strict = true;
+            }
+            // `total`: the strictest grade, implies `strict`, `panic_macros = false` and
+            // bound 0.
+            [TokenTree::Ident(key)] if key.to_string() == "total" && args.total.is_none() => {
+                args.total = Some(key.span());
+                args.strict = true;
+                args.panic_macros = false;
+                args.grade_span = Some(key.span());
             }
             [TokenTree::Ident(m)] if m.to_string() == "__fip_trait_checked" => {
                 args.trait_checked = true;
@@ -1937,16 +2069,12 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
                 if key.to_string() == "panic_macros" && is_punct(eq, '=') =>
             {
                 needs_strict(args.strict, key, "`panic_macros = ..`")?;
-                args.panic_macros = match v.to_string().as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => {
-                        return Err((
-                            v.span(),
-                            "`panic_macros` takes `true` or `false`".to_string(),
-                        ));
-                    }
-                };
+                if bool_value(v, "panic_macros")? {
+                    args.panic_macros = args.total.is_none();
+                    panic_macros_true = Some(v.span());
+                } else {
+                    args.panic_macros = false;
+                }
             }
             [TokenTree::Ident(key), eq, rest @ ..]
                 if key.to_string() == "crate" && is_punct(eq, '=') && args.krate.is_none() =>
@@ -1980,28 +2108,80 @@ fn parse_fip_args(attr: TokenStream) -> Result<FipArgs, (Span, String)> {
                 if !args.strict && args.param_unstrict.is_none() {
                     args.param_unstrict = Some(key.span());
                 }
-                for decl in split_commas(g.stream()) {
-                    match decl.as_slice() {
-                        [TokenTree::Ident(name), eq, lit]
-                            if is_punct(eq, '=') && int_literal(lit).is_some() =>
-                        {
-                            args.params.push((
-                                name.to_string(),
-                                int_literal(lit).unwrap_or(0),
-                                name.span(),
-                            ));
-                        }
-                        _ => {
-                            let sp = decl.first().map_or(g.span(), TokenTree::span);
-                            return Err((sp, "expected `name = K` with an integer K".to_string()));
-                        }
-                    }
-                }
+                args.params.extend(parse_param_decls(g)?);
             }
             _ => return Err((sp, FIP_ARGS_HELP.to_string())),
         }
     }
+    if args.total.is_some() {
+        check_total(args.mode, strict_false, panic_macros_true, bound_span)?;
+    }
     Ok(args)
+}
+
+/// `true`/`false` after `key =`.
+fn bool_value(v: &Ident, key: &str) -> Result<bool, (Span, String)> {
+    match v.to_string().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err((v.span(), format!("`{key}` takes `true` or `false`"))),
+    }
+}
+
+/// `name = K` of `param(..)`, with the span of `name`.
+type ParamDecl = (String, u64, Span);
+
+/// The declarations `name = K` of `param(..)`.
+fn parse_param_decls(g: &Group) -> Result<Vec<ParamDecl>, (Span, String)> {
+    let mut out = Vec::new();
+    for decl in split_commas(g.stream()) {
+        match decl.as_slice() {
+            [TokenTree::Ident(name), eq, lit]
+                if is_punct(eq, '=') && int_literal(lit).is_some() =>
+            {
+                out.push((name.to_string(), int_literal(lit).unwrap_or(0), name.span()));
+            }
+            _ => {
+                let sp = decl.first().map_or(g.span(), TokenTree::span);
+                return Err((sp, "expected `name = K` with an integer K".to_string()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `total` implies `strict`, `panic_macros = false` and the bound 0 (decision
+/// 2026-11-06-redesign-verus-allocates, 7.5 step 1): an argument saying otherwise is an
+/// error, never silently overridden.
+fn check_total(
+    mode: Mode,
+    strict_false: Option<Span>,
+    panic_macros_true: Option<Span>,
+    bound_span: Option<Span>,
+) -> Result<(), (Span, String)> {
+    if let Some(s) = strict_false {
+        return Err((
+            s,
+            "`total` implies `strict`; `strict = false` contradicts it".to_string(),
+        ));
+    }
+    if let Some(s) = panic_macros_true {
+        return Err((
+            s,
+            "`total` implies `panic_macros = false` (no panic path); `panic_macros = true` contradicts it".to_string(),
+        ));
+    }
+    if let Mode::FipN(n) = mode
+        && n != 0
+    {
+        return Err((
+            bound_span.unwrap_or_else(Span::call_site),
+            format!(
+                "`total` implies the allocation bound 0; `#[fip({n}, total)]` allows {n} allocation(s): use `#[fip({n}, strict)]`"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Marks a function as functional-but-in-place: no allocation; frees and
@@ -2578,16 +2758,21 @@ fn expand_parts(
     }
     let strict_scan =
         strict_args.map(|a| run_strict_scan(a, &shape, &body, &tag, ctx, &mut errors));
-    if let Some((cs, sp)) = args.and_then(|a| a.requires.as_ref()) {
-        errors.extend(check_requires(cs, *sp, &shape, &toks[..shape.after_attrs]));
-    }
+    // `strict`/`total` generate the Verus contract (decision
+    // 2026-11-06-redesign-verus-allocates, 7.1): under Verus's driver the merged
+    // `verus_spec` (and `#[verifier::fip]` for `total`) replaces the hand-written one;
+    // in every build a hand-written spec that duplicates a generated clause is an error.
+    let verus_contract = strict_args.and_then(|a| {
+        contract_or_errors(a, mode, &toks, &shape, &body, ctx.is_some(), &mut errors)
+    });
+    errors.extend(requires_errors(args, strict_args.is_some(), &shape, &toks));
     if !errors.is_empty() {
         return Err(errors);
     }
     let doc = if mark_only {
         mark_only_doc()
     } else {
-        fip_doc(mode, strict_scan.is_some())
+        fip_doc(mode, strict_scan.is_some(), args)
     };
     let mark = prelint_mark(mode, args);
     let mut items = TokenStream::new();
@@ -2637,8 +2822,7 @@ fn expand_parts(
             *last = TokenTree::Group(g);
         }
     }
-    let mut f = TokenStream::new();
-    f.extend(toks[..shape.after_attrs].iter().cloned());
+    let mut f = with_contract(&toks[..shape.after_attrs], verus_contract.as_ref());
     f.extend(doc);
     f.extend(mark);
     f.extend(toks[shape.after_attrs..].iter().cloned());
@@ -2690,6 +2874,14 @@ fn expand_decl(
     }
     let mut errors = TokenStream::new();
     if let Some(a) = args {
+        if a.total.is_some() {
+            return Err(compile_error(
+                a.grade_span.unwrap_or(span),
+                &format!(
+                    "{tag}: `total` is not supported on a trait method declaration: its Verus contract (`no_unwind`, `#[verifier::fip]`) is generated from a body, and a dynamic call checks none; declare the contract with `strict`"
+                ),
+            ));
+        }
         if let Some((_, _, sp)) = a.params.first()
             && a.strict
         {
@@ -2935,6 +3127,328 @@ fn callable_param_type(t: &[TokenTree]) -> bool {
     }
 }
 
+/// The errors of `requires(..)` ([`check_requires`]). A strict function's Verus
+/// `requires` is generated from `requires(..)`, so there is no hand-written one to
+/// compare with.
+fn requires_errors(
+    args: Option<&FipArgs>,
+    strict: bool,
+    shape: &FnShape,
+    toks: &[TokenTree],
+) -> TokenStream {
+    let attrs = if strict {
+        &[][..]
+    } else {
+        &toks[..shape.after_attrs]
+    };
+    match args.and_then(|a| a.requires.as_ref()) {
+        Some((cs, sp)) => check_requires(cs, *sp, shape, attrs),
+        None => TokenStream::new(),
+    }
+}
+
+/// The Verus contract of a strict function ([`verus_contract_of`]), its errors
+/// appended to `errors`; `total` on a method under `#[fip_impl]` is an error.
+fn contract_or_errors(
+    args: &FipArgs,
+    mode: Mode,
+    toks: &[TokenTree],
+    shape: &FnShape,
+    body: &Group,
+    in_impl: bool,
+    errors: &mut TokenStream,
+) -> Option<(Option<usize>, TokenStream)> {
+    let tag = mode.name();
+    let at = args
+        .grade_span
+        .or_else(|| fn_keyword_span(toks, shape))
+        .unwrap_or_else(|| body.span());
+    if args.total.is_some() && in_impl {
+        errors.extend(compile_error(
+            at,
+            &format!("{tag}: `total` is not supported on methods under `#[fip_impl]` (its Verus contract is generated only for free functions); use `strict`"),
+        ));
+    }
+    verus_contract_of(args, mode, toks, shape, at).unwrap_or_else(|e| {
+        errors.extend(e);
+        None
+    })
+}
+
+/// The outer attributes `attrs` with the generated Verus contract in place of the
+/// hand-written `verus_spec` (or after the attributes when there is none).
+fn with_contract(
+    attrs: &[TokenTree],
+    contract: Option<&(Option<usize>, TokenStream)>,
+) -> TokenStream {
+    let mut f = TokenStream::new();
+    let Some((hand_at, contract)) = contract else {
+        f.extend(attrs.iter().cloned());
+        return f;
+    };
+    let mut k = 0;
+    while k < attrs.len() {
+        if Some(k) == *hand_at {
+            f.extend(contract.clone());
+            k += 2;
+            continue;
+        }
+        f.extend([attrs[k].clone()]);
+        k += 1;
+    }
+    if hand_at.is_none() {
+        f.extend(contract.clone());
+    }
+    f
+}
+
+/// `true` when the strip gate's switch [`verus_gen::UPSTREAM_ENV`] is `1` and the
+/// expanding compiler is Verus's driver (never honoured elsewhere, where nothing
+/// Verus-specific is emitted anyway).
+fn upstream_switch() -> bool {
+    strict::under_verus() && std::env::var_os(verus_gen::UPSTREAM_ENV).is_some_and(|v| v == "1")
+}
+
+/// The hand-written `verus_spec` among the outer attributes `attrs`: the index of its
+/// `#` and the `verus_spec(..)` argument group. Under Verus's driver
+/// `cfg_attr(verus_keep_ghost, verus_spec(..))` reaches the macro already expanded
+/// (`#[verus_spec(..)]`); in other builds it is gone, so this finds nothing there.
+fn hand_spec(attrs: &[TokenTree]) -> Result<Option<(usize, Group)>, (Span, String)> {
+    let mut found: Option<(usize, Group)> = None;
+    let mut pos = 0;
+    while pos + 1 < attrs.len() {
+        let (TokenTree::Punct(hash), TokenTree::Group(attr)) = (&attrs[pos], &attrs[pos + 1])
+        else {
+            pos += 1;
+            continue;
+        };
+        if hash.as_char() != '#' || attr.delimiter() != Delimiter::Bracket {
+            pos += 1;
+            continue;
+        }
+        if let Some(spec) = spec_of_attr(attr)? {
+            if found.is_some() {
+                return Err((
+                    attr.span(),
+                    "two `verus_spec` attributes on one function".to_string(),
+                ));
+            }
+            found = Some((pos, spec));
+        }
+        pos += 2;
+    }
+    Ok(found)
+}
+
+/// The argument group of `verus_spec(..)` or `cfg_attr(verus_keep_ghost,
+/// verus_spec(..))` in the attribute `[..]`; another `cfg_attr` naming `verus_spec` is
+/// an error (it could not be merged).
+fn spec_of_attr(attr: &Group) -> Result<Option<Group>, (Span, String)> {
+    let inner: Vec<TokenTree> = attr.stream().into_iter().collect();
+    match inner.as_slice() {
+        [TokenTree::Ident(id), TokenTree::Group(spec)]
+            if id.to_string() == "verus_spec" && spec.delimiter() == Delimiter::Parenthesis =>
+        {
+            Ok(Some(spec.clone()))
+        }
+        [TokenTree::Ident(id), TokenTree::Group(cfg)] if id.to_string() == "cfg_attr" => {
+            let parts: Vec<TokenTree> = cfg.stream().into_iter().collect();
+            match parts.as_slice() {
+                [pred, comma, TokenTree::Ident(name), TokenTree::Group(spec)]
+                    if is_ident(pred, "verus_keep_ghost")
+                        && is_punct(comma, ',')
+                        && name.to_string() == "verus_spec"
+                        && spec.delimiter() == Delimiter::Parenthesis =>
+                {
+                    Ok(Some(spec.clone()))
+                }
+                _ if parts.iter().any(|tok| is_ident(tok, "verus_spec")) => Err((
+                    attr.span(),
+                    "a `verus_spec` under a `cfg_attr` other than `cfg_attr(verus_keep_ghost, verus_spec(..))` cannot be merged with the generated contract".to_string(),
+                )),
+                _ => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The names of the parameters of type `&mut ..` (`&'a mut ..`).
+fn mut_ref_params(shape: &FnShape) -> Vec<String> {
+    param_names(shape.params.as_ref())
+        .into_iter()
+        .filter(|n| {
+            param_type(shape.params.as_ref(), n).is_some_and(|t| {
+                let mut i = 0;
+                if !t.first().is_some_and(|x| is_punct(x, '&')) {
+                    return false;
+                }
+                i += 1;
+                if t.get(i).is_some_and(|x| is_punct(x, '\'')) {
+                    i += 2;
+                }
+                t.get(i).is_some_and(|x| is_ident(x, "mut"))
+            })
+        })
+        .collect()
+}
+
+/// `true` if the signature (generics, parameters, `where` clause; not the body) names
+/// a callable: `Fn`, `FnMut`, `FnOnce`, `FipFn`, a function pointer `fn(..)` or a
+/// trait object `dyn ..`.
+fn has_callable_signature(toks: &[TokenTree], shape: &FnShape) -> bool {
+    fn walk(ts: &[TokenTree]) -> bool {
+        ts.iter().any(|t| match t {
+            TokenTree::Ident(i) => matches!(
+                i.to_string().as_str(),
+                "Fn" | "FnMut" | "FnOnce" | "FipFn" | "fn" | "dyn"
+            ),
+            TokenTree::Group(g) => walk(&g.stream().into_iter().collect::<Vec<_>>()),
+            _ => false,
+        })
+    }
+    let sig = &toks[shape.after_attrs..toks.len().saturating_sub(1)];
+    let Some(name_at) = sig.iter().position(|t| is_ident(t, &shape.name)) else {
+        return true;
+    };
+    walk(&sig[name_at + 1..])
+}
+
+fn respan(ts: TokenStream, sp: Span) -> TokenStream {
+    ts.into_iter()
+        .map(|mut t| {
+            if let TokenTree::Group(g) = &t {
+                let mut ng = Group::new(g.delimiter(), respan(g.stream(), sp));
+                ng.set_span(sp);
+                t = TokenTree::Group(ng);
+            } else {
+                t.set_span(sp);
+            }
+            t
+        })
+        .collect()
+}
+
+/// Errors that hold only in Verus's verifying pass: wrapped in
+/// `#[cfg(verus_keep_ghost)]`, so the erasing pass of the same Verus run (where the
+/// hand-written spec is gone) does not report them.
+fn ghost_errors(at: Span, tag: &str, es: &[String]) -> TokenStream {
+    let mut out = TokenStream::new();
+    for e in es {
+        out.extend(
+            "#[cfg(verus_keep_ghost)]"
+                .parse::<TokenStream>()
+                .unwrap_or_default(),
+        );
+        out.extend(compile_error(at, &format!("{tag}: {e}")));
+    }
+    out
+}
+
+/// The Verus contract of a `strict`/`total` function (decision
+/// 2026-11-06-redesign-verus-allocates, 7.1, module [`verus_gen`]): `Ok(None)` outside
+/// Verus's driver; `Ok(Some((hand, attrs)))` under it, `hand` being the index of the
+/// hand-written `verus_spec` attribute the generated one replaces.
+fn verus_contract_of(
+    args: &FipArgs,
+    mode: Mode,
+    toks: &[TokenTree],
+    shape: &FnShape,
+    at: Span,
+) -> Result<Option<(Option<usize>, TokenStream)>, TokenStream> {
+    let tag = mode.name();
+    let hand = hand_spec(&toks[..shape.after_attrs])
+        .map_err(|(sp, msg)| compile_error(sp, &format!("{tag}: {msg}")))?;
+    let hand_text = hand.as_ref().map(|(_, spec)| spec.stream().to_string());
+    let mut_params = mut_ref_params(shape);
+    let callable = !args.params.is_empty() || has_callable_signature(toks, shape);
+    let inp = verus_gen::Input {
+        requires: args.requires.as_ref().map(|(cs, _)| cs.as_slice()),
+        mut_params: &mut_params,
+        hand: hand_text.as_deref(),
+        bound: match mode {
+            Mode::FipN(n) => n,
+            Mode::Fip | Mode::Fbip => 0,
+        },
+        total: args.total.is_some(),
+        callable,
+        upstream: upstream_switch(),
+    };
+    if !strict::under_verus() {
+        let msgs = verus_gen::plain_errors(&inp);
+        if msgs.is_empty() {
+            return Ok(None);
+        }
+        let mut out = TokenStream::new();
+        for msg in msgs {
+            out.extend(compile_error(at, &format!("{tag}: {msg}")));
+        }
+        return Err(out);
+    }
+    let parts = verus_gen::parts(&inp).map_err(|msgs| ghost_errors(at, &tag, &msgs))?;
+    let hand_toks: Vec<TokenTree> = hand
+        .as_ref()
+        .map(|(_, spec)| spec.stream().into_iter().collect())
+        .unwrap_or_default();
+    let split = return_pattern_end(&hand_toks);
+    let mut spec = TokenStream::new();
+    spec.extend(hand_toks[..split].iter().cloned());
+    if let Some(req) = &parts.requires {
+        let req_span = args.requires.as_ref().map_or(at, |(_, sp)| *sp);
+        spec.extend(respan(
+            req.parse::<TokenStream>().unwrap_or_default(),
+            req_span,
+        ));
+    }
+    spec.extend(hand_toks[split..].iter().cloned());
+    spec.extend(respan(
+        parts.tail.parse::<TokenStream>().unwrap_or_default(),
+        at,
+    ));
+    let mut out = TokenStream::new();
+    for attr in &parts.attrs {
+        out.extend(respan(attr.parse::<TokenStream>().unwrap_or_default(), at));
+    }
+    let mut sp_group = Group::new(Delimiter::Parenthesis, spec);
+    sp_group.set_span(at);
+    let mut inner: TokenStream = respan(
+        "verus_keep_ghost, verus_spec"
+            .parse::<TokenStream>()
+            .unwrap_or_default(),
+        at,
+    );
+    inner.extend([TokenTree::Group(sp_group)]);
+    let mut cfg = Group::new(Delimiter::Parenthesis, inner);
+    cfg.set_span(at);
+    let mut attr: TokenStream = respan("cfg_attr".parse::<TokenStream>().unwrap_or_default(), at);
+    attr.extend([TokenTree::Group(cfg)]);
+    let mut bracket = Group::new(Delimiter::Bracket, attr);
+    bracket.set_span(at);
+    let mut hash = Punct::new('#', Spacing::Alone);
+    hash.set_span(at);
+    out.extend([TokenTree::Punct(hash), TokenTree::Group(bracket)]);
+    Ok(Some((hand.map(|(idx, _)| idx), out)))
+}
+
+/// Where the clauses of a hand-written `verus_spec(..)` start: after a return pattern
+/// (`r =>`, `(r: T) =>`) written before the first clause keyword, else 0. The
+/// generated `requires` is inserted there.
+fn return_pattern_end(hand: &[TokenTree]) -> usize {
+    for (pos, tok) in hand.iter().enumerate() {
+        if matches!(tok, TokenTree::Ident(id) if verus_gen::CLAUSES.contains(&id.to_string().as_str()))
+        {
+            return 0;
+        }
+        if is_punct(tok, '=')
+            && hand.get(pos + 1).is_some_and(|next| is_punct(next, '>'))
+            && !(pos > 0 && is_punct(&hand[pos - 1], '='))
+        {
+            return pos + 2;
+        }
+    }
+    0
+}
+
 /// `requires(..)`: every name it uses is a parameter, and, when the item carries a
 /// `#[verus_spec(..)]` (a Verus build, where `cfg_attr(verus_keep_ghost, ..)` is
 /// expanded), every conjunct appears in its `requires` clause, so the precondition
@@ -3069,7 +3583,7 @@ fn mark_only_doc() -> TokenStream {
 /// Syntax (every key always present, in this order):
 ///
 /// `fip::mark(kind = "fip"|"fbip", n = N, strict = true|false,
-/// panic_macros = true|false[, param(name = K, ..)])`
+/// panic_macros = true|false[, total = true][, param(name = K, ..)])`
 ///
 /// `n` is the declared allocation bound (`#[fip]` and `#[fbip]`: 0, `#[fip(N)]`: N);
 /// `param(..)` repeats the declared parameter bounds (of strict functions, and of
@@ -3093,6 +3607,11 @@ fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
         format!("strict = {strict}"),
         format!("panic_macros = {panic_macros}"),
     ];
+    // `total` (decision 2026-11-06-redesign-verus-allocates, 7.1): only when set, so
+    // the marks of every other function are unchanged.
+    if args.is_some_and(|a| a.total.is_some()) {
+        parts.push("total = true".to_string());
+    }
     if let Some(a) = args
         && !a.params.is_empty()
     {
@@ -3113,7 +3632,8 @@ fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
 }
 
 /// The `# FIP` doc section stating what was checked.
-fn fip_doc(mode: Mode, strict: bool) -> TokenStream {
+fn fip_doc(mode: Mode, strict: bool, args: Option<&FipArgs>) -> TokenStream {
+    let total = args.is_some_and(|a| a.total.is_some());
     let note = match mode {
         Mode::Fip => "declared `fip`: no allocation site and no direct self-recursion in the body",
         Mode::FipN(_) => {
@@ -3138,6 +3658,13 @@ fn fip_doc(mode: Mode, strict: bool) -> TokenStream {
     if strict {
         doc.extend(
             "#[doc = \"\"] #[doc = \"Strict: calls only certified functions (`fip_strict::Cert`) and the audited `core` table; the total allocation bound is checked at compile time.\"]"
+                .parse::<TokenStream>()
+                .unwrap_or_default(),
+        );
+    }
+    if total {
+        doc.extend(
+            "#[doc = \"\"] #[doc = \"Total: strict, bound 0 and no panicking macro; a Verus build proves `allocates 0`, `no_unwind` and `#[verifier::fip]`, and `fip-prelint` discharges the mark only with that proof listed in the crate's Verus sidecar.\"]"
                 .parse::<TokenStream>()
                 .unwrap_or_default(),
         );
