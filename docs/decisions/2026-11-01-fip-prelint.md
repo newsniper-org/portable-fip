@@ -1165,6 +1165,16 @@ The workspace MSRV stays 1.99.1 (`just msrv` passes; nothing needs 1.100).
   or `&Local` can nest a `fn precondition_check` whose path prints alike (fixture
   `ub_lookalike`: both panics reported).
 
+
+**Later the same day:** re-pinned to the fork `0.2026.11.09.1b27c11` (`1b27c1101…`, same
+toolchain `beta-2026-11-05`). Between the two pins the fork added the hand-out rule for
+user allocators (`hand_out`/`reclaim`), block size and alignment postconditions, trusted
+(`external_body`-only) user `grow`/`shrink`, cross-crate `fip(strict)`, and
+`deallocates_when(0, false)` on the slice and `Vec` views; portable-fip still refuses
+allocator impls (surface gate, driver), so none of its claims depend on those rules.
+Measured: `just verify` gives the same counts; the Verus sidecars and the `targets`
+fixture differ only in the stamp (version and commit).
+
 ## What would reopen this
 
 - `rustc_public` covering crate-root attributes (drop the `rustc_middle` use).

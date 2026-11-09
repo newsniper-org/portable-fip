@@ -5,7 +5,7 @@ fip-prelint verus sidecar
 # their proved `allocates` bound. Top plan T13.4, redesign phase 4.
 format 5
 crate fip_core
-verus 0.2026.11.08.6f6975a 6f6975af2411aec5a4b2bb900ecbf6edfa71c0a5
+verus 0.2026.11.09.1b27c11 1b27c1101a254192559f93b3cd9236689dbfa35c
 z3 4.16.0
 toolchain beta-2026-11-05-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
