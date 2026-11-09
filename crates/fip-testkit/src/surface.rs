@@ -199,8 +199,13 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 /// only adds obligations (no free on a normal return; constant stack) and requires
 /// `-V alloc-check` (decision record 2026-11-06-redesign-verus-allocates, 7.2). They
 /// cannot make Verus accept recursion or skip a body.
-pub const VERIFIER_ALLOWED: &[&str] =
-    &["nonlinear", "spinoff_prover", "rlimit", "loop_isolation", "fip"];
+pub const VERIFIER_ALLOWED: &[&str] = &[
+    "nonlinear",
+    "spinoff_prover",
+    "rlimit",
+    "loop_isolation",
+    "fip",
+];
 
 /// One `verifier::<name>` (or `verifier(<name>)`) in code, outside comments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -610,7 +615,11 @@ mod tests {
             vec!["fip", "fip"]
         );
         assert!(VERIFIER_ALLOWED.contains(&"fip"));
-        for weakening in ["external_body", "external", "exec_allows_no_decreases_clause"] {
+        for weakening in [
+            "external_body",
+            "external",
+            "exec_allows_no_decreases_clause",
+        ] {
             assert!(!VERIFIER_ALLOWED.contains(&weakening), "{weakening}");
         }
     }
