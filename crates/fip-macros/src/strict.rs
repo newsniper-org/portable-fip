@@ -2125,12 +2125,28 @@ pub(crate) fn std_roots_used(ts: TokenStream) -> Vec<&'static str> {
 /// compiler's process, whose executable is `rust_verify` for the upstream `verus`
 /// launcher and for a source build (measured: `argv[0]` of both). Verus passes
 /// `--cfg verus_keep_ghost` to rustc through its driver API, not in `argv`.
+///
+/// The executable is read from `argv[0]` and, when the process has no arguments, from
+/// `std::env::current_exe()`: on a musl host `std::env::args_os()` is empty inside a proc
+/// macro (std gets the arguments of a dynamic library only through glibc's `.init_array`
+/// extension; measured with rustc 1.100.0-beta.10 on `x86_64-unknown-linux-musl`:
+/// `argc = 0`, `current_exe()` = `.../bin/rustc`; on glibc `argc = 25`, `argv[0]` = `rustc`),
+/// so the `argv[0]` test alone made every strict expansion the plain one under Verus there
+/// (fip-core: 6 errors, "Verus does not currently support const block expressions").
+/// A Verus driver under another executable name still fails visibly, as before
+/// (`TODOs/strict-open-items.md`, item 12).
 pub(crate) fn under_verus() -> bool {
-    std::env::args_os().next().is_some_and(|a| {
-        std::path::Path::new(&a)
-            .file_stem()
-            .is_some_and(|s| s == "rust_verify")
-    })
+    let argv0 = std::env::args_os().next();
+    let exe = match argv0 {
+        Some(a) => Some(std::path::PathBuf::from(a)),
+        None => std::env::current_exe().ok(),
+    };
+    exe.is_some_and(|p| is_verus_driver(&p))
+}
+
+/// `true` for the path of Verus's rustc driver executable, `rust_verify`.
+fn is_verus_driver(exe: &std::path::Path) -> bool {
+    exe.file_stem().is_some_and(|s| s == "rust_verify")
 }
 
 #[cfg(test)]
@@ -2145,6 +2161,23 @@ mod tests {
         assert!(!in_core_table(&s(&["alloc", "mem"]), "swap"));
         assert!(!in_core_table(&s(&["core", "mem"]), "take"));
         assert!(!in_core_table(&s(&["mem"]), "swap"));
+    }
+
+    #[test]
+    fn verus_driver_is_recognised_by_its_executable() {
+        use std::path::Path;
+        assert!(is_verus_driver(Path::new("rust_verify")));
+        assert!(is_verus_driver(Path::new(
+            "/opt/verus/source/target-verus/release/rust_verify"
+        )));
+        assert!(is_verus_driver(Path::new("C:/verus/rust_verify.exe")));
+        assert!(!is_verus_driver(Path::new(
+            "/home/u/.rustup/toolchains/beta/bin/rustc"
+        )));
+        assert!(!is_verus_driver(Path::new("rust_verify_test")));
+        assert!(!is_verus_driver(Path::new("")));
+        // This test binary is not Verus's driver, by either source of the executable name.
+        assert!(!under_verus());
     }
 
     #[test]
