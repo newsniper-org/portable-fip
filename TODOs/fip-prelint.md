@@ -3260,3 +3260,26 @@ is the SHA-256 of the VIR text of the `allocates` expression (a `call_allocates`
 call). The driver never evaluates opaque bounds. Surface gate: `trusted_call` and
 allocator trait implementations are rejected in `fip-core`, `fip-alloc`, `fip-strict`
 and `verify/`; `just verify-flags` checks every Verus run uses `--no-cheating`.
+
+## Resolved 2026-11-14: VIR records wrapped after a parenthesis were dropped by the sidecar generator
+
+Found from Verigrad, which regenerates this repository's sidecars from cargo's git checkout
+(`~/.cargo/git/checkouts/portable-fip-<hash>/<rev>`): with absolute paths the generated
+`fip-strict` sidecar lacked the line `skip fip_strict::FipFn::call no body` (12 skipped
+instead of 13), so it differed from the committed one; from the repository root with relative
+paths it was equal.
+
+Cause (measured on the two `--log vir` files): Verus's printer wraps long lines at spaces and
+also right after an opening parenthesis. With the long path in the record's span the head was
+printed as `(@ "<span>" (` + newline + `Function ..`, and `vir_functions` recognised only the
+literal `(Function`, so the record was skipped without a diagnostic. The same holds for a body
+span `(@@ "..")`.
+
+Fix: the head symbol is read after optional whitespace (`head_is`), and the body span as `(`,
+whitespace, `@@`. Test `records_wrapped_after_a_parenthesis_are_read` (the trimmed log with
+both heads wrapped gives the same functions). After: the sidecar generated from the checkout
+with absolute paths equals the committed one (2 listed, 13 skipped).
+
+The direction of the bug was fail-closed for trust (a dropped record is a function that is
+not listed), but it made a regenerated sidecar differ from the committed one for a reason
+unrelated to the sources.

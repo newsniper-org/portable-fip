@@ -220,6 +220,16 @@ fn json_value(b: &[u8], i: &mut usize) -> Result<Json, String> {
 // ---------------------------------------------------------------------------------
 // The VIR log (`--log vir`): top-level `(@ "<span>" (Function ..))` records.
 
+/// `true` when the S-expression text `s` is a list whose head symbol is `sym`: `(`,
+/// optional whitespace (Verus's printer may break the line there), `sym`, then whitespace
+/// or `)`.
+fn head_is(s: &str, sym: &str) -> bool {
+    s.strip_prefix('(')
+        .map(str::trim_start)
+        .and_then(|r| r.strip_prefix(sym))
+        .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_whitespace() || c == ')'))
+}
+
 /// A span as Verus prints it: `<file>:<line>:<col>: <line>:<col> (#n)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VirSpan {
@@ -355,13 +365,17 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             continue;
         };
         let span_text = &rec[marker.len()..marker.len() + q];
-        let after = rec[marker.len() + q + 1..].trim_start();
-        if !after.starts_with("(Function") {
+        // The record's payload `(Function ..)`. Verus wraps long lines at any space and
+        // also right after an opening parenthesis: with a long source path in the span
+        // the head is printed as `(` + newline + `Function` (measured: a crate under
+        // `~/.cargo/git/checkouts/..`, whose trait method declaration was then dropped
+        // from the sidecar's `skip` lines).
+        let payload_at = marker.len() + q + 1;
+        let lead = rec[payload_at..].len() - rec[payload_at..].trim_start().len();
+        let fstart = payload_at + lead;
+        if !head_is(&rec[fstart..], "Function") {
             continue;
         }
-        let Some(fstart) = rec.find("(Function") else {
-            continue;
-        };
         let Some(fend) = sexp_end(t, at + fstart) else {
             continue;
         };
@@ -389,7 +403,9 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             None
         } else {
             let q = body_text
-                .strip_prefix("(@@")
+                .strip_prefix('(')
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix("@@"))
                 .map(str::trim_start)
                 .and_then(|r| r.strip_prefix('"'))
                 .and_then(|r| r.split('"').next())
@@ -1314,6 +1330,37 @@ mod tests {
   :name (Fun :path t::s) :proxy None :mode Spec :require () :attrs (FunctionAttrs :is_external_body false
   ) :body (@@ "src/lib.rs:12:21: 12:30 (#0)" (> Block ())) :extra_dependencies ()))
 "#;
+
+    /// Verus's printer wraps a long record right after an opening parenthesis: the head
+    /// `(Function` and a body span `(@@` are then split over two lines (measured with a
+    /// long source path in the span, `~/.cargo/git/checkouts/..`). Such records must be
+    /// read like the unwrapped ones; before, they were skipped without a word.
+    #[test]
+    fn records_wrapped_after_a_parenthesis_are_read() {
+        let wrapped = VIR
+            .replace("(Function", "(\n  Function")
+            .replace("(@@ ", "(\n   @@ ");
+        assert_ne!(wrapped, VIR);
+        let key = |fns: &[VirFn]| -> Vec<(String, String, bool, Option<String>)> {
+            fns.iter()
+                .map(|f| {
+                    (
+                        f.path.clone(),
+                        f.mode.clone(),
+                        f.external_body,
+                        f.body.as_ref().map(|b| b.file.clone()),
+                    )
+                })
+                .collect()
+        };
+        let plain = vir_functions(VIR).unwrap();
+        assert!(plain.len() >= 3);
+        assert_eq!(key(&vir_functions(&wrapped).unwrap()), key(&plain));
+        assert!(head_is("(\n  Function :name x)", "Function"));
+        assert!(head_is("(Function)", "Function"));
+        assert!(!head_is("(FunctionX :name x)", "Function"));
+        assert!(!head_is("(Datatype :name x)", "Function"));
+    }
 
     #[test]
     fn vir_records() {
