@@ -71,7 +71,11 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   the audit of `ad55cd10a`; same verification counts, the sidecars differ only in
   their stamp line. Re-pinned again 2026-11-10 to `0.2026.11.09.c716c2b` (`c716c2bfd…`,
   same toolchain) for the strict check of std calls that drop nothing (`total` emits
-  `#[verifier::fip(strict)]` since then).
+  `#[verifier::fip(strict)]` since then). Re-pinned again 2026-11-15 to `0.2026.11.15.e54f393`
+  (`e54f39326…`, branch `fip-beta`, same toolchain): a `#[verifier::fip]` trait method
+  declaration binds every implementation, casts and array operations have allocation
+  bounds, and the erased vstd builds without `std_specs`; the sidecars differ only in
+  their stamp line.
 - **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
   (justfile `verus_flags`): the fork checks `allocates` clauses only with
   `-V alloc-check`, and an importing crate needs the imported crate's export from a
