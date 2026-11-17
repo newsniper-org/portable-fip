@@ -50,7 +50,6 @@ pub mod surface;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
     static COUNTS: Cell<AllocStats> = const { Cell::new(AllocStats::ZERO) };
@@ -90,8 +89,67 @@ impl AllocStats {
     }
 }
 
-/// Process-wide counters, for [`measure_all_threads`].
-static GLOBAL: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Process-wide counters, for [`measure_all_threads`]: allocations, reallocations,
+/// frees, bytes requested.
+///
+/// Two implementations with the same interface (`add`, `snapshot`). Targets with
+/// 64-bit atomics use four `AtomicU64`. Targets without them (e.g. `armv5te`, 32-bit
+/// PowerPC: `not(target_has_atomic = "64")`) have no `AtomicU64`, and use one
+/// `Mutex<[u64; 4]>`.
+#[cfg(target_has_atomic = "64")]
+mod global_counters {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static GLOBAL: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+    pub(crate) fn add(delta: [u64; 4]) {
+        for (slot, v) in GLOBAL.iter().zip(delta) {
+            if v != 0 {
+                slot.fetch_add(v, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub(crate) fn snapshot() -> [u64; 4] {
+        let [a, r, f, b] = &GLOBAL;
+        [
+            a.load(Ordering::SeqCst),
+            r.load(Ordering::SeqCst),
+            f.load(Ordering::SeqCst),
+            b.load(Ordering::SeqCst),
+        ]
+    }
+}
+
+/// `add` runs inside the global allocator, so the lock must not allocate: a lock
+/// that did would re-enter `add` on the same thread and deadlock. `std`'s `Mutex`
+/// does not allocate on the futex-based platforms (Linux, Android), which is where
+/// the known targets without 64-bit atomics that ship `std` are. On a platform whose
+/// `Mutex` allocates lazily this implementation must not be used.
+///
+/// The counts wrap at `u64::MAX` like `fetch_add` does. A poisoned lock is entered
+/// anyway: the array holds plain counters, there is no invariant to protect.
+#[cfg(not(target_has_atomic = "64"))]
+mod global_counters {
+    use std::sync::{Mutex, PoisonError};
+
+    static GLOBAL: Mutex<[u64; 4]> = Mutex::new([0; 4]);
+
+    pub(crate) fn add(delta: [u64; 4]) {
+        if delta == [0; 4] {
+            return;
+        }
+        let mut g = GLOBAL.lock().unwrap_or_else(PoisonError::into_inner);
+        for (slot, v) in g.iter_mut().zip(delta) {
+            *slot = slot.wrapping_add(v);
+        }
+    }
+
+    pub(crate) fn snapshot() -> [u64; 4] {
+        *GLOBAL.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Serialises [`measure_all_threads`] calls against each other.
 static GLOBAL_SERIAL: Mutex<()> = Mutex::new(());
 
@@ -105,23 +163,16 @@ fn record(f: impl Fn(&mut AllocStats)) {
     });
     let mut d = AllocStats::ZERO;
     f(&mut d);
-    for (slot, v) in GLOBAL
-        .iter()
-        .zip([d.allocs, d.reallocs, d.frees, d.bytes_requested])
-    {
-        if v != 0 {
-            slot.fetch_add(v, Ordering::Relaxed);
-        }
-    }
+    global_counters::add([d.allocs, d.reallocs, d.frees, d.bytes_requested]);
 }
 
 fn global() -> AllocStats {
-    let [a, r, f, b] = &GLOBAL;
+    let [allocs, reallocs, frees, bytes_requested] = global_counters::snapshot();
     AllocStats {
-        allocs: a.load(Ordering::SeqCst),
-        reallocs: r.load(Ordering::SeqCst),
-        frees: f.load(Ordering::SeqCst),
-        bytes_requested: b.load(Ordering::SeqCst),
+        allocs,
+        reallocs,
+        frees,
+        bytes_requested,
     }
 }
 
