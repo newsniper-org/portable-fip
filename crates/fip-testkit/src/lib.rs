@@ -38,6 +38,13 @@
 //! - Only allocations through the Rust global allocator are seen.
 //! - The macros panic if the counting allocator is not installed, so a missing
 //!   `install!()` cannot produce a vacuous pass.
+//! - On targets without native thread-local storage `std` keeps the per-thread
+//!   counters behind a `pthread` key and allocates their slot on a thread's first
+//!   heap operation, with `System` directly. That allocation bypasses the counting
+//!   allocator: it cannot re-enter it and it is not counted. Checked with
+//!   `rustc --print cfg` (1.100.0) for `arm-linux-androideabi`,
+//!   `aarch64-linux-android`, `i686-linux-android` and `x86_64-linux-android`;
+//!   none of them was executed.
 
 #![deny(unsafe_code)]
 
@@ -51,6 +58,10 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Mutex;
 
+// With native TLS this is a plain `#[thread_local]` static (`const` initialiser, no
+// destructor), so an access runs no `std` code. With key-based TLS (see "Limits")
+// an access is `pthread_getspecific`, which in bionic indexes fixed arrays and does
+// not allocate (`libc/bionic/pthread_key.cpp`, read for ARM and x86-64).
 thread_local! {
     static COUNTS: Cell<AllocStats> = const { Cell::new(AllocStats::ZERO) };
 }
@@ -137,11 +148,20 @@ mod global_counters {
 ///   some thread panics, a `const` thread-local without destructor: a plain
 ///   `#[thread_local]` static with native TLS; with key-based TLS (Android) a value
 ///   that `std` allocates with `System` directly, not through the global allocator.
-/// - The `u32` atomics are `lwarx`/`stwcx.` on PowerPC and, on the ARM targets,
-///   `__sync_*_4` of `compiler-builtins`, which loop on the kernel helper
-///   `__kuser_cmpxchg`.
-/// - `syscall` and the errno location, read in musl, glibc and bionic: a register
-///   shuffle and the trap; errno is a field of the thread structure.
+/// - The `u32` atomics are inline `lwarx`/`stwcx.` on PowerPC and, on the ARM
+///   targets, calls to `__sync_val_compare_and_swap_4` and
+///   `__sync_lock_test_and_set_4` of `compiler-builtins`
+///   (`sync/arm_linux.rs`, `sync/arm_thumb_shared.rs`), which loop on the kernel
+///   helper `__kuser_cmpxchg`. Checked in the assembly `rustc` emits per target.
+/// - `syscall`, read in musl (ARM), glibc (ARM, 32-bit PowerPC) and bionic (ARM,
+///   x86-64): a register shuffle and the trap instruction, then on error a store
+///   to errno. errno is a field of the thread structure in musl and bionic and an
+///   initial-exec `__thread` variable in glibc; reaching it allocates nothing.
+///   The libc sources read are the upstream heads of 2026-11-17, not necessarily
+///   the versions a given system links.
+/// - bionic reads the thread pointer from the `TPIDRURO` register
+///   (`mrc p15, 0, r, c13, c0, 3`), which exists from `ARMv6K` on, so
+///   `arm-linux-androideabi` binaries do not run on `ARMv5` hardware.
 ///
 /// Executed only on `armv5te-unknown-linux-musleabi` (`just testkit-qemu-armv5te`).
 /// On a platform whose `Mutex` allocates lazily (the pthread-based one of other
