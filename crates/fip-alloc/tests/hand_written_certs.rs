@@ -12,8 +12,7 @@ fn hand_written_certificates_are_exactly_the_documented_ones() {
         .map(|(f, _, line)| {
             let file = f
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+                .map_or_default(|n| n.to_string_lossy().into_owned());
             let ident = line
                 .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                 .find(|w| w.starts_with("__fip_strict_"))

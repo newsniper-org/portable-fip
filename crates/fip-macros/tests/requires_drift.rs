@@ -75,8 +75,7 @@ fn sites(src: &str) -> Vec<Site> {
             .unwrap_or(rest.len());
         let spec = rest[..fn_at]
             .find("verus_spec(")
-            .map(|v| group(rest, v + "verus_spec".len()).to_string())
-            .unwrap_or_default();
+            .map_or_default(|v| group(rest, v + "verus_spec".len()).to_string());
         let head = rest[fn_at..]
             .lines()
             .find(|l| l.contains("fn "))

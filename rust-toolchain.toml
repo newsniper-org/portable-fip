@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
+
+# The toolchain of every gate that the justfile runs with a plain `cargo`: formatting,
+# clippy, the tests, the cross and no_std checks. It equals the workspace MSRV
+# (`rust-version` in Cargo.toml) and the toolchain of the pinned Verus fork and of
+# `tools/fip-prelint` (which has its own file, with `rustc-dev`). Clippy's lint set
+# changes between releases, so the lint gate is only reproducible on a pinned compiler.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]

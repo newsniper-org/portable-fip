@@ -1228,4 +1228,25 @@ Consequence: an unrecorded installed target no longer fails `just ci`. Widening 
 recorded set is a deliberate step (`prelint-targets-all` with `FIP_PRELINT_BLESS=1`
 after review, plus the std summaries of the new targets).
 
-The workspace MSRV stays 1.99.1.
+**MSRV and the lint gate (same day, user decision).** The workspace MSRV moves from
+1.99.1 to 1.100.0 (`rust-version`), and a `rust-toolchain.toml` at the repository
+root pins 1.100.0 (with `rustfmt` and `clippy`) for every gate the justfile runs
+with a plain `cargo`. Before, those gates ran on whatever toolchain was the host's
+default (1.99.1 on the maintainer's host), so `just lint` did not see the lints of
+the compiler the proofs and `fip-prelint` use: clippy 1.100.0 reports ten
+`map(_).unwrap_or_default()` sites (`fip-macros`, `fip-testkit`, three test files)
+that clippy 1.99.1 accepts. They are rewritten to `map_or_default`, which is why
+the MSRV cannot stay below 1.100.0 once they are. A consumer on an older compiler
+keeps working only with a revision from before this change.
+
+One gate still builds on an older compiler: the upstream strip gate
+(`just verify-upstream`) builds `fip-macros` with the toolchain of the pinned
+upstream Verus (1.99.1; upstream `main` was still on 1.99.1 on 2026-11-17), because
+that compiler loads the proc-macro. The build passes `--ignore-rust-version`
+(measured: `fip-macros` at this revision compiles on 1.99.1). So the declared MSRV
+is 1.100.0 while `fip-macros` is in fact kept compiling on 1.99.1 by that gate, for
+as long as upstream Verus stays there.
+
+`fip-testkit` no longer needs 64-bit atomics (a `Mutex<[u64; 4]>` where
+`target_has_atomic = "64"` is false), found by `just prelint-targets-all`: four
+installed targets did not build.

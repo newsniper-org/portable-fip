@@ -2984,8 +2984,7 @@ fn foreign_signal(toks: &[TokenTree], shape: &FnShape) -> Option<(Span, &'static
     let params: Vec<TokenTree> = shape
         .params
         .as_ref()
-        .map(|g| g.stream().into_iter().collect())
-        .unwrap_or_default();
+        .map_or_default(|g| g.stream().into_iter().collect());
     if let Some(w) = params
         .windows(3)
         .find(|w| w.iter().all(|t| is_punct(t, '.')))
@@ -3389,8 +3388,7 @@ fn verus_contract_of(
     let parts = verus_gen::parts(&inp).map_err(|msgs| ghost_errors(at, &tag, &msgs))?;
     let hand_toks: Vec<TokenTree> = hand
         .as_ref()
-        .map(|(_, spec)| spec.stream().into_iter().collect())
-        .unwrap_or_default();
+        .map_or_default(|(_, spec)| spec.stream().into_iter().collect());
     let split = return_pattern_end(&hand_toks);
     let mut spec = TokenStream::new();
     spec.extend(hand_toks[..split].iter().cloned());
@@ -4539,7 +4537,7 @@ fn process_extern_item(
     krate: Option<&TokenStream>,
 ) -> Result<(TokenStream, TokenStream), (Span, String)> {
     let shape = parse_fn(item_toks);
-    let fn_name = shape.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+    let fn_name = shape.as_ref().map_or_default(|s| s.name.clone());
 
     let mut exclude_attr = None;
     let mut cert_attr = None;
@@ -5575,7 +5573,7 @@ const FIP_FN_SHAPE: &str = "fip_fn!: expected a closure `|args| body` or the pat
 
 /// [`FIP_FN_SHAPE`], specialised for common misuse.
 fn misuse_message(toks: &[TokenTree]) -> String {
-    let first = toks.first().map(ToString::to_string).unwrap_or_default();
+    let first = toks.first().map_or_default(ToString::to_string);
     if toks.is_empty() {
         return format!("{FIP_FN_SHAPE}; got nothing");
     }

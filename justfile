@@ -7,7 +7,8 @@
 #     checked against the binary `VERUS` by `verus-pin` before every Verus gate;
 #   - toolchain of `fip-prelint` (= the Verus toolchain, checked by `verus-pin`):
 #     tools/fip-prelint/rust-toolchain.toml (also read by the driver's build.rs);
-#   - MSRV: `rust-version` in Cargo.toml;
+#   - MSRV: `rust-version` in Cargo.toml; the toolchain of the plain `cargo` gates
+#     (fmt, clippy, tests, cross, no_std): `rust-toolchain.toml`, currently the same;
 #   - upstream Verus of the strip gate: `verus_upstream_pin` below.
 #
 # The Verus fork with `allocates` (branch `fip`, the pin in verus-trusted.txt), with
@@ -65,7 +66,7 @@ musl_lld := "-C linker=rust-lld -C linker-flavor=ld.lld -C link-self-contained=y
 # `cargo check` does not assemble `asm!` templates, and `prefetch_read` is generic and
 # `#[inline(always)]`, so only `fip-arch`'s unit tests instantiate it: they are built
 # (not run) for aarch64 and riscv64 musl, linked by `rust-lld`, which assembles the
-# `prfm` and `ori` templates (needs both musl targets for the ambient toolchain).
+# `prfm` and `ori` templates (needs both musl targets for the toolchain of `rust-toolchain.toml`).
 cross:
     cargo check --locked -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target aarch64-unknown-linux-gnu
     cargo check --locked -p fip-core -p fip-alloc -p fip-arch -p fip-strict --target riscv64gc-unknown-linux-gnu
@@ -774,7 +775,11 @@ verify-upstream:
     tc=$({{verus_upstream}} --version | awk '/Toolchain/ {print $2}')
     if [ -z "$tc" ]; then echo "FAIL: cannot read the toolchain of \`{{verus_upstream}}\`"; exit 1; fi
     m=target/verus-macros-upstream; rm -rf "$m"
-    cargo +"$tc" build --locked -q -p fip-macros --target-dir "$m"
+    # `--ignore-rust-version`: upstream Verus is on an older rustc (1.99.1 at the pin)
+    # than the workspace MSRV (1.100.0 since 2026-11-17). The proc-macro must be built
+    # by the compiler that loads it, so this one build is exempt from the MSRV; it
+    # fails here, visibly, the day `fip-macros` uses something that compiler lacks.
+    cargo +"$tc" build --locked -q -p fip-macros --ignore-rust-version --target-dir "$m"
     {{one_artifact}}
     so=$(one_artifact "$m" fip_macros so)
     deps=$(dirname "$so")
@@ -841,7 +846,7 @@ arch-override:
     echo "arch-override: ok"
 
 # Every compile_fail doctest of fip-macros fails for its stated reason, not another error.
-# Own target dir: the script needs exactly one build of each crate, by the ambient rustc.
+# Own target dir: the script needs exactly one build of each crate, by the rustc of `rust-toolchain.toml`.
 compile-fail-reasons:
     rm -rf target/compile-fail
     cargo build --locked -q -p fip-macros -p fip-strict --target-dir target/compile-fail

@@ -14,7 +14,7 @@ Examples fenced as `compile_fail,ignore` are checked here only: their rejection
 needs the example to be a real file (fip-macros reads an item's enclosing block from
 its source file), which rustdoc's doctests are not, so rustdoc does not run them.
 
-Usage: python verify/compile_fail_reasons.py <target dir with debug/deps>
+Usage: python verify/compile_fail_reasons.py <cargo target dir>
 """
 
 import glob
@@ -29,18 +29,30 @@ LINT_MARKERS = ("#[fip", "#[fbip", "FIP attributes", "`#[fbip]` takes")
 FOLLOW_UPS = ("erroneous constant", "aborting due to", "could not compile")
 
 
-def newest(pattern: str) -> str:
-    files = glob.glob(pattern)
+def lib_dirs(target: str) -> list[str]:
+    """Directories cargo puts a crate's artifacts in: `debug/deps` (cargo up to
+    1.99) and `debug/build/<package>/<hash>/out` (cargo 1.100)."""
+    dirs = [os.path.join(target, "debug", "deps")]
+    dirs += sorted(glob.glob(os.path.join(target, "debug", "build", "*", "*", "out")))
+    return [d for d in dirs if os.path.isdir(d)]
+
+
+def newest(dirs: list[str], name: str) -> str:
+    files = [f for d in dirs for f in glob.glob(os.path.join(d, name))]
     if not files:
-        raise SystemExit(f"not found: {pattern}")
+        raise SystemExit(f"not found: {name} in {dirs}")
     return max(files, key=os.path.getmtime)
 
 
+def search_args(dirs: list[str]) -> list[str]:
+    return [a for d in dirs for a in ("-L", d)]
+
+
 def main() -> int:
-    deps = os.path.join(sys.argv[1], "debug", "deps")
+    deps = lib_dirs(sys.argv[1])
     externs = {
-        "fip_macros": newest(os.path.join(deps, "libfip_macros-*.so")),
-        "fip_strict": newest(os.path.join(deps, "libfip_strict-*.rlib")),
+        "fip_macros": newest(deps, "libfip_macros-*.so"),
+        "fip_strict": newest(deps, "libfip_strict-*.rlib"),
     }
     src = open("crates/fip-macros/src/lib.rs", encoding="utf-8").read()
     blocks = re.findall(r"//! ```compile_fail(?:,ignore)?\n((?://!.*\n)+?)//! ```", src)
@@ -66,7 +78,7 @@ def main() -> int:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(code)
             cmd = ["rustc", "--edition", "2024", "--crate-type", "bin",
-                   "-o", os.path.join(d, "o"), "-L", deps]
+                   "-o", os.path.join(d, "o"), *search_args(deps)]
             for name, lib in externs.items():
                 cmd += ["--extern", f"{name}={lib}"]
             r = subprocess.run(cmd + [path], capture_output=True, text=True, check=False)

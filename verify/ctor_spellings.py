@@ -16,7 +16,7 @@ Each spelling is compiled with rustc against the built crates, as the body
 
 The same table drives `fip-lint-rules`' and `fip_testkit`'s unit tests.
 
-Usage: python verify/ctor_spellings.py <target dir with debug/deps>
+Usage: python verify/ctor_spellings.py <cargo target dir>
 """
 
 import glob
@@ -35,11 +35,23 @@ impl Foo { pub fn new() -> Foo { Foo } }
 """
 
 
-def newest(pattern: str) -> str:
-    files = glob.glob(pattern)
+def lib_dirs(target: str) -> list[str]:
+    """Directories cargo puts a crate's artifacts in: `debug/deps` (cargo up to
+    1.99) and `debug/build/<package>/<hash>/out` (cargo 1.100)."""
+    dirs = [os.path.join(target, "debug", "deps")]
+    dirs += sorted(glob.glob(os.path.join(target, "debug", "build", "*", "*", "out")))
+    return [d for d in dirs if os.path.isdir(d)]
+
+
+def newest(dirs: list[str], name: str) -> str:
+    files = [f for d in dirs for f in glob.glob(os.path.join(d, name))]
     if not files:
-        raise SystemExit(f"not found: {pattern}")
+        raise SystemExit(f"not found: {name} in {dirs}")
     return max(files, key=os.path.getmtime)
+
+
+def search_args(dirs: list[str]) -> list[str]:
+    return [a for d in dirs for a in ("-L", d)]
 
 
 def spellings() -> list[tuple[str, str, str]]:
@@ -54,13 +66,13 @@ def spellings() -> list[tuple[str, str, str]]:
     return out
 
 
-def compile_errors(code: str, deps: str, externs: dict[str, str]) -> tuple[int, list[str]]:
+def compile_errors(code: str, deps: list[str], externs: dict[str, str]) -> tuple[int, list[str]]:
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "t.rs")
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
         cmd = ["rustc", "--edition", "2024", "--crate-type", "lib",
-               "--out-dir", d, "-L", deps]
+               "--out-dir", d, *search_args(deps)]
         for name, lib in externs.items():
             cmd += ["--extern", f"{name}={lib}"]
         r = subprocess.run(cmd + [path], capture_output=True, text=True, check=False)
@@ -69,10 +81,10 @@ def compile_errors(code: str, deps: str, externs: dict[str, str]) -> tuple[int, 
 
 
 def main() -> int:
-    deps = os.path.join(sys.argv[1], "debug", "deps")
+    deps = lib_dirs(sys.argv[1])
     externs = {
-        "fip_macros": newest(os.path.join(deps, "libfip_macros-*.so")),
-        "fip_strict": newest(os.path.join(deps, "libfip_strict-*.rlib")),
+        "fip_macros": newest(deps, "libfip_macros-*.so"),
+        "fip_strict": newest(deps, "libfip_strict-*.rlib"),
     }
     table = spellings()
     if len(table) < 40:

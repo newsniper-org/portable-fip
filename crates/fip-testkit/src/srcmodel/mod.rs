@@ -221,8 +221,7 @@ impl Files {
         let dir = self.files[f]
             .path
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
+            .map_or_default(Path::to_path_buf);
         let group = self.files[f].group;
         let mut out = Vec::with_capacity(raw.len());
         let mut i = 0;
@@ -265,7 +264,7 @@ impl Files {
     fn decl_target(&mut self, f: usize, mod_rs: bool, d: &Decl, read: bool) -> Option<usize> {
         let p = self.files[f].path.clone();
         let group = self.files[f].group;
-        let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
+        let dir = p.parent().map_or_default(Path::to_path_buf);
         let mut base = if mod_rs {
             dir.clone()
         } else {
@@ -572,8 +571,7 @@ pub(crate) fn build(groups: &[Group], multi: bool) -> Program {
                 fl.files[root]
                     .path
                     .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+                    .map_or_default(|s| s.to_string_lossy().into_owned())
             }
         })
         .collect();

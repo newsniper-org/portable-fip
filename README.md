@@ -454,7 +454,7 @@ cargo runs with `--locked`:
 |---|---|
 | `fmt-check`, `lint` | rustfmt; clippy with `all = deny`, `pedantic = warn`, `-D warnings` |
 | `test` | unit, integration, doc tests (allocation tests run in parallel) |
-| `msrv` | the same on rustc 1.99.1 (the workspace `rust-version`) |
+| `msrv` | the same on rustc 1.100.0 (the workspace `rust-version`; since 2026-11-17 also the toolchain `rust-toolchain.toml` pins for every other gate, so this gate repeats `test` unless the pin moves ahead of the MSRV) |
 | `nostd` | `x86_64-unknown-none` build of `fip-core`, `fip-alloc`, `fip-arch`, `fip-strict`, `fip-lint-rules` (only `core`/`alloc` exist there) |
 | `cross` | `aarch64`, `riscv64gc` and `aarch64-apple-darwin` checks; `fip-arch`'s unit tests built for `aarch64`/`riscv64gc` musl (linked by `rust-lld`), which assembles the `asm!` templates |
 | `arch-override` | `fip_cache_line` = 32/128 take effect; other values are rejected with the `build.rs` message |
