@@ -830,6 +830,24 @@ arch-qemu-riscv64:
     done
     echo "arch-qemu-riscv64: ok"
 
+# `fip-testkit`'s tests on a target without 64-bit atomics, under qemu-user: there the
+# process-wide counters are a `Mutex<[u64; 4]>` locked inside the global allocator
+# (`cfg(not(target_has_atomic = "64"))`), and only running them shows that the lock
+# neither allocates nor deadlocks (`tests/all_threads.rs` counts across threads).
+# Not in `ci`: needs `qemu-arm` and the `armv5te-unknown-linux-musleabi` target
+# (linked by `rust-lld`).
+testkit-qemu-armv5te:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    t=armv5te-unknown-linux-musleabi
+    rustc --print cfg --target $t | grep -q '^target_has_atomic="64"$' && { echo "FAIL: $t has 64-bit atomics; this recipe would not run the Mutex counters"; exit 1; }
+    export CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_RUSTFLAGS="{{musl_lld}}"
+    for profile in "" --release; do
+      CARGO_TARGET_ARMV5TE_UNKNOWN_LINUX_MUSLEABI_RUNNER=qemu-arm \
+        cargo test --locked $profile -p fip-testkit --target $t --target-dir target/armv5te-qemu
+    done
+    echo "testkit-qemu-armv5te: ok"
+
 # CACHE_LINE override: supported values take effect, others are rejected.
 arch-override:
     #!/usr/bin/env bash
