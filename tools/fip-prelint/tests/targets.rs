@@ -11,10 +11,20 @@
 //! `no_std` libraries (`fip-core`, `fip-alloc`, `fip-arch`, `fip-strict`, as `just
 //! nostd` builds them). The violations, `⊤` reports, conditional results and per-crate
 //! summaries (not the notes) are compared with the target's section in
-//! `tests/targets.expected`. An installed target without a section fails (record it
-//! with `FIP_PRELINT_BLESS=1`); a recorded target that is not installed is skipped
-//! (a failure under `FIP_PRELINT_REQUIRE_TARGETS=1`, which `just ci` sets)
-//! with a message.
+//! `tests/targets.expected`.
+//!
+//! Two target sets (`FIP_PRELINT_TARGETS`):
+//!
+//! - `recorded` (the default; `just prelint-targets`, and what `just ci` runs): the
+//!   targets that have a section in `targets.expected`. An installed target without a
+//!   section is not built and not a failure; it is named in a note on stderr. A
+//!   recorded target that is not installed is skipped with a message (a failure under
+//!   `FIP_PRELINT_REQUIRE_TARGETS=1`, which `just ci` sets).
+//! - `all` (`just prelint-targets-all`): every installed target. One without a section
+//!   fails (record it with `FIP_PRELINT_BLESS=1`, after reviewing its output).
+//!
+//! `FIP_PRELINT_BLESS=1` rewrites the sections of the targets that were checked, so
+//! under `recorded` it never adds a target.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +45,17 @@ fn skipped(msg: &str) {
         panic!("{msg} (FIP_PRELINT_REQUIRE_TARGETS=1: install it, or unset the variable)");
     }
     eprintln!("{msg}");
+}
+
+/// Whether every installed target is checked (`FIP_PRELINT_TARGETS=all`) or only the
+/// recorded ones (unset or `recorded`). Any other value is an error, not a default.
+fn all_targets() -> bool {
+    match std::env::var("FIP_PRELINT_TARGETS") {
+        Err(_) => false,
+        Ok(v) if v == "recorded" => false,
+        Ok(v) if v == "all" => true,
+        Ok(v) => panic!("FIP_PRELINT_TARGETS must be `recorded` or `all`, not `{v}`"),
+    }
 }
 
 /// Installed targets of the toolchain: `(triple, has std)`.
@@ -148,8 +169,39 @@ fn parse(text: &str) -> BTreeMap<String, (String, Vec<String>)> {
 fn every_installed_target() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest.join("../..");
-    let targets = installed();
+    let path = manifest.join("tests").join("targets.expected");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut recorded = parse(&text);
+    let mut targets = installed();
     assert!(!targets.is_empty(), "no installed target found");
+    if !all_targets() {
+        let unrecorded: Vec<&str> = targets
+            .iter()
+            .filter(|(t, _)| !recorded.contains_key(t))
+            .map(|(t, _)| t.as_str())
+            .collect();
+        if !unrecorded.is_empty() {
+            eprintln!(
+                "targets.rs: {} installed target(s) without a section in targets.expected are \
+                 not checked (FIP_PRELINT_TARGETS=all checks them): {}",
+                unrecorded.len(),
+                unrecorded.join(" ")
+            );
+        }
+        targets.retain(|(t, _)| recorded.contains_key(t));
+        // A missing, empty or unparsable `targets.expected` must not pass by checking
+        // nothing.
+        assert!(
+            !recorded.is_empty(),
+            "targets.expected records no target ({})",
+            path.display()
+        );
+        assert!(
+            !targets.is_empty(),
+            "none of the {} recorded targets is installed",
+            recorded.len()
+        );
+    }
     // At most four checks at a time (each is a cargo build of the workspace).
     let mut results: Vec<(String, bool, Vec<String>)> = Vec::new();
     for chunk in targets.chunks(4) {
@@ -167,16 +219,13 @@ fn every_installed_target() {
             results.push(h.join().expect("target check thread"));
         }
     }
-    let path = manifest.join("tests").join("targets.expected");
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut recorded = parse(&text);
     if std::env::var("FIP_PRELINT_BLESS").is_ok_and(|v| v == "1") {
         for (t, std, got) in &results {
             let kind = if *std { "std" } else { "no_std" };
             recorded.insert(t.clone(), (kind.to_string(), got.clone()));
         }
         let mut out = String::from(
-            "# `cargo fip-prelint --warn-only --target <triple>` per installed target (tests/targets.rs);\n\
+            "# `cargo fip-prelint --warn-only --target <triple>` per recorded target (tests/targets.rs);\n\
              # notes omitted. `no_std` targets check the libraries of `just nostd` only.\n",
         );
         for (t, (kind, lines)) in &recorded {
@@ -193,7 +242,8 @@ fn every_installed_target() {
     for (t, _, got) in &results {
         match recorded.remove(t) {
             None => bad.push(format!(
-                "target `{t}` is installed but not recorded in targets.expected (FIP_PRELINT_BLESS=1)"
+                "target `{t}` is installed but not recorded in targets.expected \
+                 (FIP_PRELINT_TARGETS=all: review its output, then FIP_PRELINT_BLESS=1)"
             )),
             Some((_, want)) if &want != got => {
                 let missing: Vec<&String> = want.iter().filter(|l| !got.contains(l)).collect();

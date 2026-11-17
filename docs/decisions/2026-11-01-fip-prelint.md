@@ -1184,3 +1184,48 @@ std calls marked as dropping nothing with a non-`Copy` `T`, so `total` emits
 - A Verus toolchain change (re-pin, re-run the probes); a Verus or Z3 update (re-pin
   `verus-trusted.txt`, regenerate the Verus sidecars, review their diff).
 - A stable way to encode MIR for all functions without `-Z` flags.
+
+## Amendment 2026-11-17: re-pin to stable rustc 1.100.0; recorded and installed target sets
+
+The Verus fork moved to stable Rust 1.100.0 (`0.2026.11.17.1c37a96`, branch `fip`);
+`fip-prelint` follows (`rust-toolchain.toml`: `beta-2026-11-05` → `1.100.0`).
+
+**Measured** (`just prelint-repin 1.100.0`, x86_64 Linux host, 2026-11-17):
+
+- the driver builds unchanged against 1.100.0 (no `rustc_private` API change);
+- the probes pass (MIR of a non-inline function only with `-Zalways-encode-mir`,
+  `fip::export` / `fip::mark` readable from a dependency, E0514 across compilers);
+- the allocator entry-point leaves are the ones recorded for 1.100.0-beta.10;
+- the `library/` tree of the `rust-src` component is byte-identical to that of
+  `beta-2026-11-05` (`diff -rq`, 3658 files). The trusted tables were therefore not
+  re-read; `NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT` and `CORE_TABLE_AUDITED_AT` gain
+  `1.100.0` on that ground, stated at the constants;
+- the std summaries were regenerated for the 11 recorded `std` targets. Against the
+  1.100.0-beta.10 files they differ in the stamp (`rustc`, and `std-src`, whose hash
+  covers the absolute paths of the sources and so changes with the toolchain
+  directory) and, on the three WASI targets, in the crate-hash part of mangled FFI
+  symbol names (2 or 3 lines each). The beta files are removed;
+- fixtures: three expected files change, only in the rustc version string (35
+  occurrences) and one mangled allocator-shim symbol.
+
+**Target sets.** The toolchain on the maintainer's host now has far more targets
+installed (86 with `std`) than are recorded (11 `std`, 1 `no_std`). Until now
+`tests/targets.rs` built every installed target and failed on an unrecorded one, and
+`repin.sh` generated summaries for every installed `std` target, so the gate's result
+and its cost depended on what happened to be installed. Now:
+
+- **recorded** (default; `FIP_PRELINT_TARGETS=recorded`, `just prelint-targets`,
+  `just prelint-std-summaries-recorded`, `repin.sh` step 5, and what `just ci`
+  runs): the targets with a section in `tests/targets.expected`. An installed target
+  without a section is named in a note and not built. A recorded target that is not
+  installed still fails under `FIP_PRELINT_REQUIRE_TARGETS=1`; a `targets.expected`
+  that records nothing, or none of whose targets is installed, fails.
+- **all** (`FIP_PRELINT_TARGETS=all`, `just prelint-targets-all`,
+  `just prelint-std-summaries-all`, `TARGETS=all` for `repin.sh`): every installed
+  target; an unrecorded one fails until its output is reviewed and recorded.
+
+Consequence: an unrecorded installed target no longer fails `just ci`. Widening the
+recorded set is a deliberate step (`prelint-targets-all` with `FIP_PRELINT_BLESS=1`
+after review, plus the std summaries of the new targets).
+
+The workspace MSRV stays 1.99.1.

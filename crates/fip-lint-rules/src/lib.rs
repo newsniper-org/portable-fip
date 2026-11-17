@@ -83,8 +83,12 @@ pub const NON_ALLOCATING_CONSTRUCTORS: &[(&str, &str)] = &[
 /// rustc versions whose `alloc` sources were read for [`NON_ALLOCATING_CONSTRUCTORS`].
 /// A build with any other version is not covered by the audit (`fip-macros` tests
 /// fail on it).
+///
+/// `1.100.0` was not read again: its `library/` tree (3658 files) is byte-identical
+/// to that of `1.100.0-beta.10` (`diff -rq` of the two `rust-src` components,
+/// 2026-11-17), which was.
 pub const NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT: &[&str] =
-    &["1.97.1", "1.99.1", "1.100.0-beta.10"];
+    &["1.97.1", "1.99.1", "1.100.0-beta.10", "1.100.0"];
 
 /// `true` if `ty::ctor(..)` (by the last segment of the type path) is an allocation
 /// site: a [`HEAP_TYPES`] type, a [`HEAP_CONSTRUCTORS`] constructor, and not a
@@ -210,7 +214,9 @@ pub const CORE_TABLE: &[&str] = &[
 
 /// rustc versions whose `core` sources were read for [`CORE_TABLE`]. A build with
 /// any other version is not covered by the audit (`fip-macros` tests fail on it).
-pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1", "1.100.0-beta.10"];
+/// `1.100.0` is covered through `1.100.0-beta.10`, as for
+/// [`NON_ALLOCATING_CONSTRUCTORS_AUDITED_AT`].
+pub const CORE_TABLE_AUDITED_AT: &[&str] = &["1.97.1", "1.99.1", "1.100.0-beta.10", "1.100.0"];
 
 /// Method names the crate-wide checker treats as allocation-free **by name** when no
 /// method of that name is defined in the scanned sources: the slice/integer methods

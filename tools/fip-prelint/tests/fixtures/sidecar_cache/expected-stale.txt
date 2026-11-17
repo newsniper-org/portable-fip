@@ -1,4 +1,4 @@
 # Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
 exit: failure
-fmtok/src/lib.rs:30:5: error: fip-prelint: cannot check `write_number` (#[fip]): unresolved: `write_number` -> `<Buf as core::fmt::Write>::write_fmt` (fmtok/src/lib.rs:30) -> … -> `core::fmt::write`: `core::fmt::write` (no MIR: not generic and not #[inline]; std summaries not used: `summaries.txt`: generated for rustc `1.98.0 (0000000ff 2026-09-01)`, this driver is rustc `1.100.0-beta.10 (01ddda61f 2026-11-04)`)
+fmtok/src/lib.rs:30:5: error: fip-prelint: cannot check `write_number` (#[fip]): unresolved: `write_number` -> `<Buf as core::fmt::Write>::write_fmt` (fmtok/src/lib.rs:30) -> … -> `core::fmt::write`: `core::fmt::write` (no MIR: not generic and not #[inline]; std summaries not used: `summaries.txt`: generated for rustc `1.98.0 (0000000ff 2026-09-01)`, this driver is rustc `1.100.0 (0ef1bc386 2026-11-09)`)
 note: fip-prelint: crate `fmtok`: 1 roots, 0 passed, 1 errors, 0 warnings, 0 notes

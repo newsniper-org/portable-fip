@@ -119,7 +119,7 @@ verus-pin:
       echo "FAIL: \`{{verus}}\` is Verus $got_v (commit $got_c): $hint"; exit 1
     fi
     # `toolchain` is `<channel>-<host triple>`. The channel itself may contain `-`
-    # (`beta-2026-11-05`), so compare the whole string against the pinned channel and
+    # (e.g. `beta-2026-11-05`), so compare the whole string against the pinned channel and
     # this host's triple; a floating channel (`beta`) does not match a dated build.
     host=$(rustc +{{prelint_tc}} -vV 2> /dev/null | awk '/^host:/ {print $2}') || true
     if [ -z "$host" ]; then
@@ -863,6 +863,20 @@ prelint:
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} clippy --locked --all-targets -- -D warnings
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} cargo +{{prelint_tc}} test --locked
 
+# The per-target self-check of `fip-prelint` (tests/targets.rs) on the RECORDED targets:
+# those with a section in `tools/fip-prelint/tests/targets.expected`. This is the set
+# `just ci` gates on (through `prelint`); a recorded target that is not installed fails
+# here. Installed targets without a section are named in a note and not built.
+prelint-targets:
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGETS=recorded FIP_PRELINT_REQUIRE_TARGETS=1 cargo +{{prelint_tc}} test --locked --test targets -- --nocapture
+
+# The same self-check on EVERY target installed in the driver's toolchain (one workspace
+# build per target, four at a time). An installed target without a section fails: review
+# its output, then record it with `FIP_PRELINT_BLESS=1 just prelint-targets-all`. Not in
+# `ci`: its result depends on what is installed on the host.
+prelint-targets-all:
+    cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGETS=all cargo +{{prelint_tc}} test --locked --test targets -- --nocapture
+
 # Moves `fip-prelint` to another rustc (limits plan L10a): toolchain and components,
 # driver build, the decision record's probes, the allocator entry-point dump, the std
 # summaries (regenerated; for the pinned version they must equal the committed file),
@@ -882,6 +896,15 @@ prelint-repin version:
 prelint-std-summaries target="x86_64-unknown-linux-gnu":
     cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build --locked
     cd tools/fip-prelint && FIP_PRELINT_TOOLCHAIN={{prelint_tc}} FIP_PRELINT_TARGET_DIR="${FIP_PRELINT_TARGET_DIR:-/tmp/fip-prelint-std-summaries}" target/debug/cargo-fip-prelint fip-prelint --std-summaries --target {{target}}
+
+# The std summaries for the RECORDED targets with `std` (the `std` sections of
+# `tools/fip-prelint/tests/targets.expected`): the set that is committed and gated.
+prelint-std-summaries-recorded:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in $(sed -n 's/^== \(.*\) std$/\1/p' tools/fip-prelint/tests/targets.expected); do
+      just prelint-std-summaries "$t"
+    done
 
 # The std summaries for every installed target with `std` (top plan T7j), one after
 # the other, into one build directory (`FIP_PRELINT_TARGET_DIR`, else under /tmp; measured 2026-11-03: 3.8-12.4

@@ -20,8 +20,9 @@
 #      Vec::with_capacity, String::from, format!, Vec::push and a Box drop: each must
 #      still reach an allocation (or free) leaf; the leaves are printed for comparison
 #      with TODOs/fip-prelint.md "Allocator entry points";
-#   5. the std summaries sidecars (`--std-summaries`) for every installed target with
-#      `std` (top plan T7j; TARGETS="<triple> .." restricts the list): for the pinned
+#   5. the std summaries sidecars (`--std-summaries`) for the recorded targets with
+#      `std` (top plan T7j; the `std` sections of tests/targets.expected; TARGETS=all
+#      takes every installed one, TARGETS="<triple> .." a list): for the pinned
 #      version each is regenerated under /tmp and must equal the committed file byte
 #      for byte; for a new version they are written to
 #      std-summaries/<release>-<target>.txt (commit them after review);
@@ -156,7 +157,15 @@ std_targets() {
     fi
   done
 }
-targets=${TARGETS:-$(std_targets | sort | tr '\n' ' ')}
+# Default: the RECORDED std targets (the `std` sections of tests/targets.expected), the
+# set that is committed and that step 6 and `just ci` check. TARGETS=all takes every
+# installed target with `std`; TARGETS="<triple> .." names a list.
+recorded_std_targets() { sed -n 's/^== \(.*\) std$/\1/p' "$here/tests/targets.expected"; }
+case "${TARGETS:-}" in
+  "") targets=$(recorded_std_targets | sort | tr '\n' ' ') ;;
+  all) targets=$(std_targets | sort | tr '\n' ' ') ;;
+  *) targets=$TARGETS ;;
+esac
 step "5. std summaries for: $targets"
 for t in $targets; do
   committed="$here/std-summaries/$release-$t.txt"
