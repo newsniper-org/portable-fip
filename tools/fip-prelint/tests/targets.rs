@@ -94,7 +94,9 @@ fn installed() -> Vec<(String, bool)> {
     v
 }
 
-fn check_target(root: &Path, triple: &str, std: bool) -> Vec<String> {
+/// `Err` carries the build's stderr: a target the workspace does not build for is
+/// reported with the others, it does not abort the run.
+fn check_target(root: &Path, triple: &str, std: bool) -> Result<Vec<String>, String> {
     let target = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("targets")
         .join(triple);
@@ -125,10 +127,9 @@ fn check_target(root: &Path, triple: &str, std: bool) -> Vec<String> {
         .output()
         .expect("run cargo-fip-prelint");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "check for `{triple}` failed to build:\n{stderr}"
-    );
+    if !out.status.success() {
+        return Err(stderr.into_owned());
+    }
     let mut got: Vec<String> = stderr
         .lines()
         .filter(|l| {
@@ -141,7 +142,7 @@ fn check_target(root: &Path, triple: &str, std: bool) -> Vec<String> {
         .collect();
     got.sort();
     got.dedup();
-    got
+    Ok(got)
 }
 
 /// Sections of `targets.expected`: `== <triple> std|no_std`, then its lines.
@@ -204,6 +205,7 @@ fn every_installed_target() {
     }
     // At most four checks at a time (each is a cargo build of the workspace).
     let mut results: Vec<(String, bool, Vec<String>)> = Vec::new();
+    let mut unbuilt: Vec<(String, String)> = Vec::new();
     for chunk in targets.chunks(4) {
         let handles: Vec<_> = chunk
             .iter()
@@ -216,7 +218,10 @@ fn every_installed_target() {
             })
             .collect();
         for h in handles {
-            results.push(h.join().expect("target check thread"));
+            match h.join().expect("target check thread") {
+                (t, std, Ok(got)) => results.push((t, std, got)),
+                (t, _, Err(stderr)) => unbuilt.push((t, stderr)),
+            }
         }
     }
     if std::env::var("FIP_PRELINT_BLESS").is_ok_and(|v| v == "1") {
@@ -236,9 +241,33 @@ fn every_installed_target() {
             }
         }
         std::fs::write(&path, out).expect("write targets.expected");
+        // A target that did not build was not recorded; blessing must not hide it.
+        assert!(
+            unbuilt.is_empty(),
+            "not recorded, the check failed to build: {}",
+            unbuilt
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         return;
     }
     let mut bad = Vec::new();
+    for (t, stderr) in &unbuilt {
+        // The last lines name the cause; the whole stderr of ~100 targets would bury it.
+        let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        let known = if recorded.remove(t).is_some() {
+            "recorded"
+        } else {
+            "not recorded"
+        };
+        bad.push(format!(
+            "target `{t}` ({known}): the check failed to build:\n  {}",
+            tail.join("\n  ")
+        ));
+    }
     for (t, _, got) in &results {
         match recorded.remove(t) {
             None => bad.push(format!(
