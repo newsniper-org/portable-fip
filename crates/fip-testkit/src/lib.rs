@@ -122,10 +122,30 @@ mod global_counters {
 }
 
 /// `add` runs inside the global allocator, so the lock must not allocate: a lock
-/// that did would re-enter `add` on the same thread and deadlock. `std`'s `Mutex`
-/// does not allocate on the futex-based platforms (Linux, Android), which is where
-/// the known targets without 64-bit atomics that ship `std` are. On a platform whose
-/// `Mutex` allocates lazily this implementation must not be used.
+/// that did would re-enter `add` on the same thread and deadlock.
+///
+/// Read in the sources of rustc 1.100.0 (2026-11-17), for the installed targets
+/// this applies to (`armv5te-unknown-linux-{gnueabi,musleabi}`,
+/// `arm-linux-androideabi`, `powerpc-unknown-linux-gnu`):
+///
+/// - `std` picks the futex mutex for `target_os = "linux"` and `"android"`
+///   (`std/src/sys/sync/mutex/mod.rs`), whatever the libc. Its `lock` is a
+///   compare-exchange on one `u32`, then a bounded spin and
+///   `syscall(SYS_futex, FUTEX_WAIT_BITSET, ..)`; `unlock` is a swap and a
+///   `FUTEX_WAKE`. Nothing on that path allocates.
+/// - The poison check of `std::sync::Mutex` reads a global atomic and, only while
+///   some thread panics, a `const` thread-local without destructor: a plain
+///   `#[thread_local]` static with native TLS; with key-based TLS (Android) a value
+///   that `std` allocates with `System` directly, not through the global allocator.
+/// - The `u32` atomics are `lwarx`/`stwcx.` on PowerPC and, on the ARM targets,
+///   `__sync_*_4` of `compiler-builtins`, which loop on the kernel helper
+///   `__kuser_cmpxchg`.
+/// - `syscall` and the errno location, read in musl, glibc and bionic: a register
+///   shuffle and the trap; errno is a field of the thread structure.
+///
+/// Executed only on `armv5te-unknown-linux-musleabi` (`just testkit-qemu-armv5te`).
+/// On a platform whose `Mutex` allocates lazily (the pthread-based one of other
+/// unixes) this implementation must not be used.
 ///
 /// The counts wrap at `u64::MAX` like `fetch_add` does. A poisoned lock is entered
 /// anyway: the array holds plain counters, there is no invariant to protect.
