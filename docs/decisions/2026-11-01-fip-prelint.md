@@ -1320,37 +1320,73 @@ probe was extended the same day:
   certificate today; Verigrad's strict grade for `copy_on_shared` is Verus's
   `#[verifier::fip(strict)]`, and its roots are plain `#[fip(1)]`.
 
-On Verigrad itself (a copy of its `main` `7e24b90`, the driver it uses, built from
-this repository at its pin; the original checkout was not modified): unchanged, the
-library gives the recorded 169 roots, 167 passed, 4 errors. With the body of
-`copy_on_shared` replaced by `src.to_vec()`, by `Box::<[T]>::from(src).into_vec()` or
-by `let b: Box<[T]> = src.into(); b.into_vec()`, no error names `reuse::` any more;
-`reuse::reuse_or_copy::<T, K>` and `reuse::consume_and_apply::<T, K>` each get the
-warning "only relative to its generic parameters" instead (both roots are generic;
-open call `<T as ConvertVec>::to_vec`, or `<T as CopySpec>::clone_slice` for the two
-`Box` forms). So the 4 errors become 2 warnings, not 0 diagnostics. Those runs also
-print 40 errors on the eight `#[fip(total)]` roots, all citing the Verus sidecar as
-unused because `src/reuse.rs` changed: an artefact of editing the source without
-re-running Verus, which was not done here (it needs Verigrad's changed bounds and
-the fork a330057).
+On Verigrad itself (a copy of the tracked files of its `main` `7e24b90`; the original
+checkout was not modified; the driver binary of its own build directory, which trusts
+`0.2026.11.17.1c37a96`, and `tools/fip-prelint/src` did not change from `42d6f5c`
+to Verigrad's pin `1d08a0c`): unchanged, the library gives the recorded 169 roots,
+167 passed, 4 errors. With the body of `copy_on_shared` replaced by `src.to_vec()`, by
+`Box::<[T]>::from(src).into_vec()` or by `let b: Box<[T]> = src.into(); b.into_vec()`,
+no error names `reuse::` any more; `reuse::reuse_or_copy::<T, K>` and
+`reuse::consume_and_apply::<T, K>` each get the warning "only relative to its generic
+parameters" instead (both roots are generic; open call `<T as ConvertVec>::to_vec`, or
+`<T as CopySpec>::clone_slice` for the two `Box` forms). So the 4 errors become 2
+warnings, not 0 diagnostics. Those runs also print 40 errors on the eight
+`#[fip(total)]` roots, all citing the Verus sidecar as unused because `src/reuse.rs`
+changed: an artefact of editing the source without re-running Verus, which was not
+done here (it needs Verigrad's changed bounds and the fork a330057).
 
-**The warning is correct, and `Copy` does not close it.** Why the call stays open
-(rust-src 1.100.0): `<[T]>::to_vec` calls `<T as ConvertVec>::to_vec`
-(`alloc/src/slice.rs`), and `Box<[T]>: From<&[T]>` reaches
-`<T as CopySpec>::clone_slice` (`core/src/clone/uninit.rs`). Each has an
-`impl<T: Clone>` whose method is `default` (it calls `clone()` per element) and a
-specialisation `impl<T: TrivialClone>` (one `memcpy`). A `default` method is not
-resolved for a non-monomorphic type (`rustc_ty_utils::instance`, read in upstream
-`master`: "Only reveal a specializable default if we're past type-checking and the
-obligation is monomorphic"), so `Instance::try_resolve` returns nothing under
-`T: Copy` and the driver keeps the symbolic term.
+**The warning is correct, and `Copy` does not close it.** (A first reading here
+assumed that every `Copy` type takes std's bitwise path. That was not checked and is
+false; what follows was read in the sources named and measured.)
 
-`TrivialClone` is an unstable marker of `core`, implemented type by type (the
-primitives, `!`, raw pointers, `&T`, `PhantomData`, `Option<T: TrivialClone>`,
-arrays of such, ..) and emitted by `#[derive(Clone)]` when `Copy` is derived with it
-(`-Zunpretty=expanded`: `unsafe impl TrivialClone for D {}`). There is no blanket
-implementation for `T: Copy`. Measured (a counting allocator, opt-level 0 and 3, an
-8-element slice, through `fn f<T: Copy>(s: &[T]) -> Vec<T>`):
+*std* (`rust-src` of 1.100.0). `<[T]>::to_vec` is `to_vec_in(Global)`, which calls
+`<T as ConvertVec>::to_vec` (`alloc/src/slice.rs`); `Vec<T>: From<&[T]>` is
+`s.to_vec()`. `Box<[T]>: From<&[T]>` is `Box::clone_from_ref`, which allocates once
+and calls `<[T] as CloneToUninit>::clone_to_uninit`, that is
+`<T as CopySpec>::clone_slice` (`alloc/src/boxed/convert.rs`, `alloc/src/boxed.rs`,
+`core/src/clone.rs`, `core/src/clone/uninit.rs`). The blanket `Into::into` is `U::from(self)`. Both private
+traits have an `impl<T: Clone>` whose methods are `default` and call `clone()` once
+per element, and an `impl<T: TrivialClone>` that copies the bytes.
+
+*`TrivialClone`* (`core/src/clone.rs`) is an unstable `unsafe` marker ("the `Clone`
+implementation is identical to copying the value"). `Copy` has `Clone` as its only
+supertrait and there is no blanket implementation for `T: Copy`. It is implemented
+
+- in `core`, type by type: the integer and float types, `bool`, `char`, `!`, raw
+  pointers, `&T`, `[T; N]` and `Option<T>` for `T: TrivialClone`, `PhantomData`,
+  `MaybeUninit`, `NonNull`, `NonZero`, `Discriminant` and a few more;
+- by the compiler (`rustc_trait_selection`, `assemble_builtin_copy_clone_candidate`
+  and `copy_clone_conditions`; the next solver has the same table): tuples, closures,
+  coroutine closures and pattern types of `TrivialClone` components, function items
+  and pointers. A type parameter gets no built-in candidate;
+- by `#[derive(Clone)]` (`rustc_builtin_macros/src/deriving/clone.rs`): only when the
+  same `#[derive(..)]` also lists `Copy` and the type has no type parameter, or for a
+  union.
+
+Compiled with `#![feature(trivial_clone)]`, each of these is `Copy`, and
+`TrivialClone` holds for `u32`, `f64`, `bool`, `(u32, f64)`, `[u32; 4]`,
+`Option<u32>`, `&u8`, `fn(u32) -> u32`, a `#[derive(Clone, Copy)]` struct, enum or
+union (either order, also with a lifetime or const parameter), `Duration`,
+`Ipv4Addr`, `Ordering`; it does not hold for a type with `#[derive(Clone)]` and
+`#[derive(Copy)]` as two attributes, `#[derive(Clone, Copy)] struct G<T>(T)` at
+`G<u32>`, `#[derive(Clone)]` with a hand-written `impl Copy`, a hand-written `Clone`,
+a tuple, array or `Option` of such a type, or `core::num::Wrapping<u32>`.
+
+*rustc* (`rustc-src` of the toolchain, commit `0ef1bc386`,
+`rustc_ty_utils/src/instance.rs`). `resolve_associated_item` selects the impl
+(`codegen_select_candidate`; a candidate whose nested obligations fail is dropped, so
+under `T: Copy` the `TrivialClone` impl is), takes the leaf definition of the method
+and returns `Ok(None)` if that is not final (a `default` method) and the trait
+reference is `still_further_specializable()` (a type parameter, placeholder or
+inference variable is left), also in `TypingMode::PostAnalysis`.
+
+*The driver* (`analysis.rs`) analyses a root in `TypingEnv::post_analysis(root)`;
+`resolve` turns `Ok(None)` into `unresolved`, which for a trait method on a type
+parameter without a contract is the term `<T as Trait>::m`; `report.rs` prints a
+root with terms left as this warning.
+
+*Measured* (a counting allocator, opt-level 0 and 3, an 8-element slice, through
+`fn f<T: Copy>(s: &[T]) -> Vec<T>`):
 
 | element type | `to_vec` / `Box::from` / `.into()` |
 |---|---|
@@ -1358,13 +1394,39 @@ implementation for `T: Copy`. Measured (a counting allocator, opt-level 0 and 3,
 | `#[derive(Clone, Copy)]` struct | 1 allocation, 0 `clone()` calls |
 | `#[derive(Copy)]` struct with a hand-written `Clone` that allocates | 9 allocations, 8 `clone()` calls |
 
-So for a `T: Copy` whose `Clone` is hand-written these bodies call `clone()`, which
-the present loop of `copy_on_shared` (`out.push(src[i])`, a copy) never does. A
-driver rule "`T: Copy` takes the `TrivialClone` implementation" would be unsound and
-is rejected. What bounds the call is a statement about `T::clone` (the fork's
-`FipStrictClone` in the Verus build), not `Copy`. To reopen: a stable bound that
-implies `TrivialClone`, or a certified clone marker the driver can read in the plain
-build.
+So these bodies call `clone()` for a `Copy` type that is not `TrivialClone`, which the
+present loop of `copy_on_shared` (`out.push(src[i])`, a copy) never does. A driver
+rule "`T: Copy` takes the `TrivialClone` implementation" would be unsound and is
+rejected.
+
+*This was known where the request came from.* Verigrad's request names it as its
+first ground (vstd's `slice_to_vec` comment: "since Rust 1.93, `to_vec` copies
+bitwise only for `TrivialClone` types and calls `Clone::clone` for a `Copy` type with
+a hand-written `Clone`"), and the fork's reply says that `T: Copy` alone is not
+enough, for the same reason. The
+fork's specification of `to_vec` charges `seq_clone_allocates` and the bound holds
+through `T: FbipClone`. Run here with the fork a330057 (`--no-cheating -V
+alloc-check`): the one-line `src.to_vec()` verifies with
+`T: Copy + AllocFreeDrop + FipStrictClone`; with `T: Copy + AllocFreeDrop` alone its
+`allocates` bound fails; `unsafe impl FbipClone` for a type whose `clone` is
+`allocates 1`, or derived, is rejected ("must be checked by Verus and bounded by
+`allocates 0`").
+
+*In the plain build nothing says this.* `fip_core::AllocFreeDrop` is implemented for
+every type there (`fip-strict`), and this repository has no `Clone` marker. In
+Verigrad every `InPlaceKernel` implementation is for `i32` (36) or `f64` (78), both
+`TrivialClone`, so every instantiation that exists takes the bitwise path; the
+warning is about the two generic roots as such.
+
+*Copies that do not go through `clone()`* (probe, `#[fip(1)]`, driver only): for a
+generic `T: Copy`, `src.iter().copied().collect()`, `Vec::from_iter(..copied())`,
+`with_capacity` + `extend_from_slice` and `with_capacity` + `extend(..copied())` are
+errors ("cannot check ..: unresolved": `SpecFromIter::from_iter` or
+`SpecExtend::spec_extend`, "not resolvable to one function"); for `i32`,
+`src.iter().copied().collect()` is "may allocate 2 time(s)", "may free". None passes.
+
+To reopen: a stable bound that implies `TrivialClone`, or a certified clone marker
+that the driver can read in the plain build and use for std's two private traits.
 
 Not covered: Verigrad with a regenerated sidecar, and targets other than the host.
 No fixture was added.
