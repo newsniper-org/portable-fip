@@ -1320,9 +1320,22 @@ probe was extended the same day:
   certificate today; Verigrad's strict grade for `copy_on_shared` is Verus's
   `#[verifier::fip(strict)]`, and its roots are plain `#[fip(1)]`.
 
-Not covered by the probe: an element type that is not `Copy`, the bound
-`AllocFreeDrop`, Verigrad's actual functions (its sources were not found on this
-host), and targets other than the host. No fixture was added.
+On Verigrad itself (a copy of its `main` `7e24b90`, the driver it uses, built from
+this repository at its pin; the original checkout was not modified): unchanged, the
+library gives the recorded 169 roots, 167 passed, 4 errors. With the body of
+`copy_on_shared` replaced by `src.to_vec()`, by `Box::<[T]>::from(src).into_vec()` or
+by `let b: Box<[T]> = src.into(); b.into_vec()`, no error names `reuse::` any more;
+`reuse::reuse_or_copy::<T, K>` and `reuse::consume_and_apply::<T, K>` each get the
+warning "only relative to its generic parameters" instead (both roots are generic;
+open call `<T as ConvertVec>::to_vec`, or `<T as CopySpec>::clone_slice` for the two
+`Box` forms). So the 4 errors become 2 warnings, not 0 diagnostics. Those runs also
+print 40 errors on the eight `#[fip(total)]` roots, all citing the Verus sidecar as
+unused because `src/reuse.rs` changed: an artefact of editing the source without
+re-running Verus, which was not done here (it needs Verigrad's changed bounds and
+the fork a330057).
+
+Not covered: an element type that is not `Copy`, Verigrad with a regenerated
+sidecar, and targets other than the host. No fixture was added.
 
 **Not checked**: the fork's own test figures (vstd 2179 verified, 5400
 `rust_verify_test` tests) were not re-run here.
