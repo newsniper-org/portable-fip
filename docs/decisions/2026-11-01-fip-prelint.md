@@ -1363,7 +1363,9 @@ supertrait and there is no blanket implementation for `T: Copy`. It is implement
   same `#[derive(..)]` also lists `Copy` and the type has no type parameter, or for a
   union.
 
-Compiled with `#![feature(trivial_clone)]`, each of these is `Copy`, and
+Compiled with `#![feature(trivial_clone)]`: `fn g<T: Copy>() { needs_trivial::<T>() }`
+is E0277 ("the trait bound `T: TrivialClone` is not satisfied"), while `T: Copy`
+gives `T: Clone`. Each of the following types is `Copy`, and
 `TrivialClone` holds for `u32`, `f64`, `bool`, `(u32, f64)`, `[u32; 4]`,
 `Option<u32>`, `&u8`, `fn(u32) -> u32`, a `#[derive(Clone, Copy)]` struct, enum or
 union (either order, also with a lifetime or const parameter), `Duration`,
