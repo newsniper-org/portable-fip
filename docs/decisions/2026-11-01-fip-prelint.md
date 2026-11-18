@@ -1334,8 +1334,40 @@ unused because `src/reuse.rs` changed: an artefact of editing the source without
 re-running Verus, which was not done here (it needs Verigrad's changed bounds and
 the fork a330057).
 
-Not covered: an element type that is not `Copy`, Verigrad with a regenerated
-sidecar, and targets other than the host. No fixture was added.
+**The warning is correct, and `Copy` does not close it.** Why the call stays open
+(rust-src 1.100.0): `<[T]>::to_vec` calls `<T as ConvertVec>::to_vec`
+(`alloc/src/slice.rs`), and `Box<[T]>: From<&[T]>` reaches
+`<T as CopySpec>::clone_slice` (`core/src/clone/uninit.rs`). Each has an
+`impl<T: Clone>` whose method is `default` (it calls `clone()` per element) and a
+specialisation `impl<T: TrivialClone>` (one `memcpy`). A `default` method is not
+resolved for a non-monomorphic type (`rustc_ty_utils::instance`, read in upstream
+`master`: "Only reveal a specializable default if we're past type-checking and the
+obligation is monomorphic"), so `Instance::try_resolve` returns nothing under
+`T: Copy` and the driver keeps the symbolic term.
+
+`TrivialClone` is an unstable marker of `core`, implemented type by type (the
+primitives, `!`, raw pointers, `&T`, `PhantomData`, `Option<T: TrivialClone>`,
+arrays of such, ..) and emitted by `#[derive(Clone)]` when `Copy` is derived with it
+(`-Zunpretty=expanded`: `unsafe impl TrivialClone for D {}`). There is no blanket
+implementation for `T: Copy`. Measured (a counting allocator, opt-level 0 and 3, an
+8-element slice, through `fn f<T: Copy>(s: &[T]) -> Vec<T>`):
+
+| element type | `to_vec` / `Box::from` / `.into()` |
+|---|---|
+| `u32` | 1 allocation, 0 `clone()` calls |
+| `#[derive(Clone, Copy)]` struct | 1 allocation, 0 `clone()` calls |
+| `#[derive(Copy)]` struct with a hand-written `Clone` that allocates | 9 allocations, 8 `clone()` calls |
+
+So for a `T: Copy` whose `Clone` is hand-written these bodies call `clone()`, which
+the present loop of `copy_on_shared` (`out.push(src[i])`, a copy) never does. A
+driver rule "`T: Copy` takes the `TrivialClone` implementation" would be unsound and
+is rejected. What bounds the call is a statement about `T::clone` (the fork's
+`FipStrictClone` in the Verus build), not `Copy`. To reopen: a stable bound that
+implies `TrivialClone`, or a certified clone marker the driver can read in the plain
+build.
+
+Not covered: Verigrad with a regenerated sidecar, and targets other than the host.
+No fixture was added.
 
 **Not checked**: the fork's own test figures (vstd 2179 verified, 5400
 `rust_verify_test` tests) were not re-run here.
