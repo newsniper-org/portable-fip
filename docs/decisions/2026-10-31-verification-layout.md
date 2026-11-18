@@ -78,7 +78,12 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   their stamp line. Re-pinned again 2026-11-17 to `0.2026.11.17.1c37a96` (`1c37a9697…`,
   branch `fip`), built on **stable Rust 1.100.0**: three fork commits after `e54f393`
   (the toolchain change, its documentation, and vstd module paths); `fip-prelint` follows
-  (amendment of that date in `2026-11-01-fip-prelint.md`).
+  (amendment of that date in `2026-11-01-fip-prelint.md`). Re-pinned again 2026-11-18 to
+  `0.2026.11.18.a330057` (`a33005760…`, branch `fip`, same toolchain): two fork commits
+  after `1c37a96` (specifications of `<[T]>::to_vec` and `Box<[T]>: From<&[T]>`, markers
+  for `Clone`, `From` and `Into`, `x.into()` checked as the resolved `from`); the
+  sidecars differ in their stamp line and in three opaque hashes (amendment of that
+  date in `2026-11-01-fip-prelint.md`).
 - **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
   (justfile `verus_flags`): the fork checks `allocates` clauses only with
   `-V alloc-check`, and an importing crate needs the imported crate's export from a

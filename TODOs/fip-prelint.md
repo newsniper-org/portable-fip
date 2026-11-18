@@ -3283,3 +3283,12 @@ with absolute paths equals the committed one (2 listed, 13 skipped).
 The direction of the bug was fail-closed for trust (a dropped record is a function that is
 not listed), but it made a regenerated sidecar differ from the committed one for a reason
 unrelated to the sources.
+
+
+## Resolved 2026-11-18: re-pin to the fork a330057 (rustc unchanged)
+
+See the amendment of that date in `docs/decisions/2026-11-01-fip-prelint.md`. Verus
+sidecars regenerated: only the stamps and the same three `requires opaque:` hashes as on
+2026-11-09 changed; the fork's commit a33005760 adds an `into_forward` field to VIR's
+`CallTargetAttrs`. Open: whether the driver accepts `src.into()` to a `Box<[T]>` as one
+allocating copy.

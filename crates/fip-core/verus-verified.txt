@@ -5,7 +5,7 @@ fip-prelint verus sidecar
 # their proved `allocates` bound. Top plan T13.4, redesign phase 4.
 format 5
 crate fip_core
-verus 0.2026.11.17.1c37a96 1c37a9697162ab419f27f1f904e456a4a5f4b6d0
+verus 0.2026.11.18.a330057 a3300576053b54fcc103955cc20d8612c2537e16
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
@@ -17,11 +17,11 @@ source src/slice.rs eef9f4ff5b33669f9fef719d8dc20754932c94d3355d325ad14cfcb4f534
 source src/slot.rs e2f55f7165930dda20ad7f7bd3f9b35cbd470cb56c24cff410a23c41d2af5333
 source src/spec.rs 5cf8e8f9b57f4f732ec21cb2eed965d3eb7c476560476f3796ebfcf1fc90d4ce
 source src/strict.rs 24a627c3d33a4e39c2ac767e869916741cb9bc25a3aa49ef4441b3e0b0f45ffe
-fn fip_core::slice::compact src/slice.rs:75 62a723a1c0e6a5119518b8eecf446b34d6e5dcbec563eabb3a84041357629955 requires opaque:fc29c6b3b887286917709a1e00ceecc511d8ce836c6e1a21ea57995fb20a348c
-fn fip_core::slice::compact_map src/slice.rs:422 c48ff74da155ab71eb652a4d0d64fc4fbc617bb3764e15aee583d59820dd85de requires opaque:437c817418fb910cf368a480996a659c62a758c5f68995d62fcf54521e38102d
+fn fip_core::slice::compact src/slice.rs:75 62a723a1c0e6a5119518b8eecf446b34d6e5dcbec563eabb3a84041357629955 requires opaque:e2901c9f7fdc0e176b499136dfaab12b21cadd2f02715f0c49a7281b52a45011
+fn fip_core::slice::compact_map src/slice.rs:422 c48ff74da155ab71eb652a4d0d64fc4fbc617bb3764e15aee583d59820dd85de requires opaque:2aac94d8d2cb29332d0cde80513f7ad0d41c11265a804982f0b3d8340722b93a
 fn fip_core::slice::compact_map_st src/slice.rs:550 76d7f1d268d46eca0d275e22f86cf9d24a9dbb642bfab9c75351f494faeb97aa requires 0
 fn fip_core::slice::dedup_by src/slice.rs:307 0d40a3d79540613d904a68c5a1b169f6bf15fc02ed17dcf6fad0f086aa755023 requires 0
-fn fip_core::slice::map_in_place src/slice.rs:153 5e8220aa4db487abee7e7feb9895da21e9d03b6d681e4dee99d8bb7b7c8aebed requires opaque:51d3a7724c5f4aa937bba6cb683cd8690a606eff225a081894ac37513b628c3b
+fn fip_core::slice::map_in_place src/slice.rs:153 5e8220aa4db487abee7e7feb9895da21e9d03b6d681e4dee99d8bb7b7c8aebed requires opaque:3471b361ec6cbbf55b61b625eb0bb6bf5e2bd7375d122a1044c5b17bfd409c16
 fn fip_core::slice::map_in_place_st src/slice.rs:209 6771d4b3499ff79e2d95c89ef059b3c2ef6a9c3e923ed6e783de799a87d547fa requires 0
 fn fip_core::slice::swap src/slice.rs:42 3613d1d3f849b02493bdea65b74c9a6cef66580aee050f6ec352c735e48f4121 requires 0
 fn fip_core::slice::swap_lt src/slice.rs:20 27d224243561ab5daa606997d244bfd7d6339b7ebaf84466658cbcf488501639 requires 0

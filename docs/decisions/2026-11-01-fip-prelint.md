@@ -1250,3 +1250,46 @@ as long as upstream Verus stays there.
 `fip-testkit` no longer needs 64-bit atomics (a `Mutex<[u64; 4]>` where
 `target_has_atomic = "64"` is false), found by `just prelint-targets-all`: four
 installed targets did not build.
+
+## Amendment 2026-11-18: re-pin to the fork a330057 (same rustc)
+
+The fork's `fip` branch gained two commits after `1c37a9697` (notice of the fork to
+this repository, 2026-11-18): `4ea38e93f` (`<[T]>::to_vec` and `Box<[T]>: From<&[T]>`
+specifications, `Clone` markers) and `a33005760` (`x.into()` through std's blanket
+impl is checked as the resolved `from`; `From`/`Into` markers). 18 files, +894/-24.
+The pin moves to `0.2026.11.18.a330057`; the rustc toolchain (1.100.0) does not
+change, so `repin.sh` was not needed and the std summaries are untouched.
+
+**Measured** (x86_64 Linux host, 2026-11-18):
+
+- `just verus-pin` accepts the new build (Z3 4.16.0, toolchain 1.100.0);
+- `just ci` exits 0 with the new pin: 951 tests pass, 20 Verus result lines, each
+  with 0 errors and with the same verified counts as under `1c37a96`;
+- the six regenerated sidecars differ from the committed ones in the stamp line and
+  in the `requires opaque:` hash of `fip_core::slice::{compact, compact_map,
+  map_in_place}`, nothing else;
+- cause of the three hashes: `a33005760` adds a field `into_forward` to VIR's
+  `CallTargetAttrs`, so every call node prints ` :into_forward None`. `fip-core` was
+  run under both builds with `--log vir`: of its 22 non-`None` `:allocates` fields,
+  10 have identical text and 12 differ, and the differing tokens are only the added
+  `:into_forward None` (and, in one vstd function, two numeric ids, which the
+  generator drops). The other nine differing fields change no sidecar line: seven
+  belong to the functions of `fip_core::strict`, which the sidecar skips (seven
+  `skip` lines), one to the imported `fip_strict::FipFn::call` (no body) and one to
+  vstd. The fourth opaque bound of the sidecar (`fip_core::slot::update`) kept its
+  hash. This is the same situation as on 2026-11-09 (`trusted_call`).
+
+**Trust added by the fork** (as listed in its notice; not audited here): the
+specifications of `to_vec`, `Box<[T]>::from(&[T])` and a `deallocates_when(0, false)`
+on `<[T]>::into_vec` and on the reflexive `From::from`; marker impls of
+`FbipClone`/`FipClone`/`FipStrictClone` for the primitive types and of
+`AllocFreeDrop`/`NoDeallocDrop` for `f32`/`f64`; the blanket `FbipInto` and the
+reflexive `From<T> for T` markers; the axioms `axiom_clone_is_fip`,
+`axiom_fbip_clone`, `axiom_fbip_from`, `axiom_fbip_into`. In MIR strict checking a
+blanket `Into::into` call drops nothing if the resolved `From` impl drops nothing,
+and a strict function cannot call `clone_from` through a `Clone` marker.
+
+**Not checked**: whether `fip-prelint` accepts `src.into()` to a `Box<[T]>` the way
+it accepts `src.to_vec()` and `Box::<[T]>::from(src)` (the fork did not check it
+either); the fork's own test figures (vstd 2179 verified, 5400 `rust_verify_test`
+tests) were not re-run here.
