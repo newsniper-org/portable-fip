@@ -3292,4 +3292,8 @@ sidecars regenerated: only the stamps and the same three `requires opaque:` hash
 2026-11-09 changed; the fork's commit a33005760 adds an `into_forward` field to VIR's
 `CallTargetAttrs`. The driver accepts `src.into()` to a `Box<[u32]>` (and to a `Vec<u32>`)
 under `#[fip(1)]` like `src.to_vec()` and `Box::from(src)`: measured with a probe crate,
-no fixture added; non-`Copy` elements, generic `T` and strict mode not probed.
+no fixture added. A generic helper `<T: Copy>` with these bodies passes from concrete
+`#[fip(1)]` roots (`i32`, `f64`); a generic root gets the "only relative to its generic
+parameters" warning, no error. The macro's strict mode rejects every spelling (`to_vec`
+by path "may call user code", `into_vec` not in the audited table). Non-`Copy` elements
+not probed.

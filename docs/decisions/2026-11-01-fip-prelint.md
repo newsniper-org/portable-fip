@@ -1295,9 +1295,34 @@ driver passes all six of `src.to_vec()`, `Box::<[u32]>::from(src).into_vec()`,
 `let b: Box<[u32]> = src.into(); b.into_vec()`, `src.into()` to a `Box<[u32]>`,
 `src.into()` to a `Vec<u32>` and `Box::from(src)` (6 roots, 6 passed). The control,
 `Vec::with_capacity` followed by `push` in a loop, is rejected by the macro, and with
-`FIP_MACROS_MARK_ONLY=1` by the driver ("may allocate ∞ time(s)", "may free"). Not
-covered by the probe: an element type that is not `Copy`, a generic `T`, strict
-mode, and targets other than the host. No fixture was added.
+`FIP_MACROS_MARK_ONLY=1` by the driver ("may allocate ∞ time(s)", "may free").
+
+The consumer's shape is generic (Verigrad's `copy_on_shared<T: Copy + ..>(src: &[T])
+-> Vec<T>`, a helper without a certificate reached from `#[fip(1)]` roots), so the
+probe was extended the same day:
+
+- a generic helper `fn h<T: Copy>(src: &[T]) -> Vec<T>` with each of the three bodies
+  (`to_vec`, `Box::from` + `into_vec`, `.into()` + `into_vec`), called from concrete
+  `#[fip(1)]` roots over `i32` and `f64`: 5 roots, 5 passed;
+- a generic `#[fip(1)]` root `<T: Copy>` with any of the bodies, or a generic root
+  calling the helper: no error, one warning each (7), "is #[fip(1)] only relative to
+  its generic parameters", with the open call `<T as ConvertVec>::to_vec` (for
+  `to_vec` and `.into()` to a `Vec<T>`) or `<T as CopySpec>::clone_slice` (for the
+  `Box<[T]>` forms). The `.into()` forms get the same bound and the same open call as
+  their `From::from` spelling;
+- `#[fip(1, strict = true)]`: the macro rejects all of them. Method calls must be
+  written by path; by path, `<[T]>::to_vec` is refused ("an allocating method called
+  by path may call user code (e.g. the element type's `Clone`)") and
+  `<[T]>::into_vec` is "not in the audited `core` table". With
+  `FIP_MACROS_MARK_ONLY=1` the driver itself reports no error for the strict
+  functions, only notes (allocation-failure and panic paths) and the generic warning.
+  So a function that copies a slice this way cannot carry the macro's strict
+  certificate today; Verigrad's strict grade for `copy_on_shared` is Verus's
+  `#[verifier::fip(strict)]`, and its roots are plain `#[fip(1)]`.
+
+Not covered by the probe: an element type that is not `Copy`, the bound
+`AllocFreeDrop`, Verigrad's actual functions (its sources were not found on this
+host), and targets other than the host. No fixture was added.
 
 **Not checked**: the fork's own test figures (vstd 2179 verified, 5400
 `rust_verify_test` tests) were not re-run here.
