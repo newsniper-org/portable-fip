@@ -1289,7 +1289,15 @@ reflexive `From<T> for T` markers; the axioms `axiom_clone_is_fip`,
 blanket `Into::into` call drops nothing if the resolved `From` impl drops nothing,
 and a strict function cannot call `clone_from` through a `Clone` marker.
 
-**Not checked**: whether `fip-prelint` accepts `src.into()` to a `Box<[T]>` the way
-it accepts `src.to_vec()` and `Box::<[T]>::from(src)` (the fork did not check it
-either); the fork's own test figures (vstd 2179 verified, 5400 `rust_verify_test`
-tests) were not re-run here.
+**`src.into()` in the driver** (measured 2026-11-18, a probe crate outside the
+repository, `src: &[u32]`, every function `#[fip(1)]`, the macros active): the
+driver passes all six of `src.to_vec()`, `Box::<[u32]>::from(src).into_vec()`,
+`let b: Box<[u32]> = src.into(); b.into_vec()`, `src.into()` to a `Box<[u32]>`,
+`src.into()` to a `Vec<u32>` and `Box::from(src)` (6 roots, 6 passed). The control,
+`Vec::with_capacity` followed by `push` in a loop, is rejected by the macro, and with
+`FIP_MACROS_MARK_ONLY=1` by the driver ("may allocate ∞ time(s)", "may free"). Not
+covered by the probe: an element type that is not `Copy`, a generic `T`, strict
+mode, and targets other than the host. No fixture was added.
+
+**Not checked**: the fork's own test figures (vstd 2179 verified, 5400
+`rust_verify_test` tests) were not re-run here.

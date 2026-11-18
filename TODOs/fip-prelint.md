@@ -3290,5 +3290,6 @@ unrelated to the sources.
 See the amendment of that date in `docs/decisions/2026-11-01-fip-prelint.md`. Verus
 sidecars regenerated: only the stamps and the same three `requires opaque:` hashes as on
 2026-11-09 changed; the fork's commit a33005760 adds an `into_forward` field to VIR's
-`CallTargetAttrs`. Open: whether the driver accepts `src.into()` to a `Box<[T]>` as one
-allocating copy.
+`CallTargetAttrs`. The driver accepts `src.into()` to a `Box<[u32]>` (and to a `Vec<u32>`)
+under `#[fip(1)]` like `src.to_vec()` and `Box::from(src)`: measured with a probe crate,
+no fixture added; non-`Copy` elements, generic `T` and strict mode not probed.
