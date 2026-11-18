@@ -1380,6 +1380,18 @@ and returns `Ok(None)` if that is not final (a `default` method) and the trait
 reference is `still_further_specializable()` (a type parameter, placeholder or
 inference variable is left), also in `TypingMode::PostAnalysis`.
 
+Measured with a small `rustc_private` program on 1.100.0 (it walks the MIR from a
+function to these calls and prints `codegen_select_candidate` and
+`Instance::try_resolve` in `TypingEnv::post_analysis` of that function;
+`next_trait_solver_globally()` is false):
+
+| caller | selected impl | `try_resolve` |
+|---|---|---|
+| `fn f<T: Copy>(s: &[T])`, `s.to_vec()` | `impl<T: Clone> ConvertVec` (`slice.rs:408`) | `Ok(None)` |
+| the same, `Box::from(s)` | `impl<T: Clone> CopySpec` (`uninit.rs:12`) | `Ok(None)` |
+| `&[i32]`, `to_vec` / `Box::from` | the `TrivialClone` impls (`slice.rs:444`, `uninit.rs:55`) | the bitwise methods |
+| `&[Hand]` (`Copy`, hand-written `Clone`) | the `Clone` impls (`slice.rs:408`, `uninit.rs:12`) | the `default` methods, which call `clone()` |
+
 *The driver* (`analysis.rs`) analyses a root in `TypingEnv::post_analysis(root)`;
 `resolve` turns `Ok(None)` into `unresolved`, which for a trait method on a type
 parameter without a contract is the term `<T as Trait>::m`; `report.rs` prints a
