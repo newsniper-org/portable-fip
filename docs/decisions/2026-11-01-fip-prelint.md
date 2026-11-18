@@ -1428,9 +1428,13 @@ alloc-check`): the one-line `src.to_vec()` verifies with
 
 *In the plain build nothing says this.* `fip_core::AllocFreeDrop` is implemented for
 every type there (`fip-strict`), and this repository has no `Clone` marker. In
-Verigrad every `InPlaceKernel` implementation is for `i32` (36) or `f64` (78), both
-`TrivialClone`, so every instantiation that exists takes the bitwise path; the
-warning is about the two generic roots as such.
+Verigrad (`7e24b90`) every `InPlaceKernel` implementation is for `i32` (36) or `f64`
+(78), and every call of `copy_on_shared`, `reuse_or_copy` and `consume_and_apply`
+from outside `reuse.rs` was read: the buffer is `[i32]` at 4 of the 7 calls in
+`verigrad-core/src/main.rs` and `verigrad-py` and at 9 of the 16 in
+`tests/fip_runtime.rs`, `[f64]` at the others. Both are `TrivialClone`, so every
+instantiation that exists takes the bitwise path; the warning is about the two
+generic roots as such.
 
 *Copies that do not go through `clone()`* (probe, `#[fip(1)]`, driver only): for a
 generic `T: Copy`, `src.iter().copied().collect()`, `Vec::from_iter(..copied())`,
