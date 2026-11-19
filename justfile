@@ -665,6 +665,13 @@ verify-sidecar: verify-strict
     fa=tools/fip-prelint/tests/fixtures/verus_alloc
     (cd "$fa" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name valloc --crate-dir valloc --out "$out/valloc.txt" -- {{verus}} --crate-type=lib --crate-name valloc {{verus_flags}} valloc/src/lib.rs)
     just verus-sidecar-check "$out/valloc.txt" "$fa/valloc/verus-verified.txt"
+    # Declared sources of another crate (amendment 2026-11-19): `ypool` is exported and
+    # compiled by its generator run, `yuser` imports it with its committed sidecar.
+    fxs=tools/fip-prelint/tests/fixtures/verus_xsource; mkdir -p "$out/xsource"
+    (cd "$fxs" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name ypool --crate-dir ypool --out "$out/ypool.txt" -- {{verus}} --crate-type=lib --crate-name ypool {{verus_flags}} ypool/src/lib.rs --export "$out/xsource/ypool.vir" --compile --out-dir "$out/xsource")
+    just verus-sidecar-check "$out/ypool.txt" "$fxs/ypool/verus-verified.txt"
+    (cd "$fxs" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name yuser --crate-dir yuser --out "$out/yuser.txt" --import-sidecar ypool=ypool/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name yuser {{verus_flags}} yuser/src/lib.rs --import ypool="$out/xsource/ypool.vir" --extern ypool="$out/xsource/libypool.rlib")
+    just verus-sidecar-check "$out/yuser.txt" "$fxs/yuser/verus-verified.txt"
     # `total` marks (phase 5): the fixture verus_total's sidecar lists the functions the
     # driver discharges or refuses as `total` (tests/fixtures.rs `verus_total_marks`).
     ft=tools/fip-prelint/tests/fixtures/verus_total

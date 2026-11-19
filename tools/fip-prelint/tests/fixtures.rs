@@ -1448,6 +1448,31 @@ fn verus_alloc_bounds() {
 }
 
 /// `total` marks (decision 2026-11-06-redesign-verus-allocates, 7.5 step 2). Fixture
+/// Declared sources of another crate (decision 2026-11-01-fip-prelint, amendment
+/// 2026-11-19). Fixture `verus_xsource`: `ypool` (declares `fip::export`) has a source
+/// stating `allocates 1` (`take_counted`), one stating 0 (`take`), a trait-declared
+/// source whose implementation states 1, and a generic source stating 1; `yuser`,
+/// verified with `--import ypool`, calls each twice in a loop. Its bounds are taken
+/// through the first, third and fourth (pass), not through `take` (`drain` keeps `∞`).
+/// Variant `-nodep`: without `ypool`'s sidecar no source is known to be counted, so no
+/// bound of `yuser` is taken (the lookup fails closed).
+#[test]
+fn verus_xsource_bounds() {
+    check("verus_xsource");
+    let d = copy_fixture("verus_xsource", "verus_xsource_nodep");
+    std::fs::remove_file(d.join("ypool/verus-verified.txt")).expect("remove the sidecar");
+    compare(
+        "verus_xsource",
+        "-nodep",
+        &run_at(
+            &d,
+            "verus_xsource-nodep",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+}
+
 /// `verus_total`: the crate `vtotal`'s sidecar (`just verify-sidecar`) lists `ok`,
 /// `ok_loop`, `frees`, `recurses` and `panics` with `allocates 0` and `bound_one` with
 /// `allocates 1`; `unlisted` and `unlisted_loop` are `verifier::external`. Discharged:

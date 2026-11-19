@@ -127,6 +127,9 @@ pub struct VerusTrust {
     bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
     /// Functions whose driver count exceeds their proved bound.
     exceeded: RefCell<BTreeSet<String>>,
+    /// Proved bounds not taken because the function reaches an allocation source
+    /// Verus does not count: the source → the functions.
+    uncounted: RefCell<BTreeMap<String, BTreeSet<String>>>,
     /// The allocator traits (`core::alloc::Allocator`, `GlobalAlloc`), the types
     /// outside the standard library implementing one, and whether some such
     /// implementation is not for a named type (computed on first use).
@@ -175,6 +178,7 @@ impl VerusTrust {
             refused: RefCell::new(BTreeMap::new()),
             bounds: RefCell::new(BTreeMap::new()),
             exceeded: RefCell::new(BTreeSet::new()),
+            uncounted: RefCell::new(BTreeMap::new()),
             allocators: RefCell::new(None),
         }
     }
@@ -526,6 +530,17 @@ impl VerusTrust {
         }
     }
 
+    /// The literal `allocates` clause of `d` in a Verus sidecar, with or without a
+    /// `requires`: what Verus charges a verified caller for one call of `d` (the
+    /// clause, not what the body does). For an allocation source, which the driver
+    /// never analyses.
+    pub fn stated_alloc_bound(&self, tcx: TyCtxt<'_>, d: DefId, body_span: Span) -> Option<u64> {
+        match self.verdict(tcx, d, body_span) {
+            Verdict::Listed { allocates, .. } => allocates.literal(),
+            _ => None,
+        }
+    }
+
     /// The allocator traits and the types outside `core`/`alloc`/`std` implementing
     /// one of them, from every crate of the build.
     fn allocators(&self, tcx: TyCtxt<'_>) -> Allocators {
@@ -651,6 +666,17 @@ impl VerusTrust {
         self.exceeded.borrow_mut().insert(path.to_string());
     }
 
+    /// Records that the proved bound of `path` was not taken: the function reaches
+    /// the allocation source `source`, whose calls Verus does not count, or which no
+    /// sidecar lists with a clause.
+    pub fn bound_uncounted(&self, path: &str, source: &str) {
+        self.uncounted
+            .borrow_mut()
+            .entry(source.to_string())
+            .or_default()
+            .insert(path.to_string());
+    }
+
     /// The suffix of the crate summary: the panic sites discharged by Verus per
     /// sidecar, with its stamp, the allocation bounds taken from it, the bounds the
     /// driver's count exceeds, and the sidecars consulted but refused.
@@ -678,6 +704,25 @@ impl VerusTrust {
                     .map(|p| format!("`{p}`"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ));
+        }
+        let uncounted = self.uncounted.borrow();
+        if !uncounted.is_empty() {
+            let fns: BTreeSet<&String> = uncounted.values().flatten().collect();
+            out.push_str(&format!(
+                ", {} Verus allocation bounds not taken, through sources no sidecar shows Verus counting (the source needs a literal `allocates` of at least its declared count in its crate's sidecar; for a trait method, on the impl method): {}",
+                fns.len(),
+                uncounted
+                    .iter()
+                    .map(|(src, fs)| format!(
+                        "{src} ({})",
+                        fs.iter()
+                            .map(|p| format!("`{p}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
         for (path, why) in self.refused.borrow().iter() {

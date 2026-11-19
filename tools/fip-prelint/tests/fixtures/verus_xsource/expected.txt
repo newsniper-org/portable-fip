@@ -1,0 +1,5 @@
+# Expected `cargo fip-prelint --message-format short` diagnostics (tests/fixtures.rs).
+exit: failure
+note: fip-prelint: crate `ypool`: 0 roots, 0 passed, 0 errors, 0 warnings, 0 notes, 4 declared sources
+note: fip-prelint: crate `yuser`: 4 roots, 3 passed, 1 errors, 0 warnings, 0 notes, 3 allocation bounds taken from Verus (sidecar of `yuser`: Verus <trusted verus> (<trusted commit>), Z3 <trusted z3>, --no-cheating -V alloc-check), 1 Verus allocation bounds not taken, through sources no sidecar shows Verus counting (the source needs a literal `allocates` of at least its declared count in its crate's sidecar; for a trait method, on the impl method): declared source `ypool::Pool::take` (`yuser::drain`)
+yuser/src/lib.rs:47:17: error: fip-prelint: `drain` is #[fip] but may allocate ∞ time(s), at most 0 allowed: `drain` -> `ypool::Pool::take` (in loop) (yuser/src/lib.rs:47): allocation: declared source `ypool::Pool::take`

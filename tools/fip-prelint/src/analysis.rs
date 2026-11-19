@@ -327,6 +327,10 @@ pub struct Summary {
     /// `requires` of this function (top plan T13.4): a caller that Verus did not verify
     /// gets that precondition as a panic path. Not merged into callers.
     pub verus_pre: Option<String>,
+    /// An allocation source this function reaches whose calls Verus does not count
+    /// (see [`Ev::VerusUncounted`]): no `allocates` bound proved by Verus is taken
+    /// for a function with one. Merged into callers.
+    pub verus_uncounted: Option<String>,
 }
 
 fn push_w(list: &mut Vec<Witness>, w: Witness, cap: usize, key: impl Fn(&Witness) -> String) {
@@ -385,6 +389,9 @@ impl Summary {
                 .entry(k.clone())
                 .or_insert_with(|| w.prefixed(prefix));
         }
+        if self.verus_uncounted.is_none() {
+            self.verus_uncounted.clone_from(&o.verus_uncounted);
+        }
     }
 }
 
@@ -404,6 +411,14 @@ enum Ev {
     /// A panic site discharged by Verus under the `requires` of the named function
     /// (top plan T13.4): no event here, an obligation for its callers.
     VerusPre(String),
+    /// A call of the named allocation source, which Verus does not count: Verus
+    /// counts calls of `core::alloc::Allocator` methods and of `vstd::raw_ptr::allocate`
+    /// (and what a callee's `allocates` clause states), so a function declared
+    /// `fip::alloc_source` whose body calls no allocator is 0 to Verus unless its own
+    /// clause says otherwise (decision 2026-11-01-fip-prelint, amendment 2026-11-19).
+    /// No event here; it bars Verus's `allocates` bounds for every function reaching
+    /// it.
+    VerusUncounted(String),
 }
 
 #[derive(Clone, Debug)]
@@ -2301,7 +2316,40 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if s.free {
             evs.push(Ev::Free(format!("free: {why} `{path}`")));
         }
+        if s.alloc > 0 && !self.verus_counts_source(def_id, s.alloc, kind) {
+            evs.push(Ev::VerusUncounted(format!("{why} `{path}`{count}")));
+        }
         Some(NodeKind::Leaf(evs))
+    }
+
+    /// `true` if Verus charges a caller at least `n` allocations for a call of the
+    /// source `def_id`. A method of an allocator trait is one allocation to the fork
+    /// (`allocate`, `allocate_zeroed`, `grow`, `grow_zeroed`, `shrink`: its guide,
+    /// "Custom allocators") as it is here. Any other source counts only through its
+    /// own contract: a Verus sidecar must list the function with a literal
+    /// `allocates k`, `k >= n` (Verus charges a caller the callee's clause, whatever
+    /// the body does; measured on the fork `d13a91fed`). For a source declared on a
+    /// trait method, `def_id` is the implementation: Verus charges a call it resolves
+    /// to the implementation that implementation's own clause (else the
+    /// declaration's), and a call through a type parameter the declaration's, which
+    /// is at least the implementation's (Verus rejects an implementation's bound that
+    /// may exceed it); so the implementation must state the clause itself. A source
+    /// without MIR here (a trait method declaration called dynamically, a foreign
+    /// function) is not counted.
+    fn verus_counts_source(&self, def_id: DefId, n: u64, kind: SourceKind) -> bool {
+        let tcx = self.tcx;
+        match kind {
+            SourceKind::AllocatorTrait => n <= 1,
+            SourceKind::Declared | SourceKind::TraitDeclared => {
+                tcx.is_mir_available(def_id)
+                    && self
+                        .crates
+                        .verus
+                        .stated_alloc_bound(tcx, def_id, tcx.optimized_mir(def_id).span)
+                        .is_some_and(|k| k >= n)
+            }
+            SourceKind::Foreign => false,
+        }
     }
 
     fn classify_item(&mut self, inst: Instance<'tcx>, def_id: DefId) -> NodeKind {
@@ -5189,6 +5237,11 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                 s.verus_pre = Some(f.clone());
                             }
                         }
+                        Ev::VerusUncounted(src) => {
+                            if s.verus_uncounted.is_none() {
+                                s.verus_uncounted = Some(src.clone());
+                            }
+                        }
                     }
                 }
             }
@@ -5224,8 +5277,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// finite `m > k` is kept and reported as an error at every root reaching it (the
     /// proof's trust boundary is violated, or the driver's count is imprecise); any
     /// other count (`∞`, terms) becomes `k`. Frees, panics, recursion and unresolved
-    /// events stay as the driver found them.
+    /// events stay as the driver found them. A function that reaches an allocation
+    /// source Verus does not count ([`Ev::VerusUncounted`]) keeps the driver's count:
+    /// its proved bound leaves those calls out.
     fn verus_bound(&self, k: u64, path: &str, d: DefId, body_span: Span, s: &mut Summary) {
+        if let Some(src) = &s.verus_uncounted {
+            self.crates.verus.bound_uncounted(path, src);
+            return;
+        }
         let normal_only = s.panics.len() < MAX_WITNESSES
             && s.panics
                 .iter()
@@ -5648,6 +5707,11 @@ fn local_event(s: &mut Summary, ev: &Ev, w: impl Fn(&String) -> Witness) -> Cost
         Ev::VerusPre(f) => {
             if s.verus_pre.is_none() {
                 s.verus_pre = Some(f.clone());
+            }
+        }
+        Ev::VerusUncounted(src) => {
+            if s.verus_uncounted.is_none() {
+                s.verus_uncounted = Some(src.clone());
             }
         }
     }
@@ -7180,6 +7244,7 @@ mod tests {
                     Ev::Bound(k, _) => format!("bound {k}"),
                     Ev::Recurse(_) => "recurse".to_string(),
                     Ev::VerusPre(_) => "verus".to_string(),
+                    Ev::VerusUncounted(_) => "verus-uncounted".to_string(),
                 })
                 .collect()
         };
