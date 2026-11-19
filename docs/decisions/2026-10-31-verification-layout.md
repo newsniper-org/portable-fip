@@ -83,7 +83,13 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   after `1c37a96` (specifications of `<[T]>::to_vec` and `Box<[T]>: From<&[T]>`, markers
   for `Clone`, `From` and `Into`, `x.into()` checked as the resolved `from`); the
   sidecars differ in their stamp line and in three opaque hashes (amendment of that
-  date in `2026-11-01-fip-prelint.md`).
+  date in `2026-11-01-fip-prelint.md`). Re-pinned again 2026-11-19 to
+  `0.2026.11.19.d13a91f` (`d13a91fed…`, branch `fip`, same toolchain): six fork commits
+  after `a330057` (allocators counted by call only, `Vec` from slices, field-wise
+  derived `clone`, `deallocates_when` on trait declarations, fip closures); the
+  sidecars differ in their stamp line only (amendment of that date in
+  `2026-11-01-fip-prelint.md`, which also records the driver's rule for declared
+  sources).
 - **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
   (justfile `verus_flags`): the fork checks `allocates` clauses only with
   `-V alloc-check`, and an importing crate needs the imported crate's export from a

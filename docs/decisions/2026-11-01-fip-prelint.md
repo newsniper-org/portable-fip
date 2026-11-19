@@ -1451,3 +1451,128 @@ No fixture was added.
 
 **Not checked**: the fork's own test figures (vstd 2179 verified, 5400
 `rust_verify_test` tests) were not re-run here.
+
+## Amendment 2026-11-19: re-pin to the fork d13a91f; declared sources and Verus's count
+
+The fork's `fip` branch gained six commits after `a33005760` (notices of the fork to
+this repository, 2026-11-18 and 2026-11-19): `b30a4196c` (specifications of
+`Vec<T>: From<&[T]>`/`From<&mut [T]>`/`From<&[T; N]>`, derived `clone` checked field by
+field), `43cf335fa` and `85396985c` (allocators are the runtime: a bound counts the
+program's calls to an allocator, one each, and not what the allocator does;
+`BoundedAllocator`, `FipAllocator`, `allocator_max_cost` and `vstd::alloc_heap` are
+gone), `587093164` (`deallocates_when` conditions on trait method declarations,
+`call_deallocates`, `#[verifier::fip]` closures), `a53bcbae3` and `d13a91fed`
+(messages for fip closures in strict functions). The pin moves to
+`0.2026.11.19.d13a91f` (`d13a91fed6dc…`); the rustc toolchain (1.100.0) does not change.
+
+**Measured** (x86_64 Linux host, 2026-11-19; the fork built from a clean worktree of
+`d13a91fed`, `--features singular`, vstd 2166 verified):
+
+- the fork's own suite (`vargo test --release -p rust_verify_test`): 5372 passing, 63
+  ignored (two cvc5 tests need the fork's cvc5 1.3.4, `VERUS_CVC5_PATH`);
+- the six regenerated sidecars of this repository differ from the committed ones in
+  the stamp line only (no opaque hash changed);
+- `just ci` with the new pin and the changes below exits 0: 952 tests pass (951 before,
+  plus `verus_xsource_bounds`), 22 Verus result lines, each with 0 errors; against the
+  dry run of the pin alone (20 lines) only `valloc` differs (10 → 28 verified, the new
+  cases), and the two new lines are `ypool` (4) and `yuser` (8); the upstream strip gate
+  passes.
+
+**Allocation model.** The fork now counts what this driver has always counted: a call
+of an allocator method or of a declared source is one allocation, and the source's
+body is not analysed (README, "Allocation is detected at the allocator entry
+points"). This is also FP²'s model (Lorenzen, Leijen and Swierstra, ICFP 2023): its
+store holds constructor bindings and reuse credits, its size is the sum of their
+sizes (§2.3, Definition 2), allocation is the primitive `alloc k` that adds a credit
+(§5, Figure 9), and `fip(n)` allows "at most a constant n constructors" (§1.3); no
+memory manager appears in the calculus. The same principle was recorded as the
+user's decision in this repository's request to the fork of 2026-11-04
+(`2026-11-04-exec-allocation-count-tracking.md`: what happens inside an allocator is
+not FIP's concern). The fork's previous model (`a330057` and before) also charged an
+allocator's own allocations.
+
+Measured with a probe workspace (an allocator `Twice` in its own crate, whose
+`allocate` calls `Global.allocate` twice; a function `hidden` that calls a helper
+calling `Twice::allocate`, twice): the driver alone passes `hidden` at `#[fip(2)]` and
+rejects it at `#[fip(1)]` ("may allocate 2 time(s)", the chain ending at
+`<tw::Twice as core::alloc::Allocator>::allocate`); Verus `d13a91f` proves
+`allocates 2` (with the calls in a loop; `a330057` rejects the same source). A
+counting `#[global_allocator]` sees 4 global allocations: `fip-testkit` counts the
+global allocator, not allocator calls, which README already states ("`fip-testkit`
+sees only the Rust global allocator").
+
+**Defect found and fixed: declared sources were not counted by Verus.** A function
+declared `fip::alloc_source` (a pool with its own interface, not an `Allocator`, as
+in a project that implements its own allocators) is opaque to the driver and one
+allocation per call; to Verus it is an ordinary function, and a body that calls no
+allocator proves `allocates 0`. Measured before the fix (with the drivers of both
+pins, `a330057` and `d13a91f`): a `#[fip]` function calling such a source in a loop
+was rejected by the driver alone ("may allocate ∞ time(s) … declared source") and
+passed with the crate's Verus sidecar, which gave it `allocates 0`.
+
+Now a source leaf carries the event `VerusUncounted` unless Verus charges at least the
+declared count for a call of it, and no function reaching that event takes a Verus
+bound (the crate summary lists them: "Verus allocation bounds not taken"). Verus
+charges at least `n`:
+
+- for a method of an allocator trait (one call is one allocation to the fork) with
+  `n <= 1`;
+- for a declared source, when a sidecar lists the function itself with a literal
+  `allocates k`, `k >= n`. Verus charges a caller the callee's clause whatever its body
+  does (measured: a pool method that allocates nothing, with `allocates 1`, verifies;
+  two calls of it verify at `allocates 2` and fail at `allocates 1`, "postcondition not
+  satisfied");
+- for a source declared on a trait method, the same, on the implementation. Measured
+  on the fork: a call Verus resolves to the implementation is charged the
+  implementation's own clause, else the declaration's (an implementation may state
+  `allocates 0` under a declaration's `allocates 1`, and two resolved calls then verify
+  at `allocates 0`); a call through a type parameter is charged the declaration's
+  clause, and an implementation's clause above the declaration's is rejected ("this
+  `allocates` bound may exceed the trait method's `allocates` bound"); a declaration
+  without a clause is not charged 0 (a generic call of it fails `allocates 0`). So an
+  implementation that states `k >= n` itself suffices for both kinds of call; one that
+  states nothing is listed with `-` and does not count;
+- never for a foreign function or a call without MIR here (a dynamic call of a trait
+  method), which no sidecar lists.
+
+Fixture `verus_alloc` (crate `valloc`, sidecar regenerated with `d13a91f`; besides the
+stamp, only new entries): `Pool::take` (`allocates 0`), `take_counted` (1),
+`take_pair` (declared `n = 2`, clause 1), a trait `Backend` with a declared source
+`reserve` (`allocates 1`) implemented by `Pool` (stating 1) and `Bare` (stating
+nothing); roots `drain` and `drain_three` (through `take`), `two_pairs`, `bare_two`
+(through a generic helper) and `bare_two_direct` keep the driver's `∞` and are errors;
+`two_counted` and `pool_two` (through the generic helper `reserve_two::<Pool>`) take
+Verus's 2 and pass. The other seven expected files change by the new roots only.
+
+Fixture `verus_xsource` (two crates; `just verify-sidecar` exports and compiles `ypool`
+by its generator run and verifies `yuser` with `--import ypool`): a source stating 1, a
+trait-declared source whose implementation states 1, and a generic source stating 1
+(as a slab's `alloc<B: PageBackend>`), each called twice in a loop from `yuser`, give
+Verus's 2 (pass); the source stating 0 does not (`drain`, `∞`). Verus charges an
+imported callee's clause as a local one: the three roots fail at `allocates 1`
+("postcondition not satisfied", measured). Variant `-nodep` (no sidecar for `ypool`):
+no bound of `yuser` is taken. The summary groups the bounds not taken by source.
+
+**The allocator trust boundary stays** (sidecars whose sources implement an allocator
+trait are not used, nor entries of functions whose MIR names a non-std allocator).
+It was added for false facts about memory proved through user allocators (requests to
+the fork of 2026-11-08 and 2026-11-09). Re-run with `d13a91f` (the probes with
+`BoundedAllocator` removed, `--no-cheating -V alloc-check --compile`): `r4/scribble.rs`
+(the allocator keeps the permission of a block it handed out) is rejected by the
+hand-out rule; `r5/short.rs` (a block shorter than the layout) by the postcondition
+`allocator_block_fits`; `r5/grow_short.rs` and `r5/grow_nocopy.rs` by "`grow` of a
+user's `Allocator` must move the old contents"; `r5/freeA.rs` by the precondition of
+`raw_ptr::deallocate`; `r2/uaf.rs` and `r2/uaf_grow.rs` because `deallocate` and
+`grow` may be called only in a `trusted_call` block; the control `r5/oneslot_run.rs`
+verifies and makes 3 allocations and 3 frees. Whether the boundary can be lifted was
+asked of the fork (request of 2026-11-19, with the measurements above); until it
+answers, a project that uses its own allocators gets Verus bounds through declared
+sources that state their clause, and not through `Allocator` implementations.
+
+To reopen: the fork's answer on which facts about a user `Allocator` Verus assumes
+(lift or narrow the boundary), and on whether charging a callee's clause, whatever its
+body does, is a guaranteed meaning (measured within a crate and across `--import`).
+
+**Not checked**: declared free sources (`fip::free_source`) and Verus's `#[verifier::fip]` (a verified
+function without the attribute may deallocate to the fork, so a fip function cannot
+call it; not used by the driver, which takes no frees from Verus).

@@ -3297,3 +3297,48 @@ no fixture added. A generic helper `<T: Copy>` with these bodies passes from con
 parameters" warning, no error. The macro's strict mode rejects every spelling (`to_vec`
 by path "may call user code", `into_vec` not in the audited table). Non-`Copy` elements
 not probed.
+
+## Resolved 2026-11-19: re-pin to the fork d13a91f; declared sources counted by Verus
+
+See the amendment of that date in `docs/decisions/2026-11-01-fip-prelint.md`. Sidecars
+regenerated: stamps only. The fork now counts calls of allocators, as the driver does.
+Fixed: a function reaching a `fip::alloc_source` took Verus's bound, which leaves the
+source out (Verus saw `allocates 0`); now it takes it only if the source (for a trait
+method, its implementation) is listed with a literal `allocates k >= n`. Fixture
+`verus_alloc` gains a pool and a trait-declared source; new fixture `verus_xsource`
+(sources in another crate, `--import`).
+
+Open:
+
+- The allocator trust boundary (sidecars with `Allocator` impls refused, entries of
+  functions naming a non-std allocator refused) awaits the fork's answer to the request
+  of 2026-11-19; the audit probes of 2026-11-08/09 are all rejected by `d13a91f`.
+- `fip::free_source` against Verus's `#[verifier::fip]`: not probed. (Sources across
+  crates: fixture `verus_xsource`.)
+- Adopt the fork's new syntax (plan, not started):
+  1. `#[verifier::fip]` on the callback combinators of `fip-core` (`map_in_place*`,
+     `compact*`, `dedup*`, `slot::update`) with `requires forall|..| !f.deallocates(..)`
+     next to the existing `call_allocates(f, ..) <= 0`, so that a verified
+     `#[verifier::fip]` caller can use them (today it cannot: they have no
+     `deallocates_when` condition). Probe (2026-11-19, fork `d13a91f`, outside the
+     repository): a generic in-place map with `F: Fn(T) -> T + Copy` taken by value (as
+     `DropFreeFn` = `Copy` under Verus) or `&F` verifies as `#[verifier::fip]`; callers
+     passing a `#[verifier::fip]` closure, also a `move` closure capturing a `u64`,
+     verify; a caller passing a closure without the attribute fails the precondition.
+     `F: NoDeallocDrop` is not an option (closures cannot implement it). Not `strict`:
+     a strict function cannot call a generic `f`. The upstream strip gate must then
+     strip `#[verifier::fip]` and the `deallocates` conjuncts.
+  2. `fip_strict::FipFn::call`: its certificate already says "no deallocation"; the
+     declaration can say so to Verus (`deallocates_when(ALLOCS, false)`, fork
+     `587093164`), which makes every verified implementation `#[verifier::fip]`.
+     Interacts with the cfg-twin (`divergent`) rule for `FipFn`; needs a design.
+  3. Plain-build twins of the fork's `FbipClone`/`FipClone`/`FipStrictClone` (and
+     `FbipFrom`/`FbipInto`) in `fip-strict`, as for `AllocFreeDrop`, so a downstream
+     crate (Verigrad's `copy_on_shared<T: Copy + FipStrictClone>`) can write the bound
+     in both builds. In plain builds they restrict nothing, so the driver does not
+     use them (the `TrivialClone` finding of 2026-11-18 stands).
+  4. `fip-testkit`: a counting wrapper `Counting<A: Allocator>` that counts calls of
+     `A`'s methods, the unit of the fork's and the driver's count, for crates that use
+     their own allocators through the `Allocator` API (the global counter sees what the
+     allocator does instead: 4 for two calls of an allocator that calls `Global`
+     twice, measured).
