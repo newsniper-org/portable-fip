@@ -1576,3 +1576,91 @@ body does, is a guaranteed meaning (measured within a crate and across `--import
 **Not checked**: declared free sources (`fip::free_source`) and Verus's `#[verifier::fip]` (a verified
 function without the attribute may deallocate to the fork, so a fip function cannot
 call it; not used by the driver, which takes no frees from Verus).
+
+## Amendment 2026-11-20: re-pin to the fork 83fd42f; `encapsulates`, sidecar format 6
+
+**Status:** done on the branch `update/verus-83fd42f` (pin, rename, sidecar format 6, the
+`encapsulates` rule, `verus::internal` refused). Open: deallocation counts in the driver
+(below).
+
+The fork's `fip` branch moved by eleven commits: `e93729c25` (`encapsulates alloc(a, d)`),
+then `b358424cd` .. `83fd42f3b` (the internal attribute removed, deallocation counting).
+Pin: `0.2026.11.20.83fd42f` (`83fd42f3ba97…`), rustc toolchain unchanged (1.100.0).
+
+Checked before the move (clean worktree of `83fd42f3b`, built with `--features singular`,
+vstd 2175 verified):
+
+- The diff `d13a91fed..e93729c25` and the diff `e93729c25..83fd42f3b` were read in full.
+- The fork's test suite (`vargo test --release -p rust_verify_test`): 5427 passed, 0
+  failed, 63 ignored (the fork reports the same numbers); the binaries were rebuilt with
+  `--features singular` afterwards and the probes below run on that build.
+- Deallocation counting, probes of this repository's own (outside the tree): 15 functions
+  with tight `deallocates` bounds (drops of `Box`, nested `Box`, `Option<Box>`, `Vec`
+  growth, a discarded `pop`, a tail temporary, overwrites, `String` growth, a
+  conditionally initialised local, a field assignment, shadowing, `Rc`, a `return` in a
+  loop, two `match` arms) verify, and all 15 fail with each bound lowered by one. A
+  counting `#[global_allocator]` measured, per function, exactly the proved number of
+  frees. 22 functions that free and state `deallocates 0` (struct and `Drop` values,
+  closures, temporaries in arguments, tuples, struct literals, `match` scrutinees, arrays,
+  blocks, `mem::replace`, moved-from parameters, partial moves, ..): none verifies.
+- Found there, reported to the fork: a function with a `deallocates` bound whose only
+  counted drop is the old value of an assignment through `&mut` or to a field
+  (`*r = Box::new(1)`, even `*r = 1` for `r: &mut u64`) makes the verifier panic
+  ("unknown function … drop_deallocations", `vir/src/poly.rs`); it verifies when the
+  crate has another counted drop. A crash, not a wrong result. `core::mem::drop` has no
+  specification.
+- The hole found at `e93729c25` (a hand-written `#[verus::internal(encapsulates_alloc)]`
+  made a recursive function a leaf of `#[verifier::fip(strict)]`) is closed: the
+  attribute is "unrecognized" at `83fd42f3b`.
+
+What changed here:
+
+- **Rename.** `call_allocates(f, args)` is now a `bool` ("may allocate"); the count is
+  `call_allocations(f, args)`. The specifications of `fip-core`, `fip-strict` and
+  `verify/`, the mutation recipes and `verify/strip_alloc.py` use the new name. No
+  function of this repository states `deallocates` yet.
+- **Sidecar format 6.** A `fn` line ends with the function's `deallocates` bound (the
+  spellings of `allocates`) and `encapsulates` or `-`. Format 5 could not tell a
+  function with `encapsulates alloc(0, 0)` from one with a proved `allocates 0`
+  (measured at `e93729c25`: the generator wrote `- 0` for both), so format 5 sidecars
+  are refused.
+- **The rule for declared sources** (replaces the rule of 2026-11-19, a literal
+  `allocates k >= n` on the source). `encapsulates alloc(a, d)` is the fork's
+  declaration for an allocator that does not implement `core::alloc::Allocator`: a
+  verified caller is charged `a` and `d`, within the crate and through `--import`, and
+  the body is not checked against them. The driver takes a Verus bound through a declared
+  source only if a sidecar lists the source with `encapsulates`, `a` the literal
+  `n` of `fip::alloc_source(n = ..)` (0 for a pure `fip::free_source`), and `d` a
+  literal that is positive exactly if the source frees. For a source declared on a
+  trait method the implementation carries the clause (the fork rejects `encapsulates`
+  on a declaration and checks `a` and `d` against the declaration's bounds). A source
+  whose clause states other counts is an **error** on the source: two trusted
+  declarations of one function disagree. A source without the clause stays as before:
+  no bound is taken through it, and the summary says so.
+- **`encapsulates` on a function that is not a declared source.** Verus charges its
+  callers the stated counts and does not check the body; the driver analyses the body.
+  Its stated count is never taken, and no function reaching it takes a Verus bound.
+  Fixture: `valloc::sneak` (`encapsulates alloc(0, 0)`, allocates) called in a loop by
+  `via_sneak` (`allocates 0`, verified): the driver keeps `∞`.
+- **`verus::internal` refused.** The generator writes no sidecar for a crate whose
+  sources name `verus::internal` anywhere in code (an attribute, a `cfg_attr`, a macro
+  body). Independent of the fork's fix: those attributes are the verifier's input from
+  its own macros, and a hand-written one states what no clause was checked for.
+
+Fixtures: `verus_alloc` (`take_counted`, `<Pool as Backend>::reserve`: `encapsulates
+alloc(1, 0)`; `take_pair`: declared 2, clause 1, the error; `sneak`, `via_sneak`),
+`verus_xsource` (`ypool`: `encapsulates` on its sources, the free source `put` with
+`alloc(0, 1)`; `yuser::take_put_twice` takes Verus's 2 through both).
+
+Open, not done in this change:
+
+- **Deallocation counts in the driver.** The fork now proves `deallocates` bounds; the
+  driver still knows a free only as "may free" (`#[fip]` forbids it, `#[fbip]` allows
+  any number), and compares `d` with a source only as zero or positive. To check a
+  number: `fip::free_source(n = N)`, a deallocation count beside the allocation count
+  (loops `∞`), a bound on the mark, the literal `deallocates` of a sidecar taken as the
+  allocation bound is. FP² has no such bound (`fbip` there bounds allocations only), so
+  it is an extension and will be documented as one.
+- The allocator boundary (`custom_allocator`, the refusal of sidecars of crates
+  implementing an allocator trait) is unchanged; the fork's reply of 2026-11-19 says its
+  checks now cover such code. To be narrowed with the trusted allocators reported.

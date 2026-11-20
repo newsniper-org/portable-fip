@@ -3342,3 +3342,25 @@ Open:
      their own allocators through the `Allocator` API (the global counter sees what the
      allocator does instead: 4 for two calls of an allocator that calls `Global`
      twice, measured).
+
+## Resolved 2026-11-20: re-pin to the fork 83fd42f; `encapsulates`, sidecar format 6
+
+See the amendment of that date in `docs/decisions/2026-11-01-fip-prelint.md`. Done: pin,
+`call_allocates` -> `call_allocations`, sidecar format 6 (`deallocates`, `encapsulates`),
+the `encapsulates` rule for declared sources (replaces the literal-`allocates` rule of
+2026-11-19; a clause with other counts is an error), no bound from or through a
+non-source `encapsulates` function, `verus::internal` refused by the generator.
+
+Open:
+
+1. Deallocation counts in the driver: `fip::free_source(n = N)`, a count beside the
+   allocation count, a bound on the mark (`#[fbip(frees = M)]` or similar; beyond FP²),
+   the sidecar's literal `deallocates` taken under the conditions of `allocates`, the
+   `encapsulates` comparison `d == N` in place of `d > 0`.
+2. `fip-core` combinators with the fork's `#[verifier::fip]` and
+   `requires !f.deallocates(..)` (changes the public Verus contract; a decision first).
+3. `verus::internal` in the surface gate of `fip-testkit` (the generator refuses it; the
+   gate would name it in `just ci` before a sidecar run).
+4. Narrow the allocator boundary and report trusted allocators.
+5. Fork defects reported 2026-11-20 (verifier panic on a counted assignment through
+   `&mut`; `core::mem::drop` without a specification): re-probe at the next pin.

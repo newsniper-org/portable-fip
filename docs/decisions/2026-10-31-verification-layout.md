@@ -87,7 +87,12 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   `0.2026.11.19.d13a91f` (`d13a91fed…`, branch `fip`, same toolchain): six fork commits
   after `a330057` (allocators counted by call only, `Vec` from slices, field-wise
   derived `clone`, `deallocates_when` on trait declarations, fip closures); the
-  sidecars differ in their stamp line only (amendment of that date in
+  sidecars differ in their stamp line only. Re-pinned 2026-11-20 to
+  `0.2026.11.20.83fd42f` (`83fd42f3b…`, same toolchain): eleven fork commits after
+  `d13a91f` (`encapsulates alloc(a, d)`, deallocation counting with `deallocates`,
+  `call_allocates` now a `bool` beside the count `call_allocations`); the sources
+  rename `call_allocates` to `call_allocations`, the sidecars are format 6 (amendments
+  of those dates in
   `2026-11-01-fip-prelint.md`, which also records the driver's rule for declared
   sources).
 - **Flags.** Every Verus run of the gates uses `--no-cheating -V alloc-check`
