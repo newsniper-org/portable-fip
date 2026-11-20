@@ -589,6 +589,7 @@ verify-negative: verify-strict verify-core
     expect_test_fail surface-trusted-call fip-alloc lib.rs 's/^    ::core::mem::swap(&mut \*cell, &mut prev);$/    #[verifier::trusted_call]\n    {\n        ::core::mem::swap(\&mut *cell, \&mut prev);\n    }/' no_trusted_call
     expect_test_fail surface-allocator-impl fip-core slot.rs '$ s/$/\nunsafe impl<T> core::alloc::GlobalAlloc for Pool<T> {}/' no_allocator_impl
     expect_test_fail surface-strict-trusted-call fip-strict lib.rs '$ s/$/\nfn t() {\n    #[cfg_attr(verus_keep_ghost, verifier::trusted_call)]\n    {}\n}/' no_trusted_call
+    expect_test_fail surface-strict-internal-attr fip-strict lib.rs '$ s/$/\nmacro_rules! glue { ($t:ident, $i:ident) => { #[$t::$i(x)] fn t() {} } }\nglue!(verus, internal);/' no_internal_identifier
     expect_test_fail surface-strict-allocator-impl fip-strict lib.rs '$ s/$/\nunsafe impl core::alloc::Allocator for Arena {}/' no_allocator_impl
     # The same gates on the verified callers in `verify/` (fip-testkit's
     # `verified_sources` test).
@@ -603,6 +604,8 @@ verify-negative: verify-strict verify-core
       echo "mutant $1 rejected by the surface gate"
     }
     verify_surface_fail surface-verify-trusted-call compose.rs '$ s/$/\n#[verifier::trusted_call]\nfn t() {}/' no_trusted_call
+    # `verus::internal(..)` in any spelling (raw identifier, put together by a macro).
+    verify_surface_fail surface-verify-internal-attr compose.rs '$ s/$/\n#[verus::r#internal(x)]\nfn t() {}/' no_internal_identifier
     verify_surface_fail surface-verify-allocator-impl alloc_callers.rs '$ s/$/\nunsafe impl std::alloc::GlobalAlloc for Arena {}/' no_allocator_impl
     expect_test_fail surface-no-decreases-attr fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/ s/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/#[cfg_attr(verus_keep_ghost, verifier::exec_allows_no_decreases_clause)]\n&/' no_unlisted_verifier_attribute
     # Drift gate (fip-strict): the Verus `FipFn::call` must match the plain one.

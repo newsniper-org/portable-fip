@@ -8,7 +8,9 @@
 //! same gates in their `verified_surface` tests. `FIP_SURFACE_SRC` overrides the
 //! scanned directory (`verify-negative` runs it on mutated copies).
 
-use fip_testkit::surface::{allocator_impls_in, trusted_calls_in, unlisted_verifier_attributes};
+use fip_testkit::surface::{
+    allocator_impls_in, internal_idents_in, trusted_calls_in, unlisted_verifier_attributes,
+};
 use std::path::PathBuf;
 
 fn src() -> PathBuf {
@@ -53,5 +55,14 @@ fn no_allocator_impl() {
     assert!(
         found.is_empty(),
         "allocator trait implementations (a trust point of `allocates`):\n{found:#?}"
+    );
+}
+
+#[test]
+fn no_internal_identifier() {
+    let found = internal_idents_in(&src());
+    assert!(
+        found.is_empty(),
+        "`internal` (`verus::internal(..)` attributes are the verifier's input, not checked):\n{found:#?}"
     );
 }

@@ -296,6 +296,42 @@ pub fn trusted_calls(file: &Path, text: &str) -> Vec<VerifierAttr> {
         .collect()
 }
 
+/// Every `internal` identifier of `text` in code (outside comments and string
+/// literals): `verus::internal(..)` are the attributes Verus's own macros write for the
+/// verifier, and a hand-written one states to it what no clause was checked for (fork
+/// `e93729c25`: `#[verus::internal(encapsulates_alloc)]` made any function a leaf of the
+/// allocation check). `verus::r#internal` and a macro's `#[$t::$i(..)]` called with
+/// `m!(verus, internal)` reach Verus as the same attribute, so the identifier itself is
+/// rejected, as [`trusted_calls`] rejects `trusted_call`.
+#[must_use]
+pub fn internal_idents(file: &Path, text: &str) -> Vec<VerifierAttr> {
+    tokens(text)
+        .into_iter()
+        .filter(|(t, _)| t == "internal")
+        .map(|(name, line)| VerifierAttr {
+            file: file.to_path_buf(),
+            line,
+            name,
+        })
+        .collect()
+}
+
+/// The `internal` identifiers under `dir` ([`internal_idents`]).
+///
+/// # Panics
+///
+/// Panics if `dir` or a file in it cannot be read.
+#[must_use]
+pub fn internal_idents_in(dir: &Path) -> Vec<VerifierAttr> {
+    let mut files = Vec::new();
+    collect(dir, &mut files);
+    files.sort();
+    files
+        .iter()
+        .flat_map(|p| internal_idents(p, &fs::read_to_string(p).expect("read source file")))
+        .collect()
+}
+
 /// The `trusted_call` identifiers under `dir` ([`trusted_calls`]).
 ///
 /// # Panics
@@ -692,6 +728,28 @@ mod tests {
         let d = with_fn_decreases(&items);
         assert_eq!(d.len(), 1);
         assert!(d[0].signature.starts_with("fn f"));
+    }
+
+    #[test]
+    fn internal_idents_are_found() {
+        let lines = |s: &str| -> Vec<usize> {
+            internal_idents(Path::new("x.rs"), s)
+                .into_iter()
+                .map(|a| a.line)
+                .collect()
+        };
+        assert_eq!(
+            lines(
+                "#[verus::internal(x)]\nfn f() {}\n#[verus::r#internal(x)]\nfn g() {}\nm!(verus, internal);\n#[cfg_attr(verus_keep_ghost, verus::internal(x))]\nfn h() {}\n"
+            ),
+            vec![1, 3, 5, 6]
+        );
+        assert_eq!(
+            lines(
+                "// verus::internal\n/* internal */\nconst S: &str = \"internal\";\nfn internals() {}\nfn internal_use() {}\n"
+            ),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

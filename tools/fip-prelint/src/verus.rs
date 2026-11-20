@@ -731,25 +731,20 @@ pub fn crate_cfg_conflict(src: &str, local: &[String]) -> Option<String> {
     macro_conflict(src, Some(local))
 }
 
-/// The line of the first `verus::internal` in the code of `src` (comments and string
-/// literals apart; in an attribute, a `cfg_attr` or a macro body alike), if any. The
-/// attributes of that path are what Verus's own macros write for the verifier; written
-/// by hand they state to it what no clause was checked for (on the fork `e93729c25`,
-/// `#[verus::internal(encapsulates_alloc)]` made any function a leaf of the allocation
-/// check; `b358424cd` removed that one). A crate with a sidecar has none.
+/// The line of the first identifier `internal` in the code of `src` (comments and
+/// string literals apart), if any. `verus::internal(..)` are the attributes Verus's own
+/// macros write for the verifier; written by hand they state to it what no clause was
+/// checked for (on the fork `e93729c25`, `#[verus::internal(encapsulates_alloc)]` made
+/// any function a leaf of the allocation check; `b358424cd` removed that one). The
+/// path need not be spelled in one place: `verus::r#internal` and a macro's
+/// `#[$t::$i(..)]` called with `m!(verus, internal)` reach Verus as the same attribute
+/// (measured on `83fd42f3b`), so the identifier itself is refused, as
+/// `fip_testkit::surface` refuses `trusted_call`. A crate with a sidecar has none.
 pub fn verus_internal_use(src: &str) -> Option<usize> {
-    let toks: Vec<(Tok, usize, usize)> = lex(src)
+    lex(src)
         .into_iter()
-        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
-        .collect();
-    let ident = |k: usize, name: &str| {
-        toks.get(k)
-            .is_some_and(|t| t.0 == Tok::Ident && &src[t.1..t.2] == name)
-    };
-    let colon = |k: usize| toks.get(k).is_some_and(|t| t.0 == Tok::Punct(b':'));
-    (0..toks.len())
-        .find(|&k| ident(k, "verus") && colon(k + 1) && colon(k + 2) && ident(k + 3, "internal"))
-        .map(|k| line_of(src, toks[k].1))
+        .find(|t| t.0 == Tok::Ident && &src[t.1..t.2] == "internal")
+        .map(|t| line_of(src, t.1))
 }
 
 /// The names `text` defines by `macro_rules! name`.
@@ -2243,7 +2238,17 @@ mod tests {
             None
         );
         assert_eq!(
-            verus_internal_use("use verus::internals; fn internal() {}"),
+            verus_internal_use("#[verus::r#internal(x)]\nfn g() {}"),
+            Some(1)
+        );
+        assert_eq!(
+            verus_internal_use(
+                "macro_rules! m { ($t:ident, $i:ident) => { #[$t::$i(x)] fn g() {} } }\nm!(verus, internal);"
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            verus_internal_use("use verus::internals; fn internal_use() {}"),
             None
         );
         let current = format!("format {FORMAT}");

@@ -864,7 +864,7 @@ pub fn cfg_check_files(crate_dir: &Path, files: &[PathBuf]) -> Result<(), String
     for (f, src) in &texts {
         if let Some(line) = verus::verus_internal_use(src) {
             return Err(format!(
-                "{}:{line}: names `verus::internal`, the attributes Verus's own macros write for the verifier: written by hand they state what Verus did not check, so no sidecar is written",
+                "{}:{line}: the identifier `internal`: `verus::internal(..)` are the attributes Verus's own macros write for the verifier, and written by hand (in any spelling, or put together by a macro) they state what Verus did not check, so no sidecar is written",
                 relative(f, crate_dir)
             ));
         }

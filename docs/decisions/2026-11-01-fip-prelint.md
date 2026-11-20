@@ -1580,7 +1580,7 @@ call it; not used by the driver, which takes no frees from Verus).
 ## Amendment 2026-11-20: re-pin to the fork 83fd42f; `encapsulates`, sidecar format 6
 
 **Status:** done on the branch `update/verus-83fd42f` (pin, rename, sidecar format 6, the
-`encapsulates` rule, `verus::internal` refused). Open: deallocation counts in the driver
+`encapsulates` rule, `internal` refused by the generator and the surface gate). Open: deallocation counts in the driver
 (below).
 
 The fork's `fip` branch moved by eleven commits: `e93729c25` (`encapsulates alloc(a, d)`),
@@ -1643,9 +1643,15 @@ What changed here:
   Fixture: `valloc::sneak` (`encapsulates alloc(0, 0)`, allocates) called in a loop by
   `via_sneak` (`allocates 0`, verified): the driver keeps `∞`.
 - **`verus::internal` refused.** The generator writes no sidecar for a crate whose
-  sources name `verus::internal` anywhere in code (an attribute, a `cfg_attr`, a macro
-  body). Independent of the fork's fix: those attributes are the verifier's input from
-  its own macros, and a hand-written one states what no clause was checked for.
+  sources have the identifier `internal` anywhere in code, and the surface gate of
+  `fip-testkit` rejects it in this repository's verified sources (two mutants in
+  `just ci`). The identifier, not the path: `#[verus::r#internal(..)]` and a macro's
+  `#[$t::$i(..)]` called with `m!(verus, internal)` reach Verus as the same attribute
+  (measured on `83fd42f3b`: "unrecognized internal attribute" for all three spellings),
+  the rule `trusted_call` already has. Independent of the fork's fix: those attributes
+  are the verifier's input from its own macros, and a hand-written one states what no
+  clause was checked for. Not covered: an attribute a dependency's procedural macro
+  writes.
 
 Fixtures: `verus_alloc` (`take_counted`, `<Pool as Backend>::reserve`: `encapsulates
 alloc(1, 0)`; `take_pair`: declared 2, clause 1, the error; `sneak`, `via_sneak`),

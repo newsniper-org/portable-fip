@@ -17,8 +17,8 @@
 //! uses it to show the gates fail on mutated copies.
 
 use fip_testkit::surface::{
-    allocator_impls_in, scan_dir, trusted_calls_in, unlisted_verifier_attributes, unspecified,
-    with_fn_decreases,
+    allocator_impls_in, internal_idents_in, scan_dir, trusted_calls_in,
+    unlisted_verifier_attributes, unspecified, with_fn_decreases,
 };
 use std::path::PathBuf;
 
@@ -77,5 +77,14 @@ fn no_allocator_impl() {
     assert!(
         found.is_empty(),
         "allocator trait implementations (a trust point of `allocates`):\n{found:#?}"
+    );
+}
+
+#[test]
+fn no_internal_identifier() {
+    let found = internal_idents_in(&src());
+    assert!(
+        found.is_empty(),
+        "`internal` (`verus::internal(..)` attributes are the verifier's input, not checked):\n{found:#?}"
     );
 }
