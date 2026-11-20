@@ -3358,6 +3358,16 @@ Open:
    allocation count, a bound on the mark (`#[fbip(frees = M)]` or similar; beyond FP²),
    the sidecar's literal `deallocates` taken under the conditions of `allocates`, the
    `encapsulates` comparison `d == N` in place of `d > 0`.
+   Scope (read 2026-11-20, nothing written): a free is a witness list today
+   (`Summary.free`, `Ev::Free`), not a count, in every layer: the leaves
+   (`deallocate`, `realloc`, sources, certified foreign functions), the summaries of
+   std functions and their recorded files per target, the contracts of dynamic calls
+   (`fbip` "allows frees"), `fip::cert(frees = ..)`, drop glue of unresolved types, the
+   dump and the report. A count needs a second `Cost` through all of them (longest
+   path, loops and recursion `∞`), a new spelling in the contract and certificate
+   languages, regenerated std summaries for every recorded target, and a bound on the
+   mark that `fip-macros` exposes. The public attribute changes, so the design is
+   decided before code.
 2. `fip-core` combinators with the fork's `#[verifier::fip]` and
    `requires !f.deallocates(..)` (changes the public Verus contract; a decision first).
 3. Narrow the allocator boundary and report trusted allocators.
