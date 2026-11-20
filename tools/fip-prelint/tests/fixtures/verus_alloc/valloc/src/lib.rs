@@ -185,6 +185,17 @@ impl Pool {
         self.next
     }
 
+    /// A free source of two deallocations whose clause says one: an error.
+    #[cfg_attr(fip_prelint, fip::free_source(n = 2))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        encapsulates alloc(0, 1)
+    ))]
+    pub fn put_two(&mut self, slot: usize) {
+        if self.next > 1 && slot > 0 {
+            self.next = self.next - 2;
+        }
+    }
+
     /// Declared 2, 1 to Verus: the two declarations differ, an error.
     #[cfg_attr(fip_prelint, fip::alloc_source(n = 2))]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>

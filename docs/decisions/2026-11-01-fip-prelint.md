@@ -1580,7 +1580,8 @@ call it; not used by the driver, which takes no frees from Verus).
 ## Amendment 2026-11-20: re-pin to the fork 83fd42f; `encapsulates`, sidecar format 6
 
 **Status:** done on the branch `update/verus-83fd42f` (pin, rename, sidecar format 6, the
-`encapsulates` rule, `internal` refused by the generator and the surface gate). Open: deallocation counts in the driver
+`encapsulates` rule, `internal` refused by the generator and the surface gate, a first
+stage of deallocation counts in the driver). Open: the finite count through summaries
 (below).
 
 The fork's `fip` branch moved by eleven commits: `e93729c25` (`encapsulates alloc(a, d)`),
@@ -1630,8 +1631,8 @@ What changed here:
   verified caller is charged `a` and `d`, within the crate and through `--import`, and
   the body is not checked against them. The driver takes a Verus bound through a declared
   source only if a sidecar lists the source with `encapsulates`, `a` the literal
-  `n` of `fip::alloc_source(n = ..)` (0 for a pure `fip::free_source`), and `d` a
-  literal that is positive exactly if the source frees. For a source declared on a
+  `n` of `fip::alloc_source(n = ..)` (0 for a pure `fip::free_source`), and `d` the
+  literal `n` of `fip::free_source(n = ..)` (0 without the attribute). For a source declared on a
   trait method the implementation carries the clause (the fork rejects `encapsulates`
   on a declaration and checks `a` and `d` against the declaration's bounds). A source
   whose clause states other counts is an **error** on the source: two trusted
@@ -1658,15 +1659,43 @@ alloc(1, 0)`; `take_pair`: declared 2, clause 1, the error; `sneak`, `via_sneak`
 `verus_xsource` (`ypool`: `encapsulates` on its sources, the free source `put` with
 `alloc(0, 1)`; `yuser::take_put_twice` takes Verus's 2 through both).
 
+**Deallocation counts, first stage.** The fork proves `deallocates` bounds; the driver
+knew a free only as "may free" (`#[fip]` forbids it, `#[fbip]` allows any number).
+Added, as an extension of FP² (whose `fbip` bounds allocation only):
+
+- `fip::free_source(n = N)`: `N` deallocations per call (1 without `n`; `n = 0` is
+  rejected as `alloc_source(n = 0)` is).
+- A count beside the allocation count (`Summary::frees`), on the longest path. One
+  deallocation each: a call of a free source, of a deallocating method of an allocator
+  trait (`deallocate`; `realloc`, `grow`, `shrink` also allocate one), of a foreign
+  `free`/`realloc`. So dropping a `Box` is 1 (its drop glue is analysed down to
+  `Global`'s `deallocate`). Any number (`∞`): a free in a loop or in a recursive
+  component, a free known only as a witness (a std summary, the summary of an exported
+  crate, `fip::cert(frees = true)`, a contract or `param(..)` of an `fbip` function), a
+  call of a parameter or a drop of a value of a type parameter.
+- The literal `deallocates k` of a sidecar replaces an `∞` count under the conditions
+  of `allocates` (non-generic, no `requires`, no `encapsulates`, every panic path an
+  allocation failure, nothing reached that Verus counts otherwise); a finite count above
+  `k` is kept and reported, as for allocations. The summary counts the bounds taken.
+- `fip::mark(kind = "fbip", frees = M)`, written `#[fbip(frees = M)]` with
+  `fip-macros`: more than `M` is an error naming the count. Without `frees` nothing
+  changes. `frees` on `kind = "fip"` is malformed. An implementation whose mark allows
+  more deallocations than its trait method's contract is weaker than the contract.
+
+Fixtures: `alloc_sources` (`free_three` 3 of 3; `free_three_over` 3 of 2; `free_branch`
+the longer branch; `free_loop` `∞`; `free_box` 1; `free_box_over` 1 of 0; `free_vec`
+`∞`; `frees` on `fip`; `free_source(n = 0)`), `verus_xsource` (`yuser::put_twice`: a
+loop the driver counts `∞`, Verus proves `deallocates 2`, taken; `put_twice_over`: 2 of
+1), `verus_alloc` (`put_two`: declared 2, clause 1, the error), `clean` (`#[fbip(frees =
+1)]` through `fip-macros`).
+
 Open, not done in this change:
 
-- **Deallocation counts in the driver.** The fork now proves `deallocates` bounds; the
-  driver still knows a free only as "may free" (`#[fip]` forbids it, `#[fbip]` allows
-  any number), and compares `d` with a source only as zero or positive. To check a
-  number: `fip::free_source(n = N)`, a deallocation count beside the allocation count
-  (loops `∞`), a bound on the mark, the literal `deallocates` of a sidecar taken as the
-  allocation bound is. FP² has no such bound (`fbip` there bounds allocations only), so
-  it is an extension and will be documented as one.
+- **A finite count through summaries.** Std summaries, exported summaries, certificates
+  and contracts carry "may free", not a number, so a function freeing through them is
+  `∞` unless Verus proved its bound. A number there changes the summary format (every
+  recorded target regenerated), `fip::cert` and the contract language. `fip-macros`
+  does not yet generate a Verus `deallocates M` from `#[fbip(frees = M)]`.
 - The allocator boundary (`custom_allocator`, the refusal of sidecars of crates
   implementing an allocator trait) is unchanged; the fork's reply of 2026-11-19 says its
   checks now cover such code. To be narrowed with the trusted allocators reported.

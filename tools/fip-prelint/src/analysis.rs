@@ -317,6 +317,12 @@ impl Witness {
 #[derive(Clone, Debug, Default)]
 pub struct Summary {
     pub alloc: Cost,
+    /// Deallocations per call, on the longest path (no terms): finite only through
+    /// events that are one deallocation each ([`Ev::FreeOne`]) and literal
+    /// `deallocates` bounds of Verus; `∞` through any other free (std summaries,
+    /// imported summaries, certificates and contracts that say "may free"), loops and
+    /// recursion.
+    pub frees: Cost,
     pub alloc_w: Vec<Witness>,
     pub free: Vec<Witness>,
     pub panics: Vec<Witness>,
@@ -421,6 +427,10 @@ enum Ev {
     /// amendments 2026-11-19 and 2026-11-20. No event here; it bars Verus's
     /// `allocates` bounds for every function reaching it.
     VerusUncounted(String),
+    /// Exactly one deallocation (a call of a deallocating allocator method or of a
+    /// declared free source), where [`Ev::Free`] is a deallocation whose number is not
+    /// known (any number, for the count of [`Summary::frees`]).
+    FreeOne(String),
 }
 
 #[derive(Clone, Debug)]
@@ -466,6 +476,9 @@ struct BodyInfo {
     /// instance (computed by `scan_body`), with the function's path, its definition
     /// and the span of its MIR body.
     verus_bound: Option<(u64, String, DefId, Span)>,
+    /// The literal `deallocates` bound Verus proved for this body, under the same
+    /// conditions.
+    verus_free_bound: Option<(u64, String, DefId, Span)>,
 }
 
 enum NodeKind {
@@ -1185,6 +1198,7 @@ impl Crates {
                 let s = Source {
                     alloc: u64::from(a),
                     free: f,
+                    frees: u64::from(f),
                 };
                 return Some((s, SourceKind::AllocatorTrait));
             }
@@ -1195,6 +1209,7 @@ impl Crates {
             let s = Source {
                 alloc: u64::from(a),
                 free: f,
+                frees: u64::from(f),
             };
             return Some((s, SourceKind::Foreign));
         }
@@ -2283,6 +2298,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     reachable: vec![true],
                     in_loop: vec![false],
                     verus_bound: None,
+                    verus_free_bound: None,
                 });
             }
         }
@@ -2315,8 +2331,8 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         for _ in 0..s.alloc {
             evs.push(Ev::Alloc(format!("allocation: {why} `{path}`{count}")));
         }
-        if s.free {
-            evs.push(Ev::Free(format!("free: {why} `{path}`")));
+        for _ in 0..s.frees {
+            evs.push(Ev::FreeOne(format!("free: {why} `{path}`")));
         }
         if let Err(clause) = self.verus_counts_source(def_id, s, kind) {
             evs.push(Ev::VerusUncounted(format!(
@@ -2356,8 +2372,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 let Some((a, d)) = self.crates.verus.encapsulated(tcx, def_id, span) else {
                     return Err("no `encapsulates alloc(a, d)` in a Verus sidecar".to_string());
                 };
-                let agree =
-                    a.literal() == Some(s.alloc) && d.literal().is_some_and(|d| (d > 0) == s.free);
+                let agree = a.literal() == Some(s.alloc) && d.literal() == Some(s.frees);
                 if agree {
                     Ok(())
                 } else {
@@ -2384,14 +2399,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if rules::is_realloc_entry(&std) {
             return NodeKind::Leaf(vec![
                 Ev::Alloc(format!("reallocation `{path}`")),
-                Ev::Free(format!("reallocation `{path}`")),
+                Ev::FreeOne(format!("reallocation `{path}`")),
             ]);
         }
         if rules::is_alloc_entry(&std) {
             return NodeKind::Leaf(vec![Ev::Alloc(format!("allocation `{path}`"))]);
         }
         if rules::is_dealloc_entry(&std) {
-            return NodeKind::Leaf(vec![Ev::Free(format!("deallocation `{path}`"))]);
+            return NodeKind::Leaf(vec![Ev::FreeOne(format!("deallocation `{path}`"))]);
         }
         if rules::is_panic_entry(&std) {
             return NodeKind::Leaf(vec![Ev::Panic(format!("`{path}`"))]);
@@ -2412,14 +2427,14 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             if rules::is_realloc_entry(name) {
                 return NodeKind::Leaf(vec![
                     Ev::Alloc(format!("reallocation `{name}`")),
-                    Ev::Free(format!("reallocation `{name}`")),
+                    Ev::FreeOne(format!("reallocation `{name}`")),
                 ]);
             }
             if rules::is_alloc_entry(name) {
                 return NodeKind::Leaf(vec![Ev::Alloc(format!("allocation `{name}`"))]);
             }
             if rules::is_dealloc_entry(name) {
-                return NodeKind::Leaf(vec![Ev::Free(format!("deallocation `{name}`"))]);
+                return NodeKind::Leaf(vec![Ev::FreeOne(format!("deallocation `{name}`"))]);
             }
             if rules::is_alloc_free_symbol(name) {
                 return NodeKind::Leaf(Vec::new());
@@ -2438,6 +2453,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     reachable: vec![true],
                     in_loop: vec![false],
                     verus_bound: None,
+                    verus_free_bound: None,
                 });
             }
             // Marks apply by link symbol, so a declaration in `std`, `libc` or any
@@ -2565,6 +2581,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             reachable: vec![true, true],
             in_loop: vec![false, true],
             verus_bound: None,
+            verus_free_bound: None,
         })
     }
 
@@ -3085,6 +3102,18 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
             _ => None,
         };
+        let verus_free_bound = match inst.def {
+            InstanceKind::Item(d)
+                if verus_refused.is_none()
+                    && !tcx.generics_of(d).requires_monomorphization(tcx) =>
+            {
+                self.crates
+                    .verus
+                    .literal_dealloc_bound(tcx, d, body.span)
+                    .map(|(k, path)| (k, path, d, body.span))
+            }
+            _ => None,
+        };
         // A function with `encapsulates alloc(a, d)` that is not a declared source:
         // Verus charges its callers `a` and does not check its body, which the driver
         // analyses. Its stated count is never taken (`literal_alloc_bound`), and no
@@ -3110,6 +3139,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             reachable,
             in_loop,
             verus_bound,
+            verus_free_bound,
         }
     }
 
@@ -4660,6 +4690,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 panic_macros: true,
                 total: false,
                 params: vec![("f".to_string(), n)],
+                frees: None,
             }),
             certifying: false,
             node: self.current,
@@ -5255,7 +5286,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                                 s.alloc_w.push(w(what));
                             }
                         }
-                        Ev::Free(what) => s.free.push(w(what)),
+                        Ev::Free(what) => {
+                            s.frees = s.frees.add(&free_cost(ev));
+                            s.free.push(w(what));
+                        }
+                        Ev::FreeOne(what) => {
+                            s.frees = s.frees.add(&free_cost(ev));
+                            // A source with `n = N` is N events and one witness.
+                            if s.free.iter().all(|x| x.what != *what) {
+                                s.free.push(w(what));
+                            }
+                        }
                         Ev::Panic(what) => s.panics.push(w(what)),
                         Ev::Unknown(what) => s.unknown.push(w(what)),
                         Ev::Bound(k, what) => {
@@ -5288,6 +5329,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             NodeKind::Body(info) => {
                 let n = info.blocks.len();
                 let mut bcost = vec![Cost::default(); n];
+                let mut bfree = vec![Cost::default(); n];
                 for (b, cost) in bcost.iter_mut().enumerate() {
                     if !info.reachable[b] {
                         continue;
@@ -5297,11 +5339,16 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                         let c =
                             self.site_cost(i, &site.item, site.span, in_loop, sums, skip, &mut s);
                         *cost = cost.add(&c);
+                        bfree[b] = bfree[b].add(&site_frees(&site.item, in_loop, sums, skip));
                     }
                 }
                 s.alloc = longest_path(info, &bcost);
+                s.frees = longest_path(info, &bfree);
                 if let Some((k, path, d, body_span)) = &info.verus_bound {
                     self.verus_bound(*k, path, *d, *body_span, &mut s);
+                }
+                if let Some((k, path, d, body_span)) = &info.verus_free_bound {
+                    self.verus_free_bound(*k, path, *d, *body_span, &mut s);
                 }
             }
         }
@@ -5358,6 +5405,53 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                     terms: BTreeMap::new(),
                 };
                 self.crates.verus.bound_used(self.tcx, d, body_span, path);
+            }
+        }
+    }
+
+    /// Applies the literal `deallocates k` Verus proved for the body of `path` to its
+    /// summary `s`, under the conditions of [`Analysis::verus_bound`] (the fork bounds
+    /// the deallocations of normally returning executions; a function reaching what
+    /// Verus counts otherwise keeps the driver's count): a finite count `m <= k` is
+    /// kept, a finite `m > k` is kept and reported, `∞` becomes `k`.
+    fn verus_free_bound(&self, k: u64, path: &str, d: DefId, body_span: Span, s: &mut Summary) {
+        if s.verus_uncounted.is_some() {
+            return;
+        }
+        let normal_only = s.panics.len() < MAX_WITNESSES
+            && s.panics
+                .iter()
+                .all(|w| crate::report::is_alloc_failure(&w.what));
+        if !normal_only {
+            return;
+        }
+        match s.frees.c {
+            B::Fin(m) => {
+                if m > k {
+                    self.crates.verus.bound_exceeded(path);
+                    push_w(
+                        &mut s.unknown,
+                        Witness {
+                            steps: Vec::new(),
+                            what: format!(
+                                "verus-bound:the driver counts {m} deallocation(s) in `{path}`, more than the `deallocates {k}` Verus proved for it: the proof's trust boundary is violated (or the driver's count is imprecise); the driver's count is kept"
+                            ),
+                            span: DUMMY_SP,
+                            in_loop: false,
+                        },
+                        MAX_UNKNOWN,
+                        key_what,
+                    );
+                }
+            }
+            B::Inf => {
+                s.frees = Cost {
+                    c: B::Fin(k),
+                    terms: BTreeMap::new(),
+                };
+                self.crates
+                    .verus
+                    .free_bound_used(self.tcx, d, body_span, path);
             }
         }
     }
@@ -5485,10 +5579,15 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 .iter()
                 .fold(Cost::default(), |acc, l| acc.add(&l.alloc))
                 .widen();
+            let total_frees = locals
+                .iter()
+                .fold(Cost::default(), |acc, l| acc.add(&l.frees))
+                .widen();
             for &m in &comp {
                 let (paths, cycle) = self.paths_within(m, &set);
                 let mut s = Summary {
                     alloc: total.clone(),
+                    frees: total_frees.clone(),
                     ..Summary::default()
                 };
                 for (k, &other) in comp.iter().enumerate() {
@@ -5721,13 +5820,57 @@ fn verus_pre_text(f: &str) -> String {
     )
 }
 
+/// The deallocations of one event: one for [`Ev::FreeOne`], any number for
+/// [`Ev::Free`], none otherwise.
+fn free_cost(ev: &Ev) -> Cost {
+    match ev {
+        Ev::FreeOne(_) => Cost::one(),
+        Ev::Free(_) => Cost::one().widen(),
+        _ => Cost::default(),
+    }
+}
+
+/// The deallocations of one site of a body (looped if `in_loop`): the callee's count
+/// for a call (none into `skip`, the caller's own recursive component, which the
+/// component's total covers), [`free_cost`] for an event, the maximum over
+/// alternatives. A term (a call of a parameter, a drop of a value of a type parameter)
+/// is any number: nothing bounds what the argument frees.
+fn site_frees(
+    item: &Item,
+    in_loop: bool,
+    sums: &[Option<Summary>],
+    skip: Option<&HashSet<usize>>,
+) -> Cost {
+    match item {
+        Item::Call(j) => {
+            if skip.is_some_and(|k| k.contains(j)) {
+                return Cost::default();
+            }
+            sums[*j]
+                .as_ref()
+                .map_or_else(Cost::default, |cs| cs.frees.looped(in_loop))
+        }
+        Item::Term(_) => Cost::one().widen(),
+        Item::Many(_) => Cost::default(),
+        Item::Ev(ev) => free_cost(ev).looped(in_loop),
+        Item::Evs(evs) => evs.iter().fold(Cost::default(), |c, ev| {
+            c.add(&free_cost(ev).looped(in_loop))
+        }),
+        Item::Alt(items) => items.iter().fold(Cost::default(), |c, item| {
+            c.max(&site_frees(item, in_loop, sums, skip))
+        }),
+    }
+}
+
 fn local_event(s: &mut Summary, ev: &Ev, w: impl Fn(&String) -> Witness) -> Cost {
     match ev {
         Ev::Alloc(what) => {
             push_w(&mut s.alloc_w, w(what), MAX_WITNESSES, key_site);
             return Cost::one();
         }
-        Ev::Free(what) => push_w(&mut s.free, w(what), MAX_WITNESSES, key_site),
+        Ev::Free(what) | Ev::FreeOne(what) => {
+            push_w(&mut s.free, w(what), MAX_WITNESSES, key_site);
+        }
         Ev::Panic(what) => push_w(&mut s.panics, w(what), MAX_WITNESSES, key_site),
         Ev::Unknown(what) => push_w(&mut s.unknown, w(what), MAX_UNKNOWN, key_what),
         Ev::Bound(k, what) => {
@@ -7265,6 +7408,7 @@ mod tests {
             reachable: vec![true; 4],
             in_loop: vec![false; 4],
             verus_bound: None,
+            verus_free_bound: None,
         };
         let costs = vec![Cost::default(), Cost::one(), Cost::one(), Cost::one()];
         assert_eq!(longest_path(&info, &costs).c, B::Fin(2));
@@ -7278,7 +7422,7 @@ mod tests {
                 .iter()
                 .map(|e| match e {
                     Ev::Alloc(_) => "alloc".to_string(),
-                    Ev::Free(_) => "free".to_string(),
+                    Ev::Free(_) | Ev::FreeOne(_) => "free".to_string(),
                     Ev::Panic(_) => "panic".to_string(),
                     Ev::Unknown(_) => "top".to_string(),
                     Ev::Bound(k, _) => format!("bound {k}"),

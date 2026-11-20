@@ -129,6 +129,9 @@ pub struct VerusTrust {
     /// Per sidecar crate: its stamp and the functions whose proved literal
     /// `allocates` bound replaced the driver's count (phase 4).
     bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
+    /// Per sidecar crate: its stamp and the functions whose proved `deallocates` bound
+    /// replaced the driver's count.
+    free_bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
     /// Functions whose driver count exceeds their proved bound.
     exceeded: RefCell<BTreeSet<String>>,
     /// Declared sources whose `encapsulates` clause differs from the declaration.
@@ -183,6 +186,7 @@ impl VerusTrust {
             discharged: RefCell::new(BTreeMap::new()),
             refused: RefCell::new(BTreeMap::new()),
             bounds: RefCell::new(BTreeMap::new()),
+            free_bounds: RefCell::new(BTreeMap::new()),
             exceeded: RefCell::new(BTreeSet::new()),
             uncounted: RefCell::new(BTreeMap::new()),
             mismatched: RefCell::new(BTreeMap::new()),
@@ -541,6 +545,39 @@ impl VerusTrust {
         }
     }
 
+    /// The literal `deallocates` bound Verus proved for `d` and the function's path,
+    /// under the conditions of [`VerusTrust::literal_alloc_bound`].
+    pub fn literal_dealloc_bound(
+        &self,
+        tcx: TyCtxt<'_>,
+        d: DefId,
+        body_span: Span,
+    ) -> Option<(u64, String)> {
+        match self.verdict(tcx, d, body_span) {
+            Verdict::Listed {
+                path,
+                requires: false,
+                deallocates,
+                encapsulates: false,
+                ..
+            } => deallocates.literal().map(|k| (k, path)),
+            _ => None,
+        }
+    }
+
+    /// Records that the proved `deallocates` bound of `path` replaced the driver's
+    /// count.
+    pub fn free_bound_used(&self, tcx: TyCtxt<'_>, d: DefId, body_span: Span, path: &str) {
+        if let Verdict::Listed { krate, stamp, .. } = self.verdict(tcx, d, body_span) {
+            self.free_bounds
+                .borrow_mut()
+                .entry(krate)
+                .or_insert_with(|| (stamp, BTreeSet::new()))
+                .1
+                .insert(path.to_string());
+        }
+    }
+
     /// The counts `(a, d)` of `d` if a Verus sidecar lists it with `encapsulates
     /// alloc(a, d)`: what Verus charges a verified caller for one call of `d` (stated by
     /// the clause, with or without a `requires`; Verus does not check the body against
@@ -692,14 +729,10 @@ impl VerusTrust {
         dl: &verus::AllocBound,
         s: crate::marks::Source,
     ) {
-        let declared = match (s.alloc, s.free) {
-            (0, _) => "no allocation and a free".to_string(),
-            (n, false) => format!("{n} allocation(s) and no free"),
-            (n, true) => format!("{n} allocation(s) and a free"),
-        };
+        let declared = format!("{} allocation(s) and {} deallocation(s)", s.alloc, s.frees);
         self.mismatched.borrow_mut().insert(
             format!(
-                "`{}` is declared a source of {declared}, and has `encapsulates alloc({}, {})` for Verus: the two trusted declarations must state the same counts (literal numbers; a positive second one exactly for a `fip::free_source`)",
+                "`{}` is declared a source of {declared}, and has `encapsulates alloc({}, {})` for Verus: the two trusted declarations must state the same counts (literal numbers: `a` the `n` of `fip::alloc_source`, `d` the `n` of `fip::free_source`, 0 without the attribute)",
                 tcx.def_path_str(d),
                 a.render(),
                 dl.render()
@@ -747,6 +780,12 @@ impl VerusTrust {
         for (krate, (stamp, fns)) in self.bounds.borrow().iter() {
             out.push_str(&format!(
                 ", {} allocation bounds taken from Verus (sidecar of `{krate}`: {stamp})",
+                fns.len()
+            ));
+        }
+        for (krate, (stamp, fns)) in self.free_bounds.borrow().iter() {
+            out.push_str(&format!(
+                ", {} deallocation bounds taken from Verus (sidecar of `{krate}`: {stamp})",
                 fns.len()
             ));
         }

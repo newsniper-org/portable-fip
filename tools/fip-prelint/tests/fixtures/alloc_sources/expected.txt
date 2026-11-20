@@ -5,6 +5,11 @@ app/src/lib.rs:10:11: error: fip-prelint: `arena_once` is #[fip] but may allocat
 app/src/lib.rs:112:14: error: fip-prelint: `ffi_free` is #[fip] but may free: `ffi_free` -> `free` (app/src/lib.rs:112): free: foreign allocation function `free`
 app/src/lib.rs:118:14: error: fip-prelint: `ffi_marked` is #[fip] but may allocate 1 time(s), at most 0 allowed: `ffi_marked` -> `pool_get` (app/src/lib.rs:118): allocation: declared source `pool_get`
 app/src/lib.rs:124:14: error: fip-prelint: foreign function `mystery` is neither certified nor excluded: `ffi_unknown` -> `mystery` (app/src/lib.rs:124)
+app/src/lib.rs:152:13: error: fip-prelint: `free_three_over` is #[fbip(frees = 2)] but may free 3 time(s), at most 2 allowed: `free_three_over` -> `pools::Slab::remove` (app/src/lib.rs:152): free: declared source `pools::Slab::remove`; `free_three_over` -> `pools::Slab::remove_pair` (app/src/lib.rs:153): free: declared source `pools::Slab::remove_pair`
+app/src/lib.rs:172:17: error: fip-prelint: `free_loop` is #[fbip(frees = 4)] but may free ∞ time(s), at most 4 allowed: `free_loop` -> `pools::Slab::remove` (in loop) (app/src/lib.rs:172): free: declared source `pools::Slab::remove`
+app/src/lib.rs:187:1: error: fip-prelint: `free_box_over` is #[fbip(frees = 0)] but may free 1 time(s), at most 0 allowed: `free_box_over` -> `drop glue of alloc::boxed::Box<u32>` (app/src/lib.rs:187) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
+app/src/lib.rs:193:1: error: fip-prelint: `free_vec` is #[fbip(frees = 8)] but may free ∞ time(s), at most 8 allowed: `free_vec` -> `drop glue of alloc::vec::Vec<alloc::boxed::Box<u32>>` (app/src/lib.rs:193) -> … (in loop) -> `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::deallocate`
+app/src/lib.rs:197:1: error: fip-prelint: malformed `fip::mark`: `frees = M` needs `kind = "fbip"` (`kind = "fip"` allows no deallocation)
 app/src/lib.rs:21:12: error: fip-prelint: `arena_loop` is #[fip(3)] but may allocate ∞ time(s), at most 3 allowed: `arena_loop` -> `pools::Arena::alloc` (in loop) (app/src/lib.rs:21): allocation: declared source `pools::Arena::alloc`
 app/src/lib.rs:31:5: error: fip-prelint: `arena_reset` is #[fip] but may free: `arena_reset` -> `pools::Arena::reset` (app/src/lib.rs:31): free: declared source `pools::Arena::reset`
 app/src/lib.rs:37:13: error: fip-prelint: `slab_cycle` is #[fip] but may allocate 1 time(s), at most 0 allowed: `slab_cycle` -> `pools::Slab::insert` (app/src/lib.rs:37): allocation: declared source `pools::Slab::insert`
@@ -16,7 +21,7 @@ app/src/lib.rs:92:5: error: fip-prelint: `take_slab` is #[fip] but may allocate 
 bad_sources/src/lib.rs:11:1: error: fip-prelint: `marked_source` is #[fip] but is an allocation/free source (declared source): its body is outside FIP and is not analysed, and its callers count each call as 1 allocation(s); remove the FIP attribute
 bad_sources/src/lib.rs:17:1: error: fip-prelint: malformed allocation/free source: `fip::alloc_source(n = 0)` would declare an allocation-free function without checking it; the count is at least 1
 bad_sources/src/lib.rs:23:1: error: fip-prelint: malformed allocation/free source: unknown key `count` in `fip::alloc_source(..)`
-bad_sources/src/lib.rs:29:1: error: fip-prelint: malformed allocation/free source: `fip::free_source` takes no arguments, found `n = 1`
+bad_sources/src/lib.rs:29:1: error: fip-prelint: malformed allocation/free source: `fip::free_source(n = 0)` would declare a function that frees nothing without checking it; the count is at least 1
 bad_sources/src/lib.rs:34:25: error: fip-prelint: `fip::alloc_source` applies to functions, methods, trait method declarations and foreign functions
 bad_sources/src/lib.rs:42:5: error: fip-prelint: `<Null as std::alloc::GlobalAlloc>::alloc` is #[fip] but is an allocation/free source (allocator trait method): its body is outside FIP and is not analysed, and its callers count each call as 1 allocation(s); remove the FIP attribute
 galloc/src/lib.rs:37:5: error: fip-prelint: `boxed` is #[fip] but may allocate 1 time(s), at most 0 allowed: `boxed` -> `alloc::boxed::Box::<u32>::new` (galloc/src/lib.rs:37) -> … -> `alloc::alloc::__rust_alloc_zeroed`: allocation `__rust_alloc_zeroed`
@@ -27,7 +32,7 @@ galloc/src/lib.rs:61:14: error: fip-prelint: `direct_system_alloc` is #[fip] but
 galloc/src/lib.rs:67:14: error: fip-prelint: `via_dyn` is #[fip] but may allocate 1 time(s), at most 0 allowed: `via_dyn` -> `<dyn core::alloc::global::GlobalAlloc as core::alloc::global::GlobalAlloc>::alloc (virtual)` (galloc/src/lib.rs:67): allocation: allocator trait method `core::alloc::global::GlobalAlloc::alloc`
 galloc/src/lib.rs:74:5: error: fip-prelint: `vec_push` is #[fip] but may allocate 1 time(s), at most 0 allowed: `vec_push` -> `alloc::vec::Vec::<u8>::push` (galloc/src/lib.rs:74) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::allocate`: allocation: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::allocate`
 galloc/src/lib.rs:74:5: error: fip-prelint: `vec_push` is #[fip] but may free: `vec_push` -> `alloc::vec::Vec::<u8>::push` (galloc/src/lib.rs:74) -> … -> `<alloc::alloc::Global as core::alloc::Allocator>::grow`: free: allocator trait method `<alloc::alloc::Global as core::alloc::Allocator>::grow`
-note: fip-prelint: crate `app`: 17 roots, 5 passed, 13 errors, 0 warnings, 0 notes, 1 declared sources
+note: fip-prelint: crate `app`: 24 roots, 8 passed, 18 errors, 0 warnings, 0 notes, 1 declared sources
 note: fip-prelint: crate `bad_sources`: 2 roots, 0 passed, 6 errors, 0 warnings, 0 notes, 1 declared sources
 note: fip-prelint: crate `galloc`: 7 roots, 0 passed, 8 errors, 0 warnings, 0 notes
-note: fip-prelint: crate `pools`: 0 roots, 0 passed, 0 errors, 0 warnings, 0 notes, 7 declared sources
+note: fip-prelint: crate `pools`: 0 roots, 0 passed, 0 errors, 0 warnings, 0 notes, 8 declared sources

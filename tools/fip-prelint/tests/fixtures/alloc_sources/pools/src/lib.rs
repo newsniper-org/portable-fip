@@ -78,6 +78,13 @@ impl Slab {
     pub fn remove(&mut self, i: usize) -> Option<u32> {
         self.slots.get_mut(i)?.take()
     }
+    /// Returns two slots per call.
+    #[cfg_attr(fip_prelint, fip::free_source(n = 2))]
+    pub fn remove_pair(&mut self, i: usize) -> Option<u32> {
+        let a = self.slots.get_mut(i)?.take();
+        let _ = self.slots.get_mut(i + 1)?.take();
+        a
+    }
     /// Takes two slots per call.
     #[cfg_attr(fip_prelint, fip::alloc_source(n = 2))]
     pub fn insert_pair(&mut self, v: u32) -> Option<(usize, usize)> {

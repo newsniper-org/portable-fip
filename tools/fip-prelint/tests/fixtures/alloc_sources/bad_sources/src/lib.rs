@@ -24,8 +24,8 @@ pub fn bad_key(x: u32) -> u32 {
     x
 }
 
-/// Arguments to `free_source`: rejected.
-#[cfg_attr(fip_prelint, fip::free_source(n = 1))]
+/// A free source that frees nothing: rejected.
+#[cfg_attr(fip_prelint, fip::free_source(n = 0))]
 pub fn bad_free(x: u32) -> u32 {
     x
 }

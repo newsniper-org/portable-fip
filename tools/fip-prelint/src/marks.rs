@@ -81,6 +81,9 @@ pub struct Source {
     pub alloc: u64,
     /// A possible free.
     pub free: bool,
+    /// Deallocations per call (`fip::free_source(n = N)`, 1 without `n`; 0 exactly if
+    /// `free` is false).
+    pub frees: u64,
 }
 
 impl Source {
@@ -91,6 +94,7 @@ impl Source {
         Source {
             alloc: self.alloc.max(o.alloc),
             free: self.free || o.free,
+            frees: self.frees.max(o.frees),
         }
     }
 }
@@ -132,14 +136,27 @@ pub fn parse_alloc_source(args: Option<&str>) -> Result<u64, String> {
     Ok(n)
 }
 
-/// `fip::free_source` takes no arguments.
-pub fn parse_free_source(args: Option<&str>) -> Result<(), String> {
-    match args.map(str::trim) {
-        None | Some("") => Ok(()),
-        Some(a) => Err(format!(
-            "`fip::free_source` takes no arguments, found `{a}`"
-        )),
+/// Deallocations per call declared by `fip::free_source` (`args`: the list inside the
+/// parentheses, if any): `n = N`, 1 without it. `n = 0` is rejected: it would declare
+/// a function that frees nothing without checking it.
+pub fn parse_free_source(args: Option<&str>) -> Result<u64, String> {
+    let mut n = 1;
+    for part in split_top(args.unwrap_or("")) {
+        let (key, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("expected `n = N` in `fip::free_source(..)`, found `{part}`"))?;
+        match key.trim() {
+            "n" => n = parse_u64("n", value.trim())?,
+            other => return Err(format!("unknown key `{other}` in `fip::free_source(..)`")),
+        }
     }
+    if n == 0 {
+        return Err(
+            "`fip::free_source(n = 0)` would declare a function that frees nothing without checking it; the count is at least 1"
+                .to_string(),
+        );
+    }
+    Ok(n)
 }
 
 /// The source declared by the printed tool attributes of one function: `Ok(None)` if
@@ -156,14 +173,13 @@ pub fn source_of_printed<'a>(
             "alloc_source" => Source {
                 alloc: parse_alloc_source(args)?,
                 free: false,
+                frees: 0,
             },
-            "free_source" => {
-                parse_free_source(args)?;
-                Source {
-                    alloc: 0,
-                    free: true,
-                }
-            }
+            "free_source" => Source {
+                alloc: 0,
+                free: true,
+                frees: parse_free_source(args)?,
+            },
             _ => continue,
         };
         found = Some(found.map_or(s, |f| f.merge(s)));
@@ -350,6 +366,10 @@ pub struct Mark {
     /// `total`: the strictest grade (decision 2026-11-06-redesign-verus-allocates, 7.1).
     pub total: bool,
     pub params: Vec<(String, u64)>,
+    /// `frees = M` (`kind = "fbip"` only): at most `M` deallocations per call. `None`:
+    /// any number, as in FP² (whose `fbip` bounds nothing about deallocation; the bound
+    /// is an extension, decision 2026-11-01-fip-prelint, amendment 2026-11-20).
+    pub frees: Option<u64>,
 }
 
 impl Mark {
@@ -359,6 +379,9 @@ impl Mark {
         let mut args = Vec::new();
         if self.kind == Kind::Fip && self.n > 0 {
             args.push(self.n.to_string());
+        }
+        if let Some(m) = self.frees {
+            args.push(format!("frees = {m}"));
         }
         if self.total {
             args.push("total".to_string());
@@ -409,6 +432,18 @@ impl Mark {
         }
         if self.kind == Kind::Fbip && c.kind == Kind::Fip {
             v.push("it allows frees and recursion (`fbip`), the contract does not".to_string());
+        }
+        if let Some(m) = c.frees
+            && c.kind == Kind::Fbip
+            && self.kind == Kind::Fbip
+            && self.frees.is_none_or(|k| k > m)
+        {
+            v.push(match self.frees {
+                Some(k) => format!("it allows {k} deallocation(s) per call, the contract {m}"),
+                None => {
+                    format!("it allows any number of deallocations, the contract {m} per call")
+                }
+            });
         }
         if c.total && !self.total {
             v.push("the contract is `total`, the implementation is not".to_string());
@@ -482,6 +517,7 @@ pub fn parse_mark(args: &str) -> Result<Mark, String> {
         panic_macros: true,
         total: false,
         params: Vec::new(),
+        frees: None,
     };
     for part in split_top(args) {
         if let Some(rest) = part.strip_prefix("param") {
@@ -515,6 +551,7 @@ pub fn parse_mark(args: &str) -> Result<Mark, String> {
             "strict" => mark.strict = parse_bool(key, value)?,
             "panic_macros" => mark.panic_macros = parse_bool(key, value)?,
             "total" => mark.total = parse_bool(key, value)?,
+            "frees" => mark.frees = Some(parse_u64(key, value)?),
             other => return Err(format!("unknown key `{other}` in `fip::mark(..)`")),
         }
     }
@@ -522,6 +559,12 @@ pub fn parse_mark(args: &str) -> Result<Mark, String> {
         .ok_or_else(|| "`fip::mark(..)` needs `kind = \"fip\"` or `kind = \"fbip\"`".to_string())?;
     if mark.kind == Kind::Fbip && mark.n != 0 {
         return Err("`kind = \"fbip\"` takes no bound `n`".to_string());
+    }
+    if mark.kind == Kind::Fip && mark.frees.is_some() {
+        return Err(
+            "`frees = M` needs `kind = \"fbip\"` (`kind = \"fip\"` allows no deallocation)"
+                .to_string(),
+        );
     }
     // `total` implies the rest of the grade; a mark claiming it with a weaker
     // setting is malformed rather than silently weakened.
@@ -641,6 +684,11 @@ mod tests {
         assert!(parse_mark(r#"kind = "fop""#).is_err());
         assert!(parse_mark(r#"kind = "fip", strict = yes"#).is_err());
         assert!(parse_mark(r#"kind = "fip", bound = 1"#).is_err());
+        assert!(parse_mark(r#"kind = "fip", frees = 1"#).is_err());
+        let m = parse_mark(r#"kind = "fbip", frees = 2"#).unwrap();
+        assert_eq!(m.frees, Some(2));
+        assert_eq!(m.tag(), "#[fbip(frees = 2)]");
+        assert_eq!(parse_mark(r#"kind = "fbip""#).unwrap().frees, None);
     }
 
     #[test]
@@ -650,28 +698,41 @@ mod tests {
             s(&["#[fip::alloc_source]"]),
             Ok(Some(Source {
                 alloc: 1,
-                free: false
+                free: false,
+                frees: 0
             }))
         );
         assert_eq!(
             s(&["#[fip::alloc_source(n = 3)]"]),
             Ok(Some(Source {
                 alloc: 3,
-                free: false
+                free: false,
+                frees: 0
             }))
         );
         assert_eq!(
             s(&["#[fip::free_source]", "#[fip::alloc_source]"]),
             Ok(Some(Source {
                 alloc: 1,
-                free: true
+                free: true,
+                frees: 1
+            }))
+        );
+        assert_eq!(
+            s(&["#[fip::free_source(n = 2)]"]),
+            Ok(Some(Source {
+                alloc: 0,
+                free: true,
+                frees: 2
             }))
         );
         assert_eq!(s(&[r#"#[fip::mark(kind = "fip")]"#]), Ok(None));
         assert!(s(&["#[fip::alloc_source(n = 0)]"]).is_err());
         assert!(s(&["#[fip::alloc_source(count = 2)]"]).is_err());
         assert!(s(&["#[fip::alloc_source(2)]"]).is_err());
-        assert!(s(&["#[fip::free_source(n = 1)]"]).is_err());
+        assert!(s(&["#[fip::free_source(n = 0)]"]).is_err());
+        assert!(s(&["#[fip::free_source(2)]"]).is_err());
+        assert!(s(&["#[fip::free_source(k = 2)]"]).is_err());
         assert_eq!(
             tool_attr_of_printed("#[fip::alloc_source(n = 2)]"),
             Some(("alloc_source", Some("n = 2")))

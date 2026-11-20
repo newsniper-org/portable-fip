@@ -11,10 +11,12 @@ z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu -
-verified 10
+verified 14
 source ../ypool/src/lib.rs e0741458ed510401b809897e9b91e334cc72c99d327d83f62c20494dc74f68b0
-source src/lib.rs 6d7ee43793eaf0bc80e62e4bf54eed82b6c02318aeda45d5a19a7c17eb980c9e
+source src/lib.rs cbc83254a28ba73c55a89002fc2a10df8f2b414ae257878893a3faebd8807f27
 fn yuser::drain src/lib.rs:34 cca0c0c66a94d5a2c6fd8f3dbded643149393c048462f7d0763709ef42819b12 - 0 - -
+fn yuser::put_twice src/lib.rs:112 c8f973d46bf1831d687148065cbf04ca8e2a1d030b6ac94915e4a04f4f213b0c - 0 2 -
+fn yuser::put_twice_over src/lib.rs:134 86f08658806a975da16e148040db9b46509b5536099bfd3443eb5324ea60f434 - 0 2 -
 fn yuser::take_put_twice src/lib.rs:90 6e01dca53a8884aa1aa21b9b58d5c042c97514d20d657f8c3a7778cbd96d4882 - 2 - -
 fn yuser::two_counted src/lib.rs:15 a7b3b27ced2fbe9e4b77f3c4ff0fd2eac9822c39d4b1c754d3f1934525f0cf8c - 2 - -
 fn yuser::two_pages src/lib.rs:52 8d67ce193befb41121b909035c49af79df78b874229f69e2f5a8a62a49e1582b - 2 - -

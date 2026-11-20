@@ -108,3 +108,46 @@ pub fn take_put_twice(p: &mut Pool) {
         i = i + 1;
     }
 }
+
+/// Two frees in a loop: the driver counts any number, Verus proves `deallocates 2`
+/// (the source states `encapsulates alloc(0, 1)`), so the count is 2.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 2))]
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    allocates 0
+    deallocates 2
+))]
+pub fn put_twice(p: &mut Pool) {
+    let mut i: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            i <= 2,
+            allocated() == 0,
+            deallocated() <= i as nat,
+        decreases 2 - i,
+    ))]
+    while i < 2 {
+        p.put(i);
+        i = i + 1;
+    }
+}
+
+/// The same under `frees = 1`: an error naming Verus's 2.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 1))]
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    allocates 0
+    deallocates 2
+))]
+pub fn put_twice_over(p: &mut Pool) {
+    let mut i: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            i <= 2,
+            allocated() == 0,
+            deallocated() <= i as nat,
+        decreases 2 - i,
+    ))]
+    while i < 2 {
+        p.put(i);
+        i = i + 1;
+    }
+}

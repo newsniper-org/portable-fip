@@ -136,3 +136,64 @@ pub mod rust {
 pub fn rust_named_malloc(n: usize) -> usize {
     rust::malloc(n)
 }
+
+/// Deallocation counts (`frees = M`, an extension of FP²'s `fbip`): one call of a free
+/// source and one of a source declared `n = 2` are 3.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 3))]
+pub fn free_three(s: &mut Slab) -> Option<u32> {
+    let a = s.remove(0);
+    let _ = s.remove_pair(1);
+    a
+}
+
+/// The same body under `frees = 2`: an error naming 3.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 2))]
+pub fn free_three_over(s: &mut Slab) -> Option<u32> {
+    let a = s.remove(0);
+    let _ = s.remove_pair(1);
+    a
+}
+
+/// Two branches: the longer one counts (2).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 2))]
+pub fn free_branch(s: &mut Slab, both: bool) {
+    if both {
+        let _ = s.remove_pair(0);
+    } else {
+        let _ = s.remove(0);
+    }
+}
+
+/// A free source in a loop: any number.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 4))]
+pub fn free_loop(s: &mut Slab, k: usize) {
+    let mut i = 0;
+    while i < k {
+        let _ = s.remove(i);
+        i += 1;
+    }
+}
+
+/// Dropping a `Box` is one call of `Global`'s `deallocate`: 1.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 1))]
+pub fn free_box(b: Box<u32>) -> u32 {
+    *b
+}
+
+/// The same under `frees = 0`: an error naming 1.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+pub fn free_box_over(b: Box<u32>) -> u32 {
+    *b
+}
+
+/// Dropping a `Vec` of boxes frees once per element, in a loop of `std`: any number.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 8))]
+pub fn free_vec(v: Vec<Box<u32>>) -> usize {
+    v.len()
+}
+
+/// `frees` on `kind = "fip"`: malformed.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip", frees = 1))]
+pub fn free_on_fip(x: u32) -> u32 {
+    x
+}

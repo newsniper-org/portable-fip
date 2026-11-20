@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
 //! Every root passes; the marks come from `fip-macros` (`#[fip]`, `#[fip(N)]`,
-//! `#[fbip]`, `strict = true` with `param(..)`).
+//! `#[fbip]`, `#[fbip(frees = M)]`, `strict = true` with `param(..)`).
 
 use fip_macros::{fbip, fip};
 use fip_strict::FipFn;
@@ -23,6 +23,13 @@ pub fn boxed(x: u32) -> Box<u32> {
 #[fbip]
 pub fn count(n: u32) -> u32 {
     if n == 0 { 0 } else { count(n - 1).wrapping_add(1) }
+}
+
+/// A deallocation bound (`frees = M`, checked by the driver only): dropping the box
+/// is one deallocation.
+#[fbip(frees = 1)]
+pub fn unbox(b: Box<u32>) -> u32 {
+    *b
 }
 
 /// A callable parameter with a declared bound.

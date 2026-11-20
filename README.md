@@ -239,8 +239,17 @@ crates are compiled by the real rustc and stay ⊤.
   `GlobalAlloc`/`Allocator` implementations, at foreign C allocation functions
   (`malloc`, `calloc`, `free`, `realloc`, ..), and at functions declared
   `#[cfg_attr(fip_prelint, fip::alloc_source)]` (`n = N` per call) or
-  `fip::free_source` (also on trait method declarations and foreign functions). A
+  `fip::free_source` (`n = N` deallocations per call; also on trait method
+  declarations and foreign functions). A
   source is opaque: a call counts at the call site and its body is not analysed.
+  **Deallocation bound** (2026-11-20, an extension: FP²'s `fbip` bounds allocation
+  only): `#[fbip(frees = M)]` (`fip::mark(kind = "fbip", frees = M)`) allows at most
+  `M` deallocations per call. The count is finite through calls of free sources, of
+  an allocator's `deallocate`/`realloc`-like methods (one each: dropping a `Box` is 1)
+  and through a literal `deallocates` bound Verus proved (taken as `allocates` is);
+  it is `∞` in loops and recursion, through std summaries, imported summaries,
+  certificates and contracts that only say "may free", and through calls of
+  parameters. The macro checks nothing about `frees`; the driver does.
   An exported crate that hands out memory from its own pools must mark them; an
   unmarked pool is ordinary code. `#[fip]` on a source is an error. Intrinsics come
   from a table in `fip_lint_rules::mir`.
@@ -334,9 +343,9 @@ crates are compiled by the real rustc and stay ⊤.
   `encapsulates alloc(a, d)`: callers are charged `a` allocations and `d`
   deallocations, the body is not checked against them. So no Verus bound is taken for
   a function that reaches a declared source unless a sidecar lists the source with
-  `encapsulates alloc(a, d)`, `a` the literal declared count and `d` a literal that is
-  positive exactly for a `fip::free_source` (for a source declared on a trait method:
-  on the implementation). Other counts in the clause are an error on the source. A
+  `encapsulates alloc(a, d)`, `a` the literal `n` of `fip::alloc_source` and `d` the
+  literal `n` of `fip::free_source` (0 without the attribute; for a source declared on
+  a trait method: on the implementation). Other counts in the clause are an error on the source. A
   function with `encapsulates` that is not a declared source gives no bound, and none
   is taken through it: the driver analyses its body. The summary lists the bounds not
   taken.

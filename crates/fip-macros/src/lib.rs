@@ -1815,6 +1815,9 @@ struct FipArgs {
     /// reported there.
     grade_span: Option<Span>,
     trait_checked: bool,
+    /// `#[fbip(frees = M)]`: at most `M` deallocations per call, checked by
+    /// `fip-prelint` only (an extension: FP²'s `fbip` does not bound deallocation).
+    frees: Option<u64>,
     params: Vec<ParamDecl>,
     /// `param(..)` written without `strict = true` before it: rejected on a function
     /// with a body ("requires `strict = true`"), accepted on a trait method
@@ -2010,6 +2013,7 @@ impl FipArgs {
             total: None,
             grade_span: None,
             trait_checked: false,
+            frees: None,
             params: Vec::new(),
             panic_macros: true,
             param_unstrict: None,
@@ -2187,19 +2191,43 @@ fn check_total(
 
 /// Marks a function as functional-but-in-place: no allocation; frees and
 /// recursion are allowed. See the crate documentation for exactly what is checked.
+///
+/// `#[fbip(frees = M)]` also declares at most `M` deallocations per call. The macro
+/// checks nothing about it; the MIR checker `fip-prelint` does (the bound is not part
+/// of FP², whose `fbip` bounds allocation only).
 #[proc_macro_attribute]
 pub fn fbip(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if let Some(first) = attr.into_iter().next() {
-        return arg_error(first.span(), "fbip", item);
+    let parts = split_commas(attr);
+    match parts.as_slice() {
+        [] => expand(Mode::Fbip, None, item),
+        [part] => match part.as_slice() {
+            [TokenTree::Ident(key), eq, lit]
+                if key.to_string() == "frees"
+                    && is_punct(eq, '=')
+                    && int_literal(lit).is_some() =>
+            {
+                let mut args = FipArgs::plain();
+                args.mode = Mode::Fbip;
+                args.frees = int_literal(lit);
+                expand(Mode::Fbip, Some(&args), item)
+            }
+            _ => {
+                let sp = part.first().map_or_else(Span::call_site, TokenTree::span);
+                arg_error(sp, "fbip", item)
+            }
+        },
+        [_, second, ..] => {
+            let sp = second.first().map_or_else(Span::call_site, TokenTree::span);
+            arg_error(sp, "fbip", item)
+        }
     }
-    expand(Mode::Fbip, None, item)
 }
 
 fn arg_error(span: Span, which: &str, item: TokenStream) -> TokenStream {
     let msg = if which == "fip" {
         "expected `#[fip]` or `#[fip(N)]` with an integer literal N"
     } else {
-        "`#[fbip]` takes no arguments"
+        "expected `#[fbip]` or `#[fbip(frees = M)]` with an integer literal M"
     };
     let mut out = compile_error(span, msg);
     out.extend(item);
@@ -3582,7 +3610,7 @@ fn mark_only_doc() -> TokenStream {
 /// Syntax (every key always present, in this order):
 ///
 /// `fip::mark(kind = "fip"|"fbip", n = N, strict = true|false,
-/// panic_macros = true|false[, total = true][, param(name = K, ..)])`
+/// panic_macros = true|false[, total = true][, frees = M][, param(name = K, ..)])`
 ///
 /// `n` is the declared allocation bound (`#[fip]` and `#[fbip]`: 0, `#[fip(N)]`: N);
 /// `param(..)` repeats the declared parameter bounds (of strict functions, and of
@@ -3610,6 +3638,10 @@ fn prelint_mark(mode: Mode, args: Option<&FipArgs>) -> TokenStream {
     // the marks of every other function are unchanged.
     if args.is_some_and(|a| a.total.is_some()) {
         parts.push("total = true".to_string());
+    }
+    // `frees = M` (`#[fbip(frees = M)]`): only when set, as `total`.
+    if let Some(m) = args.and_then(|a| a.frees) {
+        parts.push(format!("frees = {m}"));
     }
     if let Some(a) = args
         && !a.params.is_empty()

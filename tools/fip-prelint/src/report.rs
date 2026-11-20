@@ -685,6 +685,29 @@ fn verdict(
             ),
         );
     }
+    if let Some(m) = mark.frees
+        && s.frees.c.exceeds(m)
+    {
+        let mut seen: Vec<Span> = Vec::new();
+        let mut chains: Vec<String> = Vec::new();
+        for w in &s.free {
+            let sp = primary(w, fspan);
+            if seen.contains(&sp) || chains.len() >= 3 {
+                continue;
+            }
+            seen.push(sp);
+            chains.push(render(tcx, label, w));
+        }
+        let sp = s.free.first().map_or(fspan, |w| primary(w, fspan));
+        out.error(
+            sp,
+            &format!(
+                "`{label}` is {tag} but may free {} time(s), at most {m} allowed: {}",
+                s.frees.c,
+                chains.join("; ")
+            ),
+        );
+    }
     if mark.kind == Kind::Fip {
         if let Some(w) = s.free.first() {
             out.error(
@@ -1225,7 +1248,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             && let Some((a, dl)) = crates
                 .verus
                 .encapsulated(tcx, *d, tcx.optimized_mir(*d).span)
-            && !(a.literal() == Some(s.alloc) && dl.literal().is_some_and(|k| (k > 0) == s.free))
+            && !(a.literal() == Some(s.alloc) && dl.literal() == Some(s.frees))
         {
             crates.verus.source_mismatch(tcx, *d, &a, &dl, *s);
         }
