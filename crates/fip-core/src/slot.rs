@@ -53,7 +53,7 @@ pub fn replace<T: crate::AllocFreeDrop>(slot: &mut T, new: T) -> T {
     ensures
         f.ensures((*old(slot),), *final(slot)),
         r == hole,
-    allocates call_allocates(f, (*old(slot),))
+    allocates call_allocations(f, (*old(slot),))
 ))]
 #[inline]
 pub fn update<T: crate::AllocFreeDrop, F: FnOnce(T) -> T + crate::DropFreeFn>(

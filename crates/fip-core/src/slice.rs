@@ -241,7 +241,7 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
         map_st_by_ok(old(xs)@, f, s0),
-        forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
+        forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
     ensures
         r.1 == hole,
         map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0)),
@@ -277,7 +277,7 @@ pub fn map_in_place_st<
             forall|k: int| 0 <= k < i ==> f.ensures((ss[k], old(xs)@[k]), (ss[k + 1], #[trigger] xs@[k])),
             map_st_by_ok(old(xs)@, f, s0),
             forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
-            forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
+            forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
             allocated() <= 0,
         decreases n - i,
     ))]
@@ -333,7 +333,7 @@ pub fn map_in_place_st<
         forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
             ==> same.requires((&old(xs)@[i], &old(xs)@[j])),
         forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
-            ==> call_allocates(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
+            ==> call_allocations(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
     ensures
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_by_post(old(xs)@, final(xs)@, w as int, same, idx, src),
@@ -378,7 +378,7 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFree
             forall|j: int| 0 <= j < r ==> dedup_src_ok(
                 old(xs)@, w as int, |a: T, b: T, r: bool| same.ensures((&a, &b), r), idx, #[trigger] src[j], j),
             forall|i: int, j: int| 0 <= i < n && 0 <= j < n
-                ==> call_allocates(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
+                ==> call_allocations(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
             allocated() <= 0,
         decreases n - r,
     ))]
@@ -583,7 +583,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropF
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
         compact_map_st_by_ok(old(xs)@, f, s0),
-        forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
+        forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
     ensures
         r.2 == hole,
         ({
@@ -639,7 +639,7 @@ pub fn compact_map_st<
             prefix_ok(xs@, ys, ks, idx, w as int),
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
-            forall|s: S, x: T| call_allocates(f, (s, x)) <= 0,
+            forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
             allocated() <= 0,
         decreases len - r,
     ))]

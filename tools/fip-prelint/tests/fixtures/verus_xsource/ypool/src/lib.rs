@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 
-//! Allocation sources of another crate (decision 2026-11-01-fip-prelint, amendment
-//! 2026-11-19): `yuser` takes Verus's bound through a source only if this crate's
-//! sidecar lists the source with a literal `allocates` of at least its declared count
-//! (`take_counted`, `<Pages as Backend>::reserve`, the generic `alloc_from`), not
-//! through `take` (`allocates 0`).
+//! Allocation sources of another crate (decision 2026-11-01-fip-prelint, amendments
+//! 2026-11-19 and 2026-11-20): `yuser` takes Verus's bound through a source only if
+//! this crate's sidecar lists the source with `encapsulates alloc(a, d)` equal to its
+//! declaration (`take_counted`, `put`, `<Pages as Backend>::reserve`, the generic
+//! `alloc_from`), not through `take` (`allocates 0`).
 
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 #![cfg_attr(fip_prelint, fip::export)]
@@ -23,13 +23,24 @@ impl Pool {
     /// States its count.
     #[cfg_attr(fip_prelint, fip::alloc_source)]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
-        allocates 1
+        encapsulates alloc(1, 0)
     ))]
     pub fn take_counted(&mut self) -> usize {
         if self.next < 1000 {
             self.next = self.next + 1;
         }
         self.next
+    }
+
+    /// A free source that states its deallocation.
+    #[cfg_attr(fip_prelint, fip::free_source)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        encapsulates alloc(0, 1)
+    ))]
+    pub fn put(&mut self, slot: usize) {
+        if self.next > 0 && slot > 0 {
+            self.next = self.next - 1;
+        }
     }
 
     /// States 0.
@@ -62,7 +73,7 @@ pub struct Pages {
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 impl Backend for Pages {
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
-        allocates 1
+        encapsulates alloc(1, 0)
     ))]
     fn reserve(&mut self) -> usize {
         if self.top < 1000 {
@@ -75,7 +86,7 @@ impl Backend for Pages {
 /// A generic source, as a slab's `alloc<B: PageBackend>`: declared one allocation.
 #[cfg_attr(fip_prelint, fip::alloc_source)]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
-    allocates 1
+    encapsulates alloc(1, 0)
 ))]
 pub fn alloc_from<B: Backend>(b: &mut B) -> usize {
     b.reserve()

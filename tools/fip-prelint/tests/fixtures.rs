@@ -1085,7 +1085,7 @@ fn forge_listed_bound(d: &Path, name: &str, item: &str, allocates: &str) {
         &sidecar,
         &format!("source src/lib.rs {old}"),
         &format!(
-            "source src/lib.rs {new}\nfn vside::{name} src/lib.rs:{line} {hash} - {allocates}"
+            "source src/lib.rs {new}\nfn vside::{name} src/lib.rs:{line} {hash} - {allocates} - -"
         ),
     );
 }
@@ -1219,8 +1219,8 @@ fn verus_sidecar_cfg() {
     let d = copy_fixture("verus_sidecar", "verus_format");
     edit(
         &d.join("vside/verus-verified.txt"),
+        "\nformat 6\n",
         "\nformat 5\n",
-        "\nformat 4\n",
     );
     compare(
         "verus_sidecar",
@@ -1339,8 +1339,12 @@ fn verus_alloc_bounds() {
         .find(|l| l.starts_with("fn valloc::one "))
         .expect("`one` is listed")
         .to_string();
-    assert!(one.ends_with(" - 1"), "{one}");
-    edit(&sidecar, &one, &format!("{} - 0", &one[..one.len() - 4]));
+    assert!(one.ends_with(" - 1 - -"), "{one}");
+    edit(
+        &sidecar,
+        &one,
+        &format!("{} - 0 - -", &one[..one.len() - 8]),
+    );
     compare(
         "verus_alloc",
         "-exceeded",
@@ -1431,7 +1435,9 @@ fn verus_alloc_bounds() {
         .expect("read the sidecar")
         .replacen(
             "\nfn valloc::one ",
-            &format!("\nfn valloc::pick_dyn src/lib.rs:{line} {item_hash} - 0\nfn valloc::one "),
+            &format!(
+                "\nfn valloc::pick_dyn src/lib.rs:{line} {item_hash} - 0 - -\nfn valloc::one "
+            ),
             1,
         );
     std::fs::write(&sidecar, side).expect("write the sidecar");

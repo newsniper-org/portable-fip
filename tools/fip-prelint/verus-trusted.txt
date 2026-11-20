@@ -10,5 +10,5 @@
 # `allocates` fork of Verus, branch `fip`, which adds `-V alloc-check`. This file is
 # also the pin of `just verify`: `just verus-pin` checks the binary `VERUS` against
 # these two lines, so a re-pin edits only this file (plus the regenerated sidecars).
-verus 0.2026.11.19.d13a91f d13a91fed6dc676887a798192e1195a1330a33db
+verus 0.2026.11.20.83fd42f 83fd42f3ba974c504b5d4e8b6cc88614d1a845d7
 z3 4.16.0

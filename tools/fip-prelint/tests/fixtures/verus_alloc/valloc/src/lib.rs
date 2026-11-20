@@ -149,8 +149,10 @@ pub fn use_twice() -> u32 {
 
 /// A pool with its own interface (not a `core::alloc::Allocator`): its methods are
 /// declared allocation sources whose bodies call no allocator, so Verus counts a
-/// call only through the method's own `allocates` clause (decision
-/// 2026-11-01-fip-prelint, amendment 2026-11-19).
+/// call only through the method's own clause, and the driver takes Verus's bounds
+/// through a source only if that clause is `encapsulates alloc(a, d)` with the
+/// declared counts (decision 2026-11-01-fip-prelint, amendments 2026-11-19 and
+/// 2026-11-20).
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 pub struct Pool {
     pub next: usize,
@@ -158,7 +160,8 @@ pub struct Pool {
 
 #[cfg_attr(verus_keep_ghost, verus_verify)]
 impl Pool {
-    /// A declared source that is 0 to Verus: Verus does not count its calls.
+    /// A declared source without `encapsulates`: 0 to Verus, which does not count its
+    /// calls.
     #[cfg_attr(fip_prelint, fip::alloc_source)]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
         allocates 0
@@ -173,7 +176,7 @@ impl Pool {
     /// A declared source whose clause states its count: Verus charges every call 1.
     #[cfg_attr(fip_prelint, fip::alloc_source)]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
-        allocates 1
+        encapsulates alloc(1, 0)
     ))]
     pub fn take_counted(&mut self) -> usize {
         if self.next < 1000 {
@@ -182,10 +185,10 @@ impl Pool {
         self.next
     }
 
-    /// Declared 2, 1 to Verus: not counted in full.
+    /// Declared 2, 1 to Verus: the two declarations differ, an error.
     #[cfg_attr(fip_prelint, fip::alloc_source(n = 2))]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
-        allocates 1
+        encapsulates alloc(1, 0)
     ))]
     pub fn take_pair(&mut self) -> usize {
         if self.next < 999 {
@@ -278,7 +281,7 @@ pub trait Backend {
 impl Backend for Pool {
     /// States its clause: Verus charges every call 1, resolved or generic.
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
-        allocates 1
+        encapsulates alloc(1, 0)
     ))]
     fn reserve(&mut self) -> usize {
         self.take_counted()
@@ -355,4 +358,35 @@ pub fn bare_two_direct(b: &mut Bare) {
         let _ = b.reserve();
         i = i + 1;
     }
+}
+
+/// `encapsulates` on a function that is not a declared source: Verus charges its
+/// callers 0 and does not check its body, which allocates. The driver analyses the
+/// body and takes no Verus bound from it or through it.
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    encapsulates alloc(0, 0)
+))]
+pub fn sneak(n: usize) -> usize {
+    let b = Box::new(n);
+    *b
+}
+
+/// `n` calls of `sneak`: Verus proves 0, the driver's `∞` stays (an error).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    allocates 0
+))]
+pub fn via_sneak(n: usize) -> usize {
+    let mut i: usize = 0;
+    let mut s: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+        decreases n - i,
+    ))]
+    while i < n {
+        s = sneak(i);
+        i = i + 1;
+    }
+    s
 }

@@ -368,7 +368,7 @@ verify-negative: verify-strict verify-core
     # Allocation bounds (`allocates`, decision 2026-11-06-redesign-verus-allocates, phase 2):
     # each mutant must fail a verification condition whose reported span is the
     # allocation layer (an `allocates` clause, an `allocated()` invariant or a
-    # `call_allocates` requirement), not a functional one.
+    # `call_allocations` requirement), not a functional one.
     expect_alloc_fail() {  # name, crate, file, sed script, regex expected in the failing span
       local d; d=$(mutate "$1" "$2" "$3" "$4")
       if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
@@ -406,17 +406,17 @@ verify-negative: verify-strict verify-core
     grep -q "a \`#\[verifier::fip\]\` function must not deallocate" "$d/log" || { echo "FAIL: mutant refill-frees failed for another reason"; cat "$d/log"; exit 1; }
     echo "mutant refill-frees rejected by Verus (#[verifier::fip(strict)])"
     # A sum spec that forgets the last call cannot bound the loop.
-    expect_alloc_fail map-sum-drops-call    fip-core  spec.rs  's/^    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocates(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) }/' 'allocated\(\) <= crate::spec::map_allocs'
-    expect_alloc_fail compact-sum-drops-call fip-core spec.rs  's/^    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocates(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) }/' 'allocated\(\) <= crate::spec::compact_allocs'
+    expect_alloc_fail map-sum-drops-call    fip-core  spec.rs  's/^    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocations(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) }/' 'allocated\(\) <= crate::spec::map_allocs'
+    expect_alloc_fail compact-sum-drops-call fip-core spec.rs  's/^    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocations(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) }/' 'allocated\(\) <= crate::spec::compact_allocs'
     # `map_in_place_st` is `allocates 0` only because every call is required to be.
-    expect_alloc_fail map-st-alloc-unrequired fip-core slice.rs '/^        map_st_by_ok(old(xs)@, f, s0),$/ { n; /call_allocates/d; }' 'call_allocates\(f, \(s, x\)\) <= 0'
+    expect_alloc_fail map-st-alloc-unrequired fip-core slice.rs '/^        map_st_by_ok(old(xs)@, f, s0),$/ { n; /call_allocations/d; }' 'call_allocations\(f, \(s, x\)\) <= 0'
     # Strict callables (phase 3): `FipFn::call` allocates at most `allocs()`. A strict
     # combinator calling its callable twice per element breaks `len * f.allocs()`;
     # `Compose` claiming one allocation less than its parts, and `Certified` without
-    # the `call_allocates(..) <= ALLOCS` conjunct of `pre`, break `call`'s bound.
+    # the `call_allocations(..) <= ALLOCS` conjunct of `pre`, break `call`'s bound.
     expect_alloc_fail strict-compact-calls-twice fip-core strict.rs '/^pub fn compact</,/^}/ s/^        if keep.call((&xs\[r\],)) {$/        let _again = keep.call((\&xs[r],));\n        if keep.call((\&xs[r],)) {/' 'allocated\(\) <= r \* keep\.allocs\(\)'
     expect_alloc_fail compose-sum-minus-one   fip-strict lib.rs '/^macro_rules! compose_fip_fn/,/^}/ s/^                self.0.allocs() + self.1.allocs()$/                (self.0.allocs() + self.1.allocs() - 1) as nat/' 'allocates self\.allocs\(\)'
-    expect_alloc_fail certified-pre-no-alloc  fip-strict lib.rs '/^                &&& call_allocates(self.inner(), args) <= ALLOCS as int$/d' 'allocates self\.allocs\(\)'
+    expect_alloc_fail certified-pre-no-alloc  fip-strict lib.rs '/^                &&& call_allocations(self.inner(), args) <= ALLOCS as int$/d' 'allocates self\.allocs\(\)'
     # Strict variants (`FipFn` callables), same mutations.
     expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$spec"
     expect_verus_fail strict-compact-order       fip-core strict.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
@@ -518,15 +518,15 @@ verify-negative: verify-strict verify-core
     }
     callers_fail closure-allocates '/^pub fn evens(/,/^}/ s/allocates 0 { \*v % 2 == 0 }/allocates 0 { let _b = Box::new(0u8); *v % 2 == 0 }/' 'unable to prove post-condition of closure' 'Box::new'
     callers_fail closure-unbounded '/^pub fn evens(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'postcondition not satisfied' 'allocates 0'
-    callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'precondition not satisfied' 'call_allocates\(same'
+    callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'precondition not satisfied' 'call_allocations\(same'
     callers_fail no-zero-lemmas    '/^broadcast use fip_core::spec::group_allocs_zero;$/d' 'postcondition not satisfied' 'allocates 0'
     # A `Certified<0, _>` wrapping a closure that allocates once: `Certified::pre`
-    # (`call_allocates(closure, args) <= 0`; the closure has no `requires`) fails.
+    # (`call_allocations(closure, args) <= 0`; the closure has no `requires`) fails.
     callers_fail certified0-allocating '/^pub fn boxed_once(/,/^}/ s/Certified::<1, _, false>/Certified::<0, _, false>/' 'precondition not satisfied' 'self\.pre\(args\)'
     # `fip_fn!(path)` without `bound` is a `Certified<0, _>` under Verus (it reads no
     # certificate): for the allocating `boxed` (verify/fip_fn_types.rs) the verified
     # caller fails `Certified::pre` (`boxed` has no `requires`, so the failing part is
-    # `call_allocates(boxed, (x,)) <= 0`).
+    # `call_allocations(boxed, (x,)) <= 0`).
     f="$out/types_path_no_bound.rs"
     sed 's/^    let f = fip_fn!(bound <= 1, boxed);$/    let f = fip_fn!(boxed);/' verify/fip_fn_types.rs > "$f"
     if cmp -s verify/fip_fn_types.rs "$f"; then echo "FAIL: control types-path-no-bound did not apply"; exit 1; fi
@@ -647,7 +647,7 @@ verify-sidecar: verify-strict
     fi
     grep -q "must use \`--no-cheating\`" "$out/cheat.err"
     test ! -e "$out/cheat.txt"
-    # Without -V alloc-check (sidecar format 5): refused before Verus runs, nothing written.
+    # Without -V alloc-check (required since sidecar format 5): refused before Verus runs, nothing written.
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/noalloc.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) 2> "$out/noalloc.err"; then
       echo "FAIL: a sidecar was generated without -V alloc-check"; exit 1
     fi
@@ -754,7 +754,7 @@ verify-sidecar: verify-strict
 # Strip gate (decision 2026-11-06-redesign-verus-allocates, D5): upstream Verus
 # (`VERUS_UPSTREAM`, version `verus_upstream_pin`) verifies the sources with the fork's
 # allocation layer removed (`verify/strip_alloc.py`: `allocates` clauses, `allocated()`
-# invariants, `call_allocates`, adapter-bound hints, `AllocFreeDrop` impls; it fails on
+# invariants, `call_allocations`, adapter-bound hints, `AllocFreeDrop` impls; it fails on
 # any spelling it does not know), so the functional proofs do not depend on the fork's
 # allocation pass. The fork's `.vir` files cannot be imported by upstream, so every
 # crate is re-verified, with `--no-cheating` and the fork-only flags left out. In `ci`

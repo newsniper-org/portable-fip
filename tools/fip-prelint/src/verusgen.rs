@@ -272,6 +272,11 @@ pub struct VirFn {
     pub calls: Vec<String>,
     /// Its proved `allocates` bound ([`alloc_bound`] of the `:allocates` field).
     pub allocates: verus::AllocBound,
+    /// Its `deallocates` bound ([`alloc_bound`] of the `:deallocations` field, fork
+    /// `83fd42f3b`).
+    pub deallocates: verus::AllocBound,
+    /// `:encapsulates_alloc true` in its attributes (`encapsulates alloc(a, d)`).
+    pub encapsulates: bool,
 }
 
 /// End of the balanced s-expression starting at `open` (a `(`), strings skipped.
@@ -427,6 +432,13 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
         }
         // The fork's `:allocates` field (absent before 0.2026.11: nothing proved).
         let allocates = field(func, ":allocates").map_or(verus::AllocBound::None, alloc_bound);
+        let deallocates =
+            field(func, ":deallocations").map_or(verus::AllocBound::None, alloc_bound);
+        // (absent before the fork `e93729c25`)
+        let encapsulates = attrs
+            .split(":encapsulates_alloc")
+            .nth(1)
+            .is_some_and(|r| r.trim_start().starts_with("true"));
         out.push(VirFn {
             path,
             span,
@@ -437,6 +449,8 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             expanded: !span_text.ends_with(" (#0)"),
             calls,
             allocates,
+            deallocates,
+            encapsulates,
         });
     }
     Ok(out)
@@ -848,6 +862,12 @@ pub fn cfg_check_files(crate_dir: &Path, files: &[PathBuf]) -> Result<(), String
         .flat_map(|(_, src)| verus::macro_rules_names(src))
         .collect();
     for (f, src) in &texts {
+        if let Some(line) = verus::verus_internal_use(src) {
+            return Err(format!(
+                "{}:{line}: names `verus::internal`, the attributes Verus's own macros write for the verifier: written by hand they state what Verus did not check, so no sidecar is written",
+                relative(f, crate_dir)
+            ));
+        }
         if let Some(c) = verus::crate_cfg_conflict(src, &local) {
             return Err(format!(
                 "{}: {c}: the driver compiles the crate with other cfgs and environment than Verus (`fip_prelint`, the profile, `test`, cargo's variables), so no sidecar is written",
@@ -1177,6 +1197,8 @@ pub fn build(
                 hash: verus::sha256_hex(&src.as_bytes()[lo..hi]),
                 requires: f.requires,
                 allocates: f.allocates.clone(),
+                deallocates: f.deallocates.clone(),
+                encapsulates: f.encapsulates,
             },
             f,
         ));
@@ -1446,6 +1468,8 @@ mod tests {
             expanded: false,
             calls: calls.iter().map(ToString::to_string).collect(),
             allocates: verus::AllocBound::None,
+            deallocates: verus::AllocBound::None,
+            encapsulates: false,
         };
         let fns = vec![
             f("t::on", (1, 1), ((1, 21), (5, 2)), &[]),
@@ -1497,7 +1521,7 @@ mod tests {
     /// Phase 4: `allocates` clauses as the fork `0.2026.11.05.ca33b04` writes them into
     /// the VIR log (taken from a `--log vir` run): constants, unsigned parameters
     /// (`n as nat` leaves no cast), `+` and constant `*` over `nat`/`int` normalise;
-    /// a callback's `call_allocates`, a sequence length, a fixed-width operation or a
+    /// a callback's `call_allocations`, a sequence length, a fixed-width operation or a
     /// non-constant product are opaque (hashed without spans and ids).
     #[test]
     fn allocates_bounds_normalised() {
@@ -1579,6 +1603,8 @@ mod tests {
             expanded: false,
             calls: calls.iter().map(ToString::to_string).collect(),
             allocates: verus::AllocBound::None,
+            deallocates: verus::AllocBound::None,
+            encapsulates: false,
         };
         let fns = vec![
             f("t::run", 4, (6, 2), &["t::Step::step"]),
@@ -1661,6 +1687,8 @@ mod tests {
             expanded: false,
             calls: Vec::new(),
             allocates: verus::AllocBound::None,
+            deallocates: verus::AllocBound::None,
+            encapsulates: false,
         }];
         let info = RunInfo {
             version: "v".to_string(),

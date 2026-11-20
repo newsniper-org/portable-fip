@@ -1216,6 +1216,25 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             }
         }
     }
+    // A local declared source with a body and `encapsulates alloc(a, d)` in the sidecar:
+    // the counts must be the declared ones, whether or not a root reaches it. (An
+    // implementation of a source declared on a trait method is checked where a root
+    // reaches it.)
+    for (d, s) in &sources {
+        if tcx.is_mir_available(*d)
+            && let Some((a, dl)) = crates
+                .verus
+                .encapsulated(tcx, *d, tcx.optimized_mir(*d).span)
+            && !(a.literal() == Some(s.alloc) && dl.literal().is_some_and(|k| (k > 0) == s.free))
+        {
+            crates.verus.source_mismatch(tcx, *d, &a, &dl, *s);
+        }
+    }
+    for (d, msg) in crates.verus.mismatched() {
+        if d.is_local() {
+            out.error(tcx.def_span(d), &msg);
+        }
+    }
     let by_symbol = report_ffi_matches(tcx, &crates);
     if marked.is_empty()
         && checked == 0

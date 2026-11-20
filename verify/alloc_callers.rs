@@ -7,7 +7,7 @@
 //! is itself `allocates 0` (`DropFreeFn` is `Copy` under Verus).
 //!
 //! `map_in_place`, `compact` and `compact_map` are bounded by the sum of their
-//! callbacks' `call_allocates` (`fip_core::spec::map_allocs` and friends); the lemmas
+//! callbacks' `call_allocations` (`fip_core::spec::map_allocs` and friends); the lemmas
 //! of `fip_core::spec::group_allocs_zero` turn "every call allocates nothing" into a
 //! zero sum (without them the three sum-bounded callers fail, measured 2026-11-06).
 //! `dedup_by` and `map_in_place_st` require every call to allocate nothing.
@@ -93,7 +93,7 @@ pub fn kept_state(xs: &mut [u32]) -> (r: (u32, u32))
 
 // Strict callables (phase 3): `FipFn::call` allocates at most `allocs()`, which is
 // `ALLOCS` for a `Certified<ALLOCS, _>`; `Certified::pre` requires
-// `call_allocates(closure, args) <= ALLOCS`. The values are wrapped by hand with the
+// `call_allocations(closure, args) <= ALLOCS`. The values are wrapped by hand with the
 // `unsafe` constructor that `fip_fn!` expands to.
 
 /// A closure that allocates once, certified with 1.

@@ -85,7 +85,7 @@
 //! is `allocates self.allocs()` (the Verus fork's allocation bound, checked with
 //! `-V alloc-check`; decision `2026-11-06-redesign-verus-allocates`, phase 3). For
 //! [`Certified`]`<ALLOCS, C>` they are the wrapped closure's `requires` / `ensures`,
-//! with `call_allocates(closure, args) <= ALLOCS` as a second conjunct of `pre`, and
+//! with `call_allocations(closure, args) <= ALLOCS` as a second conjunct of `pre`, and
 //! `allocs()` is `ALLOCS`. So the certificate number is checked by Verus wherever a
 //! verified caller calls the value: a closure that may allocate more than `ALLOCS`
 //! (or has no `allocates` bound) fails `pre`. For the adapters `allocs()` is the sum
@@ -378,7 +378,7 @@ pub trait FipFn<Args>: FipBound {
 ///
 /// Fields are private and [`Certified::assume`] is `unsafe`: pairing a closure with
 /// a bound is a claim. Under Verus the claim is checked at each verified call:
-/// `pre(args)` requires `call_allocates(closure, args) <= ALLOCS`, and `allocs()` is
+/// `pre(args)` requires `call_allocations(closure, args) <= ALLOCS`, and `allocs()` is
 /// `ALLOCS`.
 #[cfg(not(verus_keep_ghost))]
 pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> {
@@ -712,7 +712,7 @@ macro_rules! certified_fip_fn {
             type Output = R;
             open spec fn pre(&self, args: ($($A,)*)) -> bool {
                 &&& self.inner().requires(args)
-                &&& call_allocates(self.inner(), args) <= ALLOCS as int
+                &&& call_allocations(self.inner(), args) <= ALLOCS as int
             }
             open spec fn allocs(&self) -> nat {
                 ALLOCS as nat

@@ -86,3 +86,25 @@ pub fn two_slabs(b: &mut Pages) {
         i = i + 1;
     }
 }
+
+/// Two rounds of an allocation and a free through the pool: Verus proves 2, the sources
+/// state their counts (`encapsulates alloc(1, 0)` and `alloc(0, 1)`), so the count is 2
+/// in place of the driver's `∞` (above the 0 of `#[fbip]`: the error names 2).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    allocates 2
+))]
+pub fn take_put_twice(p: &mut Pool) {
+    let mut i: usize = 0;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            i <= 2,
+            allocated() <= i as nat,
+        decreases 2 - i,
+    ))]
+    while i < 2 {
+        let s = p.take_counted();
+        p.put(s);
+        i = i + 1;
+    }
+}

@@ -16,7 +16,7 @@
 //! - **Allocation bounds, by proof (Verus fork, `-V alloc-check`).** Every `Fn`-based
 //!   function states what one call allocates when it returns normally, and Verus
 //!   proves it: `swap` and `replace` are `allocates 0`; `update` allocates what its one
-//!   call of `f` does (`call_allocates(f, ..)`); `map_in_place`, `compact` and
+//!   call of `f` does (`call_allocations(f, ..)`); `map_in_place`, `compact` and
 //!   `compact_map` the sum over their callback calls (`spec::map_allocs`,
 //!   `spec::compact_allocs`, `spec::compact_map_allocs`; the lemmas of
 //!   `spec::group_allocs_zero` turn "every call allocates nothing" into a zero sum for
@@ -79,7 +79,7 @@
 //! ## What it does not guarantee
 //!
 //! - Closures passed in (`keep`, `same`, `f`) are the caller's code. Their
-//!   allocations enter the proved bounds through `call_allocates`, so a verified
+//!   allocations enter the proved bounds through `call_allocations`, so a verified
 //!   caller learns them from the closures' own `allocates` clauses; an unverified
 //!   caller gets no allocation claim for them, and no stack claim. The strict
 //!   variants require certified callables with bound 0 in plain builds, checked when

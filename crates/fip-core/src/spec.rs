@@ -1113,21 +1113,21 @@ verus! {
 pub open spec fn map_allocs<T, F: Fn(T) -> T>(f: F, s: Seq<T>, n: int) -> int
     decreases n,
 {
-    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocates(f, (s[n - 1],)) }
+    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocations(f, (s[n - 1],)) }
 }
 
 /// `allocates` total of calling `keep` once on each of the first `n` elements of `s`.
 pub open spec fn compact_allocs<T, F: Fn(&T) -> bool>(keep: F, s: Seq<T>, n: int) -> int
     decreases n,
 {
-    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocates(keep, (&s[n - 1],)) }
+    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocations(keep, (&s[n - 1],)) }
 }
 
 /// `allocates` total of calling `f` once on each of the first `n` elements of `s`.
 pub open spec fn compact_map_allocs<T, F: Fn(T) -> (T, bool)>(f: F, s: Seq<T>, n: int) -> int
     decreases n,
 {
-    if n <= 0 { 0 } else { compact_map_allocs(f, s, n - 1) + call_allocates(f, (s[n - 1],)) }
+    if n <= 0 { 0 } else { compact_map_allocs(f, s, n - 1) + call_allocations(f, (s[n - 1],)) }
 }
 
 } // verus!
@@ -1137,7 +1137,7 @@ verus! {
 /// Callbacks that allocate nothing on every element make [`map_allocs`] zero.
 pub broadcast proof fn lemma_map_allocs_zero<T, F: Fn(T) -> T>(f: F, s: Seq<T>, n: int)
     ensures
-        (forall|i: int| 0 <= i < n ==> #[trigger] call_allocates(f, (s[i],)) <= 0) ==> #[trigger] map_allocs(f, s, n) <= 0,
+        (forall|i: int| 0 <= i < n ==> #[trigger] call_allocations(f, (s[i],)) <= 0) ==> #[trigger] map_allocs(f, s, n) <= 0,
     decreases n,
 {
     if n > 0 { lemma_map_allocs_zero(f, s, n - 1); }
@@ -1146,7 +1146,7 @@ pub broadcast proof fn lemma_map_allocs_zero<T, F: Fn(T) -> T>(f: F, s: Seq<T>, 
 /// Callbacks that allocate nothing on every element make [`compact_allocs`] zero.
 pub broadcast proof fn lemma_compact_allocs_zero<T, F: Fn(&T) -> bool>(keep: F, s: Seq<T>, n: int)
     ensures
-        (forall|i: int| 0 <= i < n ==> #[trigger] call_allocates(keep, (&s[i],)) <= 0) ==> #[trigger] compact_allocs(keep, s, n) <= 0,
+        (forall|i: int| 0 <= i < n ==> #[trigger] call_allocations(keep, (&s[i],)) <= 0) ==> #[trigger] compact_allocs(keep, s, n) <= 0,
     decreases n,
 {
     if n > 0 { lemma_compact_allocs_zero(keep, s, n - 1); }
@@ -1155,7 +1155,7 @@ pub broadcast proof fn lemma_compact_allocs_zero<T, F: Fn(&T) -> bool>(keep: F, 
 /// Callbacks that allocate nothing on every element make [`compact_map_allocs`] zero.
 pub broadcast proof fn lemma_compact_map_allocs_zero<T, F: Fn(T) -> (T, bool)>(f: F, s: Seq<T>, n: int)
     ensures
-        (forall|i: int| 0 <= i < n ==> #[trigger] call_allocates(f, (s[i],)) <= 0) ==> #[trigger] compact_map_allocs(f, s, n) <= 0,
+        (forall|i: int| 0 <= i < n ==> #[trigger] call_allocations(f, (s[i],)) <= 0) ==> #[trigger] compact_map_allocs(f, s, n) <= 0,
     decreases n,
 {
     if n > 0 { lemma_compact_map_allocs_zero(f, s, n - 1); }

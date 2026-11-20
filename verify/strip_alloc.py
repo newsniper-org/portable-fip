@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 윤병익 (BYUNG-IK YEUN)
 """Strips the allocation layer of the Verus fork from Rust sources (`just verify-upstream`).
 
-Upstream Verus has no `allocates` clause, no `call_allocates` and no
+Upstream Verus has no `allocates` clause, no `call_allocations` and no
 `vstd::alloc_check` (decision record 2026-11-06-redesign-verus-allocates, section 3:
 `allocates` is a parse error on upstream 0.2026.11.02). The strip gate verifies the
 stripped sources with upstream Verus, showing that the functional proofs do not depend
@@ -18,7 +18,7 @@ to Verus; `tests/verus_drift.rs` names the allocation syntax in its strings). Re
     the end of a one-line `verus_spec(..)` (E up to the closing parenthesis), and a
     closure attribute line `#[cfg_attr(verus_keep_ghost, verus_spec(r: T => allocates E))]`
     whose only clause is the bound;
-  - lines mentioning `allocated()` or `call_allocates` (invariants, requires, `pre`
+  - lines mentioning `allocated()` or `call_allocations` (invariants, requires, `pre`
     conjuncts), and `forall` lines whose next line is such a conjunct;
   - proof hints about adapter bounds: `proof! { assert(..allocs(..)..) }` lines, and
     multi-line `proof! { .. }` blocks holding only `assert(..allocs(..)..);` lines;
@@ -35,7 +35,7 @@ script cannot see: `just verify-upstream` sets `FIP_MACROS_UPSTREAM=1` for that
 (`fip-macros` then leaves out `allocates` and `#[verifier::fip]`, never `requires`
 or `no_unwind`).
 The script then fails if any code line (comments excluded) still names `allocates`,
-`allocated()`, `call_allocates`, `alloc_check` or `verifier::fip`: a new spelling must
+`allocated()`, `call_allocations`, `alloc_check` or `verifier::fip`: a new spelling must
 be taught here, never passed silently to upstream Verus (where it would be an error
 anyway).
 """
@@ -49,7 +49,7 @@ ONLY_ALLOCATES_ATTR = re.compile(
     r"^\s*#\[cfg_attr\(verus_keep_ghost, verus_spec\(\w+(?:: [^=]+)? => allocates [^()]*(?:\([^()]*\))?\)\)\]$"
 )
 LEFTOVER = re.compile(
-    r"\ballocates\b|\ballocated\(\)|\bcall_allocates\b|\balloc_check\b|\bverifier::fip\b"
+    r"\ballocates\b|\ballocated\(\)|\bcall_allocations\b|\balloc_check\b|\bverifier::fip\b"
 )
 FIP_ATTR = re.compile(r"^\s*#\[cfg_attr\(verus_keep_ghost, verifier::fip(?:\(strict\))?\)\]$")
 
@@ -77,7 +77,7 @@ def strip(s: str) -> str:
     s = re.sub(r"\n\nverus! \{\n\n/// `allocates` total.*?\} // verus!\n", "\n", s, flags=re.S)
     s = re.sub(r"\n\nverus! \{\n\n/// Callbacks that allocate nothing.*?\} // verus!\n", "\n", s, flags=re.S)
     s = re.sub(r"\n[ ]*proof! \{\n(?:[ ]*assert\([^\n]*allocs\([^\n]*\);\n)+[ ]*\}(?=\n)", "", s)
-    s = re.sub(r"\n[^\n]*forall\|i: int, j: int\|[^\n]*\n[^\n]*==> call_allocates\([^\n]*", "", s)
+    s = re.sub(r"\n[^\n]*forall\|i: int, j: int\|[^\n]*\n[^\n]*==> call_allocations\([^\n]*", "", s)
     lines: list[str] = []
     skip = 0
     for line in s.split("\n"):
@@ -91,7 +91,7 @@ def strip(s: str) -> str:
             if t.count("(") != t.count(")"):
                 raise SystemExit(f"strip_alloc: multi-line `allocates` clause: {t}")
             continue
-        if "allocated()" in t or "call_allocates" in t:
+        if "allocated()" in t or "call_allocations" in t:
             continue
         if t.startswith("proof!") and "allocs(" in t:
             continue

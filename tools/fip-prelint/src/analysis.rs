@@ -411,13 +411,15 @@ enum Ev {
     /// A panic site discharged by Verus under the `requires` of the named function
     /// (top plan T13.4): no event here, an obligation for its callers.
     VerusPre(String),
-    /// A call of the named allocation source, which Verus does not count: Verus
-    /// counts calls of `core::alloc::Allocator` methods and of `vstd::raw_ptr::allocate`
-    /// (and what a callee's `allocates` clause states), so a function declared
-    /// `fip::alloc_source` whose body calls no allocator is 0 to Verus unless its own
-    /// clause says otherwise (decision 2026-11-01-fip-prelint, amendment 2026-11-19).
-    /// No event here; it bars Verus's `allocates` bounds for every function reaching
-    /// it.
+    /// A call of the named function, which Verus counts otherwise than the driver:
+    /// a declared source whose Verus clause is not `encapsulates alloc(a, d)` with the
+    /// declared counts (Verus counts calls of `core::alloc::Allocator` methods, of
+    /// `vstd::raw_ptr::allocate` and what a callee's clause states, so a function
+    /// declared `fip::alloc_source` whose body calls no allocator is 0 to Verus), or a
+    /// function with `encapsulates` that is not a declared source (Verus does not
+    /// check its body, the driver analyses it). Decision 2026-11-01-fip-prelint,
+    /// amendments 2026-11-19 and 2026-11-20. No event here; it bars Verus's
+    /// `allocates` bounds for every function reaching it.
     VerusUncounted(String),
 }
 
@@ -2316,39 +2318,58 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
         if s.free {
             evs.push(Ev::Free(format!("free: {why} `{path}`")));
         }
-        if s.alloc > 0 && !self.verus_counts_source(def_id, s.alloc, kind) {
-            evs.push(Ev::VerusUncounted(format!("{why} `{path}`{count}")));
+        if let Err(clause) = self.verus_counts_source(def_id, s, kind) {
+            evs.push(Ev::VerusUncounted(format!(
+                "{why} `{path}`{count} ({clause})"
+            )));
         }
         Some(NodeKind::Leaf(evs))
     }
 
-    /// `true` if Verus charges a caller at least `n` allocations for a call of the
-    /// source `def_id`. A method of an allocator trait is one allocation to the fork
-    /// (`allocate`, `allocate_zeroed`, `grow`, `grow_zeroed`, `shrink`: its guide,
-    /// "Custom allocators") as it is here. Any other source counts only through its
-    /// own contract: a Verus sidecar must list the function with a literal
-    /// `allocates k`, `k >= n` (Verus charges a caller the callee's clause, whatever
-    /// the body does; measured on the fork `d13a91fed`). For a source declared on a
-    /// trait method, `def_id` is the implementation: Verus charges a call it resolves
-    /// to the implementation that implementation's own clause (else the
-    /// declaration's), and a call through a type parameter the declaration's, which
-    /// is at least the implementation's (Verus rejects an implementation's bound that
-    /// may exceed it); so the implementation must state the clause itself. A source
-    /// without MIR here (a trait method declaration called dynamically, a foreign
-    /// function) is not counted.
-    fn verus_counts_source(&self, def_id: DefId, n: u64, kind: SourceKind) -> bool {
+    /// `Ok` if Verus counts a call of the source `def_id` as the driver does (`s`), else
+    /// what Verus has for it. A method of an allocator trait is one allocation to the
+    /// fork, or a deallocation, as it is here (its guide, "Custom allocators"). Any
+    /// other source must have `encapsulates alloc(a, d)` in a sidecar, with a literal
+    /// `a` equal to the declared number of allocations and a literal `d` that is
+    /// positive exactly if the source is declared to free (the fork's declaration for
+    /// an allocator of its own API, fork `e93729c25`: a caller is charged `a` and `d`,
+    /// the body is not checked; measured within a crate and across `--import`). For a
+    /// source declared on a trait method, `def_id` is the implementation, which carries
+    /// the clause (the fork rejects it on the declaration and checks `a` and `d`
+    /// against the declaration's bounds, which a call through a type parameter is
+    /// charged). A source without MIR here (a trait method declaration called
+    /// dynamically, a foreign function) is not counted.
+    fn verus_counts_source(
+        &self,
+        def_id: DefId,
+        s: Source,
+        kind: SourceKind,
+    ) -> Result<(), String> {
         let tcx = self.tcx;
         match kind {
-            SourceKind::AllocatorTrait => n <= 1,
+            SourceKind::AllocatorTrait => Ok(()),
             SourceKind::Declared | SourceKind::TraitDeclared => {
-                tcx.is_mir_available(def_id)
-                    && self
-                        .crates
-                        .verus
-                        .stated_alloc_bound(tcx, def_id, tcx.optimized_mir(def_id).span)
-                        .is_some_and(|k| k >= n)
+                if !tcx.is_mir_available(def_id) {
+                    return Err("no body here".to_string());
+                }
+                let span = tcx.optimized_mir(def_id).span;
+                let Some((a, d)) = self.crates.verus.encapsulated(tcx, def_id, span) else {
+                    return Err("no `encapsulates alloc(a, d)` in a Verus sidecar".to_string());
+                };
+                let agree =
+                    a.literal() == Some(s.alloc) && d.literal().is_some_and(|d| (d > 0) == s.free);
+                if agree {
+                    Ok(())
+                } else {
+                    self.crates.verus.source_mismatch(tcx, def_id, &a, &d, s);
+                    Err(format!(
+                        "its Verus clause is `encapsulates alloc({}, {})`",
+                        a.render(),
+                        d.render()
+                    ))
+                }
             }
-            SourceKind::Foreign => false,
+            SourceKind::Foreign => Err("a foreign function".to_string()),
         }
     }
 
@@ -2774,7 +2795,7 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
     /// sidecar lists (and that matches), or the standard library (its
     /// specifications are vstd's, part of the trusted basis). Calls of the `Fn*`
     /// traits are exempt: a closure's specification reaches the body only through
-    /// the body's own `requires` (`f.requires(..)`, `call_allocates(..)`), which
+    /// the body's own `requires` (`f.requires(..)`, `call_allocations(..)`), which
     /// unverified callers are told about. `None` if every call qualifies.
     fn verus_unverified_callee(
         &self,
@@ -3064,6 +3085,25 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             }
             _ => None,
         };
+        // A function with `encapsulates alloc(a, d)` that is not a declared source:
+        // Verus charges its callers `a` and does not check its body, which the driver
+        // analyses. Its stated count is never taken (`literal_alloc_bound`), and no
+        // function reaching it takes a Verus bound.
+        if let InstanceKind::Item(d) = inst.def
+            && self.crates.source_of(tcx, d).is_none()
+            && self.crates.verus.encapsulated(tcx, d, body.span).is_some()
+        {
+            let path = def_path(tcx, d);
+            let what =
+                format!("function `{path}`, which has `encapsulates` and is not a declared source");
+            self.crates.verus.bound_uncounted(&path, &what);
+            if let Some(first) = blocks.first_mut() {
+                first.push(Site {
+                    item: Item::Ev(Ev::VerusUncounted(what)),
+                    span: body.span,
+                });
+            }
+        }
         BodyInfo {
             blocks,
             succ,

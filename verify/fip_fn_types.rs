@@ -62,7 +62,7 @@ pub fn boxed(x: u32) -> Box<u32> {
 
 /// A verified caller of `boxed` as a `FipFn` value: `fip_fn!(bound <= 1, boxed)` is a
 /// `Certified<1, _>` in both builds; under Verus its `pre` requires
-/// `call_allocates(boxed, (x,)) <= 1` (proved from `boxed`'s `allocates 1`), and its
+/// `call_allocations(boxed, (x,)) <= 1` (proved from `boxed`'s `allocates 1`), and its
 /// `allocs()` (1) bounds the call. Without `bound`, Verus would see a
 /// `Certified<0, _>` whose `pre` fails (`just verify-negative`, `types-path-no-bound`).
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>

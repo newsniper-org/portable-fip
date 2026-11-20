@@ -96,8 +96,12 @@ pub enum Verdict {
         hi: usize,
         krate: String,
         stamp: String,
-        /// The proved `allocates` bound.
+        /// The proved `allocates` bound (stated, not proved, if `encapsulates`).
         allocates: verus::AllocBound,
+        /// The `deallocates` bound (stated, not proved, if `encapsulates`).
+        deallocates: verus::AllocBound,
+        /// The function has `encapsulates alloc(a, d)`.
+        encapsulates: bool,
     },
     /// Its package declares a sidecar, but it cannot be used for this function.
     NotListed(String),
@@ -127,6 +131,8 @@ pub struct VerusTrust {
     bounds: RefCell<BTreeMap<String, (String, BTreeSet<String>)>>,
     /// Functions whose driver count exceeds their proved bound.
     exceeded: RefCell<BTreeSet<String>>,
+    /// Declared sources whose `encapsulates` clause differs from the declaration.
+    mismatched: RefCell<BTreeMap<String, DefId>>,
     /// Proved bounds not taken because the function reaches an allocation source
     /// Verus does not count: the source → the functions.
     uncounted: RefCell<BTreeMap<String, BTreeSet<String>>>,
@@ -179,6 +185,7 @@ impl VerusTrust {
             bounds: RefCell::new(BTreeMap::new()),
             exceeded: RefCell::new(BTreeSet::new()),
             uncounted: RefCell::new(BTreeMap::new()),
+            mismatched: RefCell::new(BTreeMap::new()),
             allocators: RefCell::new(None),
         }
     }
@@ -454,6 +461,8 @@ impl VerusTrust {
             krate,
             stamp: loaded.sidecar.stamp(),
             allocates: entry.allocates.clone(),
+            deallocates: entry.deallocates.clone(),
+            encapsulates: entry.encapsulates,
         }
     }
 
@@ -520,23 +529,35 @@ impl VerusTrust {
         body_span: Span,
     ) -> Option<(u64, String)> {
         match self.verdict(tcx, d, body_span) {
+            // (the counts of an `encapsulates` function are stated, not proved)
             Verdict::Listed {
                 path,
                 requires: false,
                 allocates,
+                encapsulates: false,
                 ..
             } => allocates.literal().map(|k| (k, path)),
             _ => None,
         }
     }
 
-    /// The literal `allocates` clause of `d` in a Verus sidecar, with or without a
-    /// `requires`: what Verus charges a verified caller for one call of `d` (the
-    /// clause, not what the body does). For an allocation source, which the driver
-    /// never analyses.
-    pub fn stated_alloc_bound(&self, tcx: TyCtxt<'_>, d: DefId, body_span: Span) -> Option<u64> {
+    /// The counts `(a, d)` of `d` if a Verus sidecar lists it with `encapsulates
+    /// alloc(a, d)`: what Verus charges a verified caller for one call of `d` (stated by
+    /// the clause, with or without a `requires`; Verus does not check the body against
+    /// them). `None` if no sidecar lists `d` or it has no such clause.
+    pub fn encapsulated(
+        &self,
+        tcx: TyCtxt<'_>,
+        d: DefId,
+        body_span: Span,
+    ) -> Option<(verus::AllocBound, verus::AllocBound)> {
         match self.verdict(tcx, d, body_span) {
-            Verdict::Listed { allocates, .. } => allocates.literal(),
+            Verdict::Listed {
+                allocates,
+                deallocates,
+                encapsulates: true,
+                ..
+            } => Some((allocates, deallocates)),
             _ => None,
         }
     }
@@ -661,14 +682,49 @@ impl VerusTrust {
         }
     }
 
+    /// Records that the declared source `d` (`s`) has `encapsulates alloc(a, dl)` with
+    /// other counts in its sidecar: one of the two trusted declarations is wrong.
+    pub fn source_mismatch(
+        &self,
+        tcx: TyCtxt<'_>,
+        d: DefId,
+        a: &verus::AllocBound,
+        dl: &verus::AllocBound,
+        s: crate::marks::Source,
+    ) {
+        let declared = match (s.alloc, s.free) {
+            (0, _) => "no allocation and a free".to_string(),
+            (n, false) => format!("{n} allocation(s) and no free"),
+            (n, true) => format!("{n} allocation(s) and a free"),
+        };
+        self.mismatched.borrow_mut().insert(
+            format!(
+                "`{}` is declared a source of {declared}, and has `encapsulates alloc({}, {})` for Verus: the two trusted declarations must state the same counts (literal numbers; a positive second one exactly for a `fip::free_source`)",
+                tcx.def_path_str(d),
+                a.render(),
+                dl.render()
+            ),
+            d,
+        );
+    }
+
+    /// The declared sources whose `encapsulates` clause differs from their declaration.
+    pub fn mismatched(&self) -> Vec<(DefId, String)> {
+        self.mismatched
+            .borrow()
+            .iter()
+            .map(|(m, d)| (*d, m.clone()))
+            .collect()
+    }
+
     /// Records that the driver's count of `path` exceeds its proved bound.
     pub fn bound_exceeded(&self, path: &str) {
         self.exceeded.borrow_mut().insert(path.to_string());
     }
 
     /// Records that the proved bound of `path` was not taken: the function reaches
-    /// the allocation source `source`, whose calls Verus does not count, or which no
-    /// sidecar lists with a clause.
+    /// (or is) `source`, a declared source whose calls Verus does not count as
+    /// declared, or a function with `encapsulates` that is not a declared source.
     pub fn bound_uncounted(&self, path: &str, source: &str) {
         self.uncounted
             .borrow_mut()
@@ -710,7 +766,7 @@ impl VerusTrust {
         if !uncounted.is_empty() {
             let fns: BTreeSet<&String> = uncounted.values().flatten().collect();
             out.push_str(&format!(
-                ", {} Verus allocation bounds not taken, through sources no sidecar shows Verus counting (the source needs a literal `allocates` of at least its declared count in its crate's sidecar; for a trait method, on the impl method): {}",
+                ", {} Verus allocation bounds not taken, through functions whose calls Verus counts otherwise (a declared source needs `encapsulates alloc(a, d)` equal to its declaration in its crate's sidecar, on the impl method for a trait method; a function with `encapsulates` must be a declared source): {}",
                 fns.len(),
                 uncounted
                     .iter()

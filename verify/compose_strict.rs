@@ -49,7 +49,7 @@ pub fn test_one<F: for<'a> FipFn<(&'a u32,), Output = bool> + fip_strict::AllocF
 // A verified caller passing a `fip_fn!` closure: the macro output declares no item,
 // so Verus accepts it inside a verified body, and proves `test_one`'s precondition
 // `keep.pre(..)`: the closure's `requires` (here none) and, since `-V alloc-check`,
-// `call_allocates(closure, args) <= 0` for the `Certified<0, _>`, from the closure's
+// `call_allocations(closure, args) <= 0` for the `Certified<0, _>`, from the closure's
 // `allocates 0` (without it the precondition fails).
 #[fip(strict = true)]
 #[cfg_attr(verus_keep_ghost, verus_spec())]

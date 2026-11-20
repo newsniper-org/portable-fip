@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! fip-prelint verus sidecar
-//! format 5
+//! format 6
 //! crate <crate name>
 //! verus <version> <commit>
 //! z3 <version>
@@ -32,7 +32,7 @@
 //! cfg <target triple of the run> <its cargo features, comma-separated, or ->
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
-//! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | -> <allocates>
+//! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | -> <allocates> <deallocates> <encapsulates | ->
 //! skip <crate>::<path> <reason>
 //! divergent <trait name> <file relative to the sidecar's directory>:<line>
 //! ```
@@ -68,6 +68,14 @@
 //! unverified code, and only where its own count is not a finite number at most the
 //! bound; a finite count above the bound is an error (`crate::verustrust`).
 //!
+//! Format 6 (2026-11-20, fork `83fd42f3b`) adds, per listed function, its `deallocates`
+//! bound (the fork counts deallocations; same spellings as `allocates`) and whether it
+//! has `encapsulates alloc(a, d)` (then `<allocates>` is `a` and `<deallocates>` is `d`,
+//! and Verus proved neither: the function's body is the runtime's to Verus). The driver
+//! takes no allocation bound from an `encapsulates` function, uses its counts only for a
+//! declared source they equal, and refuses format 5 sidecars, which cannot tell such a
+//! function from one with a proved bound.
+//!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
 //! `impl&%N` and rustc `{impl#N}`, both with the `DefPath` disambiguator of their own
@@ -79,7 +87,7 @@
 use std::fmt::Write as _;
 
 /// Version of the format.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
@@ -721,6 +729,27 @@ pub fn crate_cfg_conflict(src: &str, local: &[String]) -> Option<String> {
         }
     }
     macro_conflict(src, Some(local))
+}
+
+/// The line of the first `verus::internal` in the code of `src` (comments and string
+/// literals apart; in an attribute, a `cfg_attr` or a macro body alike), if any. The
+/// attributes of that path are what Verus's own macros write for the verifier; written
+/// by hand they state to it what no clause was checked for (on the fork `e93729c25`,
+/// `#[verus::internal(encapsulates_alloc)]` made any function a leaf of the allocation
+/// check; `b358424cd` removed that one). A crate with a sidecar has none.
+pub fn verus_internal_use(src: &str) -> Option<usize> {
+    let toks: Vec<(Tok, usize, usize)> = lex(src)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect();
+    let ident = |k: usize, name: &str| {
+        toks.get(k)
+            .is_some_and(|t| t.0 == Tok::Ident && &src[t.1..t.2] == name)
+    };
+    let colon = |k: usize| toks.get(k).is_some_and(|t| t.0 == Tok::Punct(b':'));
+    (0..toks.len())
+        .find(|&k| ident(k, "verus") && colon(k + 1) && colon(k + 2) && ident(k + 3, "internal"))
+        .map(|k| line_of(src, toks[k].1))
 }
 
 /// The names `text` defines by `macro_rules! name`.
@@ -1365,8 +1394,13 @@ pub struct Entry {
     pub hash: String,
     /// The function has a Verus `requires`: callers must establish it.
     pub requires: bool,
-    /// Its proved `allocates` bound.
+    /// Its proved `allocates` bound (for [`Entry::encapsulates`]: the stated `a`).
     pub allocates: AllocBound,
+    /// Its `deallocates` bound (for [`Entry::encapsulates`]: the stated `d`).
+    pub deallocates: AllocBound,
+    /// The function has `encapsulates alloc(a, d)`: its counts are stated, not proved
+    /// (Verus does not check its body against them).
+    pub encapsulates: bool,
 }
 
 /// A parsed sidecar.
@@ -1452,7 +1486,7 @@ impl Sidecar {
                     s.sources.push((p.to_string(), h.to_string()));
                 }
                 "fn" => {
-                    let [p, at, h, r, a] = words[..] else {
+                    let [p, at, h, r, a, dl, enc] = words[..] else {
                         return Err(bad());
                     };
                     let (f, line) = at.rsplit_once(':').ok_or_else(bad)?;
@@ -1466,6 +1500,12 @@ impl Sidecar {
                         _ => return Err(bad()),
                     };
                     let allocates = AllocBound::parse(a).ok_or_else(bad)?;
+                    let deallocates = AllocBound::parse(dl).ok_or_else(bad)?;
+                    let encapsulates = match enc {
+                        "encapsulates" => true,
+                        "-" => false,
+                        _ => return Err(bad()),
+                    };
                     s.fns.push(Entry {
                         path: p.to_string(),
                         file: f.to_string(),
@@ -1473,6 +1513,8 @@ impl Sidecar {
                         hash: h.to_string(),
                         requires,
                         allocates,
+                        deallocates,
+                        encapsulates,
                     });
                 }
                 "skip" => {
@@ -1515,7 +1557,8 @@ impl Sidecar {
             "# Generated by `cargo fip-prelint --verus-sidecar` (just verify); do not edit.\n\
              # Exec functions Verus verified with --no-cheating -V alloc-check, with the SHA-256\n\
              # of their item text (outer attributes and doc comments through the body) and\n\
-             # their proved `allocates` bound. Top plan T13.4, redesign phase 4.\n",
+             # their `allocates` and `deallocates` bounds (stated, not proved, for a\n\
+             # function with `encapsulates`). Top plan T13.4, redesign phase 4.\n",
         );
         let _ = writeln!(o, "format {}", self.format);
         let _ = writeln!(o, "crate {}", self.krate);
@@ -1535,14 +1578,16 @@ impl Sidecar {
         }
         for e in &self.fns {
             let r = if e.requires { "requires" } else { "-" };
+            let enc = if e.encapsulates { "encapsulates" } else { "-" };
             let _ = writeln!(
                 o,
-                "fn {} {}:{} {} {r} {}",
+                "fn {} {}:{} {} {r} {} {} {enc}",
                 e.path,
                 e.file,
                 e.line,
                 e.hash,
-                e.allocates.render()
+                e.allocates.render(),
+                e.deallocates.render()
             );
         }
         for (p, why) in &self.skipped {
@@ -2071,6 +2116,8 @@ mod tests {
                 hash: "11".to_string(),
                 requires: true,
                 allocates: AllocBound::Linear(2, vec![("n".to_string(), 3)]),
+                deallocates: AllocBound::Linear(1, Vec::new()),
+                encapsulates: true,
             }],
             skipped: vec![("c::g".to_string(), "external body".to_string())],
             divergent: vec![("Step".to_string(), "src/lib.rs".to_string(), 3)],
@@ -2161,10 +2208,46 @@ mod tests {
             unchecked.check_stamp(&t)
         );
         // Every `fn` line has its bound.
-        assert!(s.render().contains(" requires 2+3*n\n"), "{}", s.render());
-        assert!(Sidecar::parse(&s.render().replace(" requires 2+3*n\n", " requires\n")).is_err());
+        assert!(
+            s.render().contains(" requires 2+3*n 1 encapsulates\n"),
+            "{}",
+            s.render()
+        );
+        for short in [
+            " requires\n",
+            " requires 2+3*n\n",
+            " requires 2+3*n 1\n",
+            " requires 2+3*n 1 yes\n",
+        ] {
+            let cut = s
+                .render()
+                .replace(" requires 2+3*n 1 encapsulates\n", short);
+            assert!(Sidecar::parse(&cut).is_err(), "{short}");
+        }
+        assert_eq!(
+            verus_internal_use("fn f() {}\n#[verus::internal(encapsulates_alloc)]\nfn g() {}"),
+            Some(2)
+        );
+        assert_eq!(
+            verus_internal_use("#[cfg_attr(verus_keep_ghost, verus :: internal(x))] fn g() {}"),
+            Some(1)
+        );
+        assert_eq!(
+            verus_internal_use("macro_rules! m { () => { #[verus::internal(x)] fn g() {} } }"),
+            Some(1)
+        );
+        assert_eq!(
+            verus_internal_use(
+                "// verus::internal\n/// verus::internal\nfn f() { let _ = \"verus::internal\"; }"
+            ),
+            None
+        );
+        assert_eq!(
+            verus_internal_use("use verus::internals; fn internal() {}"),
+            None
+        );
         let current = format!("format {FORMAT}");
-        for old in ["format 4", "format 3", "format 2"] {
+        for old in ["format 5", "format 4", "format 3", "format 2"] {
             assert!(
                 Sidecar::parse(&s.render().replace(&current, old)).is_err(),
                 "{old}"

@@ -14,7 +14,7 @@
 //!   is an error (two sources of one precondition);
 //! - `allocates N` (the declared bound) is generated; a hand-written `allocates` is an
 //!   error, except for a function with callable parameters, whose bound is relative to
-//!   its callbacks (`f.allocs()`, `call_allocates(..)`) and must be written by hand
+//!   its callbacks (`f.allocs()`, `call_allocations(..)`) and must be written by hand
 //!   (section 7.3), and is then required;
 //! - `total`: `no_unwind` (a hand-written one is an error) and
 //!   `#[verifier::fip(strict)]` (no free on a normal return and constant stack; plain
@@ -239,7 +239,7 @@ pub(crate) fn parts(inp: &Input<'_>) -> Result<Parts, Vec<String>> {
     // Under the strip switch the hand-written bound is stripped from the source with
     // the rest of the allocation layer (`verify/strip_alloc.py`).
     if inp.callable && !inp.total && !inp.upstream && !found.iter().any(|f| f == "allocates") {
-        errors.push("`strict` with callable parameters under Verus: write the callback-relative bound (`allocates f.allocs()`, `allocates call_allocates(f, ..)`, ..) in the hand-written `verus_spec`; the generator states only literal bounds".to_string());
+        errors.push("`strict` with callable parameters under Verus: write the callback-relative bound (`allocates f.allocs()`, `allocates call_allocations(f, ..)`, ..) in the hand-written `verus_spec`; the generator states only literal bounds".to_string());
     }
     let requires = match inp.requires {
         Some(cs) => match requires_text(cs, inp.mut_params) {
@@ -516,8 +516,8 @@ mod tests {
         let (start, found) = clauses("ensures a ==> b, allocates 0");
         assert_eq!(start, 0);
         assert_eq!(found, vec!["ensures".to_string(), "allocates".to_string()]);
-        // `call_allocates(..)` is not the clause `allocates`.
-        let (_, found) = clauses("r => ensures call_allocates(f, (x,)) == 0");
+        // `call_allocations(..)` is not the clause `allocates`.
+        let (_, found) = clauses("r => ensures call_allocations(f, (x,)) == 0");
         assert_eq!(found, vec!["ensures".to_string()]);
         let e = generate(&input(
             Some(&parse("xs[0] < 3").unwrap()),

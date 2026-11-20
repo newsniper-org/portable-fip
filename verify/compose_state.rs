@@ -29,7 +29,7 @@
 //! step function and every `fip_fn!` closure carries `allocates 0`, which Verus
 //! proves. The `fip_core` callers use the callbacks' sums; the strict callers use
 //! `fip_core::strict`'s bound `len * f.allocs()`, where `f.allocs()` of a `Certified<N, _>`
-//! is `N` (checked at each call by `Certified::pre`: `call_allocates(..) <= N`) and of
+//! is `N` (checked at each call by `Certified::pre`: `call_allocations(..) <= N`) and of
 //! an adapter the sum of its parts. Z3 does not see that a product with a zero factor
 //! built from adapters is zero, so `quadrupled` and `numbered_doubled` assert the
 //! parts' bounds and the product.
@@ -127,7 +127,7 @@ pub fn number_from_11(xs: &mut [u32]) -> u32 {
 /// function's `requires` / `ensures`), with the allocation bound of its generated
 /// certificate in the plain build and no `unsafe` here. Under Verus, `fip_fn!` reads
 /// no certificate: the value is a `Certified<0, _>`, whose `pre` requires
-/// `call_allocates(tick_checked, args) <= 0`, proved from `tick_checked`'s
+/// `call_allocations(tick_checked, args) <= 0`, proved from `tick_checked`'s
 /// `allocates 0` (an allocating function needs `fip_fn!(bound <= K, ..)`).
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
