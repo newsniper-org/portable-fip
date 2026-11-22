@@ -1838,3 +1838,37 @@ the same shapes fail in both editions):
   locals. Binding the result (`let r = peek(&mk()); r`) verifies.
 - `if let Some((x, true)) = v.pop() { .. } else { }`, with a part of the scrutinee left
   and an `else`: rejected (the fork's reply predicted it).
+
+## Amendment 2026-11-22 (3): re-pin to the fork f2998b7
+
+**Status:** done on the branch `update/verus-83fd42f`.
+
+**Pin.** `0.2026.11.22.f2998b7` (`f2998b743dde…`), three commits after `ac9642eeb`: the
+fork counts the drops of temporaries where Rust 2024 drops them (the tail expression of a
+block, the scrutinee of `if let` and `while let`), which lifts the two limits reported
+for edition 2024, and warns when `-V alloc-check` runs without `--edition`. vstd is
+unchanged; sidecars: stamps only.
+
+Checked before the move (clean worktree, `--features singular`, vstd 2175 verified): the
+diff `ac9642eeb..f2998b743` read in full (649 lines); the fork's tests, 5461 passed, 0
+failed, 63 ignored (the fork reports the same); the 7 repro files (as the reply says, in
+both editions); 102 functions that free more than they state, each with `--edition
+2021` and with `--edition 2024` (the 84 of before and 18 new ones around the new scopes:
+tail temporaries in a function, a nested block, a `match` arm, a loop body and a closure;
+`if let` with a part of the scrutinee left, with and without `else`, as a value, in an
+`else if` chain, with `ref`; `while let` with a part left): none verifies in either
+edition. The 15 tight bounds verify in both and all fail lowered by one. All on the
+binaries rebuilt with `singular` after the test run.
+
+**The mutant and the resource limit, measured on three pins** (`--multiple-errors 8`):
+`4383ece` reports two broken invariants at `--rlimit 1000` and at 2000; `ac9642e` and
+`f2998b7` report the first and then exceed the limit, and at 2000 the verifier panics
+("expected rlimit-count in smt statistics"). A script that reproduces it from this
+repository's commit `a124af1` was sent to the fork. The mutant stays at
+`--multiple-errors 1`.
+
+**Limits of the fork that remain** (its reply; not re-measured here): a temporary in an
+operand of `&&` or `||`; a temporary a `let` keeps alive because its initialiser borrows
+it (`let r = &f();`, also through a block's tail, a branch, a field of a literal); a loop
+over an owning iterator (`for x in v`) and over iterator adapters; a closure that owns a
+value whose drop may deallocate, handed over by value.

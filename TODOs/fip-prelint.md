@@ -3391,6 +3391,6 @@ Open:
 1. Use what the fork now allows in `fip-core` (`for` loops with the counter in the
    invariant, closures without drop glue in std's combinators): nothing uses them yet.
 2. The limits of the fork under edition 2024 (tail-expression temporaries, `if let ..
-   else` with a part left): re-probe at the next pin.
+   else` with a part left): lifted at `f2998b7` (third amendment of 2026-11-22).
 3. `dedup-no-swap` with `--multiple-errors 1`: back to 8 if the search for a second
    error fits the limit again.
