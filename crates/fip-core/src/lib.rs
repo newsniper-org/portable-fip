@@ -75,6 +75,17 @@
 //! the `cfg` it breaks the user's plain build (E0119 and E0199: the plain trait is a
 //! blanket-implemented safe trait), and it needs `unsafe`, so a crate under
 //! `#![forbid(unsafe_code)]` cannot have verified callers with its own element types.
+//! - **Deallocation bounds, by proof (the fork's `deallocates`, 2026-11-22).** `swap`
+//!   and `replace` free nothing (`#[verifier::fip(strict)]`); `update` frees what its
+//!   one call of `f` does (`call_deallocations(f, ..)`); `map_in_place`, `compact` and
+//!   `compact_map` the sum over their callback calls (`dealloc_spec::map_deallocs`,
+//!   `dealloc_spec::compact_deallocs`, `dealloc_spec::compact_map_deallocs`; the lemmas
+//!   of `dealloc_spec::group_deallocs_zero` turn "no call deallocates" into a zero
+//!   sum). So a verified caller with a `deallocates` bound, or a `#[verifier::fip]`
+//!   one, can call them. `dedup_by`, `map_in_place_st` and `compact_map_st` state no
+//!   deallocation bound yet (which calls they make depends on the callbacks' results
+//!   or on the threaded state, and no sum over the input alone bounds them): such a
+//!   caller cannot call these three.
 //!
 //! ## What it does not guarantee
 //!
@@ -131,6 +142,8 @@ macro_rules! proof_decl {
 
 pub use fip_strict::{AllocFreeDrop, DropFreeFn};
 
+#[cfg(verus_keep_ghost)]
+pub mod dealloc_spec;
 pub mod slice;
 pub mod slot;
 #[cfg(verus_keep_ghost)]

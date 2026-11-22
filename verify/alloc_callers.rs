@@ -30,7 +30,7 @@ use vstd::prelude::*;
 
 verus! {
 
-broadcast use fip_core::spec::group_allocs_zero;
+broadcast use fip_core::spec::group_allocs_zero, fip_core::dealloc_spec::group_deallocs_zero;
 
 /// A closure with a precondition.
 pub fn incremented(xs: &mut [u8]) -> (h: u8)
@@ -119,6 +119,62 @@ pub fn incremented_strict(xs: &mut [u8]) -> (h: u8)
         fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) requires v < 100 allocates 0 { v + 1 })
     };
     fip_core::strict::map_in_place(xs, 0, f)
+}
+
+// Deallocation bounds (the fork's `deallocates`, 2026-11-22): `map_in_place`, `compact`
+// and `compact_map` are bounded by the sum of their callbacks' `call_deallocations`
+// (`fip_core::dealloc_spec`), `update` by its one call; the lemmas of
+// `group_deallocs_zero` turn "no call deallocates" into a zero sum. A caller with a
+// `deallocates` bound, or a `#[verifier::fip]` one, can call them.
+
+pub fn incremented_no_free(xs: &mut [u8]) -> (h: u8)
+    requires
+        forall|i: int| 0 <= i < old(xs)@.len() ==> old(xs)@[i] < 100,
+    allocates 0
+    deallocates 0
+{
+    fip_core::map_in_place(xs, 0, |v: u8| -> (r: u8) requires v < 100 allocates 0 deallocates 0 { v + 1 })
+}
+
+pub fn evens_no_free(xs: &mut [u32]) -> (n: usize)
+    allocates 0
+    deallocates 0
+{
+    fip_core::compact(xs, |v: &u32| -> (r: bool) allocates 0 deallocates 0 { *v % 2 == 0 })
+}
+
+pub fn halved_odds_no_free(xs: &mut [u32]) -> (r: (usize, u32))
+    allocates 0
+    deallocates 0
+{
+    fip_core::compact_map(xs, 0, |v: u32| -> (r: (u32, bool)) allocates 0 deallocates 0 { (v / 2, v % 2 == 1) })
+}
+
+pub fn bumped_no_free(x: &mut u64) -> (h: u64)
+    requires
+        *old(x) < 100,
+    allocates 0
+    deallocates 0
+{
+    fip_core::update(x, 0, |v: u64| -> (r: u64) requires v < 100 allocates 0 deallocates 0 { v + 1 })
+}
+
+/// A fully in-place caller with a fully in-place closure.
+#[verifier::fip]
+pub fn evens_fip(xs: &mut [u32]) -> (n: usize) {
+    fip_core::compact(xs, #[verifier::fip] |v: &u32| -> (r: bool) { *v % 2 == 0 })
+}
+
+/// A closure that frees once per call, on a slice of two: at most two deallocations.
+pub fn reboxed_pair(xs: &mut [Box<u8>], hole: Box<u8>) -> (h: Box<u8>)
+    requires
+        old(xs)@.len() == 2,
+    deallocates 2
+{
+    proof {
+        reveal_with_fuel(fip_core::dealloc_spec::map_deallocs, 3);
+    }
+    fip_core::map_in_place(xs, hole, |b: Box<u8>| -> (r: Box<u8>) allocates 1 deallocates 1 { Box::new(*b) })
 }
 
 } // verus!

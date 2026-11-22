@@ -107,6 +107,7 @@ pub fn swap<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize) {
             && #[trigger] strictly_increasing_below(idx, old(xs)@.len() as int)
             && forall|i: int| 0 <= i < w ==> final(xs)@[i] == old(xs)@[idx[i]],
     allocates crate::spec::compact_allocs(keep, old(xs)@, old(xs)@.len() as int)
+    deallocates crate::dealloc_spec::compact_deallocs(keep, old(xs)@, old(xs)@.len() as int)
 ))]
 #[must_use = "elements at and after the returned length are the rejected ones"]
 pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
@@ -131,6 +132,7 @@ pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
             strictly_increasing_below(idx, r as int),
             forall|i: int| 0 <= i < w ==> xs@[i] == old(xs)@[idx[i]],
             allocated() <= crate::spec::compact_allocs(keep, old(xs)@, r as int),
+            deallocated() <= crate::dealloc_spec::compact_deallocs(keep, old(xs)@, r as int),
         decreases n - r,
     ))]
     while r < n {
@@ -176,6 +178,7 @@ pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.ensures((old(xs)@[i],), final(xs)@[i]),
         h == hole,
     allocates crate::spec::map_allocs(f, old(xs)@, old(xs)@.len() as int)
+    deallocates crate::dealloc_spec::map_deallocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
 pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
     xs: &mut [T],
@@ -195,6 +198,7 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
             forall|k: int| 0 <= k < i ==> f.ensures((old(xs)@[k],), xs@[k]),
             forall|k: int| 0 <= k < n ==> f.requires((old(xs)@[k],)),
             allocated() <= crate::spec::map_allocs(f, old(xs)@, i as int),
+            deallocated() <= crate::dealloc_spec::map_deallocs(f, old(xs)@, i as int),
         decreases n - i,
     ))]
     while i < n {
@@ -452,6 +456,7 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFree
         exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
             #[trigger] compact_map_by_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
     allocates crate::spec::compact_map_allocs(f, old(xs)@, old(xs)@.len() as int)
+    deallocates crate::dealloc_spec::compact_map_deallocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
 pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropFreeFn>(
@@ -488,6 +493,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropF
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
             allocated() <= crate::spec::compact_map_allocs(f, old(xs)@, r as int),
+            deallocated() <= crate::dealloc_spec::compact_map_deallocs(f, old(xs)@, r as int),
         decreases len - r,
     ))]
     while r < len {

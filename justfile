@@ -415,6 +415,12 @@ verify-negative: verify-strict verify-core
     # A sum spec that forgets the last call cannot bound the loop.
     expect_alloc_fail map-sum-drops-call    fip-core  spec.rs  's/^    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) + call_allocations(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_allocs(f, s, n - 1) }/' 'allocated\(\) <= crate::spec::map_allocs'
     expect_alloc_fail compact-sum-drops-call fip-core spec.rs  's/^    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) + call_allocations(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_allocs(keep, s, n - 1) }/' 'allocated\(\) <= crate::spec::compact_allocs'
+    # Deallocation bounds (the fork's `deallocates`, 2026-11-22): the sums of the
+    # callbacks' `call_deallocations`, and `update`'s one call.
+    expect_alloc_fail map-dealloc-sum-drops-call fip-core dealloc_spec.rs 's/^    if n <= 0 { 0 } else { map_deallocs(f, s, n - 1) + call_deallocations(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { map_deallocs(f, s, n - 1) }/' 'deallocated\(\) <= crate::dealloc_spec::map_deallocs'
+    expect_alloc_fail compact-dealloc-sum-drops-call fip-core dealloc_spec.rs 's/^    if n <= 0 { 0 } else { compact_deallocs(keep, s, n - 1) + call_deallocations(keep, (&s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_deallocs(keep, s, n - 1) }/' 'deallocated\(\) <= crate::dealloc_spec::compact_deallocs'
+    expect_alloc_fail compact-map-dealloc-sum-drops-call fip-core dealloc_spec.rs 's/^    if n <= 0 { 0 } else { compact_map_deallocs(f, s, n - 1) + call_deallocations(f, (s\[n - 1\],)) }$/    if n <= 0 { 0 } else { compact_map_deallocs(f, s, n - 1) }/' 'deallocated\(\) <= crate::dealloc_spec::compact_map_deallocs'
+    expect_alloc_fail update-dealloc-zero fip-core slot.rs 's/^    deallocates call_deallocations(f, (\*old(slot),))$/    deallocates 0/' 'deallocates 0'
     # `map_in_place_st` is `allocates 0` only because every call is required to be.
     expect_alloc_fail map-st-alloc-unrequired fip-core slice.rs '/^        map_st_by_ok(old(xs)@, f, s0),$/ { n; /call_allocations/d; }' 'call_allocations\(f, \(s, x\)\) <= 0'
     # Strict callables (phase 3): `FipFn::call` allocates at most `allocs()`. A strict
@@ -526,7 +532,15 @@ verify-negative: verify-strict verify-core
     callers_fail closure-allocates '/^pub fn evens(/,/^}/ s/allocates 0 { \*v % 2 == 0 }/allocates 0 { let _b = Box::new(0u8); *v % 2 == 0 }/' 'unable to prove post-condition of closure' 'Box::new'
     callers_fail closure-unbounded '/^pub fn evens(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'postcondition not satisfied' 'allocates 0'
     callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'precondition not satisfied' 'call_allocations\(same'
-    callers_fail no-zero-lemmas    '/^broadcast use fip_core::spec::group_allocs_zero;$/d' 'postcondition not satisfied' 'allocates 0'
+    callers_fail no-zero-lemmas    's/^broadcast use fip_core::spec::group_allocs_zero, fip_core::dealloc_spec::group_deallocs_zero;$/broadcast use fip_core::dealloc_spec::group_deallocs_zero;/' 'postcondition not satisfied' 'allocates 0'
+    # Deallocation bounds (2026-11-22): a closure without a `deallocates` bound, one
+    # that frees, the zero-sum lemmas left out, a bound one too low, and a freeing
+    # closure under a `#[verifier::fip]` caller.
+    callers_fail dealloc-closure-unbounded '/^pub fn evens_no_free(/,/^}/ s/allocates 0 deallocates 0 { \*v % 2 == 0 }/allocates 0 { *v % 2 == 0 }/' 'postcondition not satisfied' 'deallocates 0'
+    callers_fail dealloc-closure-frees '/^pub fn bumped_no_free(/,/^}/ s/allocates 0 deallocates 0 { v + 1 }/allocates 1 deallocates 1 { let b = Box::new(v + 1); *b }/' 'postcondition not satisfied' 'deallocates 0'
+    callers_fail no-dealloc-zero-lemmas 's/^broadcast use fip_core::spec::group_allocs_zero, fip_core::dealloc_spec::group_deallocs_zero;$/broadcast use fip_core::spec::group_allocs_zero;/' 'postcondition not satisfied' 'deallocates 0'
+    callers_fail dealloc-bound-low '/^pub fn reboxed_pair(/,/^}/ s/^    deallocates 2$/    deallocates 1/' 'postcondition not satisfied' 'deallocates 1'
+    callers_fail fip-caller-closure-frees '/^pub fn evens_fip(/,/^}/ s/#\[verifier::fip\] |v: &u32| -> (r: bool) { \*v % 2 == 0 }/|v: \&u32| -> (r: bool) allocates 1 deallocates 1 { let b = Box::new(*v); *b % 2 == 0 }/' 'this call may deallocate memory' 'fip_core::compact'
     # A `Certified<0, _>` wrapping a closure that allocates once: `Certified::pre`
     # (`call_allocations(closure, args) <= 0`; the closure has no `requires`) fails.
     callers_fail certified0-allocating '/^pub fn boxed_once(/,/^}/ s/Certified::<1, _, false>/Certified::<0, _, false>/' 'precondition not satisfied' 'self\.pre\(args\)'

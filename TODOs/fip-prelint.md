@@ -3394,3 +3394,15 @@ Open:
    else` with a part left): lifted at `f2998b7` (third amendment of 2026-11-22).
 3. `dedup-no-swap` with `--multiple-errors 1`: kept (fork, 2026-11-22: the search for
    a second error is long only after the module's earlier queries; nothing to fix).
+
+## Resolved 2026-11-22 (5): `deallocates` on `fip-core`'s `Fn`-based functions
+
+See the fifth amendment of that date. Open:
+
+1. `dedup_by`, `map_in_place_st`, `compact_map_st`: no `deallocates` (decision: require
+   callbacks that do not deallocate, a contract change, or leave them).
+2. `FipFn::call` without `deallocates`: the strict variants and every `FipFn` call are
+   closed to callers with a deallocation bound (decision: `deallocates 0` on the trait
+   method and a conjunct in `Certified::pre`).
+3. `spec::lemma_compact_map_spec_rejects_extra` is fragile: adding unrelated definitions
+   to `spec.rs` makes its third assertion fail. Give it explicit instantiations.

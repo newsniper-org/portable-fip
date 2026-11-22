@@ -1893,3 +1893,41 @@ The fork's finding on the second error's resource limit: the function alone find
 broken invariants at once; in a run of the whole module the earlier functions leave Z3 in
 a state where the search is longer. Nothing to fix there. The mutant stays at
 `--multiple-errors 1`.
+
+## Amendment 2026-11-22 (5): `deallocates` bounds on `fip-core`'s `Fn`-based functions
+
+**Status:** done on the branch `feature/fip-core-deallocates`.
+
+The fork rejects a call from a function with a `deallocates` bound, or a
+`#[verifier::fip]` one, of a function that states none. `fip-core`'s `Fn`-based
+combinators stated only `allocates`, so no such caller could use them.
+
+- `update`: `deallocates call_deallocations(f, (*old(slot),))`. `map_in_place`,
+  `compact`, `compact_map`: the sum of their callbacks' `call_deallocations` over the
+  input (`dealloc_spec::map_deallocs`, `compact_deallocs`, `compact_map_deallocs`, with
+  the zero lemmas of `group_deallocs_zero`), and `deallocated() <= ..` in their loop
+  invariants. Additions only: no `requires` changed, a caller without a deallocation
+  bound is not affected.
+- The totals are in a module of their own, `dealloc_spec`. Appended to `spec.rs` they
+  broke an unrelated proof there (`lemma_compact_map_spec_rejects_extra`, "assertion
+  failed", deterministic): that proof depends on what else its module holds. It is
+  unchanged; its fragility is noted in the TODO.
+- Gates: four mutants (each sum without its call term, `update` with `deallocates 0`),
+  six callers in `verify/alloc_callers.rs` (`deallocates 0` through each function, a
+  `#[verifier::fip]` caller of `compact`, a closure that frees once per call on two
+  elements under `deallocates 2`) and five controls (a closure without a bound, one that
+  frees, the zero lemmas left out, the bound lowered to 1, a freeing closure under the
+  `fip` caller). `verify/strip_alloc.py` strips the new clauses and empties
+  `dealloc_spec.rs` for upstream Verus.
+
+Not done, a decision each:
+
+- `dedup_by`, `map_in_place_st`, `compact_map_st` (`allocates 0`, requiring every
+  callback call to allocate nothing) state no `deallocates`. Which calls they make
+  depends on the callbacks' results (`dedup_by`) or on the threaded state (`_st`), so no
+  sum over the input bounds them. The alternative is to require that no callback call
+  deallocates and state `deallocates 0`: it changes their public Verus contract (a
+  caller's closure then needs `deallocates 0`).
+- `fip-strict`'s `FipFn::call` states no `deallocates`, so the strict variants
+  (`fip_core::strict::*`) and every `FipFn` call are closed to such callers too. Stating
+  `deallocates 0` there adds a conjunct to `Certified::pre`: also a contract change.

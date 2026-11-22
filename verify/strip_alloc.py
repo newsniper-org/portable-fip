@@ -14,6 +14,9 @@ Each source (a directory tree or one file) is copied under <dst-dir> with its ba
 name; every `.rs` file of the copy that Verus reads is rewritten: a file source, and
 the `src/` tree of a directory source (a crate's `tests/` are plain Rust, never given
 to Verus; `tests/verus_drift.rs` names the allocation syntax in its strings). Removed:
+  - `deallocates E` clauses on a line of their own, lines mentioning `deallocated()`
+    or `call_deallocations`, and the whole text of `dealloc_spec.rs` (the fork's
+    deallocation counting, 2026-11-22; the module stays, empty);
   - `allocates E` clauses: a line starting with `allocates `, or `, allocates E` at
     the end of a one-line `verus_spec(..)` (E up to the closing parenthesis), and a
     closure attribute line `#[cfg_attr(verus_keep_ghost, verus_spec(r: T => allocates E))]`
@@ -35,7 +38,8 @@ script cannot see: `just verify-upstream` sets `FIP_MACROS_UPSTREAM=1` for that
 (`fip-macros` then leaves out `allocates` and `#[verifier::fip]`, never `requires`
 or `no_unwind`).
 The script then fails if any code line (comments excluded) still names `allocates`,
-`allocated()`, `call_allocations`, `alloc_check` or `verifier::fip`: a new spelling must
+`allocated()`, `call_allocations`, `deallocates`, `deallocated()`, `call_deallocations`,
+`alloc_check` or `verifier::fip`: a new spelling must
 be taught here, never passed silently to upstream Verus (where it would be an error
 anyway).
 """
@@ -50,6 +54,7 @@ ONLY_ALLOCATES_ATTR = re.compile(
 )
 LEFTOVER = re.compile(
     r"\ballocates\b|\ballocated\(\)|\bcall_allocations\b|\balloc_check\b|\bverifier::fip\b"
+    r"|\bdeallocates\b|\bdeallocated\(\)|\bcall_deallocations\b"
 )
 FIP_ATTR = re.compile(r"^\s*#\[cfg_attr\(verus_keep_ghost, verifier::fip(?:\(strict\))?\)\]$")
 
@@ -87,11 +92,11 @@ def strip(s: str) -> str:
             continue
         if ONLY_ALLOCATES_ATTR.match(line) or FIP_ATTR.match(line):
             continue
-        if t.startswith("allocates "):
+        if t.startswith("allocates ") or t.startswith("deallocates "):
             if t.count("(") != t.count(")"):
                 raise SystemExit(f"strip_alloc: multi-line `allocates` clause: {t}")
             continue
-        if "allocated()" in t or "call_allocations" in t:
+        if "allocated()" in t or "call_allocations" in t or "call_deallocations" in t:
             continue
         if t.startswith("proof!") and "allocs(" in t:
             continue
@@ -157,7 +162,12 @@ def main() -> None:
     changed = 0
     for p in files:
         before = p.read_text()
-        after = strip(before)
+        # The deallocation totals exist only for the fork's `deallocates` clauses.
+        after = (
+            "// (the fork's deallocation totals: stripped for upstream Verus)\n"
+            if p.name == "dealloc_spec.rs"
+            else strip(before)
+        )
         if after != before:
             changed += 1
             p.write_text(after)
