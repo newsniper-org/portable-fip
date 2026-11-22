@@ -1754,3 +1754,75 @@ a wrong result, each rejects code that is fine):
   the value first (`let o = v.pop();`) verifies.
 - A function that only moves a `Box<dyn Trait>` (returns its argument) is rejected under
   `allocates`.
+
+## Amendment 2026-11-22 (2): re-pin to the fork ac9642e; the edition of a Verus run
+
+**Status:** done on the branch `update/verus-83fd42f`.
+
+**Pin.** `0.2026.11.22.ac9642e` (`ac9642eeb51d…`), six commits after `4383ecedb`. The fork
+lifted the five limits reported that morning (`for` loops over ranges, slices and
+borrowing iterators, with the counter in the loop invariant; closures without drop glue
+handed to `Option::map` and its like; `min`/`max`/`clamp` of integers; the scrutinee of
+`if let`/`match`; a `Box<dyn Trait>` that is only moved), and closed two soundness holes
+it found on the way, both present at `4383ecedb`, the pin of a few hours: the drop of a
+closure's environment by the `FnOnce` shim (a `#[verifier::fip]` function handing a
+closure that owns a `Box` to `Option::map` verified), and the compiled body of a
+`#[verus_spec(with ..)]` function, which was not compared with the counted drops. This
+repository's verified sources have no `verus_spec(with ..)` (searched) and verify
+unchanged on the new pin, which rejects the first shape.
+
+Checked before the move (clean worktree, `--features singular`, vstd 2175 verified): the
+diff `4383ecedb..ac9642eeb` read in full (3035 lines); the fork's tests, 5454 passed, 0
+failed, 63 ignored (the fork reports the same); the 18 repro files of the request (as
+the reply says: `a1`–`a4` need the counter in the invariant, `c3` needs `b <= c`); 84
+functions that free more than they state (the 52 of before and 32 new ones around the
+two holes: closures owning a box through `map`, `then`, a generic `FnOnce` or `Fn`
+consumer, a direct call, a closure only dropped; loops; scrutinees with a part left;
+`dyn` values dropped on some paths, in a `Vec`, in a closure, by `Option::is_some`):
+none verifies. All on the binaries rebuilt with `singular` after the test run.
+
+The same class in the driver: probed and absent. A closure that owns a `Box`, handed to
+`Option::map`, `bool::then`, `unwrap_or_else` or a local generic `FnOnce` consumer, or
+called by reference and dropped at the end of the scope, counts its one deallocation
+(`#[fip]` rejects it, `#[fbip(frees = 0)]` names 1): the driver reads the MIR of the shim
+and of the std function.
+
+**The edition of a Verus run (a defect here, found by a review of the reply).** The
+workspace's crates are edition 2024. No Verus run of the justfile passed `--edition`,
+and Verus's default is an older one (measured: `let gen = 1;` verifies without the flag
+and is a syntax error with `--edition 2024`). So Verus verified the sources as written
+for another edition than cargo and the driver compile them for. Editions differ in what
+a method call resolves to (`into_iter` on a boxed slice) and in where temporaries are
+dropped (the tail expression of a block, the scrutinee of `if let`), which the fork's
+deallocation count compares with the compiled program. The sidecar recorded neither.
+Nothing in the verified sources was found to depend on it (they verify unchanged with
+the flag; the sidecars differ in their stamp lines only), but nothing checked it either.
+
+- Every Verus run passes `--edition 2024` (`verus_flags`, the upstream runs);
+  `verify/no_cheating_flags.py` requires it, with two mutants.
+- Sidecar format 7: the `cfg` line ends with the run's edition. The generator refuses a
+  run without `--edition`. The driver uses a sidecar only for a crate compiled for that
+  edition: its own session's for the crate being compiled; for a dependency the one its
+  package's manifest gives cargo (`[lib] edition`, `[package] edition`, the workspace's
+  for `edition.workspace = true`, 2015 without the key), since rustc has no query for
+  another crate's edition (a span of another crate reports the edition of the crate
+  being compiled). Not found: the sidecar is not used. Format 6 is refused.
+- Fixtures: `verus_sidecar` (`-edition`: the sidecar says 2021), `verus_xsource`
+  (`-depedition`: the dependency's manifest says 2021; its sidecar is used neither in
+  its own build nor in the dependent's).
+
+**A mutant and the resource limit.** `dedup-no-swap` (`--rlimit 1000`) reports the
+intended error, the broken loop invariant, on both pins; on `ac9642e` Verus's search for
+a second error then exceeds the limit (also at 2000), which the gate counts as a
+failure of the mutant. The mutant now runs with `--multiple-errors 1`. The unmutated
+proofs verify within their limits as before.
+
+**Limits of the fork measured on this pin with `--edition 2024`** (reported 2026-11-22;
+each rejects code that is fine, none verifies a wrong bound: the six too-low bounds of
+the same shapes fail in both editions):
+
+- A temporary in the tail expression of a function or branch (`peek(&mk())` as the last
+  expression) is rejected ("cannot count this drop"): edition 2024 drops it before the
+  locals. Binding the result (`let r = peek(&mk()); r`) verifies.
+- `if let Some((x, true)) = v.pop() { .. } else { }`, with a part of the scrutinee left
+  and an `else`: rejected (the fork's reply predicted it).

@@ -18,7 +18,7 @@ verus := env_var_or_default("VERUS", "verus")
 # Flags of every Verus run of the gates: no trusted items, and `allocates` bounds checked
 # (the fork's `-V alloc-check`; an importing crate needs the imported crate's export
 # from a run with it).
-verus_flags := "--no-cheating -V alloc-check"
+verus_flags := "--no-cheating -V alloc-check --edition 2024"
 singular := env_var_or_default("SINGULAR", "/usr/bin/Singular")
 # Upstream Verus for the strip gate `verify-upstream` (decision D5): unset or empty skips
 # the gate with a message; set, it must report `verus_upstream_pin`.
@@ -98,10 +98,12 @@ verify-flags:
       grep -q "$3" "$out/$1.log" || { echo "FAIL: flags mutant $1 failed for another reason"; cat "$out/$1.log"; exit 1; }
       echo "flags mutant $1 rejected"
     }
-    flags_mutant verus-flags 's/^verus_flags := "--no-cheating -V alloc-check"$/verus_flags := "-V alloc-check"/' 'lacks --no-cheating'
-    flags_mutant upstream-run 's/ --crate-type=lib --no-cheating "\$@"/ --crate-type=lib "\$@"/' 'Verus run without --no-cheating'
+    flags_mutant verus-flags 's/^verus_flags := "--no-cheating -V alloc-check --edition 2024"$/verus_flags := "-V alloc-check --edition 2024"/' 'lacks --no-cheating'
+    flags_mutant verus-edition 's/^verus_flags := "--no-cheating -V alloc-check --edition 2024"$/verus_flags := "--no-cheating -V alloc-check"/' 'lacks --edition 2024'
+    flags_mutant upstream-edition 's/ --crate-type=lib --no-cheating --edition 2024 "\$@"/ --crate-type=lib --no-cheating "\$@"/' 'Verus run without --edition 2024'
+    flags_mutant upstream-run 's/ --crate-type=lib --no-cheating --edition 2024 "\$@"/ --crate-type=lib --edition 2024 "\$@"/' 'Verus run without --no-cheating'
     flags_mutant mutant-run 's/ [{][{]verus_flags[}][}] --multiple-errors 8 / --multiple-errors 8 /' 'Verus run without --no-cheating'
-    flags_mutant is-vstd 's/^verus_flags := "--no-cheating -V alloc-check"$/verus_flags := "--no-cheating --is-vstd -V alloc-check"/' 'a standard-library crate flag' # negative probe
+    flags_mutant is-vstd 's/^verus_flags := "--no-cheating -V alloc-check --edition 2024"$/verus_flags := "--no-cheating --is-vstd -V alloc-check --edition 2024"/' 'a standard-library crate flag' # negative probe
     echo "verify-flags: ok"
 
 # `VERUS` must be the trusted build (tools/fip-prelint/verus-trusted.txt: version, commit
@@ -322,10 +324,12 @@ verify-negative: verify-strict verify-core
     # regex finds the intended failure even when an earlier check fails too (e.g. a
     # reversed loop now fails `f`'s indexed precondition before the state chain).
     # A mutant that hits the resource limit fails the gate: a timeout says nothing
-    # about the spec. Optional sixth argument: extra Verus flags (e.g. `--rlimit 100`).
+    # about the spec. Optional sixth argument: extra Verus flags (e.g. `--rlimit 100`);
+    # a `--multiple-errors N` among them replaces the 8 (Verus refuses the flag twice).
     expect_verus_fail() {  # name, crate, file, sed script, expected log regex[, verus flags]
       local d; d=$(mutate "$1" "$2" "$3" "$4")
-      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} --multiple-errors 8 ${6:-} "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
+      local me="--multiple-errors 8"; case "${6:-}" in *--multiple-errors*) me="";; esac
+      if VERUS_SINGULAR_PATH="{{singular}}" {{verus}} --crate-type=lib {{verus_flags}} $me ${6:-} "$d/src/lib.rs" {{verus_strict}} --extern fip_macros="$so" -L "$deps" > "$d/log" 2>&1; then
         echo "FAIL: mutant $1 verified"; exit 1
       fi
       if grep -q "rlimit" "$d/log"; then echo "FAIL: mutant $1 hit the resource limit (rlimit)"; cat "$d/log"; exit 1; fi
@@ -353,7 +357,10 @@ verify-negative: verify-strict verify-core
     expect_verus_fail compact-order        fip-core  slice.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
     expect_verus_fail map-skips-store      fip-core  slice.rs '/^pub fn map_in_place</,/^}/ s/^        spare = crate::slot::replace(&mut xs\[i\], next);$/        spare = next;/' "$spec"
     expect_verus_fail update-keeps-old     fip-core  slot.rs  's/^    let next = f(prev);$/    let next = prev; let _ = f;/' "$spec"
-    expect_verus_fail dedup-no-swap        fip-core  slice.rs '/^pub fn dedup_by</,/^}/ { s/^                swap_lt(xs, w, r);$//; /^                assert(xs@\[ow\] == old(xs)@\[r as int\]);$/d }' "$spec" "--rlimit 1000"
+    # (`--multiple-errors 1`, 2026-11-22: on the fork `ac9642e` the first error is the
+    # intended one, the broken invariant, and Verus's search for a second one exceeds
+    # the limit, which the previous pin's did not.)
+    expect_verus_fail dedup-no-swap        fip-core  slice.rs '/^pub fn dedup_by</,/^}/ { s/^                swap_lt(xs, w, r);$//; /^                assert(xs@\[ow\] == old(xs)@\[r as int\]);$/d }' "$spec" "--rlimit 1000 --multiple-errors 1"
     expect_verus_fail dedup-wrong-compare  fip-core  slice.rs '/^pub fn dedup_by</,/^}/ s/same(&xs\[w - 1\], &xs\[r\])/same(\&xs[r - 1], \&xs[r])/' "$spec"
     expect_verus_fail compact-map-no-swap  fip-core  slice.rs "/^pub fn compact_map</,/^}/ { s/^                swap_lt(xs, w, r);\$//; $no_swap_asserts }" "$cmap_order"
     expect_verus_fail compact-map-invert   fip-core  slice.rs '/^pub fn compact_map</,/^}/ s/^        if keep {$/        if !keep {/' "$spec"
@@ -645,17 +652,23 @@ verify-sidecar: verify-strict
     (cd "$fx" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/vside.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs)
     just verus-sidecar-check "$out/vside.txt" "$fx/vside/verus-verified.txt"
     # Without --no-cheating: refused before Verus runs, nothing written.
-    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/cheat.txt" -- {{verus}} --crate-type=lib --crate-name vside vside/src/lib.rs) 2> "$out/cheat.err"; then # negative probe
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/cheat.txt" -- {{verus}} --crate-type=lib --crate-name vside --edition 2024 vside/src/lib.rs) 2> "$out/cheat.err"; then # negative probe
       echo "FAIL: a sidecar was generated without --no-cheating"; exit 1
     fi
     grep -q "must use \`--no-cheating\`" "$out/cheat.err"
     test ! -e "$out/cheat.txt"
     # Without -V alloc-check (required since sidecar format 5): refused before Verus runs, nothing written.
-    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/noalloc.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating vside/src/lib.rs) 2> "$out/noalloc.err"; then
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/noalloc.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating --edition 2024 vside/src/lib.rs) 2> "$out/noalloc.err"; then
       echo "FAIL: a sidecar was generated without -V alloc-check"; exit 1
     fi
     grep -q "must use \`-V alloc-check\`" "$out/noalloc.err"
     test ! -e "$out/noalloc.txt"
+    # Without --edition (required since sidecar format 7): refused before Verus runs, nothing written.
+    if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/noedition.txt" -- {{verus}} --crate-type=lib --crate-name vside --no-cheating -V alloc-check vside/src/lib.rs) 2> "$out/noedition.err"; then # negative probe
+      echo "FAIL: a sidecar was generated without --edition"; exit 1
+    fi
+    grep -q "names no \`--edition\`" "$out/noedition.err"
+    test ! -e "$out/noedition.txt"
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe
@@ -799,7 +812,7 @@ verify-upstream:
     # which upstream verifies).
     up() {  # name, Verus arguments
       local name=$1; shift
-      if FIP_MACROS_UPSTREAM=1 VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating "$@" > "$out/$name.log" 2>&1; then
+      if FIP_MACROS_UPSTREAM=1 VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating --edition 2024 "$@" > "$out/$name.log" 2>&1; then
         echo "verify-upstream: $name: $(grep -h 'verification results' "$out/$name.log")"
       else
         cat "$out/$name.log"; echo "FAIL: upstream Verus rejects the stripped $name"; exit 1
@@ -818,7 +831,7 @@ verify-upstream:
     # Control: without the switch the macro emits `allocates` (at the `strict`/`total`
     # key of the attribute), which upstream does not parse, so the switch is what makes
     # the stripped `total.rs` pass.
-    if VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating --extern fip_macros="$so" -L "$deps" $strict "$src/total.rs" > "$out/total-noswitch.log" 2>&1; then
+    if VERUS_SINGULAR_PATH="{{singular}}" {{verus_upstream}} --crate-type=lib --no-cheating --edition 2024 --extern fip_macros="$so" -L "$deps" $strict "$src/total.rs" > "$out/total-noswitch.log" 2>&1; then
       echo "FAIL: upstream Verus accepted total.rs without FIP_MACROS_UPSTREAM=1"; exit 1
     fi
     grep -A3 "^error: unexpected token" "$out/total-noswitch.log" | grep -q "#\[fip(total" || { echo "FAIL: upstream rejected total.rs without the switch for another reason"; cat "$out/total-noswitch.log"; exit 1; }

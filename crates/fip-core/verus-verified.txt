@@ -4,13 +4,13 @@ fip-prelint verus sidecar
 # of their item text (outer attributes and doc comments through the body) and
 # their `allocates` and `deallocates` bounds (stated, not proved, for a
 # function with `encapsulates`). Top plan T13.4, redesign phase 4.
-format 6
+format 7
 crate fip_core
-verus 0.2026.11.22.4383ece 4383ecedb9e475d8f42acf865194ffd5905ae571
+verus 0.2026.11.22.ac9642e ac9642eeb51d02d002a1225a70a14706b05ed740
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
-cfg x86_64-unknown-linux-gnu -
+cfg x86_64-unknown-linux-gnu - 2024
 verified 70
 source ../fip-strict/src/lib.rs af7460731523689b5287bee92f658e78e996f1029a3b4571681105018de70bcb
 source src/lib.rs 2b4e795a9a58b3097f38dffe7435608ae79322a7de2e1f3f5ba09ec08989b5be

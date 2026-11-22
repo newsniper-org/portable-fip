@@ -93,7 +93,10 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   `call_allocates` now a `bool` beside the count `call_allocations`); the sources
   rename `call_allocates` to `call_allocations`, the sidecars are format 6. Re-pinned
   2026-11-22 to `0.2026.11.22.4383ece` (`4383ecedb…`, one commit: a verifier panic and
-  `core::mem::drop`, both reported from here); stamps only (amendments
+  `core::mem::drop`, both reported from here); stamps only. Re-pinned the same day to
+  `0.2026.11.22.ac9642e` (`ac9642eeb…`, six commits: five limits reported from here
+  lifted, two soundness holes the fork found closed); every Verus run now passes
+  `--edition 2024` and the sidecars are format 7 (amendments
   of those dates in
   `2026-11-01-fip-prelint.md`, which also records the driver's rule for declared
   sources).

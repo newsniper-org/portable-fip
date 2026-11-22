@@ -720,7 +720,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     if let Err(e) = verusgen::crate_cfg_check(Path::new(&dir)) {
         return fail(&e);
     }
-    let (target, features) = match verusgen::run_cfg(&flags, env!("FIP_PRELINT_HOST")) {
+    let (target, features, edition) = match verusgen::run_cfg(&flags, env!("FIP_PRELINT_HOST")) {
         Ok(c) => c,
         Err(e) => return fail(&e),
     };
@@ -799,6 +799,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     };
     info.target = target;
     info.features = features;
+    info.edition = edition;
     info.imported_skips = imported_skips;
     info.imported_divergent = imported_divergent;
     println!(

@@ -67,6 +67,35 @@ use rustc_span::{FileName, Span};
 
 use crate::verus::{self, Sidecar, Trusted};
 
+/// The edition cargo compiles the library of the package of `file` for: of the nearest
+/// `Cargo.toml` above `file`, or of its workspace (the nearest manifest above the
+/// package with `[workspace.package] edition`). `None` if it is not found.
+fn manifest_edition_above(file: &Path) -> Option<String> {
+    let mut dir = file.parent()?;
+    let text = loop {
+        if let Ok(t) = std::fs::read_to_string(dir.join("Cargo.toml")) {
+            break t;
+        }
+        dir = dir.parent()?;
+    };
+    match verus::manifest_edition(&text) {
+        verus::ManifestEdition::Literal(e) => Some(e),
+        verus::ManifestEdition::Unknown => None,
+        verus::ManifestEdition::Workspace => {
+            let mut up = Some(dir);
+            while let Some(d) = up {
+                if let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml"))
+                    && let Some(e) = verus::workspace_edition(&t)
+                {
+                    return Some(e);
+                }
+                up = d.parent();
+            }
+            None
+        }
+    }
+}
+
 /// The trusted Verus build (the pin a sidecar's stamp must equal).
 pub const TRUSTED: &str = include_str!("../verus-trusted.txt");
 
@@ -329,6 +358,36 @@ impl VerusTrust {
                 "Verus sidecar `{}` is for crate `{}`",
                 shown(&sidecar_path),
                 loaded.sidecar.krate
+            ));
+        }
+        // Verus verified the crate as written for one edition: another edition is another
+        // program (method resolution, where temporaries are dropped).
+        // (the edition the crate of `d` was compiled for: a span of another crate does not
+        // carry it, its root context has the edition of the crate being compiled)
+        // For another crate the edition is the one its package's manifest gives cargo
+        // (rustc has no query for it); unknown, the sidecar is not used.
+        let edition = if d.is_local() {
+            Some(tcx.sess.edition().to_string())
+        } else {
+            manifest_edition_above(&file)
+        };
+        if edition.as_deref() != Some(loaded.sidecar.edition.as_str()) {
+            let why = match &edition {
+                Some(e) => format!(
+                    "verified for edition {}, this build compiles the crate for edition {e}",
+                    loaded.sidecar.edition
+                ),
+                None => format!(
+                    "verified for edition {}, and the edition `{krate}` is compiled for is not found in its package's manifest",
+                    loaded.sidecar.edition
+                ),
+            };
+            self.refused
+                .borrow_mut()
+                .insert(shown(&sidecar_path), why.clone());
+            return Verdict::NotListed(format!(
+                "Verus sidecar `{}` not used: {why}",
+                shown(&sidecar_path)
             ));
         }
         // Verus compiled the crate for one target with one set of features.

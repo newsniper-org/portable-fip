@@ -743,6 +743,8 @@ pub struct RunInfo {
     /// Target triple and cargo features of the run ([`run_cfg`]).
     pub target: String,
     pub features: Vec<String>,
+    /// Edition of the run ([`run_cfg`]).
+    pub edition: String,
     /// Functions the run's `--import-sidecar`s skipped because their code may differ
     /// between the builds ([`imported_cfg_skips`]).
     pub imported_skips: Vec<String>,
@@ -780,17 +782,21 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         verified: r("verified").and_then(Json::as_u64).unwrap_or(0),
         target: String::new(),
         features: Vec::new(),
+        edition: String::new(),
         imported_skips: Vec::new(),
         imported_divergent: Vec::new(),
     })
 }
 
-/// The target and the cargo features of a Verus command line: `--target <t>` (else
-/// `host`) and every `--cfg feature="x"`. Any other `--cfg` is refused: the driver
-/// could not compare it with its own build.
-pub fn run_cfg(flags: &[String], host: &str) -> Result<(String, Vec<String>), String> {
+/// The target, the cargo features and the edition of a Verus command line: `--target
+/// <t>` (else `host`), every `--cfg feature="x"`, and `--edition <e>`. Any other
+/// `--cfg` is refused: the driver could not compare it with its own build. A run
+/// without `--edition` is refused too: Verus's default edition is not cargo's, so the
+/// crate would be verified as written for another edition than it is compiled for.
+pub fn run_cfg(flags: &[String], host: &str) -> Result<(String, Vec<String>, String), String> {
     let mut target = host.to_string();
     let mut features = Vec::new();
+    let mut edition: Option<String> = None;
     let mut k = 0;
     while k < flags.len() {
         let f = &flags[k];
@@ -804,6 +810,14 @@ pub fn run_cfg(flags: &[String], host: &str) -> Result<(String, Vec<String>), St
         };
         if let Some(t) = value("--target") {
             target = t;
+        } else if let Some(e) = value("--edition") {
+            if !verus::EDITIONS.contains(&e.as_str()) {
+                return Err(format!("refused `--edition {e}`: not an edition of rustc"));
+            }
+            if edition.as_ref().is_some_and(|old| *old != e) {
+                return Err("refused: `--edition` is given twice with different values".to_string());
+            }
+            edition = Some(e);
         } else if let Some(c) = value("--cfg") {
             let feature = c
                 .strip_prefix("feature=\"")
@@ -822,7 +836,11 @@ pub fn run_cfg(flags: &[String], host: &str) -> Result<(String, Vec<String>), St
     }
     features.sort();
     features.dedup();
-    Ok((target, features))
+    let edition = edition.ok_or_else(|| {
+        "refused: the Verus run names no `--edition`; Verus's default is not the edition cargo compiles the crate for, so the sidecar would describe another program (pass the crate's edition, e.g. `--edition 2024`)"
+            .to_string()
+    })?;
+    Ok((target, features, edition))
 }
 
 /// `Err` naming the first source file under `crate_dir/src` whose `cfg` predicates
@@ -1291,6 +1309,7 @@ pub fn build(
         flags: flags_kept,
         target: info.target.clone(),
         features: info.features.clone(),
+        edition: info.edition.clone(),
         verified: info.verified,
         sources: source_hashes,
         fns: entries,
@@ -1421,6 +1440,7 @@ mod tests {
             verified: 2,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            edition: "2024".to_string(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1485,6 +1505,7 @@ mod tests {
             verified: 5,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            edition: "2024".to_string(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1620,6 +1641,7 @@ mod tests {
             verified: 5,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            edition: "2024".to_string(),
             imported_skips: Vec::new(),
             imported_divergent: vec!["Tick".to_string()],
         };
@@ -1697,6 +1719,7 @@ mod tests {
             verified: 1,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            edition: "2024".to_string(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1737,6 +1760,7 @@ mod tests {
             verified: 3,
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
+            edition: "2024".to_string(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1845,8 +1869,19 @@ mod tests {
     fn run_cfg_and_imports() {
         let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         assert_eq!(
-            run_cfg(&v(&["--crate-type=lib", "--no-cheating"]), "h"),
-            Ok(("h".to_string(), Vec::new()))
+            run_cfg(
+                &v(&["--crate-type=lib", "--no-cheating", "--edition", "2024"]),
+                "h"
+            ),
+            Ok(("h".to_string(), Vec::new(), "2024".to_string()))
+        );
+        // The edition is required, must be one of rustc's, and is not given twice.
+        assert!(run_cfg(&v(&["--crate-type=lib", "--no-cheating"]), "h").is_err());
+        assert!(run_cfg(&v(&["--edition=2023"]), "h").is_err());
+        assert!(run_cfg(&v(&["--edition", "2021", "--edition=2024"]), "h").is_err());
+        assert_eq!(
+            run_cfg(&v(&["--edition=2021"]), "h"),
+            Ok(("h".to_string(), Vec::new(), "2021".to_string()))
         );
         assert_eq!(
             run_cfg(
@@ -1855,14 +1890,20 @@ mod tests {
                     "t",
                     "--cfg",
                     "feature=\"b\"",
-                    "--cfg=feature=\"a\""
+                    "--cfg=feature=\"a\"",
+                    "--edition",
+                    "2024"
                 ]),
                 "h"
             ),
-            Ok(("t".to_string(), vec!["a".to_string(), "b".to_string()]))
+            Ok((
+                "t".to_string(),
+                vec!["a".to_string(), "b".to_string()],
+                "2024".to_string()
+            ))
         );
-        assert!(run_cfg(&v(&["--cfg", "fip_prelint"]), "h").is_err());
-        assert!(run_cfg(&v(&["--cfg=test"]), "h").is_err());
+        assert!(run_cfg(&v(&["--edition=2024", "--cfg", "fip_prelint"]), "h").is_err());
+        assert!(run_cfg(&v(&["--edition=2024", "--cfg=test"]), "h").is_err());
         assert_eq!(
             imports(&v(&[
                 "--import",
@@ -1912,6 +1953,7 @@ mod tests {
             ],
             target: "x".to_string(),
             features: Vec::new(),
+            edition: "2024".to_string(),
             verified: 1,
             sources: vec![(
                 "src/lib.rs".to_string(),

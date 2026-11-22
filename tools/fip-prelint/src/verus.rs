@@ -23,13 +23,13 @@
 //!
 //! ```text
 //! fip-prelint verus sidecar
-//! format 6
+//! format 7
 //! crate <crate name>
 //! verus <version> <commit>
 //! z3 <version>
 //! toolchain <rust toolchain of the Verus build>
 //! flags <verus flags relevant to trust: --no-cheating -V alloc-check>
-//! cfg <target triple of the run> <its cargo features, comma-separated, or ->
+//! cfg <target triple of the run> <its cargo features, comma-separated, or -> <its edition>
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
 //! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | -> <allocates> <deallocates> <encapsulates | ->
@@ -76,6 +76,14 @@
 //! declared source they equal, and refuses format 5 sidecars, which cannot tell such a
 //! function from one with a proved bound.
 //!
+//! Format 7 (2026-11-22) adds the run's edition to the `cfg` line. Verus's default
+//! edition is not cargo's: without `--edition` the crate is verified as written for an
+//! older edition than the one it is compiled for (measured: a 2024 keyword is an
+//! identifier), and editions differ in what a method call resolves to and in where
+//! temporaries are dropped. The generator refuses a run without `--edition`; the driver
+//! uses a sidecar only for a crate compiled for the recorded edition, and refuses
+//! format 6 sidecars, which do not say.
+//!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
 //! `impl&%N` and rustc `{impl#N}`, both with the `DefPath` disambiguator of their own
@@ -87,7 +95,10 @@
 use std::fmt::Write as _;
 
 /// Version of the format.
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
+
+/// The editions a sidecar's `cfg` line may record (rustc's spellings).
+pub const EDITIONS: &[&str] = &["2015", "2018", "2021", "2024"];
 
 /// The Verus flag without which no sidecar is written or used.
 pub const NO_CHEATING: &str = "--no-cheating";
@@ -1412,6 +1423,8 @@ pub struct Sidecar {
     pub target: String,
     /// Cargo features of the run (`--cfg feature="x"`), sorted.
     pub features: Vec<String>,
+    /// Edition of the run (`--edition`): `2015`, `2018`, `2021`, `2024`.
+    pub edition: String,
     pub verified: u64,
     pub sources: Vec<(String, String)>,
     pub fns: Vec<Entry>,
@@ -1466,7 +1479,13 @@ impl Sidecar {
                 "toolchain" => s.toolchain = rest.trim().to_string(),
                 "flags" => s.flags = words.iter().map(|w| (*w).to_string()).collect(),
                 "cfg" => {
-                    let [t, f] = words[..] else { return Err(bad()) };
+                    let [t, f, e] = words[..] else {
+                        return Err(bad());
+                    };
+                    if !EDITIONS.contains(&e) {
+                        return Err(bad());
+                    }
+                    s.edition = e.to_string();
                     s.target = t.to_string();
                     s.features = if f == "-" {
                         Vec::new()
@@ -1566,7 +1585,7 @@ impl Sidecar {
         } else {
             self.features.join(",")
         };
-        let _ = writeln!(o, "cfg {} {features}", self.target);
+        let _ = writeln!(o, "cfg {} {features} {}", self.target, self.edition);
         let _ = writeln!(o, "verified {}", self.verified);
         for (p, h) in &self.sources {
             let _ = writeln!(o, "source {p} {h}");
@@ -1696,6 +1715,76 @@ pub fn declared_sidecar(manifest: &str) -> Option<String> {
                 .strip_prefix('"')
                 .and_then(|v| v.strip_suffix('"'))
                 .map(str::to_string);
+        }
+    }
+    None
+}
+
+/// What a `Cargo.toml` text says about the edition of the package's library.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManifestEdition {
+    /// `edition = "2024"` of `[lib]`, else of `[package]`; `2015` if neither has the key
+    /// (cargo's default).
+    Literal(String),
+    /// `edition.workspace = true` (or `edition = { workspace = true }`): the edition of
+    /// `[workspace.package]` in the workspace's manifest.
+    Workspace,
+    /// A value this reader does not understand.
+    Unknown,
+}
+
+/// The edition cargo compiles the library of a `Cargo.toml` text for
+/// ([`ManifestEdition`]).
+pub fn manifest_edition(manifest: &str) -> ManifestEdition {
+    let mut section = String::new();
+    let mut package: Option<ManifestEdition> = None;
+    let mut lib: Option<ManifestEdition> = None;
+    for l in manifest.lines() {
+        let t = l.split('#').next().unwrap_or("").trim();
+        if t.starts_with('[') {
+            section = t.to_string();
+            continue;
+        }
+        let Some((k, v)) = t.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        let value = match k {
+            "edition" => match v.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+                Some(e) if EDITIONS.contains(&e) => ManifestEdition::Literal(e.to_string()),
+                Some(_) => ManifestEdition::Unknown,
+                None if v.replace(' ', "") == "{workspace=true}" => ManifestEdition::Workspace,
+                None => ManifestEdition::Unknown,
+            },
+            "edition.workspace" if v == "true" => ManifestEdition::Workspace,
+            "edition.workspace" => ManifestEdition::Unknown,
+            _ => continue,
+        };
+        match section.as_str() {
+            "[package]" => package = Some(value),
+            "[lib]" => lib = Some(value),
+            _ => {}
+        }
+    }
+    lib.or(package)
+        .unwrap_or_else(|| ManifestEdition::Literal("2015".to_string()))
+}
+
+/// The `edition = ".."` of `[workspace.package]` in a workspace manifest's text.
+pub fn workspace_edition(manifest: &str) -> Option<String> {
+    let mut inside = false;
+    for l in manifest.lines() {
+        let t = l.split('#').next().unwrap_or("").trim();
+        if t.starts_with('[') {
+            inside = t == "[workspace.package]";
+            continue;
+        }
+        if inside
+            && let Some((k, v)) = t.split_once('=')
+            && k.trim() == "edition"
+        {
+            let e = v.trim().strip_prefix('"')?.strip_suffix('"')?;
+            return EDITIONS.contains(&e).then(|| e.to_string());
         }
     }
     None
@@ -2102,6 +2191,7 @@ mod tests {
             ],
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: vec!["a".to_string(), "b".to_string()],
+            edition: "2024".to_string(),
             verified: 3,
             sources: vec![("src/lib.rs".to_string(), "00".to_string())],
             fns: vec![Entry {
@@ -2252,7 +2342,7 @@ mod tests {
             None
         );
         let current = format!("format {FORMAT}");
-        for old in ["format 5", "format 4", "format 3", "format 2"] {
+        for old in ["format 6", "format 5", "format 4", "format 3", "format 2"] {
             assert!(
                 Sidecar::parse(&s.render().replace(&current, old)).is_err(),
                 "{old}"
@@ -2260,13 +2350,66 @@ mod tests {
         }
         // Format 3 and later require the `cfg` line.
         assert!(
-            Sidecar::parse(&s.render().replace("cfg x86_64-unknown-linux-gnu a,b\n", "")).is_err()
+            Sidecar::parse(
+                &s.render()
+                    .replace("cfg x86_64-unknown-linux-gnu a,b 2024\n", "")
+            )
+            .is_err()
         );
         let none = Sidecar {
             features: Vec::new(),
+            edition: "2024".to_string(),
             ..s.clone()
         };
-        assert!(none.render().contains("cfg x86_64-unknown-linux-gnu -\n"));
+        assert!(
+            none.render()
+                .contains("cfg x86_64-unknown-linux-gnu - 2024\n")
+        );
+        assert_eq!(
+            manifest_edition("[package]\nname = \"a\"\nedition = \"2024\"\n"),
+            ManifestEdition::Literal("2024".to_string())
+        );
+        assert_eq!(
+            manifest_edition("[package]\nname = \"a\"\n"),
+            ManifestEdition::Literal("2015".to_string())
+        );
+        assert_eq!(
+            manifest_edition("[package]\nedition = \"2024\"\n[lib]\nedition = \"2021\" # old\n"),
+            ManifestEdition::Literal("2021".to_string())
+        );
+        assert_eq!(
+            manifest_edition("[package]\nedition.workspace = true\n"),
+            ManifestEdition::Workspace
+        );
+        assert_eq!(
+            manifest_edition("[package]\nedition = { workspace = true }\n"),
+            ManifestEdition::Workspace
+        );
+        assert_eq!(
+            manifest_edition("[package]\nedition = \"2027\"\n"),
+            ManifestEdition::Unknown
+        );
+        assert_eq!(
+            manifest_edition("[package]\nname = \"a\"\n[dependencies]\nedition = \"2021\"\n"),
+            ManifestEdition::Literal("2015".to_string())
+        );
+        assert_eq!(
+            workspace_edition(
+                "[workspace]\nmembers = []\n[workspace.package]\nedition = \"2024\"\n"
+            ),
+            Some("2024".to_string())
+        );
+        assert_eq!(workspace_edition("[workspace]\nmembers = []\n"), None);
+        // The edition is part of the line: none, or one rustc does not have, is malformed.
+        for bad in [
+            "cfg x86_64-unknown-linux-gnu a,b\n",
+            "cfg x86_64-unknown-linux-gnu a,b 2023\n",
+        ] {
+            let cut = s
+                .render()
+                .replace("cfg x86_64-unknown-linux-gnu a,b 2024\n", bad);
+            assert!(Sidecar::parse(&cut).is_err(), "{bad}");
+        }
         assert_eq!(Sidecar::parse(&none.render()), Ok(none));
         assert!(Sidecar::parse(&s.render().replace("src/lib.rs:12", "src/lib.rs")).is_err());
     }

@@ -1136,8 +1136,8 @@ fn verus_sidecar_cfg() {
     let d = copy_fixture("verus_sidecar", "verus_target");
     edit(
         &d.join("vside/verus-verified.txt"),
-        "\ncfg x86_64-unknown-linux-gnu -\n",
-        "\ncfg aarch64-unknown-linux-gnu -\n",
+        "\ncfg x86_64-unknown-linux-gnu - 2024\n",
+        "\ncfg aarch64-unknown-linux-gnu - 2024\n",
     );
     compare(
         "verus_sidecar",
@@ -1145,6 +1145,25 @@ fn verus_sidecar_cfg() {
         &run_at(
             &d,
             "verus_sidecar-target",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+
+    // Verified as written for another edition than the crate is compiled for (Verus's
+    // default without `--edition`, 2026-11-22): the sidecar is not used.
+    let d = copy_fixture("verus_sidecar", "verus_edition");
+    edit(
+        &d.join("vside/verus-verified.txt"),
+        "\ncfg x86_64-unknown-linux-gnu - 2024\n",
+        "\ncfg x86_64-unknown-linux-gnu - 2021\n",
+    );
+    compare(
+        "verus_sidecar",
+        "-edition",
+        &run_at(
+            &d,
+            "verus_sidecar-edition",
             &[],
             &["--message-format", "short"],
         ),
@@ -1219,8 +1238,8 @@ fn verus_sidecar_cfg() {
     let d = copy_fixture("verus_sidecar", "verus_format");
     edit(
         &d.join("vside/verus-verified.txt"),
+        "\nformat 7\n",
         "\nformat 6\n",
-        "\nformat 5\n",
     );
     compare(
         "verus_sidecar",
@@ -1473,6 +1492,25 @@ fn verus_xsource_bounds() {
         &run_at(
             &d,
             "verus_xsource-nodep",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
+    // The dependency compiled for another edition than its sidecar records (its
+    // manifest says 2021, Verus ran with `--edition 2024`): its sidecar is not used,
+    // in its own build and in `yuser`'s, where its edition is read from its manifest.
+    let d = copy_fixture("verus_xsource", "verus_xsource_depedition");
+    edit(
+        &d.join("ypool/Cargo.toml"),
+        "edition = \"2024\"",
+        "edition = \"2021\"",
+    );
+    compare(
+        "verus_xsource",
+        "-depedition",
+        &run_at(
+            &d,
+            "verus_xsource-depedition",
             &[],
             &["--message-format", "short"],
         ),

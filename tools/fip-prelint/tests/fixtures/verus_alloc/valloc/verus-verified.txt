@@ -4,13 +4,13 @@ fip-prelint verus sidecar
 # of their item text (outer attributes and doc comments through the body) and
 # their `allocates` and `deallocates` bounds (stated, not proved, for a
 # function with `encapsulates`). Top plan T13.4, redesign phase 4.
-format 6
+format 7
 crate valloc
-verus 0.2026.11.22.4383ece 4383ecedb9e475d8f42acf865194ffd5905ae571
+verus 0.2026.11.22.ac9642e ac9642eeb51d02d002a1225a70a14706b05ed740
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
-cfg x86_64-unknown-linux-gnu -
+cfg x86_64-unknown-linux-gnu - 2024
 verified 32
 source src/lib.rs 1d619356bebfdb0425a8face6b61fd7748d9c5d9c36dcad0e70da3d4ee0970e2
 fn valloc::bare_two src/lib.rs:346 96e871ee02dee3dd4fb1a431fa285b5f3984ff0bf877c229bac05b2b59c22bc0 - 2 - -
