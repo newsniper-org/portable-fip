@@ -1515,6 +1515,24 @@ fn verus_xsource_bounds() {
             &["--message-format", "short"],
         ),
     );
+    // The dependency's sidecar is not the one the importing run was given (here: one
+    // more comment line, the content otherwise valid): the dependency's own sidecar
+    // is used, the importer's is not.
+    let d = copy_fixture("verus_xsource", "verus_xsource_depsidecar");
+    let side = d.join("ypool/verus-verified.txt");
+    let mut text = std::fs::read_to_string(&side).expect("read the sidecar");
+    text.push_str("# regenerated\n");
+    std::fs::write(&side, text).expect("write the sidecar");
+    compare(
+        "verus_xsource",
+        "-depsidecar",
+        &run_at(
+            &d,
+            "verus_xsource-depsidecar",
+            &[],
+            &["--message-format", "short"],
+        ),
+    );
 }
 
 /// `verus_total`: the crate `vtotal`'s sidecar (`just verify-sidecar`) lists `ok`,

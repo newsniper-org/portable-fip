@@ -32,7 +32,7 @@
 //! cfg <target triple of the run> <its cargo features, comma-separated, or -> <its edition>
 //! verified <number Verus reported verified>
 //! source <path relative to the sidecar's directory> <sha256>
-//! imported <path of a listed source of an imported crate> <the edition that crate was verified for>
+//! import <imported crate> <sha256 of its sidecar> <the edition it was verified for>
 //! fn <crate>::<path> <file relative to the sidecar's directory>:<line> <sha256 of the item text> <requires | -> <allocates> <deallocates> <encapsulates | ->
 //! skip <crate>::<path> <reason>
 //! divergent <trait name> <file relative to the sidecar's directory>:<line>
@@ -83,11 +83,14 @@
 //! identifier), and editions differ in what a method call resolves to and in where
 //! temporaries are dropped. The generator refuses a run without `--edition`; the driver
 //! uses a sidecar only for a crate compiled for the recorded edition, and refuses
-//! format 6 sidecars, which do not say. A run with `--import` trusts the imported
-//! crate's specifications as verified for that crate's edition: each listed source of
-//! an imported crate has an `imported` line with it (from the imported crate's sidecar),
-//! and the driver uses the sidecar only if every such source's package is compiled for
-//! that edition (read from its manifest).
+//! format 6 sidecars, which do not say. A run with `--import` rests on the imported
+//! crate's specifications: an `import` line names each imported crate with the SHA-256
+//! of the sidecar it was imported with (`--import-sidecar`) and that sidecar's edition.
+//! The driver uses the importing sidecar only if the crate of that name in the build
+//! declares a sidecar with that hash which is itself usable (unchanged sources, the
+//! trusted stamp) and is compiled for that edition. The identity is the imported
+//! sidecar, not a path: an imported crate from a registry or a git dependency lives in
+//! cargo's checkout, whose path differs from machine to machine.
 //!
 //! `<line>` is the 1-based line where the item text starts. In `<path>` every impl
 //! block is the segment `{impl}` ([`impl_key`]): Verus names an impl block
@@ -1432,9 +1435,9 @@ pub struct Sidecar {
     pub edition: String,
     pub verified: u64,
     pub sources: Vec<(String, String)>,
-    /// The listed sources of imported crates, with the edition their crate was verified
-    /// for (its own sidecar's): path relative to the sidecar's directory, edition.
-    pub imported: Vec<(String, String)>,
+    /// The crates the run imported (`--import` with `--import-sidecar`): crate name,
+    /// SHA-256 of the sidecar it was imported with, that sidecar's edition.
+    pub imports: Vec<(String, String, String)>,
     pub fns: Vec<Entry>,
     /// Exec functions of the crate Verus saw but that are not listed, with why.
     pub skipped: Vec<(String, String)>,
@@ -1507,12 +1510,16 @@ impl Sidecar {
                     let [p, h] = words[..] else { return Err(bad()) };
                     s.sources.push((p.to_string(), h.to_string()));
                 }
-                "imported" => {
-                    let [p, e] = words[..] else { return Err(bad()) };
-                    if !EDITIONS.contains(&e) {
+                "import" => {
+                    let [c, h, e] = words[..] else {
+                        return Err(bad());
+                    };
+                    let hex = h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
+                    if !hex || !EDITIONS.contains(&e) {
                         return Err(bad());
                     }
-                    s.imported.push((p.to_string(), e.to_string()));
+                    s.imports
+                        .push((c.to_string(), h.to_string(), e.to_string()));
                 }
                 "fn" => {
                     let [p, at, h, r, a, dl, enc] = words[..] else {
@@ -1605,8 +1612,8 @@ impl Sidecar {
         for (p, h) in &self.sources {
             let _ = writeln!(o, "source {p} {h}");
         }
-        for (p, e) in &self.imported {
-            let _ = writeln!(o, "imported {p} {e}");
+        for (c, h, e) in &self.imports {
+            let _ = writeln!(o, "import {c} {h} {e}");
         }
         for e in &self.fns {
             let r = if e.requires { "requires" } else { "-" };
@@ -2212,7 +2219,7 @@ mod tests {
             edition: "2024".to_string(),
             verified: 3,
             sources: vec![("src/lib.rs".to_string(), "00".to_string())],
-            imported: vec![("../dep/src/lib.rs".to_string(), "2021".to_string())],
+            imports: vec![("dep".to_string(), "ab".repeat(32), "2021".to_string())],
             fns: vec![Entry {
                 path: "c::{impl}::f".to_string(),
                 file: "src/lib.rs".to_string(),
@@ -2384,16 +2391,18 @@ mod tests {
             none.render()
                 .contains("cfg x86_64-unknown-linux-gnu - 2024\n")
         );
-        assert!(
-            s.render().contains("imported ../dep/src/lib.rs 2021\n"),
-            "{}",
-            s.render()
-        );
-        let bad = s.render().replace(
-            "imported ../dep/src/lib.rs 2021\n",
-            "imported ../dep/src/lib.rs 2023\n",
-        );
-        assert!(Sidecar::parse(&bad).is_err());
+        let line = format!("import dep {} 2021\n", "ab".repeat(32));
+        assert!(s.render().contains(&line), "{}", s.render());
+        for bad in [
+            format!("import dep {} 2023\n", "ab".repeat(32)),
+            "import dep abab 2021\n".to_string(),
+            format!("import dep {}\n", "ab".repeat(32)),
+        ] {
+            assert!(
+                Sidecar::parse(&s.render().replace(&line, &bad)).is_err(),
+                "{bad}"
+            );
+        }
         assert_eq!(
             manifest_edition("[package]\nname = \"a\"\nedition = \"2024\"\n"),
             ManifestEdition::Literal("2024".to_string())

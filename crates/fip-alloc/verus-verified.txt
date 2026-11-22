@@ -12,35 +12,6 @@ toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu - 2024
 verified 1
-source ../fip-strict/src/lib.rs af7460731523689b5287bee92f658e78e996f1029a3b4571681105018de70bcb
 source src/lib.rs a3b0ab109ebacc01b97bc9060426465c068e89a99f1fe0155ceb168f8bfb8439
-imported ../fip-strict/src/lib.rs 2024
+import fip_strict 0a33e259e0fa1049a2fa843734ccc5c9d6dcad9a2527bb0dfcebfc1a73117198 2024
 fn fip_alloc::refill src/lib.rs:42 911eadcfc3e416fa7c7357878c6c907cb22834e1c6cf9435b0c6cffd17996239 - 0 - -
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:298
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:300
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:624
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:626
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:628
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:630
-divergent DropFreeFn ../fip-strict/src/lib.rs:313
-divergent DropFreeFn ../fip-strict/src/lib.rs:315
-divergent FipBound ../fip-strict/src/lib.rs:340
-divergent FipBound ../fip-strict/src/lib.rs:393
-divergent FipBound ../fip-strict/src/lib.rs:412
-divergent FipBound ../fip-strict/src/lib.rs:444
-divergent FipBound ../fip-strict/src/lib.rs:476
-divergent FipBound ../fip-strict/src/lib.rs:505
-divergent FipBound ../fip-strict/src/lib.rs:551
-divergent FipBound ../fip-strict/src/lib.rs:560
-divergent FipBound ../fip-strict/src/lib.rs:588
-divergent FipBound ../fip-strict/src/lib.rs:597
-divergent FipFn ../fip-strict/src/lib.rs:367
-divergent FipFn ../fip-strict/src/lib.rs:418
-divergent FipFn ../fip-strict/src/lib.rs:450
-divergent FipFn ../fip-strict/src/lib.rs:482
-divergent FipFn ../fip-strict/src/lib.rs:519
-divergent FipFn ../fip-strict/src/lib.rs:565
-divergent FipFn ../fip-strict/src/lib.rs:602
-divergent FipFn ../fip-strict/src/lib.rs:694
-divergent FipFn ../fip-strict/src/lib.rs:708
-divergent FipFn ../fip-strict/src/lib.rs:752

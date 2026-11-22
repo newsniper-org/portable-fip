@@ -1807,19 +1807,23 @@ the flag; the sidecars differ in their stamp lines only), but nothing checked it
   for `edition.workspace = true`, 2015 without the key), since rustc has no query for
   another crate's edition (a span of another crate reports the edition of the crate
   being compiled). Not found: the sidecar is not used. Format 6 is refused.
-- An importing run trusts the imported crate's specifications as verified for that
-  crate's edition. The sidecar has an `imported <source> <edition>` line for each
-  source of an imported crate (the edition of that crate's own sidecar), and the driver
-  uses the sidecar only if each such source's package is compiled for that edition.
-- Found on the way: a sidecar listed a source of an imported crate only if a span of
-  the run named it. `fip-alloc` imports `fip-strict` and listed none of its sources, so
-  a change of `fip-strict` left `fip-alloc`'s sidecar in use although its proofs rest
-  on `fip-strict`'s specifications. The generator now lists every source of every
-  `--import-sidecar` (hash and edition).
+- An importing run rests on the imported crate's specifications. Found on the way: a
+  sidecar listed a source of an imported crate only if a span of the run named it.
+  `fip-alloc` imports `fip-strict` and listed none of its sources, so a change of
+  `fip-strict` left `fip-alloc`'s sidecar in use. The sidecar now has a line `import
+  <crate> <sha256 of its sidecar> <edition>` for each `--import-sidecar`. The driver
+  uses the importing sidecar only if the crate of that name in the build (exactly one)
+  declares a sidecar with that hash, that sidecar is usable there (trusted stamp,
+  unchanged sources), and the crate is compiled for that edition. (A first version
+  listed every imported source by path, with its edition; for a git or registry
+  dependency that path is in cargo's checkout and differs from machine to machine, so
+  it was replaced the same day, before any use.)
 - Fixtures: `verus_sidecar` (`-edition`: the sidecar says 2021), `verus_xsource`
   (`-depedition`: the dependency's manifest says 2021; its sidecar is used neither in
   its own build nor in the dependent's, and the dependent's own sidecar, which imported
-  it, is not used either).
+  it, is not used either; `-depsidecar`: the dependency's sidecar gained a comment line,
+  so it is no longer the one the importer was verified with, and the importer's sidecar
+  is not used).
 
 **A mutant and the resource limit.** `dedup-no-swap` (`--rlimit 1000`) reports the
 intended error, the broken loop invariant, on both pins; on `ac9642e` Verus's search for

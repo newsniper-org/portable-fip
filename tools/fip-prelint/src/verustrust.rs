@@ -284,21 +284,6 @@ impl VerusTrust {
             }
             texts.push((file, String::from_utf8_lossy(&bytes).into_owned()));
         }
-        // A source of an imported crate: the run trusted that crate's specifications as
-        // verified for the recorded edition, so the crate must be compiled for it.
-        for (file, edition) in &sidecar.imported {
-            let built = manifest_edition_above(&dir.join(file));
-            if built.as_deref() != Some(edition.as_str()) {
-                return Err(match built {
-                    Some(b) => format!(
-                        "its imported source `{file}` was verified for edition {edition}, and its package is compiled for edition {b}"
-                    ),
-                    None => format!(
-                        "its imported source `{file}` was verified for edition {edition}, and the edition of its package is not found in a manifest"
-                    ),
-                });
-            }
-        }
         // Every listed source, also one outside `src/` (a `#[path]` module, re-audit
         // N4) and an imported crate's (which passed the same scan in its own run):
         // none may test a cfg the stamp does not record or expand a macro the scan
@@ -404,6 +389,19 @@ impl VerusTrust {
                 "Verus sidecar `{}` not used: {why}",
                 shown(&sidecar_path)
             ));
+        }
+        // The crates the run imported: each must be, in this build, the crate the run saw.
+        for (name, hash, edition) in &loaded.sidecar.imports {
+            if let Err(why) = self.import_ok(tcx, name, hash, edition) {
+                let why = format!("its import `{name}`: {why}");
+                self.refused
+                    .borrow_mut()
+                    .insert(shown(&sidecar_path), why.clone());
+                return Verdict::NotListed(format!(
+                    "Verus sidecar `{}` not used: {why}",
+                    shown(&sidecar_path)
+                ));
+            }
         }
         // Verus compiled the crate for one target with one set of features.
         let target = tcx.sess.opts.target_triple.tuple().to_string();
@@ -542,6 +540,74 @@ impl VerusTrust {
             deallocates: entry.deallocates.clone(),
             encapsulates: entry.encapsulates,
         }
+    }
+
+    /// `Ok` if the crate named `name` in this build is the one a run imported: its
+    /// package declares a sidecar whose text has the SHA-256 `hash`, that sidecar is
+    /// usable here (trusted stamp, unchanged sources), and the crate is compiled for
+    /// `edition`. The crate is found by name among the crates of the build (exactly
+    /// one, else refused) and its package by the file of its root module.
+    fn import_ok(
+        &self,
+        tcx: TyCtxt<'_>,
+        name: &str,
+        hash: &str,
+        edition: &str,
+    ) -> Result<(), String> {
+        let mut found: Vec<rustc_hir::def_id::CrateNum> = tcx
+            .crates(())
+            .iter()
+            .copied()
+            .filter(|c| tcx.crate_name(*c).as_str() == name)
+            .collect();
+        if tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str() == name {
+            found.push(rustc_hir::def_id::LOCAL_CRATE);
+        }
+        let [krate] = found[..] else {
+            return Err(format!(
+                "{} crates of that name in this build",
+                if found.is_empty() {
+                    "no".to_string()
+                } else {
+                    found.len().to_string()
+                }
+            ));
+        };
+        let root = tcx.def_span(krate.as_def_id());
+        let sm = tcx.sess.source_map();
+        let file = real_path(&sm.lookup_byte_offset(root.lo()).sf.name)
+            .ok_or_else(|| "its source file is not found".to_string())?;
+        let (side, lib) = self
+            .declared_for(&file)
+            .ok_or_else(|| "its package declares no Verus sidecar".to_string())?;
+        if lib != name {
+            return Err(format!("its package's library is `{lib}`"));
+        }
+        let text = std::fs::read_to_string(&side)
+            .map_err(|e| format!("its sidecar cannot be read ({e})"))?;
+        if verus::sha256_hex(text.as_bytes()) != hash {
+            return Err(
+                "its sidecar is not the one the importing run was given (regenerate the importing sidecar)"
+                    .to_string(),
+            );
+        }
+        if let Err(why) = self.load(&side).as_ref() {
+            return Err(format!("its sidecar is not usable: {why}"));
+        }
+        let built = if krate == rustc_hir::def_id::LOCAL_CRATE {
+            Some(tcx.sess.edition().to_string())
+        } else {
+            manifest_edition_above(&file)
+        };
+        if built.as_deref() != Some(edition) {
+            return Err(match built {
+                Some(b) => format!("verified for edition {edition}, compiled for edition {b}"),
+                None => format!(
+                    "verified for edition {edition}, and the edition it is compiled for is not found in its package's manifest"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Whether `d` is a Verus-verified function (a listed entry that matches).
