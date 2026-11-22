@@ -64,3 +64,39 @@ pub mod core {
 pub fn panic_prefix() -> u8 {
     *self::core::panicking::leak()
 }
+
+// Audit 2026-11-22: the drop of a trait object. rustc's drop shim for `dyn Trait` has
+// no statement (codegen emits the call through the vtable), so its MIR reads as
+// "nothing happens"; the concrete type's drop may allocate, free and panic.
+pub trait Obj {
+    fn v(&self) -> u32;
+}
+pub struct Noisy {
+    pub items: Vec<Box<u32>>,
+}
+impl Obj for Noisy {
+    fn v(&self) -> u32 {
+        0
+    }
+}
+impl Drop for Noisy {
+    fn drop(&mut self) {
+        let _extra = Box::new(self.items.len());
+    }
+}
+/// Dropping the box drops a `Noisy` (or anything else): not checkable.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
+pub fn drop_boxed_obj(b: Box<dyn Obj>) {}
+/// The same without a deallocation of its own: `#[fip]` passed before.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn drop_obj_in_place(p: *mut dyn Obj) {
+    unsafe { ::core::ptr::drop_in_place(p) }
+}
+/// Inside another type's drop glue.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 1))]
+pub fn drop_opt_obj(o: Option<Box<dyn Obj>>) {}
+/// Borrowing a trait object drops nothing.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn borrow_obj(o: &dyn Obj, s: &[u8]) -> usize {
+    s.len()
+}

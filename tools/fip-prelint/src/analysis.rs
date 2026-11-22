@@ -2226,6 +2226,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 },
             },
             InstanceKind::Shim(ShimKind::DropGlue(_, None)) => NodeKind::Leaf(Vec::new()),
+            // The drop of a trait object runs the drop glue of its concrete type through
+            // the vtable. rustc's shim for `dyn Trait` has no statement for it (codegen
+            // emits the virtual call), so the shim's MIR would read as "nothing happens":
+            // what the value's own drop allocates, frees or panics is not known here.
+            InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty)))
+                if matches!(ty.kind(), ty::Dynamic(..)) =>
+            {
+                NodeKind::Leaf(vec![Ev::Unknown(with_no_trimmed_paths!(format!(
+                    "drop of a trait object `{ty}`: the drop glue of its concrete type is not known"
+                )))])
+            }
             InstanceKind::Shim(ShimKind::DropGlue(_, Some(ty)))
                 if matches!(ty.kind(), ty::Param(_)) =>
             {
