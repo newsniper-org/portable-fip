@@ -1699,3 +1699,55 @@ Open, not done in this change:
 - The allocator boundary (`custom_allocator`, the refusal of sidecars of crates
   implementing an allocator trait) is unchanged; the fork's reply of 2026-11-19 says its
   checks now cover such code. To be narrowed with the trusted allocators reported.
+
+## Amendment 2026-11-22: re-pin to the fork 4383ece; the drop of a trait object
+
+**Status:** done on the branch `update/verus-83fd42f`.
+
+**Pin.** `0.2026.11.22.4383ece` (`4383ecedb9e4…`), one commit after `83fd42f3b`: the fork's
+fix of the two defects reported on 2026-11-20 (the verifier panic on a function whose
+only counted drop is an overwritten value; no specification for `core::mem::drop`).
+Sidecars regenerated: stamps only. Checked before the move (clean worktree, `--features
+singular`, vstd 2175 verified): the diff `83fd42f3b..4383ecedb` read in full (224 lines);
+the fork's tests, 5437 passed, 0 failed, 63 ignored (the fork reports the same); the
+reported repro files (`c1`, `c3`, `c7`, `c8`, `d1` verify; `c6`, `v[0] = ..`, is rejected
+with "cannot count this drop", as the reply says); the 52 functions that free under
+`deallocates 0` or a bound one too low, none verifies; the 15 tight bounds verify and
+all fail lowered by one. All on the binaries rebuilt with `singular` after the test run.
+
+**A defect of the driver, found by the same probes: the drop of a trait object.**
+rustc's drop shim for `dyn Trait` has no statement (codegen emits the call of the
+concrete type's drop glue through the vtable). The driver read that MIR and found
+nothing. Measured before the fix: `#[fbip(frees = 1)] fn f(b: Box<dyn T>) {}` passed (the
+box's own deallocation, nothing for the object, whose type may free any number of times);
+`#[fbip] fn f(b: Box<dyn T>) {}` passed although the concrete type's `Drop` may allocate;
+`#[fip] fn f(p: *mut dyn T) { drop_in_place(p) }` passed. The hole is older than the
+deallocation count: it was in every pin of the driver. Fixed: the drop glue of a `dyn`
+type is an unresolved event (`⊤`), as a dynamic call of a method without a contract is.
+Fixture `audit_probes` (`drop_boxed_obj`, `drop_obj_in_place`, `drop_opt_obj` are errors,
+`borrow_obj` passes). The std summaries of `x86_64-unknown-linux-gnu` regenerate
+unchanged. A function that drops a boxed trait object can therefore not be `#[fip]` or
+`#[fbip]` for now; Verus rejects the same drop under `allocates` ("the drop of a `dyn`
+value cannot be bounded yet").
+
+**What a deallocation bound counts.** As `#[fip]` does for frees, `frees = M` counts
+executions that return: a value dropped while a panic unwinds is not counted (measured:
+`let r = may_panic(x); forget(b); r` passes `frees = 0`). `strict = true, panic_macros =
+false` rejects the panic path itself.
+
+**Limits of the fork measured on this pin** (reported to the fork 2026-11-22; none makes
+a wrong result, each rejects code that is fine):
+
+- No `for` loop in a function with a `deallocates` bound or `#[verifier::fip]`
+  (`Iterator::next` has no bound), also over a range or a slice. `while` works.
+- A closure passed to `Option::map`, `unwrap_or_else`, `ok_or_else`, `and_then`,
+  `Result::map` in such a function: the specification counts the drop of the closure,
+  which is not defined for a closure type, also one that captures nothing. A lemma over
+  `F: Copy` proves it for a closure bound to a local; an inline closure cannot be used.
+- `a.min(b)`, `a.max(b)`, `a.clamp(..)` on integers are rejected (also under `allocates
+  0`); `core::cmp::min(a, b)` verifies.
+- `if let Some(x) = v.pop() { .. }` and `match v.pop() { .. }` with a value that may
+  deallocate are rejected ("a temporary value that is moved on some paths only"); binding
+  the value first (`let o = v.pop();`) verifies.
+- A function that only moves a `Box<dyn Trait>` (returns its argument) is rejected under
+  `allocates`.

@@ -91,7 +91,9 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   `0.2026.11.20.83fd42f` (`83fd42f3b…`, same toolchain): eleven fork commits after
   `d13a91f` (`encapsulates alloc(a, d)`, deallocation counting with `deallocates`,
   `call_allocates` now a `bool` beside the count `call_allocations`); the sources
-  rename `call_allocates` to `call_allocations`, the sidecars are format 6 (amendments
+  rename `call_allocates` to `call_allocations`, the sidecars are format 6. Re-pinned
+  2026-11-22 to `0.2026.11.22.4383ece` (`4383ecedb…`, one commit: a verifier panic and
+  `core::mem::drop`, both reported from here); stamps only (amendments
   of those dates in
   `2026-11-01-fip-prelint.md`, which also records the driver's rule for declared
   sources).

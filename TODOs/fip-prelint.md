@@ -3367,3 +3367,17 @@ Open:
 3. Narrow the allocator boundary and report trusted allocators.
 4. Fork defects reported 2026-11-20 (verifier panic on a counted assignment through
    `&mut`; `core::mem::drop` without a specification): re-probe at the next pin.
+
+## Resolved 2026-11-22: re-pin to the fork 4383ece; the drop of a trait object
+
+See the amendment of that date in `docs/decisions/2026-11-01-fip-prelint.md`. Pin moved
+(stamps only). Fixed here: the drop of a `dyn Trait` value was read as nothing (rustc's
+shim is empty); it is `⊤` now.
+
+Open:
+
+1. A contract for the drop of a trait object (a mark on the trait that every
+   implementing type's drop glue is checked against), so that `Box<dyn Trait>` can be
+   dropped in `#[fbip]` code.
+2. The limits of the fork listed in the amendment (reported 2026-11-22): re-probe at the
+   next pin.
