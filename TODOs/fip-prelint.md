@@ -3392,5 +3392,5 @@ Open:
    invariant, closures without drop glue in std's combinators): nothing uses them yet.
 2. The limits of the fork under edition 2024 (tail-expression temporaries, `if let ..
    else` with a part left): lifted at `f2998b7` (third amendment of 2026-11-22).
-3. `dedup-no-swap` with `--multiple-errors 1`: back to 8 if the search for a second
-   error fits the limit again.
+3. `dedup-no-swap` with `--multiple-errors 1`: kept (fork, 2026-11-22: the search for
+   a second error is long only after the module's earlier queries; nothing to fix).

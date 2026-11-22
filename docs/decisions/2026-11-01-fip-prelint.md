@@ -1872,3 +1872,24 @@ operand of `&&` or `||`; a temporary a `let` keeps alive because its initialiser
 it (`let r = &f();`, also through a block's tail, a branch, a field of a literal); a loop
 over an owning iterator (`for x in v`) and over iterator adapters; a closure that owns a
 value whose drop may deallocate, handed over by value.
+
+## Amendment 2026-11-22 (4): re-pin to the fork 0fa89d0
+
+**Status:** done on the branch `update/verus-83fd42f`.
+
+**Pin.** `0.2026.11.22.0fa89d0` (`0fa89d09bd54…`), one commit after `f2998b743`: the
+verifier read Z3's cumulative `rlimit-count` as an integer and panicked once Z3 printed it
+as a decimal (past 2^32), the panic the mutant `dedup-no-swap` showed at `--rlimit 2000`.
+Resource accounting only; vstd is unchanged; sidecars: stamps only.
+
+Checked before the move (clean worktree, `--features singular`, vstd 2175 verified): the
+diff read in full (55 lines, `air/src/smt_verify.rs` and its test); the fork's tests,
+5461 passed, 0 failed, 63 ignored, and AIR's, 146 passed (the fork reports the same); the
+script sent to the fork: at `--rlimit 2000` the two errors and no panic, at 1000 the same
+two errors, with `--multiple-errors 1` the intended error alone; the 102 too-low bounds
+in both editions, none verifies; the 15 tight bounds as before.
+
+The fork's finding on the second error's resource limit: the function alone finds both
+broken invariants at once; in a run of the whole module the earlier functions leave Z3 in
+a state where the search is longer. Nothing to fix there. The mutant stays at
+`--multiple-errors 1`.
