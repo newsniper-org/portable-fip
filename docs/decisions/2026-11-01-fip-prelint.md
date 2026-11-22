@@ -1718,15 +1718,18 @@ all fail lowered by one. All on the binaries rebuilt with `singular` after the t
 **A defect of the driver, found by the same probes: the drop of a trait object.**
 rustc's drop shim for `dyn Trait` has no statement (codegen emits the call of the
 concrete type's drop glue through the vtable). The driver read that MIR and found
-nothing. Measured before the fix: `#[fbip(frees = 1)] fn f(b: Box<dyn T>) {}` passed (the
-box's own deallocation, nothing for the object, whose type may free any number of times);
-`#[fbip] fn f(b: Box<dyn T>) {}` passed although the concrete type's `Drop` may allocate;
-`#[fip] fn f(p: *mut dyn T) { drop_in_place(p) }` passed. The hole is older than the
-deallocation count: it was in every pin of the driver. Fixed: the drop glue of a `dyn`
+nothing. Measured with the driver of `590ba1c` (the commit before the fix) on the
+fixture's new cases: `#[fbip] fn f(b: Box<dyn Obj>) {}` passed although the concrete
+type's `Drop` allocates; `#[fbip(frees = 1)] fn f(o: Option<Box<dyn Obj>>) {}` passed
+(the box's own deallocation, nothing for the object, whose type may free any number of
+times); `#[fbip(frees = 0)] fn f(p: *mut dyn T) { drop_in_place(p) }` passed. Under
+`#[fip]` the last one was an error, by accident: the empty shim reads as a call of
+itself ("recurses"), which `fbip` allows. The code that reads the shim is older than the
+deallocation count (not changed by it); earlier pins were not re-run. Fixed: the drop glue of a `dyn`
 type is an unresolved event (`⊤`), as a dynamic call of a method without a contract is.
 Fixture `audit_probes` (`drop_boxed_obj`, `drop_obj_in_place`, `drop_opt_obj` are errors,
-`borrow_obj` passes). The std summaries of `x86_64-unknown-linux-gnu` regenerate
-unchanged. A function that drops a boxed trait object can therefore not be `#[fip]` or
+`borrow_obj` passes). The std summaries of all 11 recorded targets regenerate
+unchanged (`just prelint-std-summaries-recorded`). A function that drops a boxed trait object can therefore not be `#[fip]` or
 `#[fbip]` for now; Verus rejects the same drop under `allocates` ("the drop of a `dyn`
 value cannot be bounded yet").
 

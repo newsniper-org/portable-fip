@@ -87,7 +87,7 @@ impl Drop for Noisy {
 /// Dropping the box drops a `Noisy` (or anything else): not checkable.
 #[cfg_attr(fip_prelint, fip::mark(kind = "fbip"))]
 pub fn drop_boxed_obj(b: Box<dyn Obj>) {}
-/// The same without a deallocation of its own: `#[fip]` passed before.
+/// The same without a deallocation of its own (before: reported as a recursion only).
 #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
 pub fn drop_obj_in_place(p: *mut dyn Obj) {
     unsafe { ::core::ptr::drop_in_place(p) }
