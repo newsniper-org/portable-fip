@@ -1818,6 +1818,12 @@ the flag; the sidecars differ in their stamp lines only), but nothing checked it
   listed every imported source by path, with its edition; for a git or registry
   dependency that path is in cargo's checkout and differs from machine to machine, so
   it was replaced the same day, before any use.)
+- Gate (`just verify-sidecar`): the fixture's importer with its dependency outside the
+  tree, by an absolute path. Its sidecar lists no source of the dependency and has the
+  `import` line; the driver takes Verus's bounds through it, also after the dependency
+  is moved to another directory without regenerating anything. Not exercised: a real
+  `git =` dependency in cargo's checkout (same lookup: the root module's file, the
+  nearest manifest above it, the sidecar it declares).
 - Fixtures: `verus_sidecar` (`-edition`: the sidecar says 2021), `verus_xsource`
   (`-depedition`: the dependency's manifest says 2021; its sidecar is used neither in
   its own build nor in the dependent's, and the dependent's own sidecar, which imported

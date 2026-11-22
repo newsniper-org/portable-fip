@@ -702,6 +702,33 @@ verify-sidecar: verify-strict
     just verus-sidecar-check "$out/ypool.txt" "$fxs/ypool/verus-verified.txt"
     (cd "$fxs" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name yuser --crate-dir yuser --out "$out/yuser.txt" --import-sidecar ypool=ypool/verus-verified.txt -- {{verus}} --crate-type=lib --crate-name yuser {{verus_flags}} yuser/src/lib.rs --import ypool="$out/xsource/ypool.vir" --extern ypool="$out/xsource/libypool.rlib")
     just verus-sidecar-check "$out/yuser.txt" "$fxs/yuser/verus-verified.txt"
+    # An imported crate outside the tree, as a git or registry dependency is (its sources
+    # are in cargo's checkout, at a path that differs from machine to machine): the
+    # importer's sidecar names it by the hash of its sidecar (`import ..`), lists no
+    # source of it, and the driver accepts the sidecar wherever the dependency lies.
+    oot="$out/oot"; mkdir -p "$oot/depA" "$oot/proj" "$oot/o"
+    cp -r "$fxs/ypool" "$oot/depA/"; cp -r "$fxs/yuser" "$oot/proj/"
+    printf '[workspace]\nmembers = ["yuser"]\nresolver = "3"\n' > "$oot/proj/Cargo.toml"
+    sed -i "s|ypool = { path = \"../ypool\" }|ypool = { path = \"$oot/depA/ypool\" }|" "$oot/proj/yuser/Cargo.toml"
+    grep -q "$oot/depA/ypool" "$oot/proj/yuser/Cargo.toml"
+    (cd "$oot/depA" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name ypool --crate-dir ypool --out "$oot/o/ypool.txt" -- {{verus}} --crate-type=lib --crate-name ypool {{verus_flags}} ypool/src/lib.rs --export "$oot/o/ypool.vir" --compile --out-dir "$oot/o")
+    cmp "$oot/o/ypool.txt" "$fxs/ypool/verus-verified.txt"
+    (cd "$oot/proj" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name yuser --crate-dir yuser --out "$oot/o/yuser.txt" --import-sidecar ypool="$oot/depA/ypool/verus-verified.txt" -- {{verus}} --crate-type=lib --crate-name yuser {{verus_flags}} yuser/src/lib.rs --import ypool="$oot/o/ypool.vir" --extern ypool="$oot/o/libypool.rlib")
+    [ "$(grep -c '^source ' "$oot/o/yuser.txt")" = 1 ] && grep -q '^source src/lib.rs ' "$oot/o/yuser.txt" || { echo "FAIL: the out-of-tree importer's sidecar lists a source outside its crate"; grep '^source ' "$oot/o/yuser.txt"; exit 1; }
+    grep -Eq '^import ypool [0-9a-f]{64} 2024$' "$oot/o/yuser.txt" || { echo "FAIL: no import line for ypool"; exit 1; }
+    cp "$oot/o/yuser.txt" "$oot/proj/yuser/verus-verified.txt"
+    (cd tools/fip-prelint && RUSTC_BOOTSTRAP=1 cargo +{{prelint_tc}} build --locked -q --bin fip-prelint --target-dir target)
+    drv="$PWD/tools/fip-prelint/target/debug"
+    oot_run() {  # name: the driver on the out-of-tree project; Verus's bounds must be taken
+      (cd "$oot/proj" && rm -f Cargo.lock && cargo +{{prelint_tc}} generate-lockfile -q \
+        && { RUSTC_BOOTSTRAP=1 FIP_PRELINT_TARGET_DIR="$oot/target-$1" FIP_PRELINT_DRIVER_PATH="$drv/fip-prelint" "$drv/cargo-fip-prelint" fip-prelint --message-format short --locked > "$oot/o/run-$1.txt" 2>&1 || true; })
+      grep -Eq 'crate `yuser`: 7 roots, 4 passed, 3 errors.*4 allocation bounds taken from Verus.*2 deallocation bounds taken from Verus' "$oot/o/run-$1.txt" \
+        || { echo "FAIL: out-of-tree import ($1): the importer's sidecar was not used"; cat "$oot/o/run-$1.txt"; exit 1; }
+      echo "out-of-tree import ($1): sidecar used"
+    }
+    oot_run at-a
+    mv "$oot/depA" "$oot/depB"; sed -i "s|$oot/depA/ypool|$oot/depB/ypool|" "$oot/proj/yuser/Cargo.toml"
+    oot_run moved
     # `total` marks (phase 5): the fixture verus_total's sidecar lists the functions the
     # driver discharges or refuses as `total` (tests/fixtures.rs `verus_total_marks`).
     ft=tools/fip-prelint/tests/fixtures/verus_total
