@@ -314,7 +314,9 @@ crates are compiled by the real rustc and stay ⊤.
   (format 5, redesign phase 4, plus each function's `deallocates` bound, whether it
   has `encapsulates`, and the run's edition): the run must name `--edition` (Verus's
   default is not cargo's; the driver uses a sidecar only for a crate compiled for the
-  recorded edition, read for a dependency from its package's manifest) and must
+  recorded edition, read for a dependency from its package's manifest; a sidecar of a
+  run with `--import` lists every source of the imported crates and the edition each was
+  verified for, and is used only while they are unchanged and compiled for it) and must
   use `-V alloc-check` (stamped, required by the driver); a trait with an
   implementation or declaration under a cfg naming `verus_keep_ghost` (`fip-strict`'s
   twin `FipFn` impls) is recorded as `divergent`, and every function naming one of

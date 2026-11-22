@@ -745,6 +745,10 @@ pub struct RunInfo {
     pub features: Vec<String>,
     /// Edition of the run ([`run_cfg`]).
     pub edition: String,
+    /// The sources the run's `--import-sidecar`s list (canonical paths), with the
+    /// edition their crate was verified for: the importing sidecar records it for each
+    /// of them it lists ([`imported_sources`]).
+    pub imported_sources: Vec<(PathBuf, String)>,
     /// Functions the run's `--import-sidecar`s skipped because their code may differ
     /// between the builds ([`imported_cfg_skips`]).
     pub imported_skips: Vec<String>,
@@ -783,6 +787,7 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         target: String::new(),
         features: Vec::new(),
         edition: String::new(),
+        imported_sources: Vec::new(),
         imported_skips: Vec::new(),
         imported_divergent: Vec::new(),
     })
@@ -894,6 +899,25 @@ pub fn cfg_check_files(crate_dir: &Path, files: &[PathBuf]) -> Result<(), String
         }
     }
     Ok(())
+}
+
+/// The sources an imported crate's sidecar (at `side`) lists, as canonical paths, each
+/// with the edition its crate was verified for: the sidecar's own edition, or for a
+/// source of a crate it imported in turn, the edition its `imported` line records.
+pub fn imported_sources(side: &Path, sidecar: &Sidecar) -> Vec<(PathBuf, String)> {
+    let dir = side.parent().unwrap_or(Path::new("."));
+    sidecar
+        .sources
+        .iter()
+        .filter_map(|(p, _)| {
+            let edition = sidecar
+                .imported
+                .iter()
+                .find(|(q, _)| q == p)
+                .map_or(&sidecar.edition, |(_, e)| e);
+            Some((std::fs::canonicalize(dir.join(p)).ok()?, edition.clone()))
+        })
+        .collect()
 }
 
 /// Paths of the functions an `--import-sidecar` skipped because their item text
@@ -1098,6 +1122,14 @@ pub fn build(
             add_source(&root.join(p));
         }
     }
+    // Every source of every imported crate (its sidecar's list), whether or not a span
+    // of the run names it: the run trusted that crate's specifications, so a change of
+    // its sources, or of the edition it is compiled for, makes this sidecar stale too
+    // (before 2026-11-22 only the files named by a span were listed: `fip-alloc`'s
+    // sidecar did not list `fip-strict`, which it imports).
+    for (p, _) in &info.imported_sources {
+        add_source(p);
+    }
     let mut stack = vec![crate_dir.join("src")];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else {
@@ -1117,6 +1149,16 @@ pub fn build(
     // `src/`); an imported crate's sources passed the same scan in its own run.
     let files: Vec<PathBuf> = sources.iter().map(|s| crate_dir.join(s)).collect();
     cfg_check_files(crate_dir, &files)?;
+    // The listed sources of imported crates, with the edition their crate was verified
+    // for: the driver compares it with the edition that crate is compiled for.
+    let imported: Vec<(String, String)> = sources
+        .iter()
+        .filter_map(|s| {
+            let c = std::fs::canonicalize(crate_dir.join(s)).ok()?;
+            let (_, e) = info.imported_sources.iter().find(|(p, _)| *p == c)?;
+            Some((s.clone(), e.clone()))
+        })
+        .collect();
     let mut source_hashes = Vec::new();
     // Traits implemented or declared differently in the two builds (phase 4 of
     // decision 2026-11-06-redesign-verus-allocates): in any source of the run, or
@@ -1312,6 +1354,7 @@ pub fn build(
         edition: info.edition.clone(),
         verified: info.verified,
         sources: source_hashes,
+        imported,
         fns: entries,
         skipped,
         divergent,
@@ -1441,6 +1484,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             edition: "2024".to_string(),
+            imported_sources: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1506,6 +1550,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             edition: "2024".to_string(),
+            imported_sources: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1642,6 +1687,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             edition: "2024".to_string(),
+            imported_sources: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: vec!["Tick".to_string()],
         };
@@ -1720,6 +1766,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             edition: "2024".to_string(),
+            imported_sources: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1761,6 +1808,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".to_string(),
             features: Vec::new(),
             edition: "2024".to_string(),
+            imported_sources: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
         };
@@ -1959,6 +2007,7 @@ mod tests {
                 "src/lib.rs".to_string(),
                 verus::sha256_hex(b"pub fn hint() -> usize { 1 }\n"),
             )],
+            imported: Vec::new(),
             fns: Vec::new(),
             skipped: Vec::new(),
             divergent: Vec::new(),

@@ -18,6 +18,7 @@ source src/slice.rs c6d1c16333c5c998912c4128afba9e914d5a295058bc576685827af7dbdd
 source src/slot.rs 2cdc13bf918734278f6fc4b3495a05ba963e1fbd0068970c611f9159ac9f6fb9
 source src/spec.rs 7935bb81bc26a3fb40aef360f94e86604fcaf8602956e7fc045e9df35a498b20
 source src/strict.rs 24a627c3d33a4e39c2ac767e869916741cb9bc25a3aa49ef4441b3e0b0f45ffe
+imported ../fip-strict/src/lib.rs 2024
 fn fip_core::slice::compact src/slice.rs:75 62a723a1c0e6a5119518b8eecf446b34d6e5dcbec563eabb3a84041357629955 requires opaque:e2901c9f7fdc0e176b499136dfaab12b21cadd2f02715f0c49a7281b52a45011 - -
 fn fip_core::slice::compact_map src/slice.rs:422 c48ff74da155ab71eb652a4d0d64fc4fbc617bb3764e15aee583d59820dd85de requires opaque:2aac94d8d2cb29332d0cde80513f7ad0d41c11265a804982f0b3d8340722b93a - -
 fn fip_core::slice::compact_map_st src/slice.rs:550 75992f017892706b474629458ead0add8c1f5813ce332de1479c2621da8d7882 requires 0 - -

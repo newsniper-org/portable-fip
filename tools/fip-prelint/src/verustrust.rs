@@ -284,6 +284,21 @@ impl VerusTrust {
             }
             texts.push((file, String::from_utf8_lossy(&bytes).into_owned()));
         }
+        // A source of an imported crate: the run trusted that crate's specifications as
+        // verified for the recorded edition, so the crate must be compiled for it.
+        for (file, edition) in &sidecar.imported {
+            let built = manifest_edition_above(&dir.join(file));
+            if built.as_deref() != Some(edition.as_str()) {
+                return Err(match built {
+                    Some(b) => format!(
+                        "its imported source `{file}` was verified for edition {edition}, and its package is compiled for edition {b}"
+                    ),
+                    None => format!(
+                        "its imported source `{file}` was verified for edition {edition}, and the edition of its package is not found in a manifest"
+                    ),
+                });
+            }
+        }
         // Every listed source, also one outside `src/` (a `#[path]` module, re-audit
         // N4) and an imported crate's (which passed the same scan in its own run):
         // none may test a cfg the stamp does not record or expand a macro the scan

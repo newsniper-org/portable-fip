@@ -1807,15 +1807,27 @@ the flag; the sidecars differ in their stamp lines only), but nothing checked it
   for `edition.workspace = true`, 2015 without the key), since rustc has no query for
   another crate's edition (a span of another crate reports the edition of the crate
   being compiled). Not found: the sidecar is not used. Format 6 is refused.
+- An importing run trusts the imported crate's specifications as verified for that
+  crate's edition. The sidecar has an `imported <source> <edition>` line for each
+  source of an imported crate (the edition of that crate's own sidecar), and the driver
+  uses the sidecar only if each such source's package is compiled for that edition.
+- Found on the way: a sidecar listed a source of an imported crate only if a span of
+  the run named it. `fip-alloc` imports `fip-strict` and listed none of its sources, so
+  a change of `fip-strict` left `fip-alloc`'s sidecar in use although its proofs rest
+  on `fip-strict`'s specifications. The generator now lists every source of every
+  `--import-sidecar` (hash and edition).
 - Fixtures: `verus_sidecar` (`-edition`: the sidecar says 2021), `verus_xsource`
   (`-depedition`: the dependency's manifest says 2021; its sidecar is used neither in
-  its own build nor in the dependent's).
+  its own build nor in the dependent's, and the dependent's own sidecar, which imported
+  it, is not used either).
 
 **A mutant and the resource limit.** `dedup-no-swap` (`--rlimit 1000`) reports the
 intended error, the broken loop invariant, on both pins; on `ac9642e` Verus's search for
 a second error then exceeds the limit (also at 2000), which the gate counts as a
 failure of the mutant. The mutant now runs with `--multiple-errors 1`. The unmutated
-proofs verify within their limits as before.
+proofs verify within their limits as before. At `--rlimit 2000` the verifier panics after
+the two errors ("unexpected output from solver: … expected rlimit-count in smt
+statistics", three runs of three); reported to the fork.
 
 **Limits of the fork measured on this pin with `--edition 2024`** (reported 2026-11-22;
 each rejects code that is fine, none verifies a wrong bound: the six too-low bounds of
