@@ -439,6 +439,19 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             .split(":encapsulates_alloc")
             .nth(1)
             .is_some_and(|r| r.trim_start().starts_with("true"));
+        // `#[verifier::fip]` (`:fip true`; `fip(strict)` sets it too): the fork proves
+        // that a normal return deallocates nothing and admits no `deallocates` clause
+        // beside it, so its `:deallocations` is `None`. It is `deallocates 0`. Not for
+        // a function with `encapsulates`, whose body the fork does not check.
+        let fip = attrs
+            .split(":fip ")
+            .nth(1)
+            .is_some_and(|r| r.trim_start().starts_with("true"));
+        let deallocates = if fip && !encapsulates && deallocates == verus::AllocBound::None {
+            verus::AllocBound::Linear(0, Vec::new())
+        } else {
+            deallocates
+        };
         out.push(VirFn {
             path,
             span,
@@ -1602,6 +1615,26 @@ mod tests {
         );
         let fns = vir_functions(&rec).unwrap();
         assert_eq!(fns[0].allocates, verus::AllocBound::Linear(2, Vec::new()));
+        assert_eq!(fns[0].deallocates, verus::AllocBound::None);
+        // `:fip true` is `deallocates 0` (the fork writes no `:deallocations` for it);
+        // `:fip_strict` alone is not read, nor `:fip true` beside `encapsulates`.
+        let with = |attrs: &str| {
+            let r = rec.replace(":is_external_body false", attrs);
+            assert_ne!(r, rec);
+            vir_functions(&r).unwrap()[0].deallocates.clone()
+        };
+        assert_eq!(
+            with(":is_external_body false :fip true :fip_strict false"),
+            verus::AllocBound::Linear(0, Vec::new())
+        );
+        assert_eq!(
+            with(":is_external_body false :fip false :fip_strict true"),
+            verus::AllocBound::None
+        );
+        assert_eq!(
+            with(":is_external_body false :fip true :encapsulates_alloc true"),
+            verus::AllocBound::None
+        );
     }
 
     /// Phase 4 (cfg twins, decision 2026-11-06-redesign-verus-allocates): a function

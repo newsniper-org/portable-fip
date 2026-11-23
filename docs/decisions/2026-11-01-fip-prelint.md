@@ -1994,3 +1994,31 @@ before.
   `dedup-dealloc-unbounded`, `st-dealloc-unbounded`, `certified-dealloc-unbounded`; the
   callers of `verify/` state `deallocates 0`; `tests/verus_drift.rs` counts the eight
   marker impls; `verify/strip_alloc.py` strips the new bound, impls and clauses.
+
+## Amendment 2026-11-23 (2): the sidecar records `deallocates 0` for a `#[verifier::fip]` function
+
+**Status:** done.
+
+A function with `#[verifier::fip]` (or `fip(strict)`) is proved to deallocate nothing on
+a normal return, and the fork admits no `deallocates` clause beside the attribute, so
+its VIR has `:fip true` and `:deallocations None`. The generator read only the latter:
+the sidecar recorded no deallocation bound for it, while it recorded `0` for the same
+function written with `deallocates 0`. Measured before the change, on a probe crate: of
+two functions with the same body (a loop of calls of a function that frees only when
+its argument is `true`, called with `false`), a `#[fbip(frees = 0)]` caller of the
+`deallocates 0` one passed and a caller of the `fip` one was refused with "may free ∞
+time(s)". In this repository the functions affected were `fip_core::slice::swap`,
+`swap_lt`, `fip_core::slot::replace` and `fip_alloc::refill`, where the driver's own
+count is 0, so no verdict here changed.
+
+The generator now records `deallocates 0` for `:fip true`, except beside
+`encapsulates`, whose body the fork does not check. The sidecar format is unchanged
+(7); a sidecar written before is still read, and says less. Not a hole in either
+direction, measured on the same probe: a caller passing a `Box` to a generic function
+that drops its argument is refused whether that function is `deallocates 0` or `fip`
+(the driver counts the instance, and a finite count above the bound is kept).
+
+Gates: the unit test of `vir_functions`; fixture `verus_alloc` (`calm`, `calm_fip`,
+callers `via_calm`, `via_calm_fip`, control `via_cond`): with the sidecar both callers
+pass and two deallocation bounds are taken, without it (the fixture's variants) both
+are refused.

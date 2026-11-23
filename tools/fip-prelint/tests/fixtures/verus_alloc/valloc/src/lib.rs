@@ -401,3 +401,69 @@ pub fn via_sneak(n: usize) -> usize {
     }
     s
 }
+
+/// Frees once if `c`.
+#[cfg_attr(verus_keep_ghost, verus_spec(
+    allocates (if c { 1int } else { 0int })
+    deallocates (if c { 1int } else { 0int })
+))]
+pub fn cond(c: bool) {
+    if c {
+        let _b = Box::new(1u8);
+    }
+}
+
+/// `n` calls that free nothing, as `deallocates 0`: the driver's `∞` (a call that may
+/// free, in a loop) becomes Verus's 0.
+#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+pub fn calm(n: u8) {
+    let mut i = 0u8;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+            deallocated() == 0,
+        decreases n - i,
+    ))]
+    while i < n {
+        cond(false);
+        i += 1;
+    }
+}
+
+/// The same as `#[verifier::fip]`, which admits no `deallocates` clause: the sidecar
+/// records `deallocates 0` for it (2026-11-23; it recorded none, and the `∞` stayed).
+#[cfg_attr(verus_keep_ghost, verus_spec(ensures true))]
+#[cfg_attr(verus_keep_ghost, verifier::fip)]
+pub fn calm_fip(n: u8) {
+    let mut i = 0u8;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+        decreases n - i,
+    ))]
+    while i < n {
+        cond(false);
+        i += 1;
+    }
+}
+
+/// Callers that Verus does not verify: both pass with 0 frees.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+pub fn via_calm(n: u8) {
+    calm(n);
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+pub fn via_calm_fip(n: u8) {
+    calm_fip(n);
+}
+
+/// A control: `cond(true)` in the loop is not `fip`, and its caller's `∞` stays.
+#[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+pub fn via_cond(n: u8) {
+    let mut i = 0u8;
+    while i < n {
+        cond(true);
+        i += 1;
+    }
+}
