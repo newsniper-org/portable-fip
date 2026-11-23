@@ -467,3 +467,52 @@ pub fn via_cond(n: u8) {
         i += 1;
     }
 }
+
+/// A marker that differs between the builds, as `fip_strict::NoDeallocDrop` does:
+/// vstd's trait under Verus, every type in the plain build.
+#[cfg(verus_keep_ghost)]
+pub use vstd::alloc_check::NoDeallocDrop;
+#[cfg(not(verus_keep_ghost))]
+pub trait NoDeallocDrop {}
+#[cfg(not(verus_keep_ghost))]
+impl<T: ?Sized> NoDeallocDrop for T {}
+
+/// Drops a value whose drop Verus knows to free nothing, by the bound. In the plain
+/// build the bound holds for a `Box` too, so the `deallocates 0` is not taken for this
+/// function (a Verus bound is taken for a non-generic function only).
+#[cfg_attr(verus_keep_ghost, verus_spec(deallocates 0))]
+pub fn eat_marked<T: NoDeallocDrop>(t: T) {
+    let _u = t;
+}
+
+/// The same as `#[verifier::fip]`.
+#[cfg_attr(verus_keep_ghost, verus_spec(ensures true))]
+#[cfg_attr(verus_keep_ghost, verifier::fip)]
+pub fn eat_marked_fip<T: NoDeallocDrop>(t: T) {
+    let _u = t;
+}
+
+/// Not seen by Verus (it would refuse the unbounded `T`): generic roots, and a root
+/// passing a `Box`. None may pass with 0 frees.
+#[cfg(not(verus_keep_ghost))]
+pub mod unmarked {
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+    pub fn any<T>(t: T) {
+        super::eat_marked(t);
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+    pub fn any_fip<T>(t: T) {
+        super::eat_marked_fip(t);
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+    pub fn boxed(b: Box<u8>) {
+        super::eat_marked(b);
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
+    pub fn boxed_fip(b: Box<u8>) {
+        super::eat_marked_fip(b);
+    }
+}

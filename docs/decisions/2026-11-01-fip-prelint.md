@@ -2013,12 +2013,23 @@ count is 0, so no verdict here changed.
 
 The generator now records `deallocates 0` for `:fip true`, except beside
 `encapsulates`, whose body the fork does not check. The sidecar format is unchanged
-(7); a sidecar written before is still read, and says less. Not a hole in either
-direction, measured on the same probe: a caller passing a `Box` to a generic function
-that drops its argument is refused whether that function is `deallocates 0` or `fip`
-(the driver counts the instance, and a finite count above the bound is kept).
+(7); a sidecar written before is still read, and says less.
+
+The bound of a function with a type parameter bounded by a marker that differs between
+the builds (`T: NoDeallocDrop`: vstd's trait under Verus, every type in the plain build)
+must not be taken: in the plain build the function accepts a `Box`. It is not: the
+driver takes a Verus bound for a non-generic function only (`requires_monomorphization`,
+as for `allocates` since phase 4). Measured for `deallocates 0` and for `fip`, with the
+sidecar listing both functions: a root passing a `Box` is refused (the instance is
+counted, 1 > 0), and so is a generic root `fn any<T>(t: T)` that passes its `T` on
+("may free ∞ time(s)"). The first measurement of this covered only the `Box` caller;
+the generic root was added after a review pointed out that its `∞` is what a Verus
+bound replaces. With the condition removed from the driver, both generic roots pass:
+the fixture below fails on that.
 
 Gates: the unit test of `vir_functions`; fixture `verus_alloc` (`calm`, `calm_fip`,
 callers `via_calm`, `via_calm_fip`, control `via_cond`): with the sidecar both callers
 pass and two deallocation bounds are taken, without it (the fixture's variants) both
 are refused.
+Module `unmarked` of the same fixture (`eat_marked`, `eat_marked_fip`; roots `any`,
+`any_fip`, `boxed`, `boxed_fip`): all four are refused with the sidecar.
