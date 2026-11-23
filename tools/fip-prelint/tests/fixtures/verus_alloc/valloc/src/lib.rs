@@ -516,3 +516,99 @@ pub mod unmarked {
         super::eat_marked_fip(b);
     }
 }
+
+/// Proof blocks vanish in plain builds (as in fip-core).
+#[cfg(not(verus_keep_ghost))]
+macro_rules! proof {
+    ($($t:tt)*) => {};
+}
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub trait Pick: Sized {
+    #[cfg_attr(verus_keep_ghost, verus_spec(r => allocates 1 deallocates 0))]
+    fn pick(self) -> Option<Box<u8>>;
+}
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl Pick for u64 {
+    #[cfg_attr(verus_keep_ghost, verus_spec(r => allocates 0 deallocates 0))]
+    fn pick(self) -> Option<Box<u8>> {
+        None
+    }
+}
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl Pick for i32 {
+    #[cfg_attr(verus_keep_ghost, verus_spec(r => allocates 1 deallocates 0))]
+    fn pick(self) -> Option<Box<u8>> {
+        Some(Box::new(1u8))
+    }
+}
+
+/// Ghost code types `n` for Verus (`u64`, whose `pick` allocates nothing), and Verus
+/// proves `allocates 0`. Without the proof block `n` is an `i32`, whose `pick`
+/// allocates: in the program Verus compiles (the fork `66c6c2b` and upstream accept
+/// this) and in this build. The driver refuses a listed function with a literal that
+/// this build types by default (2026-11-24).
+#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+pub fn ghost_typed(k: u8) {
+    let mut i = 0u8;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+            deallocated() == 0,
+        decreases k - i,
+    ))]
+    while i < k {
+        let n = 1;
+        proof! {
+            let g: u64 = n;
+        }
+        if let Some(b) = n.pick() {
+            core::mem::forget(b);
+        }
+        i += 1;
+    }
+}
+
+/// Would pass with Verus's 0 (the driver counts `∞` for the loop).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn via_ghost_typed(k: u8) {
+    ghost_typed(k);
+}
+
+/// The control: with the suffix both builds have `n: u64`.
+#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+pub fn suffix_typed(k: u8) {
+    let mut i = 0u8;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+            deallocated() == 0,
+        decreases k - i,
+    ))]
+    while i < k {
+        let n = 1_u64;
+        if let Some(b) = n.pick() {
+            core::mem::forget(b);
+        }
+        i += 1;
+    }
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn via_suffix_typed(k: u8) {
+    suffix_typed(k);
+}
+
+/// A literal that exec code types `i32` looks the same to the driver: refused too,
+/// until it has its suffix (`a + 1_i32`).
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    requires
+        a < 100,
+    ensures
+        r == a + 1,
+))]
+pub fn bump(a: i32) -> i32 {
+    a + 1
+}

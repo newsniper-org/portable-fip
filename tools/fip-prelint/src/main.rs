@@ -209,6 +209,11 @@ impl Callbacks for Prelint {
     }
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        // Every crate with a sidecar, whatever its role: the crates that use it read
+        // the same sidecar and cannot look at its literals.
+        if self.role != Role::StdBuild {
+            verustrust::check_fallback_literals(tcx);
+        }
         let check = match self.role {
             Role::Primary if stack::enabled() => report::stack_record,
             Role::ExportedDependency | Role::StdBuild if stack::enabled() => {

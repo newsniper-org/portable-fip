@@ -11,10 +11,11 @@ z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu - 2024
-verified 39
-source src/lib.rs c7e7a01f449a897d5c4df24c8f768690129e3931ae55b91669299e9be75c1e06
+verified 46
+source src/lib.rs d1fab378af55dea6826265dd11f1fe7d93fe7e53a84d08377294cfc1ace8f428
 fn valloc::bare_two src/lib.rs:346 96e871ee02dee3dd4fb1a431fa285b5f3984ff0bf877c229bac05b2b59c22bc0 - 2 - -
 fn valloc::bare_two_direct src/lib.rs:355 4fb9e503b70fd41e2c20f4a7a5bdcc0ecc866baf3864922f2bc8efb568b800c5 - 2 - -
+fn valloc::bump src/lib.rs:604 e4d1ef565cc345a75b9c8805d1164e702eb781cf54a4c3e3d6abc7ebc57b7d7b requires - - -
 fn valloc::calm src/lib.rs:416 a908ef59e0a7b5418681256768fbc7e38c40f17ccb921d4b33e0affc0bc56f4e - 0 0 -
 fn valloc::calm_fip src/lib.rs:433 9354978f87cc46fd3658d65c77d23896c5007ea8009d5a3a79c96ab9ab70b801 - 0 0 -
 fn valloc::cond src/lib.rs:405 423a1b8dcf07753e34904e58f6795e185f45ba7a92ae38e4c3f407a80a6c57b4 - opaque:dbdd6f9ee949cf1a7fadbed25d759031748cda770ccdea575fa58f2081a26022 opaque:dbdd6f9ee949cf1a7fadbed25d759031748cda770ccdea575fa58f2081a26022 -
@@ -22,10 +23,12 @@ fn valloc::drain src/lib.rs:212 46784c5a306e1ca5240dffda8e5d0c57f407b38a3db975f0
 fn valloc::drain_three src/lib.rs:231 6601f50700a051470b547d31bf26d3c3af829195a386d59494d004ec774d8311 - 0 - -
 fn valloc::eat_marked src/lib.rs:480 853de84ad02f55b64441fe306e1c6300263ba475f01133da780b69615986ef2e - - 0 -
 fn valloc::eat_marked_fip src/lib.rs:488 0a37dec8a585dc58518aae8934be9dafdddfcc3d14d762febcdcbe0c90f74860 - 0 0 -
+fn valloc::ghost_typed src/lib.rs:548 34497ffe4ccc857cba67cd607e3485b81e3799e462c7c1cbc17cee81e648f5a2 - 0 0 -
 fn valloc::one src/lib.rs:26 7d77db3df6f601aa1ad4fe14e72eecadd27422e47c8d369e524f180f77ded7e3 - 1 - -
 fn valloc::pool_two src/lib.rs:337 0c7eac0ad289350855c7c8445a569973576c3d53b82bbc3c72f22ef932dae9d1 - 2 - -
 fn valloc::reserve_two src/lib.rs:319 f1dabaa518ed5be6ded21b3a273fdef31ff2d4d008091f8628fe9da069dc44ee - 2 - -
 fn valloc::sneak src/lib.rs:374 c0f4d97a4f381884535105042cd63f264ff9c9318fb4d12795fa7bca1c91c8c5 - 0 0 encapsulates
+fn valloc::suffix_typed src/lib.rs:580 c08f6e880e048924e52666652cb56562f274eba98393b9ece89bbe90817d829e - 0 0 -
 fn valloc::times src/lib.rs:64 7226f9a11ba37b821e284b4e01d99e9457b5197173bf800c1350811a22166d91 - 0+1*n - -
 fn valloc::twice src/lib.rs:39 f006d54d4f713e95f27ff04f1c9b1b4902417cb7fc74f3ea86f57ffe49bb813d - 2 - -
 fn valloc::twice_with src/lib.rs:117 254776f4bc676f1cf3275bea36e5844c0920c335bb7f80964b25c60de0604555 - 2 - -
@@ -34,6 +37,8 @@ fn valloc::two_pairs src/lib.rs:261 090809ca45727df72642c84dae5821788d001b2a03aa
 fn valloc::upto src/lib.rs:89 00d4af47b25b0829ac6e199be8d0c91a42c7e53e7a8c78bd18cbdedd96f98090 requires 2 - -
 fn valloc::via_sneak src/lib.rs:385 94be9890881eaf1ed51ae21a90281de2814394eea1b91f5eff75560bea610740 - 0 - -
 fn valloc::zero src/lib.rs:15 77591b4c08dc6c2a8d58bedb42b66215535b5e977b77ba6e43bcb406412ed359 - 0 - -
+fn valloc::{impl}::pick src/lib.rs:534 404e252d8f18f5792cf0c87d5b63e9fac784ce5516694fe33c3c488fed1dd9d8 - 0 0 -
+fn valloc::{impl}::pick src/lib.rs:542 b9085693351a4169efcc5ee711b43d5a1d5dc930d570752fdf03086ef783d9a2 - 1 0 -
 fn valloc::{impl}::put_two src/lib.rs:188 2274b4968d2969c88f7850a6c5ab122579dab46f2433e6956ac92eb079bfa711 - 0 1 encapsulates
 fn valloc::{impl}::reserve src/lib.rs:293 eee74424e77665c9f08bf07cb3938e2b1a70173577a3976dd7d9c2a0cf60740b - 1 0 encapsulates
 fn valloc::{impl}::reserve src/lib.rs:311 4f598ff48c0be9c7a556de9a2de84abc5a5c9312d605da45c49e6a9edefc8bd4 - - - -
@@ -41,5 +46,6 @@ fn valloc::{impl}::take src/lib.rs:163 00c935b01fea17f983c71b808c97af64febb07c5b
 fn valloc::{impl}::take_counted src/lib.rs:176 4bb504a2b9107d858382c84bb21a3cd9a001efdd95e6235e917035368c3b61ff - 1 0 encapsulates
 fn valloc::{impl}::take_pair src/lib.rs:199 a30aa64b5b41140bbf56a212cea16316f37066399ed93dbf02f9d599b0a16655 - 1 0 encapsulates
 skip valloc::Backend::reserve no body
+skip valloc::Pick::pick no body
 divergent NoDeallocDrop src/lib.rs:476
 divergent NoDeallocDrop src/lib.rs:478

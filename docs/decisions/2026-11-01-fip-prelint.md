@@ -2165,3 +2165,45 @@ from a `proof!` or `proof_decl!` block. Crates of users are not covered by that 
 
 Also in `TODOs/fip-prelint.md` (open, blocking a claim of soundness for sidecars of
 user crates).
+
+## Amendment 2026-11-24 (2): the driver refuses a listed function with a literal typed by default
+
+**Status:** done. It closes, for this driver, the hole of the amendment above; the hole
+in Verus itself stays open (reported).
+
+The amendment above said that nothing here closes the hole. A review pointed out what
+does. The builds without the ghost code can differ from the verification only where a
+type is left to rustc's fallback, and the fallback gives a numeric literal `i32` or
+`f64` and nothing else (an inference variable that is not a literal's has no fallback:
+the build fails with "type annotations needed"). So a function in which no unsuffixed
+literal has the type `i32` or `f64` in the driver's build has no type that ghost code
+decided.
+
+- The driver, in every crate it compiles except std (also a dependency it otherwise
+  passes through), looks at each function a sidecar lists: an unsuffixed integer literal
+  of type `i32` or float literal of type `f64` in its body (closures and constant
+  expressions included) is an **error** on the literal. An error and not a refusal of
+  the entry, because a crate that uses this one reads the same sidecar and has no HIR
+  of it to look at.
+- It refuses more than the hole: a literal that exec code types `i32` or `f64`
+  (`a + 1` with `a: i32`, `x * 2.0` with `x: f64`, the shift amount in `x << 1`) looks
+  the same. The remedy is the suffix (`1_i32`, `2.0_f64`), which changes nothing else.
+  Telling the two apart needs Verus's type for the literal, which the sidecar does not
+  have; not built, since the check goes away when Verus compares the two builds itself.
+- The earlier wording of the condition was too narrow ("exec locals initialised with a
+  literal"): a literal in a generic call is the same variable. Measured on the fork
+  `66c6c2b`: `let r = wrap(1); proof { let g: W<u64> = r; } r.mk()` verifies with
+  `W<u64>` and runs with `W<i32>`; likewise `wrap(1.5)` with `W<f32>` against `W<f64>`.
+  The condition is: every numeric literal without a suffix in exec code is typed by
+  exec code.
+- The reading by hand of the 13 listed functions of this repository is replaced by the
+  check. Run over `fip-core`, `fip-strict` and `fip-alloc` in a fresh target directory,
+  with the check printing what it looks at (a local build, not committed): it examined
+  the 13 functions and found no such literal in any.
+
+Gates: fixture `verus_alloc`, `ghost_typed` (the hole: Verus proves `allocates 0`, the
+plain build calls the allocating impl in a loop; with the sidecar the literal is an
+error, without it the `#[fip]` caller is refused by the driver's own count),
+`suffix_typed` (the control with `1_u64`: passes with and without), `bump` (`a + 1`
+with `a: i32`: refused too). Measured besides, on a probe crate: the literal inside a
+generic call (`wrap(1).t`) is refused.

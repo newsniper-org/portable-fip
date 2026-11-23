@@ -966,3 +966,120 @@ impl VerusTrust {
         out
     }
 }
+
+// ---------------------------------------------------------------------------------
+// Literals typed by fallback (decision 2026-11-01-fip-prelint, amendment 2026-11-24 (2)).
+
+/// The first numeric literal without a suffix in the body of `def` (closures and
+/// constant expressions in it included) whose type in this build is `i32` or `f64`:
+/// its span and that type.
+///
+/// Those are the two types rustc gives a literal that nothing else types. Ghost code
+/// can type one for Verus (`let n = 1; proof! { let g: u64 = n; }`): Verus then
+/// verifies the function with `n: u64`, and every build without the ghost code (the
+/// one Verus compiles, and this one) has `n: i32`, calls other impls with it and
+/// instantiates generics otherwise. A literal that exec code types `i32` or `f64`
+/// looks the same here, so it is reported too; with a suffix it is not.
+pub fn fallback_literal(
+    tcx: TyCtxt<'_>,
+    def: rustc_hir::def_id::LocalDefId,
+) -> Option<(Span, &'static str)> {
+    use rustc_ast::ast::{LitFloatType, LitIntType, LitKind};
+    use rustc_hir::intravisit::{self, Visitor};
+    use rustc_middle::ty::{FloatTy, IntTy, TyKind};
+
+    struct Lits<'tcx> {
+        tcx: TyCtxt<'tcx>,
+        typeck: &'tcx rustc_middle::ty::TypeckResults<'tcx>,
+        found: Option<(Span, &'static str)>,
+    }
+    impl<'tcx> Lits<'tcx> {
+        fn lit(&mut self, kind: &LitKind, id: rustc_hir::HirId, span: Span) {
+            if self.found.is_some() {
+                return;
+            }
+            let Some(ty) = self.typeck.node_type_opt(id) else {
+                return;
+            };
+            let hit = match (kind, ty.kind()) {
+                (LitKind::Int(_, LitIntType::Unsuffixed), TyKind::Int(IntTy::I32)) => Some("i32"),
+                (LitKind::Float(_, LitFloatType::Unsuffixed), TyKind::Float(FloatTy::F64)) => {
+                    Some("f64")
+                }
+                _ => None,
+            };
+            if let Some(t) = hit {
+                self.found = Some((span, t));
+            }
+        }
+    }
+    impl<'tcx> Visitor<'tcx> for Lits<'tcx> {
+        type NestedFilter = rustc_middle::hir::nested_filter::OnlyBodies;
+
+        fn maybe_tcx(&mut self) -> TyCtxt<'tcx> {
+            self.tcx
+        }
+
+        fn visit_nested_body(&mut self, id: rustc_hir::BodyId) {
+            let outer = std::mem::replace(&mut self.typeck, self.tcx.typeck_body(id));
+            self.visit_body(self.tcx.hir_body(id));
+            self.typeck = outer;
+        }
+
+        fn visit_expr(&mut self, e: &'tcx rustc_hir::Expr<'tcx>) {
+            if let rustc_hir::ExprKind::Lit(lit) = e.kind {
+                self.lit(&lit.node, e.hir_id, e.span);
+            }
+            intravisit::walk_expr(self, e);
+        }
+
+        fn visit_pat_expr(&mut self, e: &'tcx rustc_hir::PatExpr<'tcx>) {
+            if let rustc_hir::PatExprKind::Lit { lit, .. } = e.kind {
+                self.lit(&lit.node, e.hir_id, e.span);
+            }
+            intravisit::walk_pat_expr(self, e);
+        }
+    }
+
+    let body = tcx.hir_maybe_body_owned_by(def)?;
+    let mut v = Lits {
+        tcx,
+        typeck: tcx.typeck(def),
+        found: None,
+    };
+    v.visit_body(body);
+    v.found
+}
+
+/// Reports, as errors, the functions of the crate being compiled that a Verus sidecar
+/// lists and that have a [`fallback_literal`]. An error, not a refusal of the entry:
+/// a crate that uses this one reads the same sidecar and has no HIR of it to look at.
+pub fn check_fallback_literals(tcx: TyCtxt<'_>) {
+    let verus = VerusTrust::new();
+    for def in tcx.hir_body_owners() {
+        if !matches!(
+            tcx.def_kind(def),
+            rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn
+        ) || !tcx.is_mir_available(def)
+        {
+            continue;
+        }
+        let d = def.to_def_id();
+        let Verdict::Listed { path, .. } = verus.verdict(tcx, d, tcx.optimized_mir(d).span) else {
+            continue;
+        };
+        if let Some((span, ty)) = fallback_literal(tcx, def) {
+            tcx.dcx()
+                .struct_span_err(
+                    span,
+                    format!(
+                        "fip-prelint: `{path}` is listed in a Verus sidecar and has a numeric literal without a suffix, of type `{ty}` in this build: Verus may have verified it with another type"
+                    ),
+                )
+                .with_help(format!(
+                    "ghost code can decide the type of a literal for Verus (`let n = 1; proof! {{ let g: u64 = n; }}`), and without the ghost code the literal is `{ty}`, so the compiled function can call other functions than the verified one; write the type on the literal (`1_{ty}`, or the suffix of the type that is meant)"
+                ))
+                .emit();
+        }
+    }
+}
