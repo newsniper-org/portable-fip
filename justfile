@@ -693,46 +693,44 @@ verify-sidecar: verify-strict
     fi
     grep -q "names no \`--edition\`" "$out/noedition.err"
     test ! -e "$out/noedition.txt"
-    # An item with a Verus attribute that Verus ignores (2026-11-23: a function outside
-    # `verus!` with `#[verifier::fip]` and no `#[verus_spec(..)]`; it allocates, and the
-    # run succeeds with a warning): refused after the run, nothing written. The control
-    # with `#[verus_spec]` beside the attribute fails in Verus itself.
-    mkdir -p "$out/ignored/src" "$out/ignctl/src"
+    # `#[verifier::fip]` on a function that Verus does not verify (outside `verus!`
+    # without `#[verus_spec(..)]`, or `#[verifier::external]`): an error of the fork since
+    # `62f2a9400` (before, a warning and a successful run, also for a function that
+    # allocates; the generator matched the warning until the re-pin to `d633cde`). No
+    # sidecar is written, with or without the flags that hid the warning. The control
+    # with `#[verus_spec]` beside the attribute is refused by the verification.
+    mkdir -p "$out/ignored/src" "$out/ignext/src" "$out/ignctl/src"
     printf '%s\n' '#![allow(unused_imports)]' 'use vstd::prelude::*;' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignored/src/lib.rs"
-    printf '%s\n' '#![feature(proc_macro_hygiene)]' 'use vstd::prelude::*;' '#[verus_spec]' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignctl/src/lib.rs"
-    if (cd "$out" && $gen --crate-name ignored --crate-dir ignored --out "$out/ignored.txt" -- {{verus}} --crate-type=lib --crate-name ignored {{verus_flags}} ignored/src/lib.rs) > "$out/ignored.log" 2>&1; then # negative probe
-      echo "FAIL: a sidecar was generated for a run in which Verus ignored an item with a Verus attribute"; exit 1
-    fi
-    grep -q "Verus ignored an item that carries a Verus attribute" "$out/ignored.log" || { echo "FAIL: the run with an ignored attribute failed for another reason"; cat "$out/ignored.log"; exit 1; }
-    test ! -e "$out/ignored.txt"
-    # The same with `#[verifier::external]` beside the attribute (the fork's other
-    # warning of this kind), and the flags that hide such warnings: refused before the run.
-    mkdir -p "$out/ignext/src"
     printf '%s\n' '#![allow(unused_imports)]' 'use vstd::prelude::*;' '#[verifier::external]' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignext/src/lib.rs"
-    if (cd "$out" && $gen --crate-name ignext --crate-dir ignext --out "$out/ignext.txt" -- {{verus}} --crate-type=lib --crate-name ignext {{verus_flags}} ignext/src/lib.rs) > "$out/ignext.log" 2>&1; then # negative probe
-      echo "FAIL: a sidecar was generated for a run in which Verus ignored an external item with a Verus attribute"; exit 1
-    fi
-    grep -q "because item is already marked external" "$out/ignext.log" || { echo "FAIL: Verus did not print the warning for an external item"; cat "$out/ignext.log"; exit 1; }
-    grep -q "Verus ignored an item that carries a Verus attribute" "$out/ignext.log" || { echo "FAIL: the run with an ignored external item failed for another reason"; cat "$out/ignext.log"; exit 1; }
-    test ! -e "$out/ignext.txt"
-    for hide in "-A warnings" "-Awarnings" "--cap-lints allow" "--cap-lints=allow"; do
-      if (cd "$out" && $gen --crate-name ignored --crate-dir ignored --out "$out/ignhide.txt" -- {{verus}} --crate-type=lib --crate-name ignored {{verus_flags}} $hide ignored/src/lib.rs) > "$out/ignhide.log" 2>&1; then # negative probe
-        echo "FAIL: a sidecar was generated for a run with \`$hide\`"; exit 1
+    printf '%s\n' '#![feature(proc_macro_hygiene)]' 'use vstd::prelude::*;' '#[verus_spec]' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignctl/src/lib.rs"
+    ign() {  # crate, expected regex in Verus's output, extra Verus flags
+      local c="$1" want="$2"; shift 2
+      if (cd "$out" && $gen --crate-name "$c" --crate-dir "$c" --out "$out/$c.txt" -- {{verus}} --crate-type=lib --crate-name "$c" {{verus_flags}} "$@" "$c/src/lib.rs") > "$out/$c.log" 2>&1; then # negative probe
+        echo "FAIL: a sidecar was generated for the crate $c ($*)"; exit 1
       fi
-      grep -q "it can hide the warning" "$out/ignhide.log" || { echo "FAIL: the run with \`$hide\` failed for another reason"; cat "$out/ignhide.log"; exit 1; }
-      test ! -e "$out/ignhide.txt"
-    done
-    # Control of the flags: Verus itself, given one, succeeds on that crate without the warning.
-    if ! (cd "$out" && {{verus}} --crate-type=lib --crate-name ignored {{verus_flags}} -A warnings ignored/src/lib.rs) > "$out/ignhide-verus.log" 2>&1; then
-      echo "FAIL: control: Verus with \`-A warnings\` failed on the crate with an ignored attribute"; cat "$out/ignhide-verus.log"; exit 1
+      grep -Eq "$want" "$out/$c.log" || { echo "FAIL: the crate $c ($*) failed for another reason"; cat "$out/$c.log"; exit 1; }
+      grep -q "Verus failed: no sidecar written" "$out/$c.log" || { echo "FAIL: the crate $c ($*): the generator did not report Verus's failure"; cat "$out/$c.log"; exit 1; }
+      test ! -e "$out/$c.txt"
+    }
+    ign ignored 'alloc-check: `#\[verifier::fip\]` is on a function that Verus is ignoring'
+    ign ignored 'alloc-check: `#\[verifier::fip\]` is on a function that Verus is ignoring' -A warnings
+    ign ignored 'alloc-check: `#\[verifier::fip\]` is on a function that Verus is ignoring' --cap-lints allow
+    ign ignext 'alloc-check: `#\[verifier::fip\]` is on a function that is marked external'
+    ign ignctl 'postcondition not satisfied'
+    # A body that differs between Verus's verification and the compiled program
+    # (`verus_keep_ghost_body` is set for the verification only; the fork `d633cde`
+    # verifies `allocates 0` for this function, whose compiled body allocates): the
+    # generator refuses the crate for the cfg it tests, before Verus runs.
+    mkdir -p "$out/cfgbody/src"
+    printf '%s\n' '#![feature(proc_macro_hygiene)]' '#![allow(unexpected_cfgs)]' 'use vstd::prelude::*;' '#[verus_spec(r => allocates 0)]' 'pub fn quiet(x: u64) -> u64 {' '    #[cfg(not(verus_keep_ghost_body))]' '    let _b = Box::new(x);' '    x' '}' > "$out/cfgbody/src/lib.rs"
+    if (cd "$out" && $gen --crate-name cfgbody --crate-dir cfgbody --out "$out/cfgbody.txt" -- {{verus}} --crate-type=lib --crate-name cfgbody {{verus_flags}} cfgbody/src/lib.rs) > "$out/cfgbody.log" 2>&1; then # negative probe
+      echo "FAIL: a sidecar was generated for a crate whose body tests verus_keep_ghost_body"; exit 1
     fi
-    if grep -q "verus-related attribute has no effect" "$out/ignhide-verus.log"; then
-      echo "FAIL: control: \`-A warnings\` no longer hides the warning (the refusal of the flag can be reconsidered)"; exit 1
-    fi
-    if (cd "$out" && $gen --crate-name ignctl --crate-dir ignctl --out "$out/ignctl.txt" -- {{verus}} --crate-type=lib --crate-name ignctl {{verus_flags}} ignctl/src/lib.rs) > "$out/ignctl.log" 2>&1; then # negative probe
-      echo "FAIL: control: a fip function that allocates verified"; exit 1
-    fi
-    grep -q "Verus failed: no sidecar written" "$out/ignctl.log" || { echo "FAIL: the control failed for another reason"; cat "$out/ignctl.log"; exit 1; }
+    grep -q 'tests `verus_keep_ghost_body`' "$out/cfgbody.log" || { echo "FAIL: the crate cfgbody failed for another reason"; cat "$out/cfgbody.log"; exit 1; }
+    test ! -e "$out/cfgbody.txt"
+    # Control: Verus itself verifies that crate (the fork does not compare the bodies;
+    # reported 2026-11-23). If it stops doing so, this line fails and the comment above is stale.
+    (cd "$out" && {{verus}} --crate-type=lib --crate-name cfgbody {{verus_flags}} cfgbody/src/lib.rs) > "$out/cfgbody-verus.log" 2>&1 || { echo "NOTE: Verus now refuses the crate cfgbody (update this control)"; cat "$out/cfgbody-verus.log"; exit 1; }
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

@@ -2065,3 +2065,41 @@ version of the guard was passed by adding one of them; `#![allow(warnings)]` in 
 crate does not hide it. The gate has the external case, the four spellings of the
 flags, and a control that Verus with `-A warnings` still succeeds silently on that
 crate.
+
+## Amendment 2026-11-23 (4): re-pin to the fork d633cde; the warning guard is removed
+
+**Status:** done.
+
+**Pin.** `0.2026.11.23.d633cde` (`d633cde6c027…`), five commits after `2e6f5874a`, the
+fork's answer to the report of amendment (3). With `-V alloc-check`, `#[verifier::fip]`
+on a function or closure that Verus does not verify is an error; and the fork found and
+closed a hole of its own: the verification and the compiled program read the attribute
+separately, under different cfgs (`verus_keep_ghost_body` is set for the verification
+only), so `#[cfg_attr(verus_keep_ghost_body, verifier::fip)]` on a function that drops a
+`Box` verified, and verified callers took it for `fip`. Checked before the move (clean
+worktree, tests first, then the `singular` build): the diff read in full (1567 lines);
+the fork's tests, 5507 passed, 0 failed, 63 ignored (as the fork reports); the 7 repro
+files of amendment (3) fail with the new errors, `a1` also with `-A warnings`,
+`-Awarnings` and `--cap-lints allow`; the 10 repro files before them verify; 114
+functions freeing more than they state, in both editions, none verifies; the 15 tight
+bounds as before. The attribute-syntax form of the fork's hole
+(`#[verus_spec] #[cfg_attr(verus_keep_ghost_body, verifier::fip)]`, body drops a `Box`):
+exit 0 on `2e6f587`, refused on `d633cde`.
+
+**Was a sidecar affected?** No: the generator refuses, before Verus runs, a crate that
+tests any cfg but `verus_keep_ghost` (`crate_cfg_check`). Measured on both fork builds
+with the form above: no sidecar.
+
+**The guard of amendment (3) is removed**: the match of the warning's text and the
+refusal of `-A..`, `--allow..`, `--cap-lints..`. The fork's error does not depend on
+those flags (measured). `just verify-sidecar` keeps the cases as gates on the fork: the
+ignored function (plain, with `-A warnings`, with `--cap-lints allow`), the external
+one, and the control with `#[verus_spec]`.
+
+**Left in the fork, reported** (`2026-11-23-cfg-body-divergence.md`): the same divergence
+at the level of statements. `#[cfg(not(verus_keep_ghost_body))] let _b = Box::new(x);`
+in an `allocates 0` function verifies (the compiled program allocates); likewise a
+`deallocates 0` function and a `fip` function whose compiled body calls `drop(b)`.
+Implicit drops are caught (the fork checks them on the compiled program); calls are
+not. No sidecar is written for such a crate either (same refusal; gate `cfgbody` in
+`verify-sidecar`, with a control that Verus itself still verifies that crate).

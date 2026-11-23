@@ -714,11 +714,6 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     }) {
         return fail(&format!("refused Verus flag `{f}`"));
     }
-    if let Some(f) = flags.iter().find(|f| verusgen::hides_warnings(f)) {
-        return fail(&format!(
-            "refused Verus flag `{f}`: it can hide the warning for an item with a Verus attribute that Verus ignores"
-        ));
-    }
     // The driver compiles the crate with `--cfg fip_prelint`, the profile's settings,
     // the cargo features and (for the test target) `cfg(test)`: a crate whose sources
     // test such cfgs gets no sidecar, and the run's target and features are recorded.
@@ -776,14 +771,12 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
         .args(&flags)
         .args(["--output-json", "--log", "vir", "--log-dir"])
         .arg(&log_dir)
+        .stderr(Stdio::inherit())
         .output();
     let run = match run {
         Ok(r) => r,
         Err(e) => return fail(&format!("cannot run `{verus_cmd}`: {e}")),
     };
-    // Verus's diagnostics, passed on (they are read below, so not inherited).
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    eprint!("{stderr}");
     let stdout = String::from_utf8_lossy(&run.stdout);
     // `--output-json` prints one JSON object; anything before it is passed on.
     let json_at = stdout.find("\n{").map_or(0, |i| i + 1);
@@ -804,11 +797,6 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
             );
         }
         return fail("Verus failed: no sidecar written");
-    }
-    if verusgen::ignored_attribute(&stderr) {
-        return fail(
-            "Verus ignored an item that carries a Verus attribute (the warning above: a function outside `verus!` with `#[verifier::..]` and no `#[verus_spec(..)]`); the item was not verified, whatever its attribute says: no sidecar written",
-        );
     }
     let mut info = match verusgen::parse_json(json_text.trim()).and_then(|j| verusgen::run_info(&j))
     {
