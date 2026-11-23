@@ -58,6 +58,7 @@ use vstd::prelude::*;
         r.0 == if c < 1000 { (c + 1) as u32 } else { c },
         r.1 == r.0,
     allocates 0
+    deallocates 0
 ))]
 pub fn tick(c: u32, _x: u32) -> (u32, u32) {
     let n = if c < 1000 { c + 1 } else { c };
@@ -71,6 +72,7 @@ pub fn tick(c: u32, _x: u32) -> (u32, u32) {
         final(xs)@ == seq![11u32, 12u32, 13u32],
         r == 13,
     allocates 0
+    deallocates 0
 ))]
 pub fn counter(xs: &mut [u32]) -> u32 {
     let (c, _hole) = fip_core::map_in_place_st(xs, 0, 10, tick);
@@ -107,6 +109,7 @@ pub fn tick_checked(c: u32, _x: u32) -> (u32, u32) {
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
         r == 10 + old(xs)@.len(),
     allocates 0
+    deallocates 0
 ))]
 pub fn number_from_11(xs: &mut [u32]) -> u32 {
     proof! { assert(map_st_by_inv(old(xs)@, tick_checked, 10u32, |k: int, c: u32| c == 10 + k)); }
@@ -137,6 +140,7 @@ pub fn number_from_11(xs: &mut [u32]) -> u32 {
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
         r == 10 + old(xs)@.len(),
     allocates 0
+    deallocates 0
 ))]
 pub fn number_from_11_strict(xs: &mut [u32]) -> u32 {
     let f = fip_macros::fip_fn!(tick_checked);
@@ -165,6 +169,7 @@ pub fn number_from_11_strict(xs: &mut [u32]) -> u32 {
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 11 + k,
         r == 10 + old(xs)@.len(),
     allocates 0
+    deallocates 0
 ))]
 pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
     let f = fip_macros::fip_fn!(
@@ -176,6 +181,7 @@ pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
                 r.0 == c + 1,
                 r.1 == r.0,
             allocates 0
+            deallocates 0
         ))]
         |c: u32, _x: u32| (c + 1, c + 1)
     );
@@ -202,10 +208,11 @@ pub fn number_from_11_closure(xs: &mut [u32]) -> u32 {
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 2 * old(xs)@[k],
         r == 7,
     allocates 0
+    deallocates 0
 ))]
 pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
     let g = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0 deallocates 0))]
         |x: u32| x * 2
     );
     let f = fip_strict::Stateless(g);
@@ -228,14 +235,15 @@ pub fn doubled_stateless(xs: &mut [u32]) -> u32 {
         final(xs)@.len() == old(xs)@.len(),
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 4 * old(xs)@[k],
     allocates 0
+    deallocates 0
 ))]
 pub fn quadrupled(xs: &mut [u32]) {
     let d1 = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0 deallocates 0))]
         |x: u32| x * 2
     );
     let d2 = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0 deallocates 0))]
         |x: u32| x * 2
     );
     let c = fip_strict::Compose(d1, d2);
@@ -259,6 +267,7 @@ pub fn quadrupled(xs: &mut [u32]) {
         forall|k: int| 0 <= k < final(xs)@.len() ==> final(xs)@[k] == 2 * (11 + k),
         r == 10 + old(xs)@.len(),
     allocates 0
+    deallocates 0
 ))]
 pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
     let t = fip_macros::fip_fn!(
@@ -270,11 +279,12 @@ pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
                 r.0 == c + 1,
                 r.1 == r.0,
             allocates 0
+            deallocates 0
         ))]
         |c: u32, _x: u32| (c + 1, c + 1)
     );
     let d = fip_macros::fip_fn!(
-        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0))]
+        #[cfg_attr(verus_keep_ghost, verus_spec(r: u32 => requires x < 1000, ensures r == 2 * x, allocates 0 deallocates 0))]
         |x: u32| x * 2
     );
     let f = fip_strict::Then(t, fip_strict::Stateless(d));
@@ -304,6 +314,7 @@ pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
         r.1 == x,
         r.2 == (x % 2 == 1),
     allocates 0
+    deallocates 0
 ))]
 pub fn count_odd(c: u32, x: u32) -> (u32, u32, bool) {
     let odd = x % 2 == 1;
@@ -316,6 +327,7 @@ pub fn count_odd(c: u32, x: u32) -> (u32, u32, bool) {
     ensures
         r == 2,
     allocates 0
+    deallocates 0
 ))]
 pub fn odd_count(xs: &mut [u32]) -> u32 {
     let (n, odd, _hole) = fip_core::compact_map_st(xs, 0, 0, count_odd);
@@ -335,6 +347,7 @@ pub fn odd_count(xs: &mut [u32]) -> u32 {
         r.1 == x,
         r.2 == (x % 2 == 1),
     allocates 0
+    deallocates 0
 ))]
 pub fn count_odd_checked(c: u32, x: u32) -> (u32, u32, bool) {
     let odd = x % 2 == 1;
@@ -351,6 +364,7 @@ pub fn count_odd_checked(c: u32, x: u32) -> (u32, u32, bool) {
         r.1 <= old(xs)@.len(),
         forall|i: int| 0 <= i < r.0 ==> final(xs)@[i] % 2 == 1,
     allocates 0
+    deallocates 0
 ))]
 pub fn keep_odd(xs: &mut [u32]) -> (usize, u32) {
     proof! { assert(compact_map_st_by_inv(old(xs)@, count_odd_checked, 0u32, |k: int, c: u32| c <= k)); }

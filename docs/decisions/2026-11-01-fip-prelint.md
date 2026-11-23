@@ -1930,7 +1930,7 @@ combinators stated only `allocates`, so no such caller could use them.
   `fip` caller). `verify/strip_alloc.py` strips the new clauses and empties
   `dealloc_spec.rs` for upstream Verus.
 
-Not done, a decision each:
+Not done then, a decision each (both taken and done on 2026-11-23, see that amendment):
 
 - `dedup_by`, `map_in_place_st`, `compact_map_st` (`allocates 0`, requiring every
   callback call to allocate nothing) state no `deallocates`. Which calls they make
@@ -1941,3 +1941,53 @@ Not done, a decision each:
 - `fip-strict`'s `FipFn::call` states no `deallocates`, so the strict variants
   (`fip_core::strict::*`) and every `FipFn` call are closed to such callers too. Stating
   `deallocates 0` there adds a conjunct to `Certified::pre`: also a contract change.
+
+## Amendment 2026-11-23: re-pin to the fork 2e6f587; `deallocates 0` on `FipFn::call` and the rest of `fip-core`
+
+**Status:** done on the branch `feature/dealloc-contracts`.
+
+**Pin.** `0.2026.11.23.2e6f587` (`2e6f5874a3ef…`), two commits after `0fa89d09b`, both for
+defects reported from here on 2026-11-22: a closure written with `#[verus_spec(..)]` kept
+the attribute's span, so one with a `deallocates` bound was "not found in the compiled
+program" (internal error), and `#[verus_spec(..)]` with `#[verifier::fip]` on one closure
+was a syntax error; and closure types and function items are now `Copy` to the solver
+where rustc finds them so. The `.vir` format changed; the sidecar generator reads it
+unchanged. Checked before the move (clean worktree; this time the fork's tests ran first
+and the `singular` build after them, so every probe is on that build): the diff read in
+full (827 lines); the fork's tests, 5470 passed, 0 failed, 63 ignored (the fork reports
+the same); the 10 repro files, all verify; 113 functions that free more than they state
+in both editions (the 102 of before and 11 new ones: closures that own a `Box` or a
+`Vec`, wrapped or not, in a generic function, written with `#[verus_spec(..)]`, with
+`#[verifier::fip]`), none verifies; the 15 tight bounds as before.
+
+**The contract change** (the two decisions left open by the fifth amendment of
+2026-11-22; the user decided for both).
+
+- `fip-strict`: `FipFn::call` is `deallocates 0`. `Certified::pre` has a third conjunct,
+  `call_deallocations(closure, args) == 0`; `Certified::assume` and
+  `assume_no_panic_macros` are `deallocates 0`. `NoDeallocDrop` is exported as
+  `AllocFreeDrop` is (Verus: `vstd::alloc_check::NoDeallocDrop`; plain builds: a marker
+  every type has), with impls for `Certified` (closure `Copy`), `Stateless`, `Compose`
+  and `Then`, which Verus checks.
+- `fip-core`: the strict variants are `deallocates 0`. They take their callable by value
+  and drop it, so the callable is bounded by `NoDeallocDrop`. (Stating instead
+  `deallocates drop_deallocations(f)` left the caller to show that a `Certified` around
+  a closure frees nothing when dropped, which was not provable before `2e6f587`; the
+  bound is resolved by rustc and needs no proof.) `dedup_by`, `map_in_place_st` and
+  `compact_map_st` require `call_deallocations(..) == 0` of every callback call and are
+  `deallocates 0`.
+- `fip-macros`: a `strict` function without callable parameters gets `deallocates 0`
+  beside `allocates N` (it is `fip`: it frees nothing, and a certificate of it must
+  satisfy `Certified::pre`). Not `total`, which states it through
+  `#[verifier::fip(strict)]`, nor a function with a hand-written `verifier::fip`: the
+  fork admits no `deallocates` clause on a `fip` function. A hand-written `deallocates`
+  on a strict function without callable parameters is an error, as `allocates` is.
+- What a Verus user changes: a closure given to `fip_fn!`, and a callback given to the
+  three `Fn`-based functions above, states `deallocates 0` (or is `#[verifier::fip]`); a
+  strict combinator written by hand bounds its callable by `NoDeallocDrop` and states
+  `deallocates 0`; a function certified by `fip_fn!(path)` that is not `strict` states
+  `deallocates 0`. Plain builds are unchanged.
+- Gates: mutants `certified-pre-no-dealloc` and `map-st-dealloc-unrequired`; controls
+  `dedup-dealloc-unbounded`, `st-dealloc-unbounded`, `certified-dealloc-unbounded`; the
+  callers of `verify/` state `deallocates 0`; `tests/verus_drift.rs` counts the eight
+  marker impls; `verify/strip_alloc.py` strips the new bound, impls and clauses.

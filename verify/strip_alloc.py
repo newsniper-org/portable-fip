@@ -82,7 +82,11 @@ def strip(s: str) -> str:
     s = re.sub(r"\n\nverus! \{\n\n/// `allocates` total.*?\} // verus!\n", "\n", s, flags=re.S)
     s = re.sub(r"\n\nverus! \{\n\n/// Callbacks that allocate nothing.*?\} // verus!\n", "\n", s, flags=re.S)
     s = re.sub(r"\n[ ]*proof! \{\n(?:[ ]*assert\([^\n]*allocs\([^\n]*\);\n)+[ ]*\}(?=\n)", "", s)
-    s = re.sub(r"\n[^\n]*forall\|i: int, j: int\|[^\n]*\n[^\n]*==> call_allocations\([^\n]*", "", s)
+    s = re.sub(
+        r"\n[^\n]*forall\|i: int, j: int\|[^\n]*\n[^\n]*==> call_(?:allocations|deallocations)\([^\n]*",
+        "",
+        s,
+    )
     lines: list[str] = []
     skip = 0
     for line in s.split("\n"):
@@ -109,7 +113,7 @@ def strip(s: str) -> str:
         if t.startswith("open spec fn allocs(&self)"):
             skip = 2
             continue
-        if "vstd::alloc_check::AllocFreeDrop for" in t:
+        if "vstd::alloc_check::AllocFreeDrop for" in t or "vstd::alloc_check::NoDeallocDrop for" in t:
             if lines and lines[-1].strip().startswith('#[allow(unsafe_code, reason = "checked by Verus'):
                 lines.pop()
             continue
@@ -121,6 +125,10 @@ def strip(s: str) -> str:
         "#[cfg(verus_keep_ghost)]\npub trait AllocFreeDrop {}\n#[cfg(verus_keep_ghost)]\nimpl<T: ?Sized> AllocFreeDrop for T {}",
     )
     s = s.replace(
+        "#[cfg(verus_keep_ghost)]\npub use vstd::alloc_check::NoDeallocDrop;",
+        "#[cfg(verus_keep_ghost)]\npub trait NoDeallocDrop {}\n#[cfg(verus_keep_ghost)]\nimpl<T: ?Sized> NoDeallocDrop for T {}",
+    )
+    s = s.replace(
         "#[cfg(verus_keep_ghost)]\npub use core::marker::Copy as DropFreeFn;",
         "#[cfg(verus_keep_ghost)]\npub trait DropFreeFn {}\n#[cfg(verus_keep_ghost)]\nimpl<T: ?Sized> DropFreeFn for T {}",
     )
@@ -128,8 +136,9 @@ def strip(s: str) -> str:
     s = s.replace(": vstd::alloc_check::AllocFreeDrop", ": crate::AllocFreeDrop")
     s = s.replace("$($A: crate::AllocFreeDrop,)* R: crate::AllocFreeDrop", "$($A,)* R")
     s = re.sub(r"(\w+): (?:crate::|fip_strict::)AllocFreeDrop([,>])", r"\1\2", s)
+    s = s.replace(" + crate::NoDeallocDrop", "").replace(" + fip_strict::NoDeallocDrop", "")
     s = s.replace(" + crate::AllocFreeDrop", "").replace(" + crate::DropFreeFn", "")
-    s = s.replace("pub use fip_strict::{AllocFreeDrop, DropFreeFn};\n", "")
+    s = s.replace("pub use fip_strict::{AllocFreeDrop, DropFreeFn, NoDeallocDrop};\n", "")
     return s
 
 

@@ -430,6 +430,11 @@ verify-negative: verify-strict verify-core
     expect_alloc_fail strict-compact-calls-twice fip-core strict.rs '/^pub fn compact</,/^}/ s/^        if keep.call((&xs\[r\],)) {$/        let _again = keep.call((\&xs[r],));\n        if keep.call((\&xs[r],)) {/' 'allocated\(\) <= r \* keep\.allocs\(\)'
     expect_alloc_fail compose-sum-minus-one   fip-strict lib.rs '/^macro_rules! compose_fip_fn/,/^}/ s/^                self.0.allocs() + self.1.allocs()$/                (self.0.allocs() + self.1.allocs() - 1) as nat/' 'allocates self\.allocs\(\)'
     expect_alloc_fail certified-pre-no-alloc  fip-strict lib.rs '/^                &&& call_allocations(self.inner(), args) <= ALLOCS as int$/d' 'allocates self\.allocs\(\)'
+    # (2026-11-22) `FipFn::call` is `deallocates 0`: without the conjunct of `pre`,
+    # `Certified`'s `call` cannot show it; without the requirement, neither can the
+    # `_st` combinators and `dedup_by`.
+    expect_alloc_fail certified-pre-no-dealloc fip-strict lib.rs '/^                &&& call_deallocations(self.inner(), args) == 0$/d' 'deallocates 0'
+    expect_alloc_fail map-st-dealloc-unrequired fip-core slice.rs '/^        map_st_by_ok(old(xs)@, f, s0),$/ { n; n; /call_deallocations/d; }' 'call_deallocations\(f, \(s, x\)\) == 0'
     # Strict variants (`FipFn` callables), same mutations.
     expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$spec"
     expect_verus_fail strict-compact-order       fip-core strict.rs '/^pub fn compact</,/^}/ s/idx = idx.push(r as int);/idx = idx.push(0);/' "$spec"
@@ -531,7 +536,12 @@ verify-negative: verify-strict verify-core
     }
     callers_fail closure-allocates '/^pub fn evens(/,/^}/ s/allocates 0 { \*v % 2 == 0 }/allocates 0 { let _b = Box::new(0u8); *v % 2 == 0 }/' 'unable to prove post-condition of closure' 'Box::new'
     callers_fail closure-unbounded '/^pub fn evens(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'postcondition not satisfied' 'allocates 0'
-    callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'precondition not satisfied' 'call_allocations\(same'
+    callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 deallocates 0 {/-> (r: bool) deallocates 0 {/' 'precondition not satisfied' 'call_allocations\(same'
+    # (2026-11-22) `dedup_by`, `map_in_place_st` and `compact_map_st` also require
+    # callbacks that deallocate nothing, and a `Certified` checks it in `pre`.
+    callers_fail dedup-dealloc-unbounded '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 deallocates 0 {/-> (r: bool) allocates 0 {/' 'precondition not satisfied' 'call_deallocations\(same'
+    callers_fail st-dealloc-unbounded '/^pub fn kept_state(/,/^}/ s/allocates 0 deallocates 0 { (s, x) }/allocates 0 { (s, x) }/' 'precondition not satisfied' 'call_deallocations\(f, \(s, x\)\) == 0'
+    callers_fail certified-dealloc-unbounded '/^pub fn incremented_strict(/,/^}/ s/requires v < 100 allocates 0 deallocates 0 { v + 1 }/requires v < 100 allocates 0 { v + 1 }/' 'precondition not satisfied' 'f\.pre\(\(old\(xs\)@\[i\],\)\)'
     callers_fail no-zero-lemmas    's/^broadcast use fip_core::spec::group_allocs_zero, fip_core::dealloc_spec::group_deallocs_zero;$/broadcast use fip_core::dealloc_spec::group_deallocs_zero;/' 'postcondition not satisfied' 'allocates 0'
     # Deallocation bounds (2026-11-22): a closure without a `deallocates` bound, one
     # that frees, the zero-sum lemmas left out, a bound one too low, and a freeing
@@ -587,7 +597,7 @@ verify-negative: verify-strict verify-core
       echo "control total-$1 rejected by Verus"
     }
     total_fail unwind 's/^    inc(same_total(x))$/    inc(same_fip(x))/' 'cannot show this call will not unwind'
-    total_fail hidden-alloc 'append:\n/// Claims 0 allocations, allocates one.\npub const __fip_strict_claim: fip_strict::Cert = unsafe { fip_strict::Cert::assume("claim", 0) };\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n    allocates 1\n))]\npub fn claim() -> u32 {\n    let b = alloc::boxed::Box::new(1u32);\n    *b\n}\n\n#[fip(strict)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n))]\npub fn calls_claim() -> u32 {\n    claim()\n}\n' 'postcondition not satisfied'
+    total_fail hidden-alloc 'append:\n/// Claims 0 allocations, allocates one.\npub const __fip_strict_claim: fip_strict::Cert = unsafe { fip_strict::Cert::assume("claim", 0) };\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n    allocates 1\n    deallocates 1\n))]\npub fn claim() -> u32 {\n    let b = alloc::boxed::Box::new(1u32);\n    *b\n}\n\n#[fip(strict)]\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        r == 1,\n))]\npub fn calls_claim() -> u32 {\n    claim()\n}\n' 'postcondition not satisfied'
     grep -A3 "postcondition not satisfied" "$out/total_hidden-alloc.log" | grep -q '#\[fip(strict)\]' || { echo "FAIL: control total-hidden-alloc failed elsewhere than the generated bound"; cat "$out/total_hidden-alloc.log"; exit 1; }
     # Since fork c716c2bfd `total` emits `#[verifier::fip(strict)]` (constant stack): a
     # `total` caller of a callee that is `#[verifier::fip]`, `no_unwind` and

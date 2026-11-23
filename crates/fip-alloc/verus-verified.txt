@@ -6,12 +6,12 @@ fip-prelint verus sidecar
 # function with `encapsulates`). Top plan T13.4, redesign phase 4.
 format 7
 crate fip_alloc
-verus 0.2026.11.22.0fa89d0 0fa89d09bd543905873c84bc0cf877278153de86
+verus 0.2026.11.23.2e6f587 2e6f5874a3ef9a5b3014560abcf48871497d1f98
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu - 2024
 verified 1
 source src/lib.rs a3b0ab109ebacc01b97bc9060426465c068e89a99f1fe0155ceb168f8bfb8439
-import fip_strict 0a33e259e0fa1049a2fa843734ccc5c9d6dcad9a2527bb0dfcebfc1a73117198 2024
+import fip_strict b87b4507e3018555f1543f0c108ac46611d15c6a61b3e8a71e7870f0325eaffd 2024
 fn fip_alloc::refill src/lib.rs:42 911eadcfc3e416fa7c7357878c6c907cb22834e1c6cf9435b0c6cffd17996239 - 0 - -

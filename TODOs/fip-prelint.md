@@ -3399,10 +3399,9 @@ Open:
 
 See the fifth amendment of that date. Open:
 
-1. `dedup_by`, `map_in_place_st`, `compact_map_st`: no `deallocates` (decision: require
-   callbacks that do not deallocate, a contract change, or leave them).
-2. `FipFn::call` without `deallocates`: the strict variants and every `FipFn` call are
-   closed to callers with a deallocation bound (decision: `deallocates 0` on the trait
-   method and a conjunct in `Certified::pre`).
+1. (done 2026-11-23) `dedup_by`, `map_in_place_st`, `compact_map_st`: `deallocates 0`,
+   requiring callbacks that do not deallocate.
+2. (done 2026-11-23) `FipFn::call` is `deallocates 0`, with a conjunct in
+   `Certified::pre`; the strict variants are `deallocates 0`.
 3. `spec::lemma_compact_map_spec_rejects_extra` is fragile: adding unrelated definitions
    to `spec.rs` makes its third assertion fail. Give it explicit instantiations.

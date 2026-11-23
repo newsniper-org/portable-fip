@@ -85,7 +85,8 @@
 //! is `allocates self.allocs()` (the Verus fork's allocation bound, checked with
 //! `-V alloc-check`; decision `2026-11-06-redesign-verus-allocates`, phase 3). For
 //! [`Certified`]`<ALLOCS, C>` they are the wrapped closure's `requires` / `ensures`,
-//! with `call_allocations(closure, args) <= ALLOCS` as a second conjunct of `pre`, and
+//! with `call_allocations(closure, args) <= ALLOCS` as a second conjunct of `pre`
+//! (and `call_deallocations(closure, args) == 0` as a third: `call` is `deallocates 0`), and
 //! `allocs()` is `ALLOCS`. So the certificate number is checked by Verus wherever a
 //! verified caller calls the value: a closure that may allocate more than `ALLOCS`
 //! (or has no `allocates` bound) fails `pre`. For the adapters `allocs()` is the sum
@@ -299,6 +300,21 @@ pub trait AllocFreeDrop {}
 #[cfg(not(verus_keep_ghost))]
 impl<T: ?Sized> AllocFreeDrop for T {}
 
+/// Types whose drop cannot deallocate (the fork's deallocation counting, 2026-11-22).
+///
+/// Under Verus this is `vstd::alloc_check::NoDeallocDrop` (primitives, references,
+/// `Option`/`Result`/tuples of such, and a certified callable whose closure is `Copy`):
+/// the strict combinators of `fip-core` take their callable by value and drop it, and
+/// state `deallocates 0`. In plain builds a marker implemented for every type, as
+/// [`AllocFreeDrop`] is (and with the same consequence for a downstream `unsafe impl`).
+#[cfg(verus_keep_ghost)]
+pub use vstd::alloc_check::NoDeallocDrop;
+/// Plain builds: implemented for every type (see the Verus declaration's docs).
+#[cfg(not(verus_keep_ghost))]
+pub trait NoDeallocDrop {}
+#[cfg(not(verus_keep_ghost))]
+impl<T: ?Sized> NoDeallocDrop for T {}
+
 /// Callables whose drop cannot allocate.
 ///
 /// Under Verus this is `Copy` itself (a closure is `Copy` when its captures are): a
@@ -378,8 +394,9 @@ pub trait FipFn<Args>: FipBound {
 ///
 /// Fields are private and [`Certified::assume`] is `unsafe`: pairing a closure with
 /// a bound is a claim. Under Verus the claim is checked at each verified call:
-/// `pre(args)` requires `call_allocations(closure, args) <= ALLOCS`, and `allocs()` is
-/// `ALLOCS`.
+/// `pre(args)` requires `call_allocations(closure, args) <= ALLOCS` and
+/// `call_deallocations(closure, args) == 0` (since 2026-11-22: `FipFn::call` is
+/// `deallocates 0`), and `allocs()` is `ALLOCS`.
 #[cfg(not(verus_keep_ghost))]
 pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> {
     f: C,
@@ -532,6 +549,7 @@ pub trait FipFn<Args>: FipBound {
         ensures
             self.post(args, r),
         allocates self.allocs()
+        deallocates 0
     ;
 }
 
@@ -618,16 +636,24 @@ impl<S: vstd::alloc_check::AllocFreeDrop, A: vstd::alloc_check::AllocFreeDrop, B
     }
 }
 
-// Dropping a certified callable cannot allocate when the wrapped closure is `Copy`
+// Dropping a certified callable can neither allocate nor deallocate when the wrapped closure is `Copy`
 // (its captures are), or when the adapters' parts cannot.
 #[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
 unsafe impl<const ALLOCS: u64, C: Copy, const P: bool> vstd::alloc_check::AllocFreeDrop for Certified<ALLOCS, C, P> {}
 #[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
+unsafe impl<const ALLOCS: u64, C: Copy, const P: bool> vstd::alloc_check::NoDeallocDrop for Certified<ALLOCS, C, P> {}
+#[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
 unsafe impl<F: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Stateless<F> {}
+#[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
+unsafe impl<F: vstd::alloc_check::NoDeallocDrop> vstd::alloc_check::NoDeallocDrop for Stateless<F> {}
 #[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
 unsafe impl<F: vstd::alloc_check::AllocFreeDrop, G: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Compose<F, G> {}
 #[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
+unsafe impl<F: vstd::alloc_check::NoDeallocDrop, G: vstd::alloc_check::NoDeallocDrop> vstd::alloc_check::NoDeallocDrop for Compose<F, G> {}
+#[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
 unsafe impl<F: vstd::alloc_check::AllocFreeDrop, G: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Then<F, G> {}
+#[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
+unsafe impl<F: vstd::alloc_check::NoDeallocDrop, G: vstd::alloc_check::NoDeallocDrop> vstd::alloc_check::NoDeallocDrop for Then<F, G> {}
 
 } // verus!
 
@@ -654,6 +680,7 @@ impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, false> {
         ensures
             r.inner() == f,
         allocates 0
+        deallocates 0
     ))]
     pub const unsafe fn assume(f: C) -> Self {
         Certified { f }
@@ -679,6 +706,7 @@ impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, true> {
         ensures
             r.inner() == f,
         allocates 0
+        deallocates 0
     ))]
     pub const unsafe fn assume_no_panic_macros(f: C) -> Self {
         Certified { f }
@@ -713,6 +741,7 @@ macro_rules! certified_fip_fn {
             open spec fn pre(&self, args: ($($A,)*)) -> bool {
                 &&& self.inner().requires(args)
                 &&& call_allocations(self.inner(), args) <= ALLOCS as int
+                &&& call_deallocations(self.inner(), args) == 0
             }
             open spec fn allocs(&self) -> nat {
                 ALLOCS as nat

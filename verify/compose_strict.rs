@@ -38,8 +38,9 @@ pub fn swap_twice(a: &mut u32, b: &mut u32) {
     ensures
         keep.post((&x,), r),
     allocates keep.allocs()
+    deallocates 0
 ))]
-pub fn test_one<F: for<'a> FipFn<(&'a u32,), Output = bool> + fip_strict::AllocFreeDrop>(
+pub fn test_one<F: for<'a> FipFn<(&'a u32,), Output = bool> + fip_strict::AllocFreeDrop + fip_strict::NoDeallocDrop>(
     x: u32,
     keep: F,
 ) -> bool {
@@ -57,7 +58,7 @@ pub fn caller(x: u32) -> bool {
     test_one(
         x,
         fip_fn!(
-            #[cfg_attr(verus_keep_ghost, verus_spec(r: bool => allocates 0))]
+            #[cfg_attr(verus_keep_ghost, verus_spec(r: bool => allocates 0 deallocates 0))]
             |v: &u32| *v > 1
         ),
     )

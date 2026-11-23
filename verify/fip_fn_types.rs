@@ -69,6 +69,7 @@ pub fn boxed(x: u32) -> Box<u32> {
     ensures
         *r == x,
     allocates 1
+    deallocates 0
 ))]
 pub fn boxes_one(x: u32) -> Box<u32> {
     let f = fip_fn!(bound <= 1, boxed);

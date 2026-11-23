@@ -39,7 +39,7 @@ fn normalize(item: &str) -> String {
         .join(" ");
     let mut s = remove_balanced(&no_comments, "#[", '[', ']');
     s = remove_spec_fns(&s);
-    for kw in ["requires", "ensures", "allocates"] {
+    for kw in ["requires", "ensures", "allocates", "deallocates"] {
         s = remove_clause(&s, kw);
     }
     s = unname_returns(&s);
@@ -56,7 +56,8 @@ const VERUS_DROP_BOUND: &str = ":vstd::alloc_check::AllocFreeDrop";
 /// A Verus-only drop marker impl (normalized): no run-time content.
 fn is_drop_marker(item: &str) -> bool {
     item.starts_with("unsafeimpl<")
-        && item.contains(">vstd::alloc_check::AllocFreeDropfor")
+        && (item.contains(">vstd::alloc_check::AllocFreeDropfor")
+            || item.contains(">vstd::alloc_check::NoDeallocDropfor"))
         && item.ends_with("{}")
 }
 
@@ -234,8 +235,8 @@ fn verus_declarations_match_the_plain_ones() {
     assert_eq!(plain.len(), 13, "plain items: {plain:#?}");
     assert_eq!(
         markers.len(),
-        4,
-        "drop markers (Certified, Stateless, Compose, Then): {markers:#?}"
+        8,
+        "drop markers (`AllocFreeDrop` and `NoDeallocDrop` for Certified, Stateless, Compose, Then): {markers:#?}"
     );
     // `Compose`'s `FipFn` impl is per arity under Verus (`compose_fip_fn!`).
     let compose = plain

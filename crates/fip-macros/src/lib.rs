@@ -1983,6 +1983,31 @@ fn split_commas(ts: TokenStream) -> Vec<Vec<TokenTree>> {
     parts
 }
 
+/// `true` if the attributes `toks` (everything before the item) hold a hand-written
+/// `verifier::fip` (plain or inside `cfg_attr(verus_keep_ghost, ..)`, with or without
+/// `(strict)`).
+fn has_hand_fip(toks: &[TokenTree]) -> bool {
+    fn walk(ts: TokenStream) -> bool {
+        let v: Vec<TokenTree> = ts.into_iter().collect();
+        for k in 0..v.len() {
+            match &v[k] {
+                TokenTree::Ident(i)
+                    if i.to_string() == "verifier"
+                        && v.get(k + 1).is_some_and(|t| is_punct(t, ':'))
+                        && v.get(k + 2).is_some_and(|t| is_punct(t, ':'))
+                        && matches!(v.get(k + 3), Some(TokenTree::Ident(f)) if f.to_string() == "fip") =>
+                {
+                    return true;
+                }
+                TokenTree::Group(g) if walk(g.stream()) => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+    walk(toks.iter().cloned().collect())
+}
+
 fn int_literal(t: &TokenTree) -> Option<u64> {
     match t {
         TokenTree::Literal(l) => l.to_string().trim_end_matches("u64").parse().ok(),
@@ -3401,6 +3426,7 @@ fn verus_contract_of(
         total: args.total.is_some(),
         callable,
         upstream: upstream_switch(),
+        hand_fip: has_hand_fip(&toks[..shape.after_attrs]),
     };
     if !strict::under_verus() {
         let msgs = verus_gen::plain_errors(&inp);

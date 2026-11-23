@@ -99,7 +99,10 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   `--edition 2024` and the sidecars are format 7. Re-pinned the same day to
   `0.2026.11.22.f2998b7` (`f2998b743…`, three commits: the drop scopes of Rust 2024),
   then to `0.2026.11.22.0fa89d0` (`0fa89d09b…`, one commit: a verifier panic reading
-  Z3's statistics); stamps only (amendments
+  Z3's statistics); stamps only. Re-pinned 2026-11-23 to `0.2026.11.23.2e6f587`
+  (`2e6f5874a…`, two commits: closures written with `#[verus_spec(..)]`, closure types
+  `Copy` to the solver), with `deallocates 0` on `FipFn::call` and the rest of
+  `fip-core` (amendments
   of those dates in
   `2026-11-01-fip-prelint.md`, which also records the driver's rule for declared
   sources).

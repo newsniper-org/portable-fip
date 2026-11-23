@@ -6,7 +6,7 @@ fip-prelint verus sidecar
 # function with `encapsulates`). Top plan T13.4, redesign phase 4.
 format 7
 crate vside
-verus 0.2026.11.22.0fa89d0 0fa89d09bd543905873c84bc0cf877278153de86
+verus 0.2026.11.23.2e6f587 2e6f5874a3ef9a5b3014560abcf48871497d1f98
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check

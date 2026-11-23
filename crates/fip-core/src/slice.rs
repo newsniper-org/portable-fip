@@ -246,12 +246,14 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
     requires
         map_st_by_ok(old(xs)@, f, s0),
         forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
+        forall|s: S, x: T| call_deallocations(f, (s, x)) == 0,
     ensures
         r.1 == hole,
         map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0)),
         forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv)
             ==> st_trace_inv(map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
     allocates 0
+    deallocates 0
 ))]
 pub fn map_in_place_st<
     S: crate::AllocFreeDrop,
@@ -282,7 +284,9 @@ pub fn map_in_place_st<
             map_st_by_ok(old(xs)@, f, s0),
             forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
             forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
+            forall|s: S, x: T| call_deallocations(f, (s, x)) == 0,
             allocated() <= 0,
+            deallocated() == 0,
         decreases n - i,
     ))]
     while i < n {
@@ -338,10 +342,13 @@ pub fn map_in_place_st<
             ==> same.requires((&old(xs)@[i], &old(xs)@[j])),
         forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
             ==> call_allocations(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
+        forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
+            ==> call_deallocations(same, (&old(xs)@[i], &old(xs)@[j])) == 0,
     ensures
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_by_post(old(xs)@, final(xs)@, w as int, same, idx, src),
     allocates 0
+    deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the removed ones"]
 pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFreeFn>(
@@ -383,7 +390,10 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFree
                 old(xs)@, w as int, |a: T, b: T, r: bool| same.ensures((&a, &b), r), idx, #[trigger] src[j], j),
             forall|i: int, j: int| 0 <= i < n && 0 <= j < n
                 ==> call_allocations(same, (&old(xs)@[i], &old(xs)@[j])) <= 0,
+            forall|i: int, j: int| 0 <= i < n && 0 <= j < n
+                ==> call_deallocations(same, (&old(xs)@[i], &old(xs)@[j])) == 0,
             allocated() <= 0,
+            deallocated() == 0,
         decreases n - r,
     ))]
     while r < n {
@@ -590,6 +600,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropF
     requires
         compact_map_st_by_ok(old(xs)@, f, s0),
         forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
+        forall|s: S, x: T| call_deallocations(f, (s, x)) == 0,
     ensures
         r.2 == hole,
         ({
@@ -599,8 +610,13 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropF
                 ==> st_trace_inv(ss, inv)
         }),
     allocates 0
+    deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the loop invariant states one fact per line"
+)]
 pub fn compact_map_st<
     S: crate::AllocFreeDrop,
     T: crate::AllocFreeDrop,
@@ -646,7 +662,9 @@ pub fn compact_map_st<
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
             forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
+            forall|s: S, x: T| call_deallocations(f, (s, x)) == 0,
             allocated() <= 0,
+            deallocated() == 0,
         decreases len - r,
     ))]
     while r < len {

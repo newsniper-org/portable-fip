@@ -81,11 +81,15 @@
 //!   `compact_map` the sum over their callback calls (`dealloc_spec::map_deallocs`,
 //!   `dealloc_spec::compact_deallocs`, `dealloc_spec::compact_map_deallocs`; the lemmas
 //!   of `dealloc_spec::group_deallocs_zero` turn "no call deallocates" into a zero
-//!   sum). So a verified caller with a `deallocates` bound, or a `#[verifier::fip]`
-//!   one, can call them. `dedup_by`, `map_in_place_st` and `compact_map_st` state no
-//!   deallocation bound yet (which calls they make depends on the callbacks' results
-//!   or on the threaded state, and no sum over the input alone bounds them): such a
-//!   caller cannot call these three.
+//!   sum). `dedup_by`, `map_in_place_st` and `compact_map_st` are `deallocates 0` and
+//!   require every callback call to deallocate nothing, as they require it to allocate
+//!   nothing (which calls they make depends on the callbacks' results or on the
+//!   threaded state, so no sum over the input bounds them). The strict variants are
+//!   `deallocates 0`: `FipFn::call` is, and the callable they take by value and drop is
+//!   bounded by [`NoDeallocDrop`] (Verus: `vstd::alloc_check::NoDeallocDrop`, which a
+//!   `fip_fn!` value has when its closure is `Copy`; plain builds: every type). So a
+//!   verified caller with a `deallocates` bound, or a `#[verifier::fip]` one, can call
+//!   every function of this crate.
 //!
 //! ## What it does not guarantee
 //!
@@ -140,7 +144,7 @@ macro_rules! proof_decl {
     ($($t:tt)*) => {};
 }
 
-pub use fip_strict::{AllocFreeDrop, DropFreeFn};
+pub use fip_strict::{AllocFreeDrop, DropFreeFn, NoDeallocDrop};
 
 #[cfg(verus_keep_ghost)]
 pub mod dealloc_spec;

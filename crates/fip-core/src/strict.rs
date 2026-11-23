@@ -74,9 +74,13 @@ use vstd::prelude::*;
         f.post((*old(slot),), *final(slot)),
         r == hole,
     allocates f.allocs()
+    deallocates 0
 ))]
 #[inline]
-pub fn update<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate::AllocFreeDrop>(
+pub fn update<
+    T: crate::AllocFreeDrop,
+    F: FipFn<(T,), Output = T> + crate::AllocFreeDrop + crate::NoDeallocDrop,
+>(
     slot: &mut T,
     hole: T,
     f: F,
@@ -105,8 +109,12 @@ pub fn update<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate::Alloc
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.post((old(xs)@[i],), final(xs)@[i]),
         h == hole,
     allocates old(xs)@.len() * f.allocs()
+    deallocates 0
 ))]
-pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate::AllocFreeDrop>(
+pub fn map_in_place<
+    T: crate::AllocFreeDrop,
+    F: FipFn<(T,), Output = T> + crate::AllocFreeDrop + crate::NoDeallocDrop,
+>(
     xs: &mut [T],
     hole: T,
     f: F,
@@ -124,6 +132,7 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate:
             forall|k: int| 0 <= k < i ==> f.post((old(xs)@[k],), xs@[k]),
             forall|k: int| 0 <= k < n ==> f.pre((old(xs)@[k],)),
             allocated() <= i * f.allocs(),
+            deallocated() == 0,
         decreases n - i,
     ))]
     while i < n {
@@ -164,11 +173,12 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: FipFn<(T,), Output = T> + crate:
         forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv)
             ==> st_trace_inv(map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
     allocates old(xs)@.len() * f.allocs()
+    deallocates 0
 ))]
 pub fn map_in_place_st<
     S: crate::AllocFreeDrop,
     T: crate::AllocFreeDrop,
-    F: FipFn<(S, T), Output = (S, T)> + crate::AllocFreeDrop,
+    F: FipFn<(S, T), Output = (S, T)> + crate::AllocFreeDrop + crate::NoDeallocDrop,
 >(
     xs: &mut [T],
     hole: T,
@@ -194,6 +204,7 @@ pub fn map_in_place_st<
             map_st_fip_ok(old(xs)@, f, s0),
             forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv) ==> st_trace_inv(ss, inv),
             allocated() <= i * f.allocs(),
+            deallocated() == 0,
         decreases n - i,
     ))]
     while i < n {
@@ -241,11 +252,12 @@ pub fn map_in_place_st<
     ensures
         compact_fip_post(old(xs)@, final(xs)@, w as int, keep),
     allocates old(xs)@.len() * keep.allocs()
+    deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the rejected ones"]
 pub fn compact<
     T: crate::AllocFreeDrop,
-    F: for<'a> FipFn<(&'a T,), Output = bool> + crate::AllocFreeDrop,
+    F: for<'a> FipFn<(&'a T,), Output = bool> + crate::AllocFreeDrop + crate::NoDeallocDrop,
 >(
     xs: &mut [T],
     keep: F,
@@ -268,6 +280,7 @@ pub fn compact<
             strictly_increasing_below(idx, r as int),
             forall|i: int| 0 <= i < w ==> xs@[i] == old(xs)@[idx[i]],
             allocated() <= r * keep.allocs(),
+            deallocated() == 0,
         decreases n - r,
     ))]
     while r < n {
@@ -314,11 +327,12 @@ pub fn compact<
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_fip_post(old(xs)@, final(xs)@, w as int, same, idx, src),
     allocates old(xs)@.len() * same.allocs()
+    deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the removed ones"]
 pub fn dedup_by<
     T: crate::AllocFreeDrop,
-    F: for<'a, 'b> FipFn<(&'a T, &'b T), Output = bool> + crate::AllocFreeDrop,
+    F: for<'a, 'b> FipFn<(&'a T, &'b T), Output = bool> + crate::AllocFreeDrop + crate::NoDeallocDrop,
 >(
     xs: &mut [T],
     same: F,
@@ -357,6 +371,7 @@ pub fn dedup_by<
             forall|j: int| 0 <= j < r ==> dedup_src_ok(
                 old(xs)@, w as int, |a: T, b: T, r: bool| same.post((&a, &b), r), idx, #[trigger] src[j], j),
             allocated() <= r * same.allocs(),
+            deallocated() == 0,
         decreases n - r,
     ))]
     while r < n {
@@ -419,11 +434,12 @@ pub fn dedup_by<
         exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
             #[trigger] compact_map_fip_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
     allocates old(xs)@.len() * f.allocs()
+    deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
 pub fn compact_map<
     T: crate::AllocFreeDrop,
-    F: FipFn<(T,), Output = (T, bool)> + crate::AllocFreeDrop,
+    F: FipFn<(T,), Output = (T, bool)> + crate::AllocFreeDrop + crate::NoDeallocDrop,
 >(
     xs: &mut [T],
     hole: T,
@@ -458,6 +474,7 @@ pub fn compact_map<
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
             allocated() <= r * f.allocs(),
+            deallocated() == 0,
         decreases len - r,
     ))]
     while r < len {
@@ -552,12 +569,17 @@ pub fn compact_map<
                 ==> st_trace_inv(ss, inv)
         }),
     allocates old(xs)@.len() * f.allocs()
+    deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the loop invariant states one fact per line"
+)]
 pub fn compact_map_st<
     S: crate::AllocFreeDrop,
     T: crate::AllocFreeDrop,
-    F: FipFn<(S, T), Output = (S, T, bool)> + crate::AllocFreeDrop,
+    F: FipFn<(S, T), Output = (S, T, bool)> + crate::AllocFreeDrop + crate::NoDeallocDrop,
 >(
     xs: &mut [T],
     hole: T,
@@ -599,6 +621,7 @@ pub fn compact_map_st<
             pos.len() == r,
             forall|j: int| 0 <= j < r && #[trigger] ks[j] ==> 0 <= pos[j] < w && idx[pos[j]] == j,
             allocated() <= r * f.allocs(),
+            deallocated() == 0,
         decreases len - r,
     ))]
     while r < len {

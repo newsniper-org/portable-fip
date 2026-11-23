@@ -47,12 +47,17 @@ pub(crate) const CLAUSES: &[&str] = &[
     "no_unwind",
     "unwind",
     "allocates",
+    "deallocates",
     "invariant",
     "invariant_except_break",
     "invariant_ensures",
 ];
 
 /// What the generator needs to know about one function.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four independent facts about one function, each read once"
+)]
 pub(crate) struct Input<'a> {
     /// `requires(..)` of the attribute.
     pub(crate) requires: Option<&'a [Conjunct]>,
@@ -69,6 +74,9 @@ pub(crate) struct Input<'a> {
     pub(crate) callable: bool,
     /// [`UPSTREAM_ENV`] is set (and honoured).
     pub(crate) upstream: bool,
+    /// The function carries a hand-written `verifier::fip` attribute (which states that
+    /// it frees nothing, and admits no `deallocates` clause).
+    pub(crate) hand_fip: bool,
 }
 
 /// The top-level clause keywords of a `verus_spec(..)` text, in order, and where the
@@ -203,6 +211,9 @@ pub(crate) fn conflicts(inp: &Input<'_>) -> Vec<String> {
             inp.bound
         ));
     }
+    if has("deallocates") && !inp.callable {
+        errors.push("`strict`/`total`: the hand-written `verus_spec` has `deallocates`; a strict function frees nothing, and the clause is generated (`deallocates 0`; `total` states it through `#[verifier::fip(strict)]`), so remove it from `verus_spec` (only a function with callable parameters writes its own, e.g. the drop of the callable it takes by value)".to_string());
+    }
     if inp.total && (has("no_unwind") || has("unwind")) {
         errors.push("`total`: the hand-written `verus_spec` has an unwinding clause; `total` generates `no_unwind`, so remove it from `verus_spec`".to_string());
     }
@@ -260,6 +271,12 @@ pub(crate) fn parts(inp: &Input<'_>) -> Result<Parts, Vec<String>> {
     }
     if !inp.callable && !inp.upstream {
         tail.push(format!("allocates {}", inp.bound));
+        // A strict function is `fip`: it frees nothing (2026-11-22; `FipFn::call` is
+        // `deallocates 0`, so a certified function must state it). `total` states it
+        // through `#[verifier::fip(strict)]`, which admits no `deallocates` clause.
+        if !inp.total && !inp.hand_fip {
+            tail.push("deallocates 0".to_string());
+        }
     }
     let mut attrs = Vec::new();
     if inp.total && !inp.upstream {
@@ -339,6 +356,7 @@ mod tests {
             total,
             callable,
             upstream,
+            hand_fip: false,
         }
     }
 
@@ -375,7 +393,7 @@ mod tests {
         assert_eq!(
             a,
             vec![
-                "#[cfg_attr(verus_keep_ghost, verus_spec(requires i < xs@.len(), allocates 3))]"
+                "#[cfg_attr(verus_keep_ghost, verus_spec(requires i < xs@.len(), allocates 3 deallocates 0))]"
                     .to_string()
             ]
         );

@@ -82,13 +82,13 @@ pub fn halved_odds(xs: &mut [u32]) -> (r: (usize, u32))
 pub fn deduped(xs: &mut [u32]) -> (n: usize)
     allocates 0
 {
-    fip_core::dedup_by(xs, |a: &u32, b: &u32| -> (r: bool) allocates 0 { *a == *b })
+    fip_core::dedup_by(xs, |a: &u32, b: &u32| -> (r: bool) allocates 0 deallocates 0 { *a == *b })
 }
 
 pub fn kept_state(xs: &mut [u32]) -> (r: (u32, u32))
     allocates 0
 {
-    fip_core::map_in_place_st(xs, 0, 0u32, |s: u32, x: u32| -> (r: (u32, u32)) allocates 0 { (s, x) })
+    fip_core::map_in_place_st(xs, 0, 0u32, |s: u32, x: u32| -> (r: (u32, u32)) allocates 0 deallocates 0 { (s, x) })
 }
 
 // Strict callables (phase 3): `FipFn::call` allocates at most `allocs()`, which is
@@ -103,7 +103,7 @@ pub fn boxed_once(x: u32) -> (r: Box<u32>)
     allocates 1
 {
     let f = unsafe {
-        fip_strict::Certified::<1, _, false>::assume(|v: u32| -> (r: Box<u32>) ensures *r == v allocates 1 { Box::new(v) })
+        fip_strict::Certified::<1, _, false>::assume(|v: u32| -> (r: Box<u32>) ensures *r == v allocates 1 deallocates 0 { Box::new(v) })
     };
     fip_strict::FipFn::call(&f, (x,))
 }
@@ -116,7 +116,7 @@ pub fn incremented_strict(xs: &mut [u8]) -> (h: u8)
     allocates 0
 {
     let f = unsafe {
-        fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) requires v < 100 allocates 0 { v + 1 })
+        fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) requires v < 100 allocates 0 deallocates 0 { v + 1 })
     };
     fip_core::strict::map_in_place(xs, 0, f)
 }
