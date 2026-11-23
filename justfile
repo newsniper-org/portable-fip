@@ -718,9 +718,10 @@ verify-sidecar: verify-strict
     ign ignext 'alloc-check: `#\[verifier::fip\]` is on a function that is marked external'
     ign ignctl 'postcondition not satisfied'
     # A body that differs between Verus's verification and the compiled program
-    # (`verus_keep_ghost_body` is set for the verification only; the fork `d633cde`
-    # verifies `allocates 0` for this function, whose compiled body allocates): the
-    # generator refuses the crate for the cfg it tests, before Verus runs.
+    # (`verus_keep_ghost_body` is set for the verification only): the generator refuses
+    # the crate for the cfg it tests, before Verus runs; and since the fork `66c6c2b`
+    # Verus itself refuses a crate whose source names that cfg (before, it verified
+    # `allocates 0` for this function, whose compiled body allocates).
     mkdir -p "$out/cfgbody/src"
     printf '%s\n' '#![feature(proc_macro_hygiene)]' '#![allow(unexpected_cfgs)]' 'use vstd::prelude::*;' '#[verus_spec(r => allocates 0)]' 'pub fn quiet(x: u64) -> u64 {' '    #[cfg(not(verus_keep_ghost_body))]' '    let _b = Box::new(x);' '    x' '}' > "$out/cfgbody/src/lib.rs"
     if (cd "$out" && $gen --crate-name cfgbody --crate-dir cfgbody --out "$out/cfgbody.txt" -- {{verus}} --crate-type=lib --crate-name cfgbody {{verus_flags}} cfgbody/src/lib.rs) > "$out/cfgbody.log" 2>&1; then # negative probe
@@ -728,9 +729,10 @@ verify-sidecar: verify-strict
     fi
     grep -q 'tests `verus_keep_ghost_body`' "$out/cfgbody.log" || { echo "FAIL: the crate cfgbody failed for another reason"; cat "$out/cfgbody.log"; exit 1; }
     test ! -e "$out/cfgbody.txt"
-    # Control: Verus itself verifies that crate (the fork does not compare the bodies;
-    # reported 2026-11-23). If it stops doing so, this line fails and the comment above is stale.
-    (cd "$out" && {{verus}} --crate-type=lib --crate-name cfgbody {{verus_flags}} cfgbody/src/lib.rs) > "$out/cfgbody-verus.log" 2>&1 || { echo "NOTE: Verus now refuses the crate cfgbody (update this control)"; cat "$out/cfgbody-verus.log"; exit 1; }
+    if (cd "$out" && {{verus}} --crate-type=lib --crate-name cfgbody {{verus_flags}} cfgbody/src/lib.rs) > "$out/cfgbody-verus.log" 2>&1; then # negative probe
+      echo "FAIL: Verus verified a crate whose compiled body differs from the verified one"; exit 1
+    fi
+    grep -q 'alloc-check: Verus sets `verus_keep_ghost_body` only when it verifies the crate' "$out/cfgbody-verus.log" || { echo "FAIL: Verus refused the crate cfgbody for another reason"; cat "$out/cfgbody-verus.log"; exit 1; }
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

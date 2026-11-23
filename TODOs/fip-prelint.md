@@ -3405,3 +3405,14 @@ See the fifth amendment of that date. Open:
    `Certified::pre`; the strict variants are `deallocates 0`.
 3. `spec::lemma_compact_map_spec_rejects_extra` is fragile: adding unrelated definitions
    to `spec.rs` makes its third assertion fail. Give it explicit instantiations.
+
+## Open hole (2026-11-24): a type that ghost code decides
+
+`let n = 1; proof! { let g: u64 = n; } n.mk()`: Verus verifies with `n: u64` and
+compiles with `n: i32`; a sidecar bound for such a function is taken by the driver
+although the compiled function calls another impl (measured: a `#[fip]` caller of an
+allocating loop passes). Root cause in Verus (upstream too); reported to the fork
+2026-11-24 (`2026-11-24-ghost-decides-exec-type.md`), nothing here closes it. Decision
+record `2026-11-01-fip-prelint.md`, amendment 2026-11-24. When the fork rejects it: add
+the case to `just verify-sidecar` as a gate and remove this section.
+

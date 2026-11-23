@@ -6,7 +6,7 @@ fip-prelint verus sidecar
 # function with `encapsulates`). Top plan T13.4, redesign phase 4.
 format 7
 crate fip_core
-verus 0.2026.11.23.d633cde d633cde6c0276b9dfbc23e66a93b5d29db06926f
+verus 0.2026.11.23.66c6c2b 66c6c2b2f991150a783dbfef7267f54abdb72146
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
@@ -19,7 +19,7 @@ source src/slice.rs 2247a5f17429a225750b56afdbbcb78b0082f6af36e6b145273375f2f0fb
 source src/slot.rs 58e62907ea83484297a4cfc1a895f4305eae48855a9e34a44e0382901f3dbf40
 source src/spec.rs 7935bb81bc26a3fb40aef360f94e86604fcaf8602956e7fc045e9df35a498b20
 source src/strict.rs 16cc0ce81094f63954b2276f6887022fa7bae4c929cc1cfb9be57558d072eaf3
-import fip_strict fe9883dd149653769aa28548cbb575f59047e7e325961f79282eb9ebfe8605d1 2024
+import fip_strict 6e7a89516803d64e92c1521f9416362295cb9a21568170632e2eb392caa24ac9 2024
 fn fip_core::slice::compact src/slice.rs:75 f87efb333abd3543369faeb49cd0d39c743145d9e53c6affb6e80b8e9d37e52c requires opaque:e2901c9f7fdc0e176b499136dfaab12b21cadd2f02715f0c49a7281b52a45011 opaque:41aa57f5daeca134b627407240558a8b34cf02a926496a0e5328cf3560123839 -
 fn fip_core::slice::compact_map src/slice.rs:436 8a5b57fa3823a001d9d7a174852df9a1ba173716b83cd78bb434c3163c53ffcc requires opaque:2aac94d8d2cb29332d0cde80513f7ad0d41c11265a804982f0b3d8340722b93a opaque:1113b18b796150d855da6afd78e23b94931a487034f1ba53cd8b0da6eaba81eb -
 fn fip_core::slice::compact_map_st src/slice.rs:566 99bc8bdb2bc40e9216e89aa16f942d7ecca4a4044723c7757852015de16b3cf7 requires 0 0 -

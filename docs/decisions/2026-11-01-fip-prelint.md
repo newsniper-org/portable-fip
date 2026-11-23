@@ -2103,3 +2103,65 @@ in an `allocates 0` function verifies (the compiled program allocates); likewise
 Implicit drops are caught (the fork checks them on the compiled program); calls are
 not. No sidecar is written for such a crate either (same refusal; gate `cfgbody` in
 `verify-sidecar`, with a control that Verus itself still verifies that crate).
+
+## Amendment 2026-11-24: re-pin to the fork 66c6c2b; an open hole (a type that ghost code decides)
+
+**Status:** the re-pin is done. **The hole is open**: it is in Verus (upstream too), it
+reaches this driver, and nothing here closes it. Reported to the fork as urgent
+(`2026-11-24-ghost-decides-exec-type.md`).
+
+**Pin.** `0.2026.11.23.66c6c2b` (`66c6c2b2f991…`), one commit after `d633cde6c`, the
+fork's answer to the report of statements behind `cfg(verus_keep_ghost_body)`: with
+`-V alloc-check` the crate's own source may not name that cfg (nor `cfg_accessible`,
+nor names starting with `VERUS_`, `_VERUS_`, `__VERUS_`, `_verus_`, nor enable
+`macro_metavar_expr_concat`), the crate root must be a file, and the compilation must
+read the file contents and have the cfgs that the verification had. Checked before the
+move (clean worktree, tests first, then the `singular` build): the diff read in full
+(1676 lines); the fork's tests, 5545 passed, 0 failed, 63 ignored (as the fork
+reports); the 6 repro files are refused with the new error, also an `include!` of a
+file outside the crate's directory; the 7 and the 10 repro files before them as before;
+114 functions freeing more than they state, in both editions, none verifies; the 15
+tight bounds as before. No source that Verus verifies here names anything now refused.
+
+**What the fork leaves, and where this repository stands.** Tokens that another crate's
+macro puts in the crate are not checked by the fork (stated in its guide): measured, a
+`macro_rules!` of a dependency that expands to
+`#[cfg(not(verus_keep_ghost_body))] mem::forget(Box::new(x));` in an
+`allocates 0 deallocates 0` function verifies. The sidecar generator lists no function
+that invokes a `name!(..)` macro defined outside the crate's sources (measured again:
+no sidecar). Attribute and derive macros of dependencies are seen by neither: the trust
+boundary already recorded in the amendment "Verus sidecars after the re-audit".
+
+**The open hole.** Ghost code can decide the type of an exec variable:
+
+```rust
+let n = 1;                    // no annotation
+proof! { let g: u64 = n; }    // the verification infers n: u64 from this
+n.mk()                        // compiled: the proof block is gone, n: i32, another impl
+```
+
+Verus verifies the function with `<u64 as Mk>::mk` and compiles it with
+`<i32 as Mk>::mk`. Measured on the fork `66c6c2b` and on upstream `0.2026.11.02.8bf68ee`:
+`ensures r.is_none()` is verified, also with `--no-cheating`, and the compiled program
+returns `Some`. With `-V alloc-check`: `allocates 0` is verified, the compiled function
+allocates. It reaches the driver, measured with a sidecar of `d633cde` (the generator
+lists the function; nothing in its text differs between the builds, and the plain
+build's `proof!` vanishes like Verus's): a `#[fip]` caller of a function whose loop
+calls the `i32` impl, which allocates, **passes**, with "1 allocation bounds taken from
+Verus". The driver counts `∞` for the loop and replaces it by the proved 0.
+
+Not closed here because no check of this tool sees it: the sidecar's paths are
+normalised (`{impl}::mk` for both impls), and where only a generic argument differs
+(`size_of_val::<T>`) the callee is the same function. The fix belongs where the two
+type checks are: Verus comparing the types (or the resolved callees with their generic
+arguments) of exec code between the verification and the compilation. Until the fork
+has it, a bound taken from a sidecar holds only for functions in which no ghost code
+decides the type of an exec variable. The functions of `fip-core`, `fip-strict` and
+`fip-alloc` were not audited for that by a tool. Read by hand on 2026-11-24 (the 13
+functions the three sidecars list): every exec local initialised with a literal is
+annotated (`let mut w: usize = 0;`), and the other literals are operands of typed exec
+expressions (`w += 1`, `n == 0`, a `return 0` of a declared `usize`); none takes its type
+from a `proof!` or `proof_decl!` block. Crates of users are not covered by that reading.
+
+Also in `TODOs/fip-prelint.md` (open, blocking a claim of soundness for sidecars of
+user crates).
