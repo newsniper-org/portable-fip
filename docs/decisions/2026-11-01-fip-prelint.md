@@ -1955,10 +1955,13 @@ where rustc finds them so. The `.vir` format changed; the sidecar generator read
 unchanged. Checked before the move (clean worktree; this time the fork's tests ran first
 and the `singular` build after them, so every probe is on that build): the diff read in
 full (827 lines); the fork's tests, 5470 passed, 0 failed, 63 ignored (the fork reports
-the same); the 10 repro files, all verify; 113 functions that free more than they state
-in both editions (the 102 of before and 11 new ones: closures that own a `Box` or a
+the same); the 10 repro files, all verify; 114 functions that free more than they state
+in both editions (the 102 of before and 12 new ones: closures that own a `Box` or a
 `Vec`, wrapped or not, in a generic function, written with `#[verus_spec(..)]`, with
-`#[verifier::fip]`), none verifies; the 15 tight bounds as before.
+`#[verifier::fip]`), none verifies, and each of the 12 fails at an allocation or
+deallocation bound (a thirteenth, a closure capturing `&mut`, was refused as
+unsupported before any counting and is not counted here); the 15 tight bounds as
+before.
 
 **The contract change** (the two decisions left open by the fifth amendment of
 2026-11-22; the user decided for both).
