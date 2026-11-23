@@ -2033,3 +2033,25 @@ pass and two deallocation bounds are taken, without it (the fixture's variants) 
 are refused.
 Module `unmarked` of the same fixture (`eat_marked`, `eat_marked_fip`; roots `any`,
 `any_fip`, `boxed`, `boxed_fip`): all four are refused with the sidecar.
+
+## Amendment 2026-11-23 (3): no sidecar for a run in which Verus ignored an attributed item
+
+**Status:** done here; reported to the fork (`2026-11-23-ignored-fip-attribute.md`).
+
+Measured on the fork `2e6f5874a`: a function outside `verus!` with `#[verifier::fip]`
+(or `fip(strict)`) and no `#[verus_spec(..)]` is not verified. Verus prints the warning
+"verus-related attribute has no effect because Verus is ignoring this item" and
+succeeds, also when the function allocates (`Box::new`, `Vec::push`) or frees through a
+call. Only a drop in its body is refused, by the fork's check of the compiled program.
+A verified function cannot call such a function ("cannot use function … which is
+ignored"), the function is not in the VIR and so not in the sidecar, and `fip-macros`
+always emits `verus_spec(..)` beside the attribute: no result of the driver depended on
+it. What it allowed is a crate written with attributes, as these are, in which one
+`#[verus_spec]` is forgotten and the run still ends well.
+
+The generator now reads Verus's diagnostics (they are passed on after the run, no
+longer while it runs) and writes no sidecar when the warning is among them. It matches
+the fork's sentence; `just verify-sidecar` runs a crate with such a function and
+expects the refusal, and a control with `#[verus_spec]` beside the attribute, which
+Verus itself refuses. If the fork rewords the warning or makes it an error, that gate
+fails at the re-pin.

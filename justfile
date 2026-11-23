@@ -693,6 +693,22 @@ verify-sidecar: verify-strict
     fi
     grep -q "names no \`--edition\`" "$out/noedition.err"
     test ! -e "$out/noedition.txt"
+    # An item with a Verus attribute that Verus ignores (2026-11-23: a function outside
+    # `verus!` with `#[verifier::fip]` and no `#[verus_spec(..)]`; it allocates, and the
+    # run succeeds with a warning): refused after the run, nothing written. The control
+    # with `#[verus_spec]` beside the attribute fails in Verus itself.
+    mkdir -p "$out/ignored/src" "$out/ignctl/src"
+    printf '%s\n' '#![allow(unused_imports)]' 'use vstd::prelude::*;' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignored/src/lib.rs"
+    printf '%s\n' '#![feature(proc_macro_hygiene)]' 'use vstd::prelude::*;' '#[verus_spec]' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignctl/src/lib.rs"
+    if (cd "$out" && $gen --crate-name ignored --crate-dir ignored --out "$out/ignored.txt" -- {{verus}} --crate-type=lib --crate-name ignored {{verus_flags}} ignored/src/lib.rs) > "$out/ignored.log" 2>&1; then # negative probe
+      echo "FAIL: a sidecar was generated for a run in which Verus ignored an item with a Verus attribute"; exit 1
+    fi
+    grep -q "Verus ignored an item that carries a Verus attribute" "$out/ignored.log" || { echo "FAIL: the run with an ignored attribute failed for another reason"; cat "$out/ignored.log"; exit 1; }
+    test ! -e "$out/ignored.txt"
+    if (cd "$out" && $gen --crate-name ignctl --crate-dir ignctl --out "$out/ignctl.txt" -- {{verus}} --crate-type=lib --crate-name ignctl {{verus_flags}} ignctl/src/lib.rs) > "$out/ignctl.log" 2>&1; then # negative probe
+      echo "FAIL: control: a fip function that allocates verified"; exit 1
+    fi
+    grep -q "Verus failed: no sidecar written" "$out/ignctl.log" || { echo "FAIL: the control failed for another reason"; cat "$out/ignctl.log"; exit 1; }
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

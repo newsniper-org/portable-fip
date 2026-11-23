@@ -769,6 +769,19 @@ pub struct RunInfo {
     pub imported_divergent: Vec<String>,
 }
 
+/// Verus's warning for an item it does not verify although the item carries one of its
+/// attributes (fork `2e6f5874a`: a function outside `verus!` with `#[verifier::fip]` and
+/// no `#[verus_spec(..)]`; the run succeeds, and only what the fork checks on the
+/// compiled program, the drops, is checked for it).
+pub const IGNORED_ATTRIBUTE: &str =
+    "verus-related attribute has no effect because Verus is ignoring this item";
+
+/// Whether Verus's diagnostics (`stderr`) have [`IGNORED_ATTRIBUTE`]. A run with it is
+/// not recorded: the attribute states something that was not proved.
+pub fn ignored_attribute(stderr: &str) -> bool {
+    stderr.contains(IGNORED_ATTRIBUTE)
+}
+
 /// Checks the `--output-json` result: success, no errors, the entire crate.
 pub fn run_info(json: &Json) -> Result<RunInfo, String> {
     let r = |k: &str| json.path(&["verification-results", k]);
@@ -1714,6 +1727,16 @@ mod tests {
 
     /// Re-audit N4 (2026-11-04): a source of the run outside `src/` (a `#[path]`
     /// module) is scanned like the crate's own: before, `shared.rs` testing
+    /// Verus's warning for an ignored item with a Verus attribute, as the fork prints it.
+    #[test]
+    fn ignored_attribute_warning_is_recognised() {
+        assert!(ignored_attribute(
+            "warning: verus-related attribute has no effect because Verus is ignoring this item\n --> src/lib.rs:1:18\n"
+        ));
+        assert!(!ignored_attribute("warning: unused variable: `x`\n"));
+        assert!(!ignored_attribute(""));
+    }
+
     /// `cfg!(fip_prelint)` escaped the scan of `src/`.
     #[test]
     fn every_source_of_the_run_is_scanned() {
