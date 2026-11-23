@@ -2055,3 +2055,13 @@ the fork's sentence; `just verify-sidecar` runs a crate with such a function and
 expects the refusal, and a control with `#[verus_spec]` beside the attribute, which
 Verus itself refuses. If the fork rewords the warning or makes it an error, that gate
 fails at the re-pin.
+
+Widened the same day, after a review: the generator matches the start the fork's two
+warnings of this kind share ("verus-related attribute has no effect because"; the
+other one is for an item that is also `#[verifier::external]`), and refuses a run with
+`-A..`, `--allow..` or `--cap-lints..` before it starts. Measured: `-A warnings`,
+`-Awarnings` and `--cap-lints allow` given to Verus hide the warning, so the first
+version of the guard was passed by adding one of them; `#![allow(warnings)]` in the
+crate does not hide it. The gate has the external case, the four spellings of the
+flags, and a control that Verus with `-A warnings` still succeeds silently on that
+crate.

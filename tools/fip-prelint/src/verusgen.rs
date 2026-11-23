@@ -769,17 +769,28 @@ pub struct RunInfo {
     pub imported_divergent: Vec<String>,
 }
 
-/// Verus's warning for an item it does not verify although the item carries one of its
-/// attributes (fork `2e6f5874a`: a function outside `verus!` with `#[verifier::fip]` and
-/// no `#[verus_spec(..)]`; the run succeeds, and only what the fork checks on the
-/// compiled program, the drops, is checked for it).
-pub const IGNORED_ATTRIBUTE: &str =
-    "verus-related attribute has no effect because Verus is ignoring this item";
+/// The start of Verus's warnings for an item it does not verify although the item
+/// carries one of its attributes (fork `2e6f5874a`, `rust_verify/src/external.rs`: "…
+/// because Verus is ignoring this item", a function outside `verus!` with
+/// `#[verifier::fip]` and no `#[verus_spec(..)]`; "… because item is already marked
+/// external", `#[verifier::external]` beside it). The run succeeds, and only what the
+/// fork checks on the compiled program, the drops, is checked for the item.
+pub const IGNORED_ATTRIBUTE: &str = "verus-related attribute has no effect because";
 
-/// Whether Verus's diagnostics (`stderr`) have [`IGNORED_ATTRIBUTE`]. A run with it is
-/// not recorded: the attribute states something that was not proved.
+/// Whether Verus's diagnostics (`stderr`) have a warning starting with
+/// [`IGNORED_ATTRIBUTE`]. A run with one is not recorded: the attribute states
+/// something that was not proved.
 pub fn ignored_attribute(stderr: &str) -> bool {
     stderr.contains(IGNORED_ATTRIBUTE)
+}
+
+/// Whether `flag` is a rustc flag that hides warnings, [`IGNORED_ATTRIBUTE`] among them
+/// (measured on the fork `2e6f5874a`: `-A warnings`, `-Awarnings` and `--cap-lints
+/// allow` do; `#![allow(warnings)]` in the crate does not). Every `-A`/`--allow` and
+/// `--cap-lints` is refused, whatever it names: a run is recorded only if it could
+/// have printed the warning.
+pub fn hides_warnings(flag: &str) -> bool {
+    flag.starts_with("-A") || flag.starts_with("--allow") || flag.starts_with("--cap-lints")
 }
 
 /// Checks the `--output-json` result: success, no errors, the entire crate.
@@ -1733,8 +1744,32 @@ mod tests {
         assert!(ignored_attribute(
             "warning: verus-related attribute has no effect because Verus is ignoring this item\n --> src/lib.rs:1:18\n"
         ));
+        assert!(ignored_attribute(
+            "warning: verus-related attribute has no effect because item is already marked external\n"
+        ));
         assert!(!ignored_attribute("warning: unused variable: `x`\n"));
         assert!(!ignored_attribute(""));
+        for f in [
+            "-A",
+            "-Awarnings",
+            "-Aunused",
+            "--allow",
+            "--allow=warnings",
+            "--cap-lints",
+            "--cap-lints=allow",
+        ] {
+            assert!(hides_warnings(f), "{f}");
+        }
+        for f in [
+            "-W",
+            "-Dwarnings",
+            "--edition",
+            "-V",
+            "alloc-check",
+            "--no-cheating",
+        ] {
+            assert!(!hides_warnings(f), "{f}");
+        }
     }
 
     /// `cfg!(fip_prelint)` escaped the scan of `src/`.

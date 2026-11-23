@@ -705,6 +705,30 @@ verify-sidecar: verify-strict
     fi
     grep -q "Verus ignored an item that carries a Verus attribute" "$out/ignored.log" || { echo "FAIL: the run with an ignored attribute failed for another reason"; cat "$out/ignored.log"; exit 1; }
     test ! -e "$out/ignored.txt"
+    # The same with `#[verifier::external]` beside the attribute (the fork's other
+    # warning of this kind), and the flags that hide such warnings: refused before the run.
+    mkdir -p "$out/ignext/src"
+    printf '%s\n' '#![allow(unused_imports)]' 'use vstd::prelude::*;' '#[verifier::external]' '#[verifier::fip]' 'pub fn boxed(x: u64) -> Box<u64> {' '    Box::new(x)' '}' > "$out/ignext/src/lib.rs"
+    if (cd "$out" && $gen --crate-name ignext --crate-dir ignext --out "$out/ignext.txt" -- {{verus}} --crate-type=lib --crate-name ignext {{verus_flags}} ignext/src/lib.rs) > "$out/ignext.log" 2>&1; then # negative probe
+      echo "FAIL: a sidecar was generated for a run in which Verus ignored an external item with a Verus attribute"; exit 1
+    fi
+    grep -q "because item is already marked external" "$out/ignext.log" || { echo "FAIL: Verus did not print the warning for an external item"; cat "$out/ignext.log"; exit 1; }
+    grep -q "Verus ignored an item that carries a Verus attribute" "$out/ignext.log" || { echo "FAIL: the run with an ignored external item failed for another reason"; cat "$out/ignext.log"; exit 1; }
+    test ! -e "$out/ignext.txt"
+    for hide in "-A warnings" "-Awarnings" "--cap-lints allow" "--cap-lints=allow"; do
+      if (cd "$out" && $gen --crate-name ignored --crate-dir ignored --out "$out/ignhide.txt" -- {{verus}} --crate-type=lib --crate-name ignored {{verus_flags}} $hide ignored/src/lib.rs) > "$out/ignhide.log" 2>&1; then # negative probe
+        echo "FAIL: a sidecar was generated for a run with \`$hide\`"; exit 1
+      fi
+      grep -q "it can hide the warning" "$out/ignhide.log" || { echo "FAIL: the run with \`$hide\` failed for another reason"; cat "$out/ignhide.log"; exit 1; }
+      test ! -e "$out/ignhide.txt"
+    done
+    # Control of the flags: Verus itself, given one, succeeds on that crate without the warning.
+    if ! (cd "$out" && {{verus}} --crate-type=lib --crate-name ignored {{verus_flags}} -A warnings ignored/src/lib.rs) > "$out/ignhide-verus.log" 2>&1; then
+      echo "FAIL: control: Verus with \`-A warnings\` failed on the crate with an ignored attribute"; cat "$out/ignhide-verus.log"; exit 1
+    fi
+    if grep -q "verus-related attribute has no effect" "$out/ignhide-verus.log"; then
+      echo "FAIL: control: \`-A warnings\` no longer hides the warning (the refusal of the flag can be reconsidered)"; exit 1
+    fi
     if (cd "$out" && $gen --crate-name ignctl --crate-dir ignctl --out "$out/ignctl.txt" -- {{verus}} --crate-type=lib --crate-name ignctl {{verus_flags}} ignctl/src/lib.rs) > "$out/ignctl.log" 2>&1; then # negative probe
       echo "FAIL: control: a fip function that allocates verified"; exit 1
     fi

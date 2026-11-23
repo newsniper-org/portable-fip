@@ -714,6 +714,11 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     }) {
         return fail(&format!("refused Verus flag `{f}`"));
     }
+    if let Some(f) = flags.iter().find(|f| verusgen::hides_warnings(f)) {
+        return fail(&format!(
+            "refused Verus flag `{f}`: it can hide the warning for an item with a Verus attribute that Verus ignores"
+        ));
+    }
     // The driver compiles the crate with `--cfg fip_prelint`, the profile's settings,
     // the cargo features and (for the test target) `cfg(test)`: a crate whose sources
     // test such cfgs gets no sidecar, and the run's target and features are recorded.
