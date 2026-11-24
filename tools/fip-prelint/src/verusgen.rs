@@ -935,11 +935,14 @@ pub fn cfg_skip_reason(why: &str) -> bool {
     why.starts_with(SKIP_CFG_ITEM)
         || why.starts_with(SKIP_GHOST_ONLY)
         || why.starts_with(SKIP_TAINTED)
+        || why.starts_with(SKIP_GATE)
 }
 
 const SKIP_CFG_ITEM: &str = "the item text has ";
 const SKIP_GHOST_ONLY: &str = "only in the Verus build";
 const SKIP_TAINTED: &str = "relies on the specification of ";
+/// The crate uses `verus_keep_ghost` for more than [`verus::gate_violation`] admits.
+const SKIP_GATE: &str = "the crate has code for one build only: ";
 
 /// The `--import <name>=<file.vir>` arguments of a Verus command line.
 pub fn imports(flags: &[String]) -> Vec<(String, PathBuf)> {
@@ -1153,6 +1156,16 @@ pub fn build(
     }
     let mut gated =
         verus::gated_names(&texts).map_err(|e| format!("{e}, so no sidecar is written"))?;
+    // What the crate puts under `verus_keep_ghost` beyond what cannot change exec code:
+    // then none of its functions is listed (amendment 2026-11-25).
+    // (the crate's own sources: an imported crate answers for its own, through the
+    // functions its sidecar skips and the names it gates)
+    let own: Vec<(String, String)> = texts
+        .iter()
+        .filter(|(p, _)| !Path::new(p).starts_with(".."))
+        .cloned()
+        .collect();
+    let gate = verus::gate_violation(&own);
     gated.names.extend(info.imported_gated.iter().cloned());
     let mut source_hashes = Vec::new();
     // Traits implemented or declared differently in the two builds (phase 4 of
@@ -1187,6 +1200,11 @@ pub fn build(
     let mut tainted: BTreeSet<String> = info.imported_skips.iter().cloned().collect();
     for f in fns {
         if !f.path.starts_with(&prefix) || f.mode != "Exec" {
+            continue;
+        }
+        if let Some(v) = &gate {
+            skipped.push((f.path.clone(), format!("{SKIP_GATE}{v}")));
+            tainted.insert(verus::impl_key(&f.path));
             continue;
         }
         let why = if f.external_body {
@@ -1520,7 +1538,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fip-verusgen-taint-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let src = "pub fn on() -> bool {\n    #[cfg_attr(verus_keep_ghost, cfg(any()))]\n    return true;\n    false\n}\n\npub fn g(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n\npub fn h(a: u32, b: u32) -> u32 {\n    g(a, b)\n}\n\npub fn k() -> u32 { 1 }\n\npub fn d() -> u32 { 2 }\n";
+        let src = "pub fn on() -> bool {\n    #[cfg(not(verus_keep_ghost))]\n    return true;\n    false\n}\n\npub fn g(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n\npub fn h(a: u32, b: u32) -> u32 {\n    g(a, b)\n}\n\npub fn k() -> u32 { 1 }\n\npub fn d() -> u32 { 2 }\n";
         std::fs::write(dir.join("src/lib.rs"), src).unwrap();
         let sp = |a: (usize, usize), b: (usize, usize)| VirSpan {
             file: "src/lib.rs".to_string(),
@@ -1846,15 +1864,35 @@ mod tests {
         };
         let fns = vir_functions(vir).unwrap();
         assert!(!fns[0].expanded && fns[2].expanded);
+        // An exec method of Verus's build only: no function of the crate is listed
+        // (amendment 2026-11-25).
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
-        assert_eq!(s.fns.len(), 1, "{s:?}");
-        assert_eq!(s.fns[0].path, "t::{impl}::m");
-        assert_eq!((s.fns[0].file.as_str(), s.fns[0].line), ("src/lib.rs", 3));
+        assert!(s.fns.is_empty(), "{s:?}");
         assert!(
-            s.skipped
-                .iter()
-                .any(|(p, why)| p == "t::impl&%1::g" && why.contains("only in the Verus build"))
+            s.skipped.len() == 3
+                && s.skipped.iter().all(|(_, why)| why.starts_with(SKIP_GATE)
+                    && why.contains("the exec function `g` under `#[cfg(verus_keep_ghost)]`")),
+            "{s:?}"
         );
+        assert_eq!(imported_cfg_skips(&s).len(), 3);
+        // Without the gate (same lines): both methods are listed, by one path.
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            src.replace(
+                "#[cfg(verus_keep_ghost)]\nverus! {",
+                "// (no gate)\nverus! {",
+            ),
+        )
+        .unwrap();
+        let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
+        assert_eq!(s.fns.len(), 2, "{s:?}");
+        assert!(
+            s.fns
+                .iter()
+                .all(|e| e.path == "t::{impl}::g" || e.path == "t::{impl}::m")
+        );
+        let m = s.fns.iter().find(|e| e.path == "t::{impl}::m").unwrap();
+        assert_eq!((m.file.as_str(), m.line), ("src/lib.rs", 3));
         assert!(
             s.skipped
                 .iter()

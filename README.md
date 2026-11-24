@@ -331,6 +331,22 @@ crates are compiled by the real rustc and stay ⊤.
   driver's count where that count is `∞` or open, a finite count above it is an error,
   and the crate summary counts the bounds taken; frees, panics, recursion and `⊤` stay
   the driver's.
+  **What a crate may put under `verus_keep_ghost`** (2026-11-25). The driver analyses
+  the plain build, Verus proves the one with `verus_keep_ghost`; a sidecar lists a
+  crate's functions only if the gate is used for what cannot change exec code:
+  `#[cfg(verus_keep_ghost)]` on specifications and proofs (a `verus! { .. }` block, a
+  module, an impl, a `use`; no exec function and no `macro_rules!` in it),
+  `#[cfg(not(verus_keep_ghost))]` on items of plain builds (no `macro_rules!` but the
+  empty shims of `proof!` and `proof_decl!`, no macro invocation),
+  `cfg_attr(verus_keep_ghost, ..)` with Verus's attributes, `feature(..)`, lint levels
+  or `doc`, and `cfg_attr(not(verus_keep_ghost), fip_macros::..)`. Anything else (an
+  exec function written once per build, as `fip-strict` does, a `cfg_attr` with
+  `path`, `derive` or `repr`, another predicate) and the sidecar lists none of the
+  crate's functions, each skipped with the place of the first such thing; crates that
+  import it take no result through its functions. Within the allowed shapes, a
+  function naming a constant, type or macro defined under a gate is skipped, and the
+  driver uses the results of a listed function only if the functions it calls and the
+  destructors it runs are listed too.
   Every `--import` of the run needs the imported crate's committed sidecar (trusted
   stamp, `--no-cheating`, unchanged sources) and a VIR file a generator run exported.
   The fork audit (2026-11-09): a sidecar whose `flags` record anything but

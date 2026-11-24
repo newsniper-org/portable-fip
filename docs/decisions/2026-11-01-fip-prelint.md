@@ -2426,3 +2426,79 @@ Gates: unit test `gated_impls_of_foreign_traits`; `just verify-sidecar`, crate
 `twindrop`. **No gate for the driver's two `Drop` rules**: the generator now skips every
 function that could reach them, and a fixture cannot list one. They were measured by
 hand as said above, with the generator binary of the commit before.
+
+## Amendment 2026-11-25: what may be under `verus_keep_ghost` is a short list
+
+**Status:** done. Decided by the user after the audit of 2026-11-24 (amendments (4)
+to (6)), which closed nine shapes one by one, four of them only after a review had
+found a way around the fix before.
+
+**Why.** A sidecar says what Verus proved of the program that has `verus_keep_ghost`;
+the driver analyses the plain build, which has not. Every hole of the audit was code
+that the crate's own source put under that gate. Listing the dangerous shapes was never
+shown complete. The rule is turned around: the generator knows the shapes that cannot
+change exec code, and a crate with anything else under the gate has **none of its
+functions listed**.
+
+**The list** (`verus::gate_violation`; a crate's own sources):
+
+1. `#[cfg(verus_keep_ghost)]` on an item (a `verus! { .. }` block, a module, inline or a
+   file, an impl, a trait, a definition, a `use`) with no exec function in it (a `fn`
+   that is not `spec`, `proof` or `axiom`) and no `macro_rules!`; not on `extern`, not
+   on a macro invocation other than `verus!`.
+2. `#[cfg(not(verus_keep_ghost))]` on an item of plain builds, but for a
+   `macro_rules!` (the empty shims of `proof!` and `proof_decl!` apart) and for a macro
+   invocation.
+3. `cfg_attr(verus_keep_ghost, ..)` with `verus_spec(..)`, `verus_verify`,
+   `verifier::..`, `feature(..)`, lint levels, `doc`;
+   `cfg_attr(not(verus_keep_ghost), ..)` with `fip_macros::..`, lint levels, `doc`.
+4. No other predicate naming `verus_keep_ghost`.
+
+A violation skips every exec function of the crate, with the place of the first one in
+the reason; the sidecar is still written (a crate that imports this one needs it), and
+the importer takes the skipped functions as differing between the builds, as before,
+and the names the crate gates.
+
+**Why each shape is harmless, and what answers for what stays possible.**
+
+- (1) adds no exec code to Verus's build: the plain build has every exec function Verus
+  verified, with the same text. A ghost definition (a constant, a type) can still share
+  its name with something the plain build finds elsewhere: the rule on names
+  (amendment (4)) skips a function whose exec code names a gated definition.
+- (2) adds code to the plain build that Verus never saw. A listed function reaches it
+  only by a name that Verus resolved to something else: a function or method (the
+  driver requires every callee of a listed function to be listed, amendment (5)), a
+  destructor or another impl of a standard trait (the type is a gated name, and the
+  driver checks destructors, amendment (6)), a constant or type (names), a trait with
+  methods imported under the gate (refused), a macro (not allowed under the gate).
+- (3) are attributes that Verus reads and rustc ignores, or that change no code.
+- Inside a function, a gate is the item rule's (that function is skipped, its callers
+  with it); inside a definition, the definition is a gated name.
+
+So the list does not stand alone: (2) leans on the driver's rules and on names. What it
+removes is every shape nobody thought of on Verus's side of the gate, and macros on
+both sides.
+
+**Effect here.** `fip-strict` is such a crate (exec methods in a gated `verus! { .. }`
+block, structs and impls for plain builds): its 15 exec functions are skipped for
+`src/lib.rs:546`. Its sidecar listed no function before. `fip-core` (10 functions) and
+`fip-alloc` (1) conform and are unchanged; `fip-core`'s two gated modules hold
+specifications and proofs only.
+
+**The probes of the audit, again:** the callee's module per build under
+`#[cfg(all(verus_keep_ghost))]`, by `#[path]`, by `cfg_attr(.., path = ..)`, a
+`macro_rules!` per build, a `Clone` impl per build: the crate is skipped as a whole. A
+constant, a type alias, a plain-only `Drop` impl (direct, through `drop(..)`, through
+`Vec::clear`): skipped by name. A trait imported per build: no sidecar. In every case
+the `#[fip]` caller is refused by the driver's own count.
+
+Gates: unit test `gate_whitelist`; `just verify-sidecar`: `twinmacro`, `twinmod`,
+`twinpath`, `twinattr`, `cfgattr`, `twin` (the crate as a whole), `twinconst`,
+`twintype`, `twindrop`, `cfgitem` (by the older rules). The older gates `cfgitem` and
+`taint` now write their statement of plain builds as `#[cfg(not(verus_keep_ghost))]`
+(they wrote `cfg_attr(verus_keep_ghost, cfg(any()))`, which is now a violation and has
+its own gate).
+
+**Not done.** The driver's check of literals typed by default (amendment 2026-11-24
+(2)) is unchanged: it is about ghost code, not about the gate. The rows of the audit's
+table without an end-to-end probe are as they were.

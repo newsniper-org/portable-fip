@@ -1037,6 +1037,293 @@ pub fn in_gated_item(src: &str, lo: usize, hi: usize) -> bool {
     })
 }
 
+/// What a crate may put under `verus_keep_ghost` and still have its functions listed
+/// (decision 2026-11-01-fip-prelint, amendment 2026-11-25): the first thing in `files`
+/// (path relative to the crate directory, text) that is none of it, with its place.
+///
+/// The driver analyses the plain build, which has no `verus_keep_ghost`; Verus proves
+/// the build that has it. Every way found, on 2026-11-24, in which one function text
+/// was two programs went through code under that gate, and the list of ways was never
+/// shown complete. So the rule is turned around: the gate may be used for what cannot
+/// change exec code, and for nothing else.
+///
+/// - `#[cfg(verus_keep_ghost)]` on an item (a `verus! { .. }` block, a module, an
+///   impl, a trait, a definition, a `use`) that has no exec function and no
+///   `macro_rules!` in it: specifications and proofs, markers. A module file declared
+///   so is read in the same way.
+/// - `#[cfg(not(verus_keep_ghost))]` on an item of plain builds only, but for a
+///   `macro_rules!` other than the empty shims of `proof!` and `proof_decl!`, and for
+///   a macro invocation.
+/// - `cfg_attr(verus_keep_ghost, ..)` with Verus's attributes (`verus_spec(..)`,
+///   `verus_verify`, `verifier::..`), `feature(..)`, lint levels and `doc`;
+///   `cfg_attr(not(verus_keep_ghost), ..)` with `fip_macros::..`, lint levels and `doc`.
+/// - No other predicate that names `verus_keep_ghost`.
+///
+/// What the two sides still define apart (plain-only items; ghost definitions) is
+/// covered by the rules on names ([`gated_names`]), on the functions' own text
+/// ([`cfg_conflict`]) and by the driver, which requires the callees and destructors of
+/// a listed function to be listed in the build it analyses.
+pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
+    use std::collections::BTreeSet;
+    const LINTS: &[&str] = &["allow(", "warn(", "deny(", "forbid(", "expect(", "doc"];
+    // Module files declared under `#[cfg(verus_keep_ghost)]`: ghost as a whole.
+    let mut ghost_mods: BTreeSet<String> = BTreeSet::new();
+    let mut ghost_files: BTreeSet<String> = BTreeSet::new();
+    type Toks = Vec<(Tok, usize, usize)>;
+    let parsed: Vec<(&str, &str, Toks)> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str(), code_toks(s)))
+        .collect();
+    // The index after the attributes (and the visibility) that start at `k`.
+    fn after_attrs(src: &str, toks: &[(Tok, usize, usize)], mut k: usize, end: usize) -> usize {
+        let text = |k: usize| &src[toks[k].1..toks[k].2];
+        loop {
+            if k + 1 < end && text(k) == "#" && text(k + 1) == "[" {
+                let mut depth = 0usize;
+                k += 1;
+                while k < end {
+                    match toks[k].0 {
+                        Tok::Punct(b'[' | b'(') => depth += 1,
+                        Tok::Punct(b']' | b')') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                k += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                continue;
+            }
+            if k < end && text(k) == "pub" {
+                k += 1;
+                if k < end && text(k) == "(" {
+                    while k < end && text(k) != ")" {
+                        k += 1;
+                    }
+                    k += 1;
+                }
+                continue;
+            }
+            return k;
+        }
+    }
+    // The predicate of the first `cfg(..)` in `toks[a..b]`, as its tokens.
+    fn cfg_pred<'s>(
+        src: &'s str,
+        toks: &[(Tok, usize, usize)],
+        a: usize,
+        b: usize,
+    ) -> Vec<&'s str> {
+        let Some(open) = (a..b).find(|&k| &src[toks[k].1..toks[k].2] == "cfg") else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        for t in &toks[open + 1..b] {
+            let w = &src[t.1..t.2];
+            match t.0 {
+                Tok::Punct(b'(') => {
+                    depth += 1;
+                    if depth > 1 {
+                        out.push(w);
+                    }
+                }
+                Tok::Punct(b')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    out.push(w);
+                }
+                _ => out.push(w),
+            }
+        }
+        out
+    }
+    // The first exec function definition or `macro_rules!` in `toks[a..b]`.
+    fn exec_code(
+        src: &str,
+        toks: &[(Tok, usize, usize)],
+        a: usize,
+        b: usize,
+    ) -> Option<(usize, String)> {
+        let text = |k: usize| &src[toks[k].1..toks[k].2];
+        for m in a..b {
+            if toks[m].0 != Tok::Ident {
+                continue;
+            }
+            if text(m) == "macro_rules" && m + 1 < b && text(m + 1) == "!" {
+                return Some((m, "a `macro_rules!`".to_string()));
+            }
+            if text(m) == "fn" && m + 1 < b && toks[m + 1].0 == Tok::Ident {
+                // Its header, back to the end of what is before it.
+                let mut ghost = false;
+                let mut j = m;
+                while j > a {
+                    j -= 1;
+                    match toks[j].0 {
+                        Tok::Punct(b';' | b'{' | b'}' | b']') => break,
+                        Tok::Ident if matches!(text(j), "spec" | "proof" | "axiom") => ghost = true,
+                        _ => {}
+                    }
+                }
+                if !ghost {
+                    return Some((m, format!("the exec function `{}`", text(m + 1))));
+                }
+            }
+        }
+        None
+    }
+    let at = |path: &str, src: &str, toks: &[(Tok, usize, usize)], k: usize| {
+        format!("{path}:{}", line_of(src, toks[k].1))
+    };
+    // First pass: the gated `mod name;` declarations.
+    for (_, src, toks) in &parsed {
+        let text = |k: usize| &src[toks[k].1..toks[k].2];
+        for (a, b) in gated_items(src, toks) {
+            let pred = cfg_pred(src, toks, a, b);
+            if pred == ["verus_keep_ghost"] {
+                let k = after_attrs(src, toks, a, b);
+                if k + 2 < toks.len()
+                    && text(k) == "mod"
+                    && toks[k + 1].0 == Tok::Ident
+                    && text(k + 2) == ";"
+                {
+                    ghost_mods.insert(text(k + 1).to_string());
+                    // (`#[path = "file.rs"]`: the file by its name)
+                    for m in a..k {
+                        if text(m) == "path"
+                            && m + 2 < k
+                            && text(m + 1) == "="
+                            && toks[m + 2].0 == Tok::Literal
+                            && let Some(n) = std::path::Path::new(text(m + 2).trim_matches('"'))
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                        {
+                            ghost_files.insert(n.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (path, src, toks) in &parsed {
+        let text = |k: usize| &src[toks[k].1..toks[k].2];
+        // `cfg_attr(P, payload)` with `verus_keep_ghost` in `P`.
+        for u in cfg_uses(src) {
+            if u.kind != "cfg_attr" {
+                continue;
+            }
+            let pred = u.args.first().map(String::as_str).unwrap_or("");
+            if !pred.contains("verus_keep_ghost") {
+                continue;
+            }
+            let ok = match pred {
+                "verus_keep_ghost" => payload_only(
+                    &u.args[1..],
+                    &[
+                        &["verus_spec(", "verus_verify", "verifier::", "feature("],
+                        LINTS,
+                    ]
+                    .concat(),
+                ),
+                "not(verus_keep_ghost)" => payload_only(
+                    &u.args[1..],
+                    &[&["fip_macros::", "::fip_macros::"], LINTS].concat(),
+                ),
+                _ => false,
+            };
+            if !ok {
+                return Some(format!(
+                    "{path}: {}: only Verus's attributes, `feature(..)`, lint levels and `doc` may depend on `verus_keep_ghost` (and `fip_macros::..` on its negation)",
+                    u.shown()
+                ));
+            }
+        }
+        // A module file declared under `#[cfg(verus_keep_ghost)]`.
+        let p = std::path::Path::new(path);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let ghost_file = ghost_mods.contains(stem)
+            || p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| ghost_files.contains(n))
+            || p.parent().is_some_and(|d| {
+                d.components().any(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .is_some_and(|c| ghost_mods.contains(c))
+                })
+            });
+        if ghost_file && let Some((m, what)) = exec_code(src, toks, 0, toks.len()) {
+            return Some(format!(
+                "{}: {what} in a module declared under `#[cfg(verus_keep_ghost)]`: exec code of Verus's build only",
+                at(path, src, toks, m)
+            ));
+        }
+        for (a, b) in gated_items(src, toks) {
+            let pred = cfg_pred(src, toks, a, b);
+            if !pred.contains(&"verus_keep_ghost") {
+                continue;
+            }
+            let ghost = pred == ["verus_keep_ghost"];
+            let plain = pred == ["not", "(", "verus_keep_ghost", ")"];
+            if !ghost && !plain {
+                return Some(format!(
+                    "{}: `#[cfg({})]`: only `verus_keep_ghost` and `not(verus_keep_ghost)` are read",
+                    at(path, src, toks, a),
+                    pred.concat()
+                ));
+            }
+            // Inside a function body or a definition the gate is the business of the
+            // rules on item texts and on names; here: items.
+            let k = after_attrs(src, toks, a, b);
+            if k >= b {
+                continue;
+            }
+            let head = text(k);
+            let invocation = toks[k].0 == Tok::Ident
+                && k + 1 < b
+                && text(k + 1) == "!"
+                && head != "macro_rules"
+                && head != "verus";
+            if invocation {
+                return Some(format!(
+                    "{}: the macro invocation `{head}!` under `#[cfg({})]`: what it expands to is in one build only",
+                    at(path, src, toks, a),
+                    pred.concat()
+                ));
+            }
+            if ghost {
+                if let Some((m, what)) = exec_code(src, toks, k, b) {
+                    return Some(format!(
+                        "{}: {what} under `#[cfg(verus_keep_ghost)]`: exec code of Verus's build only (the plain build has other code in its place, or none)",
+                        at(path, src, toks, m)
+                    ));
+                }
+                if head == "extern" {
+                    return Some(format!(
+                        "{}: `extern` under `#[cfg(verus_keep_ghost)]`",
+                        at(path, src, toks, a)
+                    ));
+                }
+            } else if head == "macro_rules" {
+                let name = if k + 2 < b { text(k + 2) } else { "" };
+                let end = item_end(toks, k);
+                if !(GHOST_MACROS.contains(&name) && empty_macro(toks, k, end)) {
+                    return Some(format!(
+                        "{}: `macro_rules! {name}` under `#[cfg(not(verus_keep_ghost))]`: a macro of plain builds only, but for the empty shims of `proof!` and `proof_decl!`",
+                        at(path, src, toks, a)
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Marker traits of the standard library: importing one under a gate changes no
 /// method call.
 const MARKER_TRAITS: &[&str] = &["Copy", "Send", "Sync", "Sized", "Unpin"];
@@ -3562,5 +3849,103 @@ mod tests {
         for n in ["Free", "T", "Own"] {
             assert!(!g.names.contains(n), "{n}: {:?}", g.names);
         }
+    }
+
+    /// Amendment 2026-11-25: what may be under `verus_keep_ghost`.
+    #[test]
+    fn gate_whitelist() {
+        let v = |files: &[(&str, &str)]| {
+            let files: Vec<(String, String)> = files
+                .iter()
+                .map(|(p, s)| (p.to_string(), s.to_string()))
+                .collect();
+            gate_violation(&files)
+        };
+        // fip-core's shapes: ghost imports and modules, shims, markers, Verus's attributes.
+        let ok = "#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]\n#![cfg_attr(fip_prelint, fip::export)]\n#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n#[cfg(verus_keep_ghost)]\npub mod spec;\n#[cfg(verus_keep_ghost)]\nuse crate::spec::{post, inv};\n#[cfg(not(verus_keep_ghost))]\nmacro_rules! proof { ($($t:tt)*) => {}; }\n#[cfg(verus_keep_ghost)]\npub use vstd::alloc_check::NoDeallocDrop;\n#[cfg(not(verus_keep_ghost))]\npub trait NoDeallocDrop {}\n#[cfg(not(verus_keep_ghost))]\nimpl<T: ?Sized> NoDeallocDrop for T {}\n#[cfg(verus_keep_ghost)]\nverus! {\npub open spec fn twice(x: int) -> int { 2 * x }\nproof fn lemma() ensures true {}\npub broadcast proof fn b(x: int) ensures #[trigger] twice(x) == 2 * x {}\nimpl View for S { type V = int; open spec(checked) fn view(&self) -> int { 0 } }\n#[allow(unsafe_code)] unsafe impl NoDeallocDrop for S {}\n}\n#[cfg_attr(verus_keep_ghost, verus_verify)]\npub struct S;\n#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r == x))]\n#[cfg_attr(not(verus_keep_ghost), fip_macros::fip(strict))]\npub fn id(x: u8) -> u8 { x }\n#[cfg(not(verus_keep_ghost))]\npub mod plain {\n    pub fn root() {}\n}\n";
+        let spec = "use vstd::prelude::*;\nverus! {\npub open spec fn post(x: int) -> bool { true }\npub closed spec fn inv(x: int) -> bool { true }\n}\n";
+        assert_eq!(v(&[("src/lib.rs", ok), ("src/spec.rs", spec)]), None);
+        // Exec code of Verus's build only: a twin.
+        let twin = "#[cfg(verus_keep_ghost)]\nverus! {\npub fn helper() -> (r: u8) { 0 }\n}\n#[cfg(not(verus_keep_ghost))]\npub fn helper() -> u8 { 1 }\n";
+        let e = v(&[("src/lib.rs", twin)]).unwrap();
+        assert!(
+            e.starts_with(
+                "src/lib.rs:3: the exec function `helper` under `#[cfg(verus_keep_ghost)]`"
+            ),
+            "{e}"
+        );
+        let e = v(&[
+            ("src/lib.rs", "#[cfg(verus_keep_ghost)]\npub mod spec;\n"),
+            ("src/spec.rs", "pub fn exec() {}\n"),
+        ])
+        .unwrap();
+        assert!(
+            e.starts_with("src/spec.rs:1: the exec function `exec` in a module declared under"),
+            "{e}"
+        );
+        let e = v(&[(
+            "src/lib.rs",
+            "#[cfg(verus_keep_ghost)]\nimpl S {\n    pub const fn m(&self) {}\n}\n",
+        )])
+        .unwrap();
+        assert!(e.contains("the exec function `m`"), "{e}");
+        // Macros of one build.
+        let e = v(&[(
+            "src/lib.rs",
+            "#[cfg(not(verus_keep_ghost))]\nmacro_rules! tick { ($x:expr) => { let _ = $x; }; }\n",
+        )])
+        .unwrap();
+        assert!(
+            e.starts_with(
+                "src/lib.rs:1: `macro_rules! tick` under `#[cfg(not(verus_keep_ghost))]`"
+            ),
+            "{e}"
+        );
+        let e = v(&[(
+            "src/lib.rs",
+            "#[cfg(verus_keep_ghost)]\nmacro_rules! tick { ($x:expr) => {}; }\n",
+        )])
+        .unwrap();
+        assert!(
+            e.contains("a `macro_rules!` under `#[cfg(verus_keep_ghost)]`"),
+            "{e}"
+        );
+        let e = v(&[(
+            "src/lib.rs",
+            "#[cfg(not(verus_keep_ghost))]\nmacro_rules! proof { ($($t:tt)*) => { $($t)* }; }\n",
+        )])
+        .unwrap();
+        assert!(e.contains("`macro_rules! proof`"), "{e}");
+        let e = v(&[(
+            "src/lib.rs",
+            "#[cfg(verus_keep_ghost)]\nmake_impls!(A, B);\n",
+        )])
+        .unwrap();
+        assert!(e.contains("the macro invocation `make_impls!`"), "{e}");
+        // Other predicates and payloads.
+        let e = v(&[(
+            "src/lib.rs",
+            "#[cfg(all(verus_keep_ghost))]\npub mod v {}\n",
+        )])
+        .unwrap();
+        assert!(
+            e.contains("`#[cfg(all(verus_keep_ghost))]`: only `verus_keep_ghost` and"),
+            "{e}"
+        );
+        for bad in [
+            "#[cfg_attr(not(verus_keep_ghost), path = \"p.rs\")]\nmod v;\n",
+            "#[cfg_attr(not(verus_keep_ghost), derive(Clone))]\npub struct S;\n",
+            "#![cfg_attr(not(verus_keep_ghost), no_std)]\n",
+            "#[cfg_attr(verus_keep_ghost, repr(C))]\npub struct S;\n",
+            "#[cfg_attr(all(verus_keep_ghost), verus_verify)]\npub struct S;\n",
+        ] {
+            let e = v(&[("src/lib.rs", bad)]).unwrap();
+            assert!(e.contains("may depend on `verus_keep_ghost`"), "{bad}: {e}");
+        }
+        // Other cfgs are not this rule's (the crate scan refuses them).
+        assert_eq!(
+            v(&[("src/lib.rs", "#[cfg(feature = \"x\")]\npub fn f() {}\n")]),
+            None
+        );
     }
 }

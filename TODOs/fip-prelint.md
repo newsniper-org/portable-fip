@@ -3425,3 +3425,8 @@ or narrow it.
   variant of one build, crate-level attributes, gated `use` of non-traits.
 - Attribute and derive macros of dependencies stay a trust boundary.
 - The driver's check of literals typed by default: keep or remove, the user's decision.
+- (2026-11-25) The gate rule is a list of allowed shapes now (decision record,
+  amendment 2026-11-25). Open: `fip-strict` is written with exec code per build and so
+  lists nothing; whether to rewrite it to conform (its Verus twins of `Certified`,
+  `Compose`, `Then`, `Stateless`) is a design question of its own.
+
