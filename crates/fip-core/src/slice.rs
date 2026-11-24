@@ -96,6 +96,8 @@ pub fn swap<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize) {
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(w =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> keep.requires((&old(xs)@[i],)),
     ensures
         w <= old(xs)@.len(),
@@ -110,10 +112,7 @@ pub fn swap<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize) {
     deallocates crate::dealloc_spec::compact_deallocs(keep, old(xs)@, old(xs)@.len() as int)
 ))]
 #[must_use = "elements at and after the returned length are the rejected ones"]
-pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
-    xs: &mut [T],
-    keep: F,
-) -> usize {
+pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool>(xs: &mut [T], keep: F) -> usize {
     let n = xs.len();
     let mut w: usize = 0;
     let mut r: usize = 0;
@@ -172,6 +171,8 @@ pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(h =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.requires((old(xs)@[i],)),
     ensures
         final(xs)@.len() == old(xs)@.len(),
@@ -180,11 +181,7 @@ pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool + crate::DropFreeFn>(
     allocates crate::spec::map_allocs(f, old(xs)@, old(xs)@.len() as int)
     deallocates crate::dealloc_spec::map_deallocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
-pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
-    xs: &mut [T],
-    hole: T,
-    f: F,
-) -> T {
+pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T>(xs: &mut [T], hole: T, f: F) -> T {
     let n = xs.len();
     let mut spare = hole;
     let mut i: usize = 0;
@@ -244,6 +241,8 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         map_st_by_ok(old(xs)@, f, s0),
         forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
         forall|s: S, x: T| call_deallocations(f, (s, x)) == 0,
@@ -255,11 +254,7 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T + crate::DropFreeFn>(
     allocates 0
     deallocates 0
 ))]
-pub fn map_in_place_st<
-    S: crate::AllocFreeDrop,
-    T: crate::AllocFreeDrop,
-    F: Fn(S, T) -> (S, T) + crate::DropFreeFn,
->(
+pub fn map_in_place_st<S: crate::AllocFreeDrop, T: crate::AllocFreeDrop, F: Fn(S, T) -> (S, T)>(
     xs: &mut [T],
     hole: T,
     s0: S,
@@ -338,6 +333,8 @@ pub fn map_in_place_st<
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(w =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
             ==> same.requires((&old(xs)@[i], &old(xs)@[j])),
         forall|i: int, j: int| 0 <= i < old(xs)@.len() && 0 <= j < old(xs)@.len()
@@ -351,10 +348,7 @@ pub fn map_in_place_st<
     deallocates 0
 ))]
 #[must_use = "elements at and after the returned length are the removed ones"]
-pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFreeFn>(
-    xs: &mut [T],
-    same: F,
-) -> usize {
+pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool>(xs: &mut [T], same: F) -> usize {
     let n = xs.len();
     if n == 0 {
         proof! {
@@ -460,6 +454,8 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFree
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.requires((old(xs)@[i],)),
     ensures
         r.1 == hole,
@@ -469,7 +465,7 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool + crate::DropFree
     deallocates crate::dealloc_spec::compact_map_deallocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
 #[must_use = "elements at and after the returned length are the dropped ones"]
-pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropFreeFn>(
+pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool)>(
     xs: &mut [T],
     hole: T,
     f: F,
@@ -598,6 +594,8 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropF
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         compact_map_st_by_ok(old(xs)@, f, s0),
         forall|s: S, x: T| call_allocations(f, (s, x)) <= 0,
         forall|s: S, x: T| call_deallocations(f, (s, x)) == 0,
@@ -620,7 +618,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool) + crate::DropF
 pub fn compact_map_st<
     S: crate::AllocFreeDrop,
     T: crate::AllocFreeDrop,
-    F: Fn(S, T) -> (S, T, bool) + crate::DropFreeFn,
+    F: Fn(S, T) -> (S, T, bool),
 >(
     xs: &mut [T],
     hole: T,

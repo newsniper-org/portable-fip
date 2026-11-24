@@ -7,7 +7,7 @@
 //! `#[fip(strict = true)]` code. Each is `#[fip(strict = true, param(f = 0))]`: the
 //! callable must be certified allocation-free (it is called in a loop).
 //!
-//! Specified like their `Fn` counterparts, with `FipFn::pre` / `FipFn::post` in place
+//! Specified like their `Fn` counterparts, with `FipSpec::pre` / `FipSpec::post` in place
 //! of a closure's `requires` / `ensures`; `compact`, `dedup_by` and `compact_map` use
 //! the pre-verified predicates `compact_fip_post`, `dedup_fip_post` and
 //! `compact_map_fip_post` (`spec.rs`), and `map_in_place_st` / `compact_map_st` use
@@ -149,7 +149,7 @@ pub fn map_in_place<
 /// `s` through the calls in index order, and returns the final state and `hole`.
 /// Strict variant of [`crate::map_in_place_st`].
 ///
-/// Verified: as [`crate::map_in_place_st`], with `FipFn::pre` / `FipFn::post` in place of
+/// Verified: as [`crate::map_in_place_st`], with `FipSpec::pre` / `FipSpec::post` in place of
 /// `requires` / `ensures` (`map_st_fip_ok`, `map_st_fip_post`, `map_st_fip_trace`,
 /// `map_st_fip_inv`).
 ///
@@ -540,7 +540,7 @@ pub fn compact_map<
 /// original order. Returns how many are kept, the final state, and `hole`. Strict
 /// variant of [`crate::compact_map_st`].
 ///
-/// Verified: as [`crate::compact_map_st`], with `FipFn::pre` / `FipFn::post` in place
+/// Verified: as [`crate::compact_map_st`], with `FipSpec::pre` / `FipSpec::post` in place
 /// of `requires` / `ensures` (`compact_map_st_fip_ok`, `compact_map_st_fip_post`,
 /// `compact_map_st_fip_witnesses`, `compact_map_st_fip_inv`).
 ///

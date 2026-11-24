@@ -971,6 +971,7 @@ pub fn cfg_skip_reason(why: &str) -> bool {
         || why.starts_with(SKIP_TAINTED)
         || why.starts_with(SKIP_GATE)
         || why.starts_with(SKIP_DEP)
+        || why.starts_with(SKIP_VERUS_EXEC)
 }
 
 const SKIP_CFG_ITEM: &str = "the item text has ";
@@ -980,6 +981,11 @@ const SKIP_TAINTED: &str = "relies on the specification of ";
 const SKIP_GATE: &str = "the crate has code for one build only: ";
 /// The function uses something of an imported crate that does.
 const SKIP_DEP: &str = "uses the crate ";
+/// The function calls an exec function of one of Verus's crates, which the plain build
+/// does not have.
+pub const SKIP_VERUS_EXEC: &str = "calls an exec function of Verus's library, ";
+/// Verus's model of a call of a callable value (as [`vir_path`] writes the path).
+const VERUS_CALL_MODEL: &str = "vstd::pervasive::exec_nonstatic_call";
 
 /// The `--import <name>=<file.vir>` arguments of a Verus command line.
 pub fn imports(flags: &[String]) -> Vec<(String, PathBuf)> {
@@ -1224,6 +1230,21 @@ pub fn build(
     let names_divergent =
         |c: &str| verus::trait_segment(c).is_some_and(|t| divergent_names.contains(t));
     let prefix = format!("{krate}::");
+    // The exec functions of Verus's crates in the run: its library's own code, which the
+    // plain build does not have. All but its model of calling a callable value (`f(x)`
+    // for a closure or an `F: Fn..`), which no other text can be.
+    let verus_exec: BTreeSet<&str> = fns
+        .iter()
+        .filter(|f| {
+            f.mode == "Exec"
+                && f.path != VERUS_CALL_MODEL
+                && f.path
+                    .split("::")
+                    .next()
+                    .is_some_and(|root| verus::VERUS_ROOTS.contains(&root))
+        })
+        .map(|f| f.path.as_str())
+        .collect();
     let mut entries: Vec<(Entry, &VirFn)> = Vec::new();
     let mut skipped = Vec::new();
     // Functions whose code may differ between the two builds (impl segments as
@@ -1248,6 +1269,23 @@ pub fn build(
             skipped.push((
                 f.path.clone(),
                 format!("{SKIP_DEP}`{dep}`, which has code for one build only"),
+            ));
+            tainted.insert(verus::impl_key(&f.path));
+            continue;
+        }
+        // An exec function of one of Verus's crates. The plain build has none of them, so
+        // the same text calls another function there (a method found at a later step of
+        // the receiver's lookup: `a.set(0, 1)` is `vstd`'s `ArrayAdditionalExecFns::set`
+        // under Verus, by its prelude, and a `set` of the crate for slices without it;
+        // or a name of the standard prelude, should `vstd`'s prelude come to have one),
+        // and Verus verified this function against the one of its crate.
+        if let Some(c) = f.calls.iter().find(|c| verus_exec.contains(c.as_str())) {
+            skipped.push((
+                f.path.clone(),
+                format!(
+                    "{SKIP_VERUS_EXEC}`{}` (the plain build has no such function: there the same text calls another one)",
+                    verus::impl_key(c)
+                ),
             ));
             tainted.insert(verus::impl_key(&f.path));
             continue;
@@ -1573,6 +1611,138 @@ mod tests {
         );
         assert!(s.flags.is_empty());
         assert_eq!(s.sources.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Amendment 2026-11-25 (3): the plain build has none of Verus's crates, so a
+    /// method call that is a method of `vstd` under Verus (in scope by its prelude) is
+    /// another function's in the plain build. Measured: `a.set(0, 1)` on an array was
+    /// `vstd::array::ArrayAdditionalExecFns::set` for Verus and a `set` of the crate for
+    /// slices without it; the driver discharged an index check that fails at run time.
+    #[test]
+    fn callers_of_verus_library_functions_are_not_listed() {
+        let dir = std::env::temp_dir().join(format!("fip-verusgen-vexec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let src = "pub fn m(a: &mut [u8; 2]) {\n    a.set(0, 1);\n}\n\npub fn c(a: &mut [u8; 2]) {\n    m(a);\n}\n\npub fn call(f: impl Fn()) {\n    f();\n}\n\npub fn spec_only(a: u8) -> u8 {\n    a\n}\n\npub fn free() {\n    unreached()\n}\n";
+        std::fs::write(dir.join("src/lib.rs"), src).unwrap();
+        let sp = |file: &str, a: (usize, usize), b: (usize, usize)| VirSpan {
+            file: file.to_string(),
+            lo: a,
+            hi: b,
+        };
+        let f = |path: &str,
+                 mode: &str,
+                 sig: (usize, usize),
+                 body: ((usize, usize), (usize, usize)),
+                 calls: &[&str]| VirFn {
+            path: path.to_string(),
+            span: sp("src/lib.rs", sig, sig),
+            mode: mode.to_string(),
+            external_body: false,
+            body: Some(sp("src/lib.rs", body.0, body.1)),
+            requires: false,
+            expanded: false,
+            calls: calls.iter().map(ToString::to_string).collect(),
+            allocates: verus::AllocBound::None,
+            deallocates: verus::AllocBound::None,
+            encapsulates: false,
+            mentions: Vec::new(),
+        };
+        let lib = ((1, 1), (1, 2));
+        let fns = vec![
+            // Verus's library, as its records are in the crate's VIR.
+            f("vstd::array::impl&%3::set", "Exec", (1, 1), lib, &[]),
+            f(
+                "vstd::pervasive::exec_nonstatic_call",
+                "Exec",
+                (1, 1),
+                lib,
+                &[],
+            ),
+            f("vstd::pervasive::unreached", "Exec", (1, 1), lib, &[]),
+            f("vstd::seq::impl&%0::len", "Spec", (1, 1), lib, &[]),
+            f("other::impl&%0::set", "Exec", (1, 1), lib, &[]),
+            // The crate.
+            f(
+                "t::m",
+                "Exec",
+                (1, 1),
+                ((1, 28), (3, 2)),
+                &["vstd::array::impl&%3::set"],
+            ),
+            f("t::c", "Exec", (5, 1), ((5, 28), (7, 2)), &["t::m"]),
+            f(
+                "t::call",
+                "Exec",
+                (9, 1),
+                ((9, 26), (11, 2)),
+                &["vstd::pervasive::exec_nonstatic_call"],
+            ),
+            f(
+                "t::spec_only",
+                "Exec",
+                (13, 1),
+                ((13, 30), (15, 2)),
+                &["vstd::seq::impl&%0::len", "other::impl&%0::set"],
+            ),
+            f(
+                "t::free",
+                "Exec",
+                (17, 1),
+                ((17, 15), (19, 2)),
+                &["vstd::pervasive::unreached"],
+            ),
+        ];
+        let info = RunInfo {
+            version: "v".to_string(),
+            commit: "c".to_string(),
+            toolchain: "t".to_string(),
+            verified: 4,
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            features: Vec::new(),
+            edition: "2024".to_string(),
+            imports: Vec::new(),
+            imported_skips: Vec::new(),
+            imported_divergent: Vec::new(),
+            imported_gated: Vec::new(),
+            imported_nonconforming: Vec::new(),
+        };
+        let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
+        let listed: Vec<&str> = s.fns.iter().map(|e| e.path.as_str()).collect();
+        // (a call of a closure is Verus's model `exec_nonstatic_call`; a spec function of
+        // its library and a method of another crate are not this rule's)
+        assert_eq!(listed, vec!["t::call", "t::spec_only"], "{s:?}");
+        let why = |p: &str| {
+            s.skipped
+                .iter()
+                .find(|(q, _)| q == p)
+                .map(|(_, w)| w.clone())
+                .unwrap_or_default()
+        };
+        assert!(
+            why("t::m").starts_with(
+                "calls an exec function of Verus's library, `vstd::array::{impl}::set`"
+            ),
+            "{s:?}"
+        );
+        // Its caller relies on what Verus proved of it, and an importing crate's too.
+        assert!(why("t::c").contains("`t::m`"), "{s:?}");
+        // A free function of the library too (a name its prelude would bring).
+        assert!(
+            why("t::free").starts_with(
+                "calls an exec function of Verus's library, `vstd::pervasive::unreached`"
+            ),
+            "{s:?}"
+        );
+        assert_eq!(
+            imported_cfg_skips(&s),
+            vec![
+                "t::c".to_string(),
+                "t::free".to_string(),
+                "t::m".to_string()
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

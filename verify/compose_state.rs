@@ -12,7 +12,7 @@
 //!   without a bound (`tick_checked` requires the count below 1000) on a slice of any
 //!   length below 990. The caller states the invariant `c == 10 + k` (count before call
 //!   `k`) and gets it back along the trace; the strict form passes `tick_checked` as
-//!   `fip_fn!(tick_checked)`, so `FipFn::pre` / `post` are its `requires` / `ensures`.
+//!   `fip_fn!(tick_checked)`, so `FipSpec::pre` / `post` are its `requires` / `ensures`.
 //! - `number_from_11_closure`: the same step as a closure in `fip_fn!` carrying a
 //!   `verus_spec` attribute, which `fip_fn!` keeps on the closure: `pre` / `post` are
 //!   the closure's `requires` / `ensures`.
@@ -248,9 +248,9 @@ pub fn quadrupled(xs: &mut [u32]) {
     );
     let c = fip_strict::Compose(d1, d2);
     proof! {
-        assert(fip_strict::FipFn::<(u32,)>::allocs(&d1) == 0);
-        assert(fip_strict::FipFn::<(u32,)>::allocs(&c) == 0);
-        assert(old(xs)@.len() * fip_strict::FipFn::<(u32,)>::allocs(&c) == 0);
+        assert(fip_strict::FipSpec::<(u32,)>::allocs(&d1) == 0);
+        assert(fip_strict::FipSpec::<(u32,)>::allocs(&c) == 0);
+        assert(old(xs)@.len() * fip_strict::FipSpec::<(u32,)>::allocs(&c) == 0);
     }
     let _hole = fip_core::strict::map_in_place(xs, 0, c);
 }
@@ -290,10 +290,10 @@ pub fn numbered_doubled(xs: &mut [u32]) -> u32 {
     let f = fip_strict::Then(t, fip_strict::Stateless(d));
     proof! { assert(map_st_fip_inv(old(xs)@, f, 10u32, |k: int, c: u32| c == 10 + k)); }
     proof! {
-        assert(fip_strict::FipFn::<(u32, u32)>::allocs(&t) == 0);
-        assert(fip_strict::FipFn::<(u32,)>::allocs(&d) == 0);
-        assert(fip_strict::FipFn::<(u32, u32)>::allocs(&f) == 0);
-        assert(old(xs)@.len() * fip_strict::FipFn::<(u32, u32)>::allocs(&f) == 0);
+        assert(fip_strict::FipSpec::<(u32, u32)>::allocs(&t) == 0);
+        assert(fip_strict::FipSpec::<(u32,)>::allocs(&d) == 0);
+        assert(fip_strict::FipSpec::<(u32, u32)>::allocs(&f) == 0);
+        assert(old(xs)@.len() * fip_strict::FipSpec::<(u32, u32)>::allocs(&f) == 0);
     }
     let (c, _hole) = fip_core::strict::map_in_place_st(xs, 0, 10, f);
     proof! {

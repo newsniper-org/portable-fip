@@ -49,6 +49,8 @@ pub fn replace<T: crate::AllocFreeDrop>(slot: &mut T, new: T) -> T {
 /// ```
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires
+        vstd::alloc_check::bound_drop_alloc_free::<F>(),
+        !vstd::alloc_check::drop_may_deallocate::<F>(),
         f.requires((*old(slot),)),
     ensures
         f.ensures((*old(slot),), *final(slot)),
@@ -57,11 +59,7 @@ pub fn replace<T: crate::AllocFreeDrop>(slot: &mut T, new: T) -> T {
     deallocates call_deallocations(f, (*old(slot),))
 ))]
 #[inline]
-pub fn update<T: crate::AllocFreeDrop, F: FnOnce(T) -> T + crate::DropFreeFn>(
-    slot: &mut T,
-    hole: T,
-    f: F,
-) -> T {
+pub fn update<T: crate::AllocFreeDrop, F: FnOnce(T) -> T>(slot: &mut T, hole: T, f: F) -> T {
     let prev = replace(slot, hole);
     let next = f(prev);
     replace(slot, next)

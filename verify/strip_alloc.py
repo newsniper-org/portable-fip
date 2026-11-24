@@ -13,7 +13,7 @@ usage: strip_alloc.py <dst-dir> <src-dir-or-file>..
 Each source (a directory tree or one file) is copied under <dst-dir> with its base
 name; every `.rs` file of the copy that Verus reads is rewritten: a file source, and
 the `src/` tree of a directory source (a crate's `tests/` are plain Rust, never given
-to Verus; `tests/verus_drift.rs` names the allocation syntax in its strings). Removed:
+to Verus). Removed:
   - `deallocates E` clauses on a line of their own, lines mentioning `deallocated()`
     or `call_deallocations`, and the whole text of `dealloc_spec.rs` (the fork's
     deallocation counting, 2026-11-22; the module stays, empty);
@@ -28,9 +28,13 @@ to Verus; `tests/verus_drift.rs` names the allocation syntax in its strings). Re
   - the `allocs` spec function of `FipFn` and its implementations;
   - `verus! { .. }` blocks whose first item comment starts with `/// \\`allocates\\`
     total` or `/// Callbacks that allocate nothing` (sum spec functions, zero lemmas);
-  - `unsafe impl .. vstd::alloc_check::AllocFreeDrop for ..` and the bounds on it;
-    the Verus-only re-exports of `AllocFreeDrop` / `DropFreeFn` become marker traits
-    with a blanket impl, as in plain builds;
+  - `unsafe impl .. vstd::alloc_check::AllocFreeDrop for ..` (with its
+    `#[cfg(verus_keep_ghost)]`) and the bounds on it; the Verus-only re-exports of
+    `AllocFreeDrop` / `NoDeallocDrop` become marker traits with a blanket impl, as in
+    plain builds;
+  - the drop preconditions `vstd::alloc_check::bound_drop_alloc_free::<F>()` and
+    `!vstd::alloc_check::drop_may_deallocate::<F>()` (a conjunct on a line of its own;
+    with its `requires` where it is the only one);
   - hand-written `#[cfg_attr(verus_keep_ghost, verifier::fip)]` attribute lines (the
     fork's `fip`, phase 5; upstream has no such attribute).
 What `#[fip_macros::fip(strict ..)]`/`(total)` generate is macro output, which this
@@ -87,6 +91,12 @@ def strip(s: str) -> str:
         "",
         s,
     )
+    # A `requires` with nothing but the fork's drop precondition (`Certified::assume`).
+    s = re.sub(
+        r"\n[ ]*requires\n[ ]*vstd::alloc_check::bound_drop_alloc_free::<\w+>\(\),(?=\n[ ]*ensures\b)",
+        "",
+        s,
+    )
     lines: list[str] = []
     skip = 0
     for line in s.split("\n"):
@@ -102,6 +112,12 @@ def strip(s: str) -> str:
             continue
         if "allocated()" in t or "call_allocations" in t or "call_deallocations" in t:
             continue
+        # The drop preconditions of the `Fn`-based functions (conjuncts of a `requires`
+        # that has others).
+        if t.startswith("vstd::alloc_check::bound_drop_alloc_free::<") or t.startswith(
+            "!vstd::alloc_check::drop_may_deallocate::<"
+        ):
+            continue
         if t.startswith("proof!") and "allocs(" in t:
             continue
         if ".allocs()" in t and "nonlinear_arith" in t:
@@ -116,6 +132,8 @@ def strip(s: str) -> str:
         if "vstd::alloc_check::AllocFreeDrop for" in t or "vstd::alloc_check::NoDeallocDrop for" in t:
             if lines and lines[-1].strip().startswith('#[allow(unsafe_code, reason = "checked by Verus'):
                 lines.pop()
+            if lines and lines[-1].strip() == "#[cfg(verus_keep_ghost)]":
+                lines.pop()
             continue
         lines.append(strip_inline_allocates(line))
     s = "\n".join(lines)
@@ -128,17 +146,13 @@ def strip(s: str) -> str:
         "#[cfg(verus_keep_ghost)]\npub use vstd::alloc_check::NoDeallocDrop;",
         "#[cfg(verus_keep_ghost)]\npub trait NoDeallocDrop {}\n#[cfg(verus_keep_ghost)]\nimpl<T: ?Sized> NoDeallocDrop for T {}",
     )
-    s = s.replace(
-        "#[cfg(verus_keep_ghost)]\npub use core::marker::Copy as DropFreeFn;",
-        "#[cfg(verus_keep_ghost)]\npub trait DropFreeFn {}\n#[cfg(verus_keep_ghost)]\nimpl<T: ?Sized> DropFreeFn for T {}",
-    )
     s = s.replace("broadcast use fip_core::spec::group_allocs_zero;\n", "")
     s = s.replace(": vstd::alloc_check::AllocFreeDrop", ": crate::AllocFreeDrop")
-    s = s.replace("$($A: crate::AllocFreeDrop,)* R: crate::AllocFreeDrop", "$($A,)* R")
+    s = s.replace("$($A: crate::AllocFreeDrop,)*", "$($A,)*")
     s = re.sub(r"(\w+): (?:crate::|fip_strict::)AllocFreeDrop([,>])", r"\1\2", s)
     s = s.replace(" + crate::NoDeallocDrop", "").replace(" + fip_strict::NoDeallocDrop", "")
-    s = s.replace(" + crate::AllocFreeDrop", "").replace(" + crate::DropFreeFn", "")
-    s = s.replace("pub use fip_strict::{AllocFreeDrop, DropFreeFn, NoDeallocDrop};\n", "")
+    s = s.replace(" + crate::AllocFreeDrop", "")
+    s = s.replace("pub use fip_strict::{AllocFreeDrop, NoDeallocDrop};\n", "")
     return s
 
 

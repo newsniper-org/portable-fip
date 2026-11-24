@@ -355,7 +355,7 @@ pub proof fn lemma_compact_map_spec_rejects_unmapped(
 }
 
 // ---- Specifications of the strict variants (`crate::strict`), whose callables are
-// `fip_strict::FipFn` values: the relation is `FipFn::post` instead of a closure's
+// `fip_strict::FipFn` values: the relation is `FipSpec::post` instead of a closure's
 // `ensures`. Written and pre-verified before `crate::strict` was implemented.
 
 /// Postcondition of `compact` on `old` → `new` with result `w`, where `keep(a, r)`

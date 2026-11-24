@@ -448,12 +448,12 @@ verify-negative: verify-strict verify-core
     # order. Each must fail on the state-chain invariant or assertion, not elsewhere.
     chain='\(ss\[[jk]\], old\(xs\)@\[[jk]\]\), \(ss\[[jk] \+ 1\]'
     expect_verus_fail map-st-reverse-order              fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
-    expect_verus_fail map-st-not-threaded               fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { s/^    S: crate::AllocFreeDrop,$/    S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
-    expect_verus_fail compact-map-st-not-threaded       fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ { s/^    S: crate::AllocFreeDrop,$/    S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail map-st-not-threaded               fip-core slice.rs  '/^pub fn map_in_place_st</,/^}/ { s/\bS: crate::AllocFreeDrop,/S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail compact-map-st-not-threaded       fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ { s/\bS: crate::AllocFreeDrop,/S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     expect_verus_fail compact-map-st-reverse-order      fip-core slice.rs  '/^pub fn compact_map_st</,/^}/ s/&mut xs\[r\]/\&mut xs[len - 1 - r]/g' "$chain"
     expect_verus_fail strict-map-st-reverse-order       fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ s/&mut xs\[i\]/\&mut xs[n - 1 - i]/g' "$chain"
-    expect_verus_fail strict-map-st-not-threaded        fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ { s/^    S: crate::AllocFreeDrop,$/    S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
-    expect_verus_fail strict-compact-map-st-not-threaded fip-core strict.rs '/^pub fn compact_map_st</,/^}/ { s/^    S: crate::AllocFreeDrop,$/    S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail strict-map-st-not-threaded        fip-core strict.rs '/^pub fn map_in_place_st</,/^}/ { s/\bS: crate::AllocFreeDrop,/S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
+    expect_verus_fail strict-compact-map-st-not-threaded fip-core strict.rs '/^pub fn compact_map_st</,/^}/ { s/\bS: crate::AllocFreeDrop,/S: crate::AllocFreeDrop + Copy,/; s/^        s = s1;$/        let _ = s1;/ }' "$chain"
     # Pre-verified state spec: without the state chain, the rejecting lemmas fail.
     expect_verus_fail spec-st-no-chain fip-core spec.rs '/^    pub open spec fn map_st_post</,/^    }/ s/^        &&& forall|k: int| 0 <= k < old.len() ==> step(.*$/        \&\&\& true/' "$errs"
     # State invariants and named traces (`spec::state`). A weakened invariant spec must
@@ -536,6 +536,10 @@ verify-negative: verify-strict verify-core
     }
     callers_fail closure-allocates '/^pub fn evens(/,/^}/ s/allocates 0 { \*v % 2 == 0 }/allocates 0 { let _b = Box::new(0u8); *v % 2 == 0 }/' 'unable to prove post-condition of closure' 'Box::new'
     callers_fail closure-unbounded '/^pub fn evens(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'postcondition not satisfied' 'allocates 0'
+    # (2026-11-25) The callable of an `Fn`-based function is dropped there: a closure
+    # that owns a `Vec` deallocates when it is. (Until then the bound `DropFreeFn`,
+    # `Copy` under Verus, refused it; now the function's `requires`.)
+    callers_fail closure-owns-vec '/^pub fn below(/,/^}/ { s/limit: Limit/limit: alloc::vec::Vec<u32>/; s/\*v < limit.at/(*v as usize) < limit.len()/ }' 'precondition not satisfied' 'drop_may_deallocate::<F>'
     callers_fail dedup-unbounded   '/^pub fn deduped(/,/^}/ s/-> (r: bool) allocates 0 deallocates 0 {/-> (r: bool) deallocates 0 {/' 'precondition not satisfied' 'call_allocations\(same'
     # (2026-11-22) `dedup_by`, `map_in_place_st` and `compact_map_st` also require
     # callbacks that deallocate nothing, and a `Certified` checks it in `pre`.
@@ -574,7 +578,7 @@ verify-negative: verify-strict verify-core
     # Stack bound: recursion without `decreases` is rejected (in `compact`, which has no
     # `#[fip]` attribute, so Verus is the check; on a `strict`/`total` function the
     # macro's direct-recursion check rejects it first).
-    expect_verus_fail compact-recursive    fip-core  slice.rs '/^pub fn compact</,/^}/ s/^    let n = xs.len();$/    let _again = compact(xs, keep);\n    let n = xs.len();/' 'recursive function must have a .?decreases.? clause'
+    expect_verus_fail compact-recursive    fip-core  slice.rs '/^pub fn compact</,/^}/ s/^    let n = xs.len();$/    let _again = compact(xs, \&keep);\n    let n = xs.len();/' 'recursive function must have a .?decreases.? clause'
     # Termination (P4 of `total`): a loop without `decreases` in verified code is
     # rejected by Verus (`exec_allows_no_decreases_clause` is refused by the surface
     # gate, mutant `surface-no-decreases-attr`).
@@ -639,20 +643,24 @@ verify-negative: verify-strict verify-core
     verify_surface_fail surface-verify-internal-attr compose.rs '$ s/$/\n#[verus::r#internal(x)]\nfn t() {}/' no_internal_identifier
     verify_surface_fail surface-verify-allocator-impl alloc_callers.rs '$ s/$/\nunsafe impl std::alloc::GlobalAlloc for Arena {}/' no_allocator_impl
     expect_test_fail surface-no-decreases-attr fip-core slot.rs '0,/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/ s/^#\[cfg_attr(verus_keep_ghost, verus_spec(r =>$/#[cfg_attr(verus_keep_ghost, verifier::exec_allows_no_decreases_clause)]\n&/' no_unlisted_verifier_attribute
-    # Drift gate (fip-strict): the Verus `FipFn::call` must match the plain one.
-    d=$(mutate drift-call fip-strict lib.rs 's/^    fn call(&self, args: Args) -> (r: Self::Output)$/    fn call(\&self, args: Args, extra: u8) -> (r: Self::Output)/')
-    if FIP_DRIFT_SRC="$PWD/$d/src/lib.rs" cargo test --locked -q -p fip-strict --test verus_drift > "$d/log" 2>&1; then
-      echo "FAIL: drift mutant passed"; exit 1
-    fi
-    grep -q "test result: FAILED" "$d/log" || { echo "FAIL: drift mutant failed for another reason"; cat "$d/log"; exit 1; }
-    echo "mutant drift-call rejected by the drift test"
-    # The per-arity Verus `Compose` impls must match the plain generic one.
-    d=$(mutate drift-compose fip-strict lib.rs '/^macro_rules! compose_fip_fn/,/^}/ s/^                self.1.call((y,))$/                self.1.call((y,)); self.1.call((y,))/')
-    if FIP_DRIFT_SRC="$PWD/$d/src/lib.rs" cargo test --locked -q -p fip-strict --test verus_drift > "$d/log" 2>&1; then
-      echo "FAIL: drift mutant drift-compose passed"; exit 1
-    fi
-    grep -q "test result: FAILED" "$d/log" || { echo "FAIL: drift mutant drift-compose failed for another reason"; cat "$d/log"; exit 1; }
-    echo "mutant drift-compose rejected by the drift test"
+    # fip-strict keeps to the list of uses of `verus_keep_ghost` (decision
+    # 2026-11-01-fip-prelint, amendment 2026-11-25 (3)): its sidecar lists its
+    # constructors. With an exec item of one build only, or with the bound that was
+    # `Copy` under Verus and a marker in plain builds, the sidecar lists nothing.
+    strict_twin() {  # name, sed script
+      local d; d=$(mutate "$1" fip-strict lib.rs "$2")
+      if ! VERUS_SINGULAR_PATH="{{singular}}" {{sidecar_gen}} --crate-name fip_strict --crate-dir "$d" --out "$d/sidecar.txt" -- {{verus}} --crate-type=lib --crate-name fip_strict {{verus_flags}} "$d/src/lib.rs" --export "$d/fip_strict.vir" --compile --out-dir "$d" > "$d/log" 2>&1; then
+        echo "FAIL: mutant $1: no sidecar"; cat "$d/log"; exit 1
+      fi
+      if grep -q '^fn ' "$d/sidecar.txt"; then echo "FAIL: mutant $1 lists a function"; cat "$d/sidecar.txt"; exit 1; fi
+      grep -q '^skip fip_strict::.*assume the crate has code for one build only: src/lib.rs:' "$d/sidecar.txt" || { echo "FAIL: mutant $1 skipped for another reason"; cat "$d/sidecar.txt"; exit 1; }
+      echo "mutant $1: no function listed"
+    }
+    grep -q '^fn fip_strict::{impl}::assume ' crates/fip-strict/verus-verified.txt
+    grep -q '^fn fip_strict::{impl}::assume_no_panic_macros ' crates/fip-strict/verus-verified.txt
+    strict_twin strict-twin-item '$ s/$/\n#[cfg(not(verus_keep_ghost))]\npub fn plain_only() {}/'
+    strict_twin strict-twin-bound '$ s/$/\n#[cfg(verus_keep_ghost)]\npub use core::marker::Copy as DropFreeFn;\n#[cfg(not(verus_keep_ghost))]\npub trait DropFreeFn {}\n#[cfg(not(verus_keep_ghost))]\nimpl<F: ?Sized> DropFreeFn for F {}/'
+    strict_twin strict-twin-impl 's/^unsafe impl<F: FipBound> FipBound for Stateless<F> {$/#[cfg(not(verus_keep_ghost))]\n&/; $ s/$/\n#[cfg(verus_keep_ghost)]\n#[allow(unsafe_code)]\nunsafe impl<F: FipBound> FipBound for Stateless<F> { const ALLOCS: u64 = F::ALLOCS; const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS; }/'
     echo "verify-negative: ok"
 
 # The Verus sidecar of the driver fixture (tools/fip-prelint/tests/fixtures/verus_sidecar)
@@ -1190,6 +1198,79 @@ verify-sidecar: verify-strict
     #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
     pub fn quiet(k: u8) {}
     TWIN
+    # An impl of a trait under the gate exists in Verus's build only, with all the trait
+    # gives a type (2026-11-25: the list as first written admitted `impl Copy for X {}`
+    # in a block of specifications, and an empty impl of a trait with provided methods).
+    twin ghostimpl <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[derive(Clone)]
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    pub struct X(pub u8);
+
+    #[cfg(verus_keep_ghost)]
+    verus! {
+    impl Copy for X {}
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {}
+    TWIN
+    # A trait of specifications with a supertrait that has methods: a bound on it brings
+    # them into scope in Verus's build only.
+    twin ghostsuper <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(not(verus_keep_ghost))]
+    pub trait Gh {}
+    #[cfg(not(verus_keep_ghost))]
+    impl<T: ?Sized> Gh for T {}
+    #[cfg(verus_keep_ghost)]
+    verus! {
+    pub trait Gh: Copy {
+        spec fn s(&self) -> bool;
+    }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {}
+    TWIN
+    # A method of Verus's library (2026-11-25): `a.set(0, 1)` is
+    # `vstd::array::ArrayAdditionalExecFns::set` under Verus, in scope by the prelude, and
+    # the crate's `set` for slices in the plain build, which has no `vstd` (found at a
+    # later step of the receiver's lookup). The crate keeps to the list. Verus proved
+    # `r == 20` and the driver discharged the index check with it; the plain build
+    # panics on `[200, 0]`. A function calling an exec function of Verus's crates is
+    # skipped.
+    twin vstdexec "calls an exec function of Verus's library, .vstd::array::\{impl\}::set. " <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    pub trait MySet {
+        fn set(&mut self, i: usize, v: u8);
+    }
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    impl MySet for [u8] {
+        fn set(&mut self, i: usize, v: u8) {}
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            r == 20,
+    ))]
+    pub fn quiet(a: &mut [u8; 2]) -> u8 {
+        a.set(0, 1);
+        let t = [10u8, 20u8];
+        t[a[0] as usize]
+    }
+    TWIN
+    grep -q "^fn vstdexec::{impl}::set " "$out/vstdexec.txt" || { echo "FAIL: vstdexec: the crate's own set is not listed"; cat "$out/vstdexec.txt"; exit 1; }
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

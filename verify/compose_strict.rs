@@ -30,7 +30,7 @@ pub fn swap_twice(a: &mut u32, b: &mut u32) {
 }
 
 // Higher-order: a `FipFn` parameter with a declared bound, specified through
-// `FipFn::pre` / `FipFn::post` (the Verus declarations of `fip-strict`).
+// `FipSpec::pre` / `FipSpec::post` (the Verus declarations of `fip-strict`).
 #[fip(strict = true, param(keep = 0))]
 #[cfg_attr(verus_keep_ghost, verus_spec(r =>
     requires

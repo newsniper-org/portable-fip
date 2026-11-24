@@ -79,29 +79,38 @@
 //!
 //! ## Verus
 //!
-//! Under the `verus` driver (`cfg(verus_keep_ghost)`) [`FipBound`], [`FipFn`] and
-//! [`Certified`] are declared inside `verus! { }`: [`FipFn`] gains the spec functions
-//! `pre` / `post` and `allocs` (a `nat`), and `call` requires `pre`, ensures `post` and
-//! is `allocates self.allocs()` (the Verus fork's allocation bound, checked with
-//! `-V alloc-check`; decision `2026-11-06-redesign-verus-allocates`, phase 3). For
-//! [`Certified`]`<ALLOCS, C>` they are the wrapped closure's `requires` / `ensures`,
-//! with `call_allocations(closure, args) <= ALLOCS` as a second conjunct of `pre`
-//! (and `call_deallocations(closure, args) == 0` as a third: `call` is `deallocates 0`), and
-//! `allocs()` is `ALLOCS`. So the certificate number is checked by Verus wherever a
-//! verified caller calls the value: a closure that may allocate more than `ALLOCS`
-//! (or has no `allocates` bound) fails `pre`. For the adapters `allocs()` is the sum
-//! of the parts' (`Stateless`: the part's). `allocs` is a `nat`, not an `int`: the
-//! fork clamps a trait declaration's bound at 0, so with `int` a generic caller could
-//! not use it. Under Verus the adapters and `Certified<_, C: Copy>` also implement
-//! `vstd::alloc_check::AllocFreeDrop` (`unsafe impl`s checked by the fork, pinned by
-//! `tests/hand_written_certs.rs`), and `Compose` has one `FipFn` impl per arity
-//! `0..=`[`MAX_ARITY`] (vstd has no `AllocFreeDrop` for a generic argument tuple).
-//! Plain builds see the dependency-free declarations; `tests/verus_drift.rs` checks
-//! that both declare the same exec items (the Verus-only drop bounds and markers
-//! excepted). The constructors [`Certified::assume`] and
-//! [`Certified::assume_no_panic_macros`] are single items for both builds, their
-//! Verus `ensures` in `cfg_attr(verus_keep_ghost, verus_spec(..))`. Verify with `just verify-strict` (exports the Verus metadata
-//! `fip-core` imports).
+//! One source for both builds. The exec items ([`FipBound`], [`FipOut`], [`FipFn`],
+//! [`Certified`], the adapters, every `call`) are plain Rust with their Verus
+//! specification in `cfg_attr(verus_keep_ghost, ..)` attributes. What exists only under
+//! the `verus` driver (`cfg(verus_keep_ghost)`) is specification: the trait [`FipSpec`]
+//! with the spec functions `pre`, `post` and `allocs` (a `nat`) and its impls,
+//! `Certified::inner`, and the impls of the drop markers. No exec item is declared per
+//! build. (Until 2026-11-25 the traits, the structs and the impls were declared twice,
+//! once in `verus! { }`: what the sidecar generator's rule on `verus_keep_ghost` refuses;
+//! decision record `2026-11-01-fip-prelint`, amendment 2026-11-25 (3).)
+//!
+//! [`FipFn::call`] requires `pre`, ensures `post` and is `allocates self.allocs()`,
+//! `deallocates 0` (the Verus fork's bounds, checked with `-V alloc-check`; decision
+//! `2026-11-06-redesign-verus-allocates`, phase 3). For [`Certified`]`<ALLOCS, C>` they
+//! are the wrapped closure's `requires` / `ensures`, with
+//! `call_allocations(closure, args) <= ALLOCS` as a second conjunct of `pre` (and
+//! `call_deallocations(closure, args) == 0` as a third), and `allocs()` is `ALLOCS`. So
+//! the certificate number is checked by Verus wherever a verified caller calls the
+//! value: a closure that may allocate more than `ALLOCS` (or has no `allocates` bound)
+//! fails `pre`. For the adapters `allocs()` is the sum of the parts' (`Stateless`: the
+//! part's). `allocs` is a `nat`, not an `int`: the fork clamps a trait declaration's
+//! bound at 0, so with `int` a generic caller could not use it.
+//!
+//! Under Verus the adapters and `Certified<_, C: Copy>` also implement
+//! `vstd::alloc_check::AllocFreeDrop` and `NoDeallocDrop` (`unsafe impl`s checked by the
+//! fork, pinned by `tests/hand_written_certs.rs`). [`Compose`] has one [`FipFn`] impl
+//! per arity `0..=`[`MAX_ARITY`], in both builds: the fork requires a bound on every
+//! type parameter of a bounded function and vstd has no `AllocFreeDrop` for a generic
+//! argument tuple, so the argument types are bounded one by one.
+//! [`Certified::assume`] and [`Certified::assume_no_panic_macros`] require, under Verus,
+//! that dropping the closure cannot allocate (`vstd::alloc_check::bound_drop_alloc_free`,
+//! which the fork checks at each verified call for the closure passed).
+//! Verify with `just verify-strict` (exports the Verus metadata `fip-core` imports).
 //!
 //! `#![no_std]`, no `alloc`, no dependencies.
 //!
@@ -315,23 +324,8 @@ pub trait NoDeallocDrop {}
 #[cfg(not(verus_keep_ghost))]
 impl<T: ?Sized> NoDeallocDrop for T {}
 
-/// Callables whose drop cannot allocate.
-///
-/// Under Verus this is `Copy` itself (a closure is `Copy` when its captures are): a
-/// closure type cannot implement [`AllocFreeDrop`], and the fork's drop rule accepts
-/// only `Copy` or `AllocFreeDrop` bounds, not a supertrait of `Copy`. So verified
-/// callers of `fip-core`'s higher-order functions pass `Copy` closures. In plain builds
-/// a marker implemented for every type: the plain API is unchanged.
-#[cfg(verus_keep_ghost)]
-pub use core::marker::Copy as DropFreeFn;
-/// Plain builds: implemented for every type (see the Verus declaration's docs).
-#[cfg(not(verus_keep_ghost))]
-pub trait DropFreeFn {}
-#[cfg(not(verus_keep_ghost))]
-impl<F: ?Sized> DropFreeFn for F {}
-
-// ---- Plain declarations (every build except the `verus` driver). Keep the exec
-// items identical to the `verus!` declarations below (`tests/verus_drift.rs`).
+// ---- The certificate traits. One declaration for both builds; the Verus
+// specification is in `cfg_attr(verus_keep_ghost, ..)` and in `FipSpec`.
 
 /// Certificate for a callable value: calling it through [`FipFn::call`] performs at
 /// most `ALLOCS` heap allocations, no deallocation and no recursion.
@@ -343,7 +337,6 @@ impl<F: ?Sized> DropFreeFn for F {}
 /// # Safety
 ///
 /// Implementing it asserts the property above; see [`Cert::assume`].
-#[cfg(not(verus_keep_ghost))]
 #[allow(
     unsafe_code,
     reason = "certificate trait; `unsafe impl` marks a trusted claim"
@@ -353,6 +346,7 @@ impl<F: ?Sized> DropFreeFn for F {}
     label = "not a certified callable",
     note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`"
 )]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub unsafe trait FipBound {
     /// Upper bound on allocations per call.
     const ALLOCS: u64;
@@ -363,28 +357,60 @@ pub unsafe trait FipBound {
     const NO_PANIC_MACROS: bool = false;
 }
 
+/// The return type of a certified callable taking `Args`: the `Output` of
+/// [`FipFn`]`<Args>`, which has it as a supertrait (so `F: FipFn<(A,), Output = B>` and
+/// `F::Output` read as before).
+///
+/// A trait of its own because the Verus specification of a call ([`FipSpec`]) names
+/// the output type and is a supertrait of [`FipFn`] too. An implementation of
+/// [`FipFn`] gives `Output` in an `impl FipOut<Args>`.
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub trait FipOut<Args> {
+    /// Return type.
+    type Output;
+}
+
+/// The Verus specification of a certified callable taking `Args`.
+///
+/// Under Verus (`cfg(verus_keep_ghost)`) a trait with the spec functions
+/// `pre(&self, args: Args) -> bool`, `post(&self, args: Args, out: Self::Output) -> bool`
+/// and `allocs(&self) -> nat`, which [`FipFn::call`] requires, ensures and is bounded
+/// by. A type implements it in a `#[cfg(verus_keep_ghost)] verus! { .. }` block.
+///
+/// In plain builds a marker implemented for every type, so the supertrait of
+/// [`FipFn`] restricts nothing and needs no `vstd`.
+#[cfg(not(verus_keep_ghost))]
+pub trait FipSpec<Args> {}
+#[cfg(not(verus_keep_ghost))]
+impl<T: ?Sized, Args> FipSpec<Args> for T {}
+
 /// A certified callable taking `Args` (a tuple, e.g. `(&T,)`).
 ///
 /// Values come from `fip_macros::fip_fn!(|x| ..)`. Call with
 /// `FipFn::call(&f, (x,))` or `f.call((x,))`; stable Rust does not allow
 /// implementing the `Fn` traits, so `f(x)` is not available.
 ///
-/// Under Verus the trait also has `spec fn pre(&self, args: Args) -> bool`,
-/// `spec fn post(&self, args: Args, out: Self::Output) -> bool` and
-/// `spec fn allocs(&self) -> nat`; `call` requires `pre`, ensures `post` and
-/// allocates at most `allocs()` (Verus fork, `-V alloc-check`).
-#[cfg(not(verus_keep_ghost))]
+/// The return type is [`FipOut::Output`]. Under Verus, `call` requires
+/// [`FipSpec`]'s `pre`, ensures `post` and allocates at most `allocs()`, with no
+/// deallocation (Verus fork, `-V alloc-check`).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a certified callable taking `{Args}` (`fip_strict::FipFn`)",
     label = "not a certified callable",
     note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`",
     note = "a `fip_fn!` value takes `{Args}` only if its parameter types match; annotate them (`|v: &u8| ..`)"
 )]
-pub trait FipFn<Args>: FipBound {
-    /// Return type.
-    type Output;
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub trait FipFn<Args>: FipBound + FipOut<Args> + FipSpec<Args> {
     /// Calls the wrapped function.
-    fn call(&self, args: Args) -> Self::Output;
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        requires
+            self.pre(args),
+        ensures
+            self.post(args, r),
+        allocates self.allocs()
+        deallocates 0
+    ))]
+    fn call(&self, args: Args) -> <Self as FipOut<Args>>::Output;
 }
 
 /// A closure `C` certified to perform at most `ALLOCS` allocations per call, no
@@ -397,7 +423,7 @@ pub trait FipFn<Args>: FipBound {
 /// `pre(args)` requires `call_allocations(closure, args) <= ALLOCS` and
 /// `call_deallocations(closure, args) == 0` (since 2026-11-22: `FipFn::call` is
 /// `deallocates 0`), and `allocs()` is `ALLOCS`.
-#[cfg(not(verus_keep_ghost))]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> {
     f: C,
 }
@@ -406,7 +432,6 @@ pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> 
     unsafe_code,
     reason = "the bound was claimed by the `unsafe` constructors `Certified::assume` / `assume_no_panic_macros`"
 )]
-#[cfg(not(verus_keep_ghost))]
 unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {
     const ALLOCS: u64 = ALLOCS;
     const NO_PANIC_MACROS: bool = P;
@@ -418,22 +443,31 @@ unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, 
 ///
 /// Under Verus, `pre((s, x))` is `f.pre((x,))` and `post((s, x), (s2, y))` is
 /// `s2 == s && f.post((x,), y)`.
-#[cfg(not(verus_keep_ghost))]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub struct Stateless<F>(pub F);
 
 #[allow(
     unsafe_code,
     reason = "one call of `Stateless(f)` is one call of `f`, bounded by `F::ALLOCS`"
 )]
-#[cfg(not(verus_keep_ghost))]
 unsafe impl<F: FipBound> FipBound for Stateless<F> {
     const ALLOCS: u64 = F::ALLOCS;
     const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS;
 }
 
-#[cfg(not(verus_keep_ghost))]
-impl<S, A, B, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl<S, A, B, F: FipFn<(A,), Output = B>> FipOut<(S, A)> for Stateless<F> {
     type Output = (S, B);
+}
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl<
+    S: crate::AllocFreeDrop,
+    A: crate::AllocFreeDrop,
+    B: crate::AllocFreeDrop,
+    F: FipFn<(A,), Output = B>,
+> FipFn<(S, A)> for Stateless<F>
+{
     #[inline]
     fn call(&self, args: (S, A)) -> (S, B) {
         let (s, x) = args;
@@ -442,37 +476,24 @@ impl<S, A, B, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
     }
 }
 
-/// `Compose(f, g)` called with `args` returns `g(f(args))`: `f` takes any number of
-/// arguments (a `FipFn<Args>`), `g` takes `f`'s output. So it also maps the output
-/// of a multi-argument callable. Its bound is `F::ALLOCS + G::ALLOCS` (one call of
+/// `Compose(f, g)` called with `args` returns `g(f(args))`: `f` takes up to
+/// [`MAX_ARITY`] arguments, `g` takes `f`'s output. So it also maps the output of a
+/// multi-argument callable. Its bound is `F::ALLOCS + G::ALLOCS` (one call of
 /// each); an overflowing sum is a compile error in constant evaluation, not a
 /// wrapped bound.
 ///
 /// Under Verus, `pre(args)` is `f.pre(args)` and `g.pre` for every result `f.post`
 /// allows; `post(args, z)` is: some `y` with `f.post(args, y)` and `g.post((y,), z)`.
-#[cfg(not(verus_keep_ghost))]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub struct Compose<F, G>(pub F, pub G);
 
 #[allow(
     unsafe_code,
     reason = "one call of `Compose(f, g)` is one call of `f` and one of `g`"
 )]
-#[cfg(not(verus_keep_ghost))]
 unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {
     const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
     const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
-}
-
-#[cfg(not(verus_keep_ghost))]
-impl<Args, B, C, F: FipFn<Args, Output = B>, G: FipFn<(B,), Output = C>> FipFn<Args>
-    for Compose<F, G>
-{
-    type Output = C;
-    #[inline]
-    fn call(&self, args: Args) -> C {
-        let y = self.0.call(args);
-        self.1.call((y,))
-    }
 }
 
 /// `Then(f, g)` runs two state-passing steps of the `_st` combinators one after the
@@ -482,24 +503,35 @@ impl<Args, B, C, F: FipFn<Args, Output = B>, G: FipFn<(B,), Output = C>> FipFn<A
 /// Under Verus, `pre((s, x))` is `f.pre((s, x))` and `g.pre(r)` for every result `r`
 /// `f.post` allows; `post((s, x), out)` is: some `r` with `f.post((s, x), r)` and
 /// `g.post(r, out)`.
-#[cfg(not(verus_keep_ghost))]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub struct Then<F, G>(pub F, pub G);
 
 #[allow(
     unsafe_code,
     reason = "one call of `Then(f, g)` is one call of `f` and one of `g`"
 )]
-#[cfg(not(verus_keep_ghost))]
 unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {
     const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
     const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
 }
 
-#[cfg(not(verus_keep_ghost))]
-impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>> FipFn<(S, A)>
-    for Then<F, G>
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>>
+    FipOut<(S, A)> for Then<F, G>
 {
     type Output = (S, C);
+}
+
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+impl<
+    S: crate::AllocFreeDrop,
+    A: crate::AllocFreeDrop,
+    B: crate::AllocFreeDrop,
+    C: crate::AllocFreeDrop,
+    F: FipFn<(S, A), Output = (S, B)>,
+    G: FipFn<(S, B), Output = (S, C)>,
+> FipFn<(S, A)> for Then<F, G>
+{
     #[inline]
     fn call(&self, args: (S, A)) -> (S, C) {
         let (s, y) = self.0.call(args);
@@ -507,55 +539,19 @@ impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S
     }
 }
 
-// ---- Verus declarations (only under the `verus` driver).
+// ---- Specifications (only under the `verus` driver): no exec code.
 
 #[cfg(verus_keep_ghost)]
 verus! {
 
-/// Certificate for a callable value; see the plain declaration.
-#[allow(unsafe_code, reason = "certificate trait; `unsafe impl` marks a trusted claim")]
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` carries no allocation certificate (`fip_strict::FipBound`)",
-    label = "not a certified callable",
-    note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`"
-)]
-pub unsafe trait FipBound {
-    /// Upper bound on allocations per call.
-    const ALLOCS: u64;
-    /// `true` if the callable's body was checked with `panic_macros = false`.
-    const NO_PANIC_MACROS: bool = false;
-}
-
-/// A certified callable taking `Args`, with a specification.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` is not a certified callable taking `{Args}` (`fip_strict::FipFn`)",
-    label = "not a certified callable",
-    note = "a plain closure or function has no allocation bound: wrap it with `fip_macros::fip_fn!(|x: T| ..)` or, for a function with a certificate, `fip_macros::fip_fn!(path)`",
-    note = "a `fip_fn!` value takes `{Args}` only if its parameter types match; annotate them (`|v: &u8| ..`)"
-)]
-pub trait FipFn<Args>: FipBound {
-    /// Return type.
-    type Output;
+/// The specification of a certified callable taking `Args`; see the plain declaration.
+pub trait FipSpec<Args>: FipOut<Args> {
     /// Precondition of a call with `args`.
     spec fn pre(&self, args: Args) -> bool;
     /// Postcondition of a call with `args` returning `out`.
     spec fn post(&self, args: Args, out: Self::Output) -> bool;
     /// Upper bound on the allocations of one call (Verus `allocates`).
     spec fn allocs(&self) -> nat;
-    /// Calls the wrapped function.
-    fn call(&self, args: Args) -> (r: Self::Output)
-        requires
-            self.pre(args),
-        ensures
-            self.post(args, r),
-        allocates self.allocs()
-        deallocates 0
-    ;
-}
-
-/// A certified closure; see the plain declaration.
-pub struct Certified<const ALLOCS: u64, C, const NO_PANIC_MACROS: bool = false> {
-    f: C,
 }
 
 impl<const ALLOCS: u64, C, const P: bool> Certified<ALLOCS, C, P> {
@@ -565,23 +561,7 @@ impl<const ALLOCS: u64, C, const P: bool> Certified<ALLOCS, C, P> {
     }
 }
 
-#[allow(unsafe_code, reason = "the bound was claimed by the `unsafe` constructors `Certified::assume` / `assume_no_panic_macros`")]
-unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {
-    const ALLOCS: u64 = ALLOCS;
-    const NO_PANIC_MACROS: bool = P;
-}
-
-/// A state-keeping adapter; see the plain declaration.
-pub struct Stateless<F>(pub F);
-
-#[allow(unsafe_code, reason = "one call of `Stateless(f)` is one call of `f`, bounded by `F::ALLOCS`")]
-unsafe impl<F: FipBound> FipBound for Stateless<F> {
-    const ALLOCS: u64 = F::ALLOCS;
-    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS;
-}
-
-impl<S: vstd::alloc_check::AllocFreeDrop, A: vstd::alloc_check::AllocFreeDrop, B: vstd::alloc_check::AllocFreeDrop, F: FipFn<(A,), Output = B>> FipFn<(S, A)> for Stateless<F> {
-    type Output = (S, B);
+impl<S, A, B, F: FipFn<(A,), Output = B>> FipSpec<(S, A)> for Stateless<F> {
     open spec fn pre(&self, args: (S, A)) -> bool {
         self.0.pre((args.1,))
     }
@@ -591,34 +571,9 @@ impl<S: vstd::alloc_check::AllocFreeDrop, A: vstd::alloc_check::AllocFreeDrop, B
     open spec fn allocs(&self) -> nat {
         self.0.allocs()
     }
-    #[inline]
-    fn call(&self, args: (S, A)) -> (r: (S, B)) {
-        let (s, x) = args;
-        let y = self.0.call((x,));
-        (s, y)
-    }
 }
 
-/// Composition; see the plain declaration.
-pub struct Compose<F, G>(pub F, pub G);
-
-#[allow(unsafe_code, reason = "one call of `Compose(f, g)` is one call of `f` and one of `g`")]
-unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {
-    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
-    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
-}
-
-/// Two state-passing steps; see the plain declaration.
-pub struct Then<F, G>(pub F, pub G);
-
-#[allow(unsafe_code, reason = "one call of `Then(f, g)` is one call of `f` and one of `g`")]
-unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {
-    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;
-    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;
-}
-
-impl<S: vstd::alloc_check::AllocFreeDrop, A: vstd::alloc_check::AllocFreeDrop, B: vstd::alloc_check::AllocFreeDrop, C: vstd::alloc_check::AllocFreeDrop, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>> FipFn<(S, A)> for Then<F, G> {
-    type Output = (S, C);
+impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>> FipSpec<(S, A)> for Then<F, G> {
     open spec fn pre(&self, args: (S, A)) -> bool {
         &&& self.0.pre(args)
         &&& forall|r: (S, B)| #[trigger] self.0.post(args, r) ==> self.1.pre(r)
@@ -629,15 +584,10 @@ impl<S: vstd::alloc_check::AllocFreeDrop, A: vstd::alloc_check::AllocFreeDrop, B
     open spec fn allocs(&self) -> nat {
         self.0.allocs() + self.1.allocs()
     }
-    #[inline]
-    fn call(&self, args: (S, A)) -> (r: (S, C)) {
-        let (s, y) = self.0.call(args);
-        self.1.call((s, y))
-    }
 }
 
-// Dropping a certified callable can neither allocate nor deallocate when the wrapped closure is `Copy`
-// (its captures are), or when the adapters' parts cannot.
+// Dropping a certified callable can neither allocate nor deallocate when the wrapped
+// closure is `Copy` (its captures are), or when the adapters' parts cannot.
 #[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
 unsafe impl<const ALLOCS: u64, C: Copy, const P: bool> vstd::alloc_check::AllocFreeDrop for Certified<ALLOCS, C, P> {}
 #[allow(unsafe_code, reason = "checked by Verus -V alloc-check (drop rule)")]
@@ -657,13 +607,15 @@ unsafe impl<F: vstd::alloc_check::NoDeallocDrop, G: vstd::alloc_check::NoDealloc
 
 } // verus!
 
-// ---- Shared items (both builds): one source, with the Verus specification in
-// `cfg_attr(verus_keep_ghost, ..)`, so the Verus sidecar lists them by their text.
-// Under Verus, `Certified` and `Certified::inner` are those of the `verus!` block.
+// ---- The constructors.
 
 #[cfg_attr(verus_keep_ghost, verus_verify)]
-impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, false> {
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
     /// Wraps `f` without checking anything.
+    ///
+    /// Under Verus it requires that dropping a `C` cannot allocate
+    /// (`vstd::alloc_check::bound_drop_alloc_free`): the fork checks it at each
+    /// verified call, for the closure passed.
     ///
     /// # Safety
     ///
@@ -677,6 +629,8 @@ impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, false> {
     #[doc(hidden)]
     #[must_use]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        requires
+            vstd::alloc_check::bound_drop_alloc_free::<C>(),
         ensures
             r.inner() == f,
         allocates 0
@@ -688,7 +642,7 @@ impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, false> {
 }
 
 #[cfg_attr(verus_keep_ghost, verus_verify)]
-impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, true> {
+impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
     /// [`Certified::assume`] for a closure whose body was also checked with
     /// `panic_macros = false`.
     ///
@@ -703,6 +657,8 @@ impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, true> {
     #[doc(hidden)]
     #[must_use]
     #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        requires
+            vstd::alloc_check::bound_drop_alloc_free::<C>(),
         ensures
             r.inner() == f,
         allocates 0
@@ -713,31 +669,24 @@ impl<const ALLOCS: u64, C: crate::DropFreeFn> Certified<ALLOCS, C, true> {
     }
 }
 
-/// `FipFn<(A0, ..)>` for `Certified<N, C>` with `C: Fn(A0, ..) -> R`: one source for
-/// both declarations of the trait. Under Verus, `pre`/`post` are the closure's
-/// `requires`/`ensures`.
+/// `FipFn<(A0, ..)>` for `Certified<N, C>` with `C: Fn(A0, ..) -> R`. Under Verus,
+/// `pre`/`post` are the closure's `requires`/`ensures`.
 macro_rules! certified_fip_fn {
     ($($A:ident $a:ident),*) => {
-        #[cfg(not(verus_keep_ghost))]
-        impl<const ALLOCS: u64, C, const P: bool, $($A,)* R> FipFn<($($A,)*)> for Certified<ALLOCS, C, P>
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        impl<const ALLOCS: u64, C, const P: bool, $($A,)* R> FipOut<($($A,)*)> for Certified<ALLOCS, C, P>
         where
             C: Fn($($A),*) -> R,
         {
             type Output = R;
-            #[inline]
-            fn call(&self, args: ($($A,)*)) -> R {
-                let ($($a,)*) = args;
-                (self.f)($($a),*)
-            }
         }
 
         #[cfg(verus_keep_ghost)]
         verus! {
-        impl<const ALLOCS: u64, C, const P: bool, $($A: vstd::alloc_check::AllocFreeDrop,)* R: vstd::alloc_check::AllocFreeDrop> FipFn<($($A,)*)> for Certified<ALLOCS, C, P>
+        impl<const ALLOCS: u64, C, const P: bool, $($A,)* R> FipSpec<($($A,)*)> for Certified<ALLOCS, C, P>
         where
             C: Fn($($A),*) -> R,
         {
-            type Output = R;
             open spec fn pre(&self, args: ($($A,)*)) -> bool {
                 &&& self.inner().requires(args)
                 &&& call_allocations(self.inner(), args) <= ALLOCS as int
@@ -749,13 +698,20 @@ macro_rules! certified_fip_fn {
             open spec fn post(&self, args: ($($A,)*), out: R) -> bool {
                 self.inner().ensures(args, out)
             }
+        }
+        } // verus!
+
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        impl<const ALLOCS: u64, C, const P: bool, $($A: crate::AllocFreeDrop,)* R: crate::AllocFreeDrop> FipFn<($($A,)*)> for Certified<ALLOCS, C, P>
+        where
+            C: Fn($($A),*) -> R,
+        {
             #[inline]
-            fn call(&self, args: ($($A,)*)) -> (r: R) {
+            fn call(&self, args: ($($A,)*)) -> R {
                 let ($($a,)*) = args;
                 (self.f)($($a),*)
             }
         }
-        } // verus!
     };
 }
 
@@ -765,21 +721,25 @@ certified_fip_fn!(A0 a0, A1 a1);
 certified_fip_fn!(A0 a0, A1 a1, A2 a2);
 certified_fip_fn!(A0 a0, A1 a1, A2 a2, A3 a3);
 
-/// Largest closure arity `fip_fn!` supports (the number of `FipFn` impls above).
+/// Largest closure arity `fip_fn!` supports (the number of `FipFn` impls above), and
+/// the largest arity of the first callable of a [`Compose`].
 pub const MAX_ARITY: usize = 4;
 
-/// `FipFn` for `Compose` under Verus, one impl per arity `0..=MAX_ARITY` of `f`: the
-/// fork's `-V alloc-check` requires every type parameter of a bounded function to be
-/// `Copy` or `AllocFreeDrop`, and vstd has no `AllocFreeDrop` for a generic tuple
-/// `Args` (nor for 1-tuples), so the argument types are bounded one by one. The plain
-/// build keeps one impl generic over `Args`; `tests/verus_drift.rs` compares the two
-/// (with `$($A,)*` read as `Args`).
-#[cfg(verus_keep_ghost)]
+/// `FipFn` for `Compose`, one impl per arity `0..=MAX_ARITY` of `f`: the fork's
+/// `-V alloc-check` requires every type parameter of a bounded function to be `Copy`
+/// or `AllocFreeDrop`, and vstd has no `AllocFreeDrop` for a generic tuple `Args` (nor
+/// for 1-tuples), so the argument types are bounded one by one. The same impls in
+/// plain builds (until 2026-11-25 those had one impl generic over `Args`).
 macro_rules! compose_fip_fn {
     ($($A:ident),*) => {
-        verus! {
-        impl<$($A: vstd::alloc_check::AllocFreeDrop,)* B: vstd::alloc_check::AllocFreeDrop, C: vstd::alloc_check::AllocFreeDrop, F: FipFn<($($A,)*), Output = B>, G: FipFn<(B,), Output = C>> FipFn<($($A,)*)> for Compose<F, G> {
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        impl<$($A,)* B, C, F: FipFn<($($A,)*), Output = B>, G: FipFn<(B,), Output = C>> FipOut<($($A,)*)> for Compose<F, G> {
             type Output = C;
+        }
+
+        #[cfg(verus_keep_ghost)]
+        verus! {
+        impl<$($A,)* B, C, F: FipFn<($($A,)*), Output = B>, G: FipFn<(B,), Output = C>> FipSpec<($($A,)*)> for Compose<F, G> {
             open spec fn pre(&self, args: ($($A,)*)) -> bool {
                 &&& self.0.pre(args)
                 &&& forall|y: B| #[trigger] self.0.post(args, y) ==> self.1.pre((y,))
@@ -790,23 +750,22 @@ macro_rules! compose_fip_fn {
             open spec fn allocs(&self) -> nat {
                 self.0.allocs() + self.1.allocs()
             }
+        }
+        } // verus!
+
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        impl<$($A: crate::AllocFreeDrop,)* B: crate::AllocFreeDrop, C: crate::AllocFreeDrop, F: FipFn<($($A,)*), Output = B>, G: FipFn<(B,), Output = C>> FipFn<($($A,)*)> for Compose<F, G> {
             #[inline]
-            fn call(&self, args: ($($A,)*)) -> (r: C) {
+            fn call(&self, args: ($($A,)*)) -> C {
                 let y = self.0.call(args);
                 self.1.call((y,))
             }
         }
-        } // verus!
     };
 }
 
-#[cfg(verus_keep_ghost)]
 compose_fip_fn!();
-#[cfg(verus_keep_ghost)]
 compose_fip_fn!(A0);
-#[cfg(verus_keep_ghost)]
 compose_fip_fn!(A0, A1);
-#[cfg(verus_keep_ghost)]
 compose_fip_fn!(A0, A1, A2);
-#[cfg(verus_keep_ghost)]
 compose_fip_fn!(A0, A1, A2, A3);

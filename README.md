@@ -83,7 +83,7 @@ compiles only in a checking
 `cargo fip-prelint` run, never in a plain build
 (`docs/decisions/2026-11-03-fip-fn-driver-mode.md`). `fip_strict::Stateless(f)` lifts
 a one-argument callable to a state-passing step for the `_st` combinators,
-`fip_strict::Compose(f, g)` calls `g(f(args))` (any arity of `f`) and
+`fip_strict::Compose(f, g)` calls `g(f(args))` (`f` of up to four arguments) and
 `fip_strict::Then(f, g)` runs two state-passing steps, each with the summed bound;
 all are also specified under Verus. `fip_fn!(panic_macros = false, ..)` certifies a
 closure scanned with `panic_macros = false` (or a function whose certificate says
@@ -342,11 +342,17 @@ crates are compiled by the real rustc and stay ⊤.
      ghost module of the crate (3);
   3. `#[cfg(verus_keep_ghost)]` on a `verus! { .. }` block, a `mod name { .. }` or a
      `mod name;` holding specifications and proofs only (`spec`/`proof`/`axiom`
-     functions, `spec` constants, `use`, `broadcast` items, impls and traits of those);
+     functions, `spec` constants, `use`, `broadcast` items, impls and traits of those).
+     An impl of a trait there gives at least one `spec` or `proof` function (or is an
+     empty impl of a marker of Verus's crates), and a trait declared there has no
+     supertrait but traits of the crate without methods and the drop markers: an impl
+     of `Copy`, or a bound that implies it, in Verus's build only is exec code of one
+     build;
   4. `#[cfg(not(verus_keep_ghost))] macro_rules!` for `proof` and `proof_decl`,
      expanding to nothing;
   5. the marker pattern: `#[cfg(not(verus_keep_ghost))] trait Name {}` with
-     `#[cfg(not(verus_keep_ghost))] impl<T: ?Sized> Name for T {}`, and
+     `#[cfg(not(verus_keep_ghost))] impl<T: ?Sized> Name for T {}` (also with type
+     parameters, `trait Name<A> {}` and `impl<T: ?Sized, A> Name<A> for T {}`), and
      `#[cfg(verus_keep_ghost)] unsafe impl vstd::alloc_check::NoDeallocDrop for Type {}`
      (an empty impl of a trait of Verus's crates).
 
@@ -355,8 +361,16 @@ crates are compiled by the real rustc and stay ⊤.
   and the sidecar lists none of the crate's functions, each skipped with the place of
   the first such use. Code that Verus must not verify needs no gate: Verus ignores a
   function without its attributes. A crate that imports such a crate lists no function
-  that uses anything of it (`fip-strict` is written with exec code per build:
-  `fip-core`'s strict variants, which use its `FipFn`, are not listed).
+  that uses anything of it. `fip-strict`, `fip-core` and `fip-alloc` keep to the list
+  (`fip-strict` since 2026-11-25: one declaration of each exec item, its
+  specifications in the trait `FipSpec`, which is a marker in plain builds).
+
+  One more rule, on what Verus resolved (2026-11-25): a function that calls an exec
+  function of Verus's own crates is not listed. The plain build has no `vstd`, so the
+  same text is another call there: with `vstd`'s prelude in scope, `a.set(0, 1)` on an
+  array is `vstd::array::ArrayAdditionalExecFns::set` for Verus and, without it, a
+  `set` the crate has for slices (measured: Verus proved a result the plain build did
+  not compute, and the driver discharged an index check that panics).
   Every `--import` of the run needs the imported crate's committed sidecar (trusted
   stamp, `--no-cheating`, unchanged sources) and a VIR file a generator run exported.
   The fork audit (2026-11-09): a sidecar whose `flags` record anything but
@@ -458,7 +472,7 @@ state.
   that requires the count below 1000 (invariant `c == 10 + k`); without the invariant
   the call is rejected.
 - **Strict forms.** `fip_core::strict::*_st` have the same specifications with
-  `FipFn::pre` / `post`. A verified caller passes a named function as a `FipFn` value
+  `FipSpec::pre` / `post` (the specification trait of `FipFn`). A verified caller passes a named function as a `FipFn` value
   (`fip_fn!(tick_checked)`, bounded by the function's generated certificate in the
   plain build, no `unsafe` at the call site), whose `pre` / `post` are the function's
   `requires` / `ensures`. Under Verus `fip_fn!` reads no certificate: a closure keeps
@@ -482,6 +496,10 @@ steps of the strict loops), `fip-alloc` 1, `verify/compose.rs` 3,
 `verify/compose_strict.rs` 4, `verify/compose_state.rs` 13, `verify/alloc_callers.rs`
 10, `verify/fip_fn_types.rs` 4, `verify/total.rs` 6 (phase 5; the counts of the other
 files are unchanged by phase 5, measured 2026-11-09).
+Measured 2026-11-25 (fork 0.2026.11.24.6ae48cb, `just ci`): `fip-strict` 15 (23 until
+then: the eight associated constants of the four `FipBound` impls are no longer items
+Verus reads, since the impls are plain Rust outside `verus!`), `fip-core` 76,
+`fip-alloc` 1; on stripped sources with upstream 0.2026.11.02.8bf68ee: 15/58/1/3/4/13/4/6.
 
 **Pre-verification → implementation → post-verification.** For `dedup_by` and
 `compact_map` the postcondition was first written as a spec predicate
@@ -492,10 +510,12 @@ missing a kept one, returning an unmapped value) provably do not. Then the
 function was implemented and verified against that predicate, and mutants of it
 must fail.
 
-`fip-strict` declares `FipBound`/`FipFn`/`Certified` twice, as plain Rust and inside
-`verus!` with `pre`/`post` specs; `tests/verus_drift.rs` checks the two declarations
-agree. Verifying `fip-core` therefore needs the exported `fip-strict` metadata (see
-the `verify-core` recipe).
+`fip-strict` declares `FipBound`/`FipOut`/`FipFn`/`Certified` and the adapters once,
+as plain Rust with their Verus specification in `cfg_attr(verus_keep_ghost, ..)`; the
+spec functions `pre`/`post`/`allocs` are those of the trait `FipSpec`, a supertrait of
+`FipFn` that exists with them under Verus only (a marker implemented for every type in
+plain builds). Verifying `fip-core` needs the exported `fip-strict` metadata (see the
+`verify-core` recipe).
 
 Requirements: the Verus fork with `allocates` (branch `fip`, the commit in
 `tools/fip-prelint/verus-trusted.txt`) as `VERUS` (its Z3 is `VERUS_Z3_PATH`, else

@@ -3426,13 +3426,19 @@ or narrow it.
 - Attribute and derive macros of dependencies stay a trust boundary.
 - The driver's check of literals typed by default: keep or remove, the user's decision.
 - (2026-11-25) The gate rule is a list of allowed shapes (decision record, amendments
-  2026-11-25 and 2026-11-25 (2)). Open:
-  - `fip-strict` is written with exec code per build and lists nothing; `fip-core`'s
-    `Fn`-based functions use its `DropFreeFn` (under Verus `core::marker::Copy`, imported
-    under the gate, which is not on the list) as a bound. Rewriting `fip-strict` to keep
-    to the list (its Verus twins of `Certified`, `Compose`, `Then`, `Stateless`; a marker
-    for `DropFreeFn` that is on the list) is a design question of its own.
-  - Ghost datatypes under the gate are refused; admit them by name, or not: the user's
-    decision.
+  2026-11-25, (2) and (3)). `fip-strict` keeps to it since (3). Open:
+  - The strict variants of `fip-core` and the `call`s of `fip-strict` are not listed:
+    (a) a function whose record names a method of a trait declared differently in the
+    two builds is skipped, also when the method is a spec function (`FipSpec::pre`);
+    exempting spec functions needs the mode of the named function and an argument
+    that nothing else of the trait can differ; (b) `Certified`'s and `Compose`'s
+    `call`s come from a macro, one text for five impls. Until both, the driver takes
+    nothing of Verus's for an instance of a strict combinator.
+  - Ghost datatypes under the gate are refused (decided 2026-11-25: stays).
   - No fixture for a `Box` passed to a function bounded by a marker (it needs a crate
-    that Verus does not compile), nor for the driver's two `Drop` rules.
+    that Verus does not compile), nor for the driver's two `Drop` rules, nor for a
+    closure whose captured value has an allocating `Drop` (measured by hand).
+  - The check that `vstd`'s prelude has no name of the standard prelude is a script
+    run by hand at `6ae48cb`, not a gate (it reads the fork's sources).
+  - `requires vstd::alloc_check::bound_drop_alloc_free::<F>()` written by hand is
+    measured to work, not documented by the fork (request sent 2026-11-25).

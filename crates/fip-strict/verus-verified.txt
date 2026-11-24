@@ -11,54 +11,39 @@ z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu - 2024
-verified 23
-source src/lib.rs 86caa6d14b3e4f52b97ffeebcf7046afd0009ea2eb2b59094659c66c16ca5365
-skip fip_strict::FipFn::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%11::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%14::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%23::assume the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%24::assume_no_panic_macros the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%25::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%26::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%27::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%28::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%29::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%30::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%31::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%32::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%33::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-skip fip_strict::impl&%34::call the crate has code for one build only: src/lib.rs:325: a `use` of something else than Verus's crates or a ghost module of the crate under `#[cfg(verus_keep_ghost)]`: the gate is for specifications and proofs, the empty `proof!` shims and marker traits
-divergent AllocFreeDrop src/lib.rs:299
-divergent AllocFreeDrop src/lib.rs:301
-divergent AllocFreeDrop src/lib.rs:642
-divergent AllocFreeDrop src/lib.rs:646
-divergent AllocFreeDrop src/lib.rs:650
-divergent AllocFreeDrop src/lib.rs:654
-divergent DropFreeFn src/lib.rs:329
-divergent DropFreeFn src/lib.rs:331
-divergent FipBound src/lib.rs:356
-divergent FipBound src/lib.rs:410
-divergent FipBound src/lib.rs:429
-divergent FipBound src/lib.rs:461
-divergent FipBound src/lib.rs:493
-divergent FipBound src/lib.rs:522
-divergent FipBound src/lib.rs:569
-divergent FipBound src/lib.rs:578
-divergent FipBound src/lib.rs:606
-divergent FipBound src/lib.rs:615
-divergent FipFn src/lib.rs:383
-divergent FipFn src/lib.rs:435
-divergent FipFn src/lib.rs:467
-divergent FipFn src/lib.rs:499
-divergent FipFn src/lib.rs:536
-divergent FipFn src/lib.rs:583
-divergent FipFn src/lib.rs:620
-divergent FipFn src/lib.rs:722
-divergent FipFn src/lib.rs:736
-divergent FipFn src/lib.rs:781
-divergent NoDeallocDrop src/lib.rs:314
-divergent NoDeallocDrop src/lib.rs:316
-divergent NoDeallocDrop src/lib.rs:644
-divergent NoDeallocDrop src/lib.rs:648
-divergent NoDeallocDrop src/lib.rs:652
-divergent NoDeallocDrop src/lib.rs:656
+verified 15
+source src/lib.rs 0bbfad77f02062487590edde0d4d0aad167f2092f60f98747d355bc89517ca5f
+fn fip_strict::{impl}::assume src/lib.rs:614 b9c7170698ac0f326b143efbba4489b879cf9351e829c0817946297067833ef7 requires 0 0 -
+fn fip_strict::{impl}::assume_no_panic_macros src/lib.rs:646 916b74897774f972fcaee0e82d5ce095f75ce38f4ebf8ce499f2446ad40eb6b9 requires 0 0 -
+skip fip_strict::FipFn::call no body
+skip fip_strict::impl&%13::call relies on the specification of `fip_strict::FipFn::call`, whose code may differ in the driver's build
+skip fip_strict::impl&%15::call relies on the specification of `fip_strict::FipFn::call`, whose code may differ in the driver's build
+skip fip_strict::impl&%31::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%34::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%37::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%40::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%43::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%46::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%49::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%52::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%55::call generated by a macro expansion (one item text for every expansion)
+skip fip_strict::impl&%58::call generated by a macro expansion (one item text for every expansion)
+divergent AllocFreeDrop src/lib.rs:308
+divergent AllocFreeDrop src/lib.rs:310
+divergent AllocFreeDrop src/lib.rs:592
+divergent AllocFreeDrop src/lib.rs:596
+divergent AllocFreeDrop src/lib.rs:600
+divergent AllocFreeDrop src/lib.rs:604
+divergent FipSpec src/lib.rs:383
+divergent FipSpec src/lib.rs:385
+divergent FipSpec src/lib.rs:548
+divergent FipSpec src/lib.rs:564
+divergent FipSpec src/lib.rs:576
+divergent FipSpec src/lib.rs:686
+divergent FipSpec src/lib.rs:742
+divergent NoDeallocDrop src/lib.rs:323
+divergent NoDeallocDrop src/lib.rs:325
+divergent NoDeallocDrop src/lib.rs:594
+divergent NoDeallocDrop src/lib.rs:598
+divergent NoDeallocDrop src/lib.rs:602
+divergent NoDeallocDrop src/lib.rs:606

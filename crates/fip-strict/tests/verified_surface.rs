@@ -10,7 +10,8 @@
 //!    a trust point of Verus's `allocates` accounting.
 //!
 //! The function-level gates of `fip-core` (a `verus_spec` on every `fn`, no
-//! `decreases`) do not apply: this crate's Verus-only twins live in `verus! { .. }`.
+//! `decreases`) do not apply: the `call` of a `FipFn` impl has its specification in the
+//! trait, and the specifications of this crate live in `verus! { .. }`.
 //! `FIP_SURFACE_SRC` overrides the scanned directory; the `verify-negative` recipe
 //! uses it to show the gates fail on mutated copies.
 

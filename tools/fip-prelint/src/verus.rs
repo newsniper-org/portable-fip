@@ -992,8 +992,12 @@ pub fn line_of(src: &str, at: usize) -> usize {
 // 2026-11-24 (4)).
 
 /// Crates whose items exist only in Verus's build by design: a gated `use` of one of
-/// them brings ghost names, which exec code compiled in both builds cannot use.
-const VERUS_ROOTS: &[&str] = &[
+/// them brings ghost names, which exec code compiled in both builds cannot name. (It
+/// also brings traits with exec methods into scope, `vstd::prelude`'s
+/// `ArrayAdditionalExecFns` among them, and a method call does not name its trait: the
+/// generator skips a function that calls an exec function of these crates,
+/// `verusgen::SKIP_VERUS_EXEC`.)
+pub const VERUS_ROOTS: &[&str] = &[
     "vstd",
     "verus_builtin",
     "verus_builtin_macros",
@@ -1071,12 +1075,10 @@ pub fn in_gated_item(src: &str, lo: usize, hi: usize) -> bool {
 /// `#![cfg(..)]`, the gate on a function, an impl with items, a definition, a field, a
 /// statement, an item of plain builds only.
 pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     type Toks = [(Tok, usize, usize)];
     const LINTS: &[&str] = &["allow(", "warn(", "deny(", "forbid(", "expect(", "doc"];
-    /// The marker traits of `vstd::alloc_check`, also under a re-exported name.
-    const VERUS_MARKERS: &[&str] = &["AllocFreeDrop", "NoDeallocDrop"];
 
     type File<'a> = (&'a str, &'a str, Vec<(Tok, usize, usize)>);
     let parsed: Vec<File> = files
@@ -1225,6 +1227,7 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
         module: bool,
         ghost_mods: &BTreeSet<String>,
         local_macros: &BTreeSet<String>,
+        plain_markers: &BTreeSet<String>,
     ) -> Option<(usize, String)> {
         let text = |k: usize| &src[toks[k].1..toks[k].2];
         let ident = |k: usize| k < b && toks[k].0 == Tok::Ident;
@@ -1289,6 +1292,11 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
                     Some(format!("the type alias `{}`", text(m + 1)))
                 }
                 "extern" => Some("`extern`".to_string()),
+                // An impl (the item: `impl` in a type comes after `:`, `->`, `(`, ..).
+                "impl" if matches!(prev, "" | "}" | ";" | "]" | "{" | "unsafe" | "default") => {
+                    ghost_impl_violation(src, toks, m, b)
+                }
+                "trait" if ident(m + 1) => ghost_trait_violation(src, toks, m, b, plain_markers),
                 "use" if !module && prev != "broadcast" => {
                     let end = (m..b).find(|&k| is(k, ";")).unwrap_or(b);
                     (!ghost_use(src, toks, m + 1, end, ghost_mods)).then(|| {
@@ -1356,8 +1364,32 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
     // the macros of the crate.
     let mut ghost_mods: BTreeSet<String> = BTreeSet::new();
     let mut ghost_files: BTreeSet<String> = BTreeSet::new();
-    let mut markers: BTreeSet<String> = BTreeSet::new();
+    let mut markers: BTreeMap<String, usize> = BTreeMap::new();
     let mut local_macros: BTreeSet<String> = BTreeSet::new();
+    // The traits of the crate that have no method and no supertrait, in every
+    // declaration of the name: as a supertrait of a trait of specifications they bring
+    // no method into scope.
+    let mut methodless: BTreeSet<String> = BTreeSet::new();
+    let mut with_methods: BTreeSet<String> = BTreeSet::new();
+    for (_, src, toks) in &parsed {
+        let text = |k: usize| &src[toks[k].1..toks[k].2];
+        for k in 0..toks.len() {
+            if text(k) == "trait" && toks.get(k + 1).is_some_and(|t| t.0 == Tok::Ident) {
+                let name = text(k + 1).to_string();
+                match trait_shape(src, toks, k, toks.len()) {
+                    Some((supers, body, end))
+                        if supers.is_empty() && !(body..end).any(|j| text(j) == "fn") =>
+                    {
+                        methodless.insert(name);
+                    }
+                    _ => {
+                        with_methods.insert(name);
+                    }
+                }
+            }
+        }
+    }
+    methodless.retain(|n| !with_methods.contains(n));
     for (_, src, toks) in &parsed {
         let text = |k: usize| &src[toks[k].1..toks[k].2];
         local_macros.extend(macro_rules_names(src));
@@ -1383,12 +1415,9 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
                 }
             }
             if pred == ["not", "(", "verus_keep_ghost", ")"]
-                && text(k) == "trait"
-                && k + 4 == b
-                && text(k + 2) == "{"
-                && text(k + 3) == "}"
+                && let Some((name, arity)) = marker_trait(src, toks, k, b)
             {
-                markers.insert(text(k + 1).to_string());
+                markers.insert(name, arity);
             }
         }
     }
@@ -1466,8 +1495,16 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
                 })
             });
         if ghost_file
-            && let Some((m, what)) =
-                not_ghost(src, toks, 0, toks.len(), true, &ghost_mods, &local_macros)
+            && let Some((m, what)) = not_ghost(
+                src,
+                toks,
+                0,
+                toks.len(),
+                true,
+                &ghost_mods,
+                &local_macros,
+                &methodless,
+            )
         {
             return Some(format!(
                 "{}: {what} in a module declared under `#[cfg(verus_keep_ghost)]`: only specifications and proofs may be there",
@@ -1527,6 +1564,7 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
                             head == "mod",
                             &ghost_mods,
                             &local_macros,
+                            &methodless,
                         ) {
                             return Some(format!(
                                 "{}: {what} under `{shown}`: only specifications and proofs may be there (exec code of Verus's build only is another program than the plain build's)",
@@ -1585,32 +1623,12 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
                         }
                     }
                     "trait" => {
-                        if !(k + 4 == b && empty_body) {
+                        if marker_trait(src, toks, k, b).is_none() {
                             return refuse("a trait that is not an empty marker trait");
                         }
                     }
                     "impl" => {
-                        // `impl<T: ?Sized> Marker for T {}`.
-                        let for_at = (k..b).find(|&m| text(m) == "for");
-                        let param = if is(k + 1, "<")
-                            && toks.get(k + 2).is_some_and(|t| t.0 == Tok::Ident)
-                        {
-                            Some(text(k + 2))
-                        } else {
-                            None
-                        };
-                        let blanket = match (for_at, param) {
-                            (Some(f), Some(p)) => {
-                                f + 4 == b
-                                    && text(f + 1) == p
-                                    && f >= 1
-                                    && toks[f - 1].0 == Tok::Ident
-                                    && markers.contains(text(f - 1))
-                                    && !(k + 1..f).any(|m| text(m) == ",")
-                            }
-                            _ => false,
-                        };
-                        if !(blanket && empty_body) {
+                        if !marker_blanket(src, toks, k, b, &markers) {
                             return refuse(
                                 "an impl that is not the blanket impl of an empty marker trait",
                             );
@@ -1623,6 +1641,315 @@ pub fn gate_violation(files: &[(String, String)]) -> Option<String> {
         }
     }
     None
+}
+
+/// The marker traits of `vstd::alloc_check`, also under a re-exported name.
+const VERUS_MARKERS: &[&str] = &["AllocFreeDrop", "NoDeallocDrop"];
+
+/// The header of the trait declared at token `k` (`trait`) of `toks[..b]`: the last
+/// names of its supertraits (`None` in the list for a `where` clause, which is not
+/// read), and the token range of its body. `None` if the header is not read.
+fn trait_shape(
+    src: &str,
+    toks: &[(Tok, usize, usize)],
+    k: usize,
+    b: usize,
+) -> Option<(Vec<Option<String>>, usize, usize)> {
+    let text = |m: usize| {
+        if m < b {
+            &src[toks[m].1..toks[m].2]
+        } else {
+            ""
+        }
+    };
+    let mut m = k + 2;
+    let mut angle = 0i32;
+    let mut supers: Vec<Option<String>> = Vec::new();
+    let mut in_supers = false;
+    let mut last: Option<String> = None;
+    loop {
+        if m >= b {
+            return None;
+        }
+        match text(m) {
+            "<" => angle += 1,
+            // (`->`)
+            ">" if m > 0 && text(m - 1) == "-" && toks[m - 1].2 == toks[m].1 => {}
+            ">" => angle -= 1,
+            ":" if angle == 0 && !in_supers && text(m + 1) != ":" && text(m - 1) != ":" => {
+                in_supers = true;
+            }
+            "+" if angle == 0 && in_supers => supers.push(last.take()),
+            "where" if angle == 0 => supers.push(None),
+            "{" if angle <= 0 => break,
+            ";" => return None,
+            w if angle == 0 && in_supers && toks[m].0 == Tok::Ident => last = Some(w.to_string()),
+            _ => {}
+        }
+        m += 1;
+    }
+    if in_supers {
+        supers.push(last.take());
+    }
+    let mut depth = 0usize;
+    let mut end = m;
+    while end < b {
+        match toks[end].0 {
+            Tok::Punct(b'{') => depth += 1,
+            Tok::Punct(b'}') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        end += 1;
+    }
+    (end < b).then_some((supers, m + 1, end))
+}
+
+/// Why the trait declared at token `k`, under `#[cfg(verus_keep_ghost)]`, is more than a
+/// trait of specifications: a bound on it would bring methods into scope in Verus's
+/// build only. Its supertraits are traits of the crate without methods (`plain`), the
+/// drop markers of Verus's crates, or `Sized`.
+fn ghost_trait_violation(
+    src: &str,
+    toks: &[(Tok, usize, usize)],
+    k: usize,
+    b: usize,
+    plain: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let name = &src[toks[k + 1].1..toks[k + 1].2];
+    let Some((supers, _, _)) = trait_shape(src, toks, k, b) else {
+        return Some(format!("the trait `{name}`, whose header is not read,"));
+    };
+    for sup in supers {
+        match sup {
+            Some(t)
+                if plain.contains(&t) || VERUS_MARKERS.contains(&t.as_str()) || t == "Sized" => {}
+            Some(t) => {
+                return Some(format!(
+                    "the trait `{name}` with the supertrait `{t}` (a bound on `{name}` would bring `{t}`'s methods into scope in Verus's build only; a supertrait may be a trait of the crate without methods or supertraits)"
+                ));
+            }
+            None => {
+                return Some(format!("the trait `{name}` with a `where` clause"));
+            }
+        }
+    }
+    None
+}
+
+/// Why the impl at token `k` (`impl`), under `#[cfg(verus_keep_ghost)]`, is more than
+/// specifications. An inherent impl is read item by item. An impl of a trait exists in
+/// Verus's build only, with everything the trait provides: it has to give a `spec` or
+/// `proof` function (then the trait is one of specifications: declared under the gate,
+/// where no exec function may be), or be an empty impl of a marker of Verus's crates.
+fn ghost_impl_violation(
+    src: &str,
+    toks: &[(Tok, usize, usize)],
+    k: usize,
+    b: usize,
+) -> Option<String> {
+    let text = |m: usize| {
+        if m < b {
+            &src[toks[m].1..toks[m].2]
+        } else {
+            ""
+        }
+    };
+    let mut m = k + 1;
+    let mut angle = 0i32;
+    let mut for_at: Option<usize> = None;
+    let mut path_from = k + 1;
+    loop {
+        if m >= b {
+            return Some("an impl whose header is not read".to_string());
+        }
+        match text(m) {
+            "<" => angle += 1,
+            ">" if text(m - 1) == "-" && toks[m - 1].2 == toks[m].1 => {}
+            ">" => {
+                angle -= 1;
+                if angle == 0 && for_at.is_none() && path_from == k + 1 && text(k + 1) == "<" {
+                    path_from = m + 1;
+                }
+            }
+            "for" if angle == 0 && for_at.is_none() => for_at = Some(m),
+            "{" if angle <= 0 => break,
+            ";" => return Some("an impl whose header is not read".to_string()),
+            _ => {}
+        }
+        m += 1;
+    }
+    // (an inherent impl: nothing of this rule's)
+    let for_at = for_at?;
+    let path: Vec<&str> = (path_from..for_at)
+        .take_while(|&j| text(j) != "<")
+        .filter(|&j| toks[j].0 == Tok::Ident)
+        .map(text)
+        .collect();
+    let (Some(root), Some(last)) = (path.first(), path.last()) else {
+        return Some("an impl whose header is not read".to_string());
+    };
+    let body = m;
+    let mut depth = 0usize;
+    let mut end = body;
+    while end < b {
+        match toks[end].0 {
+            Tok::Punct(b'{') => depth += 1,
+            Tok::Punct(b'}') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        end += 1;
+    }
+    let empty = end == body + 1;
+    if empty && (VERUS_ROOTS.contains(root) || VERUS_MARKERS.contains(last)) {
+        return None;
+    }
+    let ghost_fn = (body + 1..end).any(|j| {
+        text(j) == "fn" && {
+            // (its header, back to the end of what is before it)
+            let mut h = j;
+            let mut found = false;
+            while h > body {
+                h -= 1;
+                match toks[h].0 {
+                    Tok::Punct(b';' | b'{' | b'}' | b']') => break,
+                    Tok::Ident if matches!(text(h), "spec" | "proof" | "axiom") => {
+                        found = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            found
+        }
+    });
+    (!ghost_fn).then(|| {
+        format!(
+            "an impl of the trait `{last}` that gives no `spec` or `proof` function (it exists in Verus's build only, with every method the trait provides)"
+        )
+    })
+}
+
+/// `trait Name {}` or `trait Name<P, ..> {}` in `toks[k..b]`: an empty trait whose
+/// parameters, if any, are type parameters without bounds or defaults. Its name and the
+/// number of its parameters.
+fn marker_trait(
+    src: &str,
+    toks: &[(Tok, usize, usize)],
+    k: usize,
+    b: usize,
+) -> Option<(String, usize)> {
+    let text = |m: usize| {
+        if m < b {
+            &src[toks[m].1..toks[m].2]
+        } else {
+            ""
+        }
+    };
+    let ident = |m: usize| m < b && toks[m].0 == Tok::Ident;
+    if text(k) != "trait" || !ident(k + 1) {
+        return None;
+    }
+    let mut m = k + 2;
+    let mut arity = 0usize;
+    if text(m) == "<" {
+        loop {
+            if !ident(m + 1) {
+                return None;
+            }
+            arity += 1;
+            match text(m + 2) {
+                "," => m += 2,
+                ">" => {
+                    m += 3;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+    }
+    (text(m) == "{" && text(m + 1) == "}" && m + 2 == b).then(|| (text(k + 1).to_string(), arity))
+}
+
+/// `impl<T: ?Sized> Name for T {}` or `impl<T: ?Sized, P, ..> Name<P, ..> for T {}` in
+/// `toks[k..b]`, for a marker trait of `markers`: implemented for every type, with every
+/// parameter of the trait free.
+fn marker_blanket(
+    src: &str,
+    toks: &[(Tok, usize, usize)],
+    k: usize,
+    b: usize,
+    markers: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let text = |m: usize| {
+        if m < b {
+            &src[toks[m].1..toks[m].2]
+        } else {
+            ""
+        }
+    };
+    let ident = |m: usize| m < b && toks[m].0 == Tok::Ident;
+    // `impl < T : ? Sized`
+    if !(text(k) == "impl"
+        && text(k + 1) == "<"
+        && ident(k + 2)
+        && text(k + 3) == ":"
+        && text(k + 4) == "?"
+        && text(k + 5) == "Sized")
+    {
+        return false;
+    }
+    let this = text(k + 2);
+    let mut m = k + 6;
+    let mut params: Vec<&str> = Vec::new();
+    while text(m) == "," && ident(m + 1) {
+        params.push(text(m + 1));
+        m += 2;
+    }
+    if text(m) != ">" || !ident(m + 1) {
+        return false;
+    }
+    let Some(&arity) = markers.get(text(m + 1)) else {
+        return false;
+    };
+    m += 2;
+    // The trait's arguments: the impl's other parameters, each once, in order.
+    if arity != params.len() || params.contains(&this) {
+        return false;
+    }
+    let distinct: std::collections::BTreeSet<&str> = params.iter().copied().collect();
+    if distinct.len() != params.len() {
+        return false;
+    }
+    if arity > 0 {
+        if text(m) != "<" {
+            return false;
+        }
+        for (i, p) in params.iter().enumerate() {
+            if text(m + 1) != *p {
+                return false;
+            }
+            match (text(m + 2), i + 1 == arity) {
+                (",", false) => m += 2,
+                (">", true) => m += 3,
+                _ => return false,
+            }
+        }
+    }
+    text(m) == "for"
+        && text(m + 1) == this
+        && text(m + 2) == "{"
+        && text(m + 3) == "}"
+        && m + 4 == b
 }
 
 fn code_toks(src: &str) -> Vec<(Tok, usize, usize)> {
@@ -4030,6 +4357,197 @@ mod tests {
 
     /// Everything else under the gate, whatever it is.
     #[test]
+    fn gate_marker_traits_with_parameters() {
+        // A marker of plain builds may have type parameters, each free in the blanket
+        // impl: the supertrait `FipSpec<Args>` of `fip_strict::FipFn`, a trait of
+        // specifications under Verus (amendment 2026-11-25 (3)).
+        let ok = "#[cfg(not(verus_keep_ghost))]\npub trait Spec<Args> {}\n#[cfg(not(verus_keep_ghost))]\nimpl<T: ?Sized, Args> Spec<Args> for T {}\n#[cfg(not(verus_keep_ghost))]\npub trait Two<A, B> {}\n#[cfg(not(verus_keep_ghost))]\nimpl<X: ?Sized, A, B> Two<A, B> for X {}\n#[cfg(verus_keep_ghost)]\nverus! {\npub trait Spec<Args>: Out<Args> {\n    spec fn pre(&self, args: Args) -> bool;\n    spec fn post(&self, args: Args, out: Self::Output) -> bool;\n}\n}\npub trait Out<Args> { type Output; }\n";
+        assert_eq!(violation(&[("src/lib.rs", ok)]), None);
+        for (decl, what) in [
+            // not empty, bounded, defaulted, a lifetime, a const
+            (
+                "pub trait M<A> { fn m(&self); }",
+                "a trait that is not an empty marker trait",
+            ),
+            (
+                "pub trait M<A: Copy> {}",
+                "a trait that is not an empty marker trait",
+            ),
+            (
+                "pub trait M<A = u8> {}",
+                "a trait that is not an empty marker trait",
+            ),
+            (
+                "pub trait M<'a> {}",
+                "a trait that is not an empty marker trait",
+            ),
+            (
+                "pub trait M<const N: usize> {}",
+                "a trait that is not an empty marker trait",
+            ),
+            (
+                "pub trait M<A>: Copy {}",
+                "a trait that is not an empty marker trait",
+            ),
+            (
+                "pub trait M<A> where A: Copy {}",
+                "a trait that is not an empty marker trait",
+            ),
+        ] {
+            let src = format!("#[cfg(not(verus_keep_ghost))]\n{decl}\n");
+            let e = violation(&[("src/lib.rs", &src)]).unwrap();
+            assert!(e.contains(what), "{decl}: {e}");
+        }
+        for imp in [
+            // not every type, not every argument, an argument twice, the wrong number
+            "impl<T, A> M<A> for T {}",
+            "impl<T: ?Sized, A: Copy> M<A> for T {}",
+            "impl<T: ?Sized> M<u8> for T {}",
+            "impl<T: ?Sized, A> M<u8> for T {}",
+            "impl<T: ?Sized, A> M<T> for T {}",
+            "impl<T: ?Sized, A> M<A> for A {}",
+            "impl<T: ?Sized, A> M<A> for &T {}",
+            "impl<T: ?Sized, A, B> M<A> for T {}",
+            "impl<T: ?Sized, A> M<A, A> for T {}",
+            "impl<T: ?Sized, A> M<A> for T where A: Copy {}",
+            "impl<T: ?Sized, A> M<A> for T { }\nimpl<T: ?Sized, A> Other<A> for T {}",
+        ] {
+            let src = format!(
+                "#[cfg(not(verus_keep_ghost))]\npub trait M<A> {{}}\n#[cfg(not(verus_keep_ghost))]\n{imp}\n"
+            );
+            let got = violation(&[("src/lib.rs", &src)]);
+            if imp.contains("Other") {
+                // (the second impl has no gate: nothing of the rule's)
+                assert_eq!(got, None, "{imp}");
+                continue;
+            }
+            let e = got.unwrap_or_else(|| panic!("accepted: {imp}"));
+            assert!(
+                e.contains("an impl that is not the blanket impl of an empty marker trait"),
+                "{imp}: {e}"
+            );
+        }
+        // The arity is the trait's.
+        let two = "#[cfg(not(verus_keep_ghost))]\npub trait M<A, B> {}\n#[cfg(not(verus_keep_ghost))]\nimpl<T: ?Sized, A> M<A> for T {}\n";
+        assert!(violation(&[("src/lib.rs", two)]).is_some());
+        let swapped = "#[cfg(not(verus_keep_ghost))]\npub trait M<A, B> {}\n#[cfg(not(verus_keep_ghost))]\nimpl<T: ?Sized, A, B> M<B, A> for T {}\n";
+        assert!(violation(&[("src/lib.rs", swapped)]).is_some());
+    }
+
+    /// Amendment 2026-11-25 (3): an impl of a trait under the gate exists in Verus's
+    /// build only, with every method the trait provides, and a bound on a trait declared
+    /// there brings its supertraits' methods into scope. Found on 2026-11-25 while
+    /// moving the drop markers' impls of `fip-strict` into a block: the list admitted
+    /// `impl Copy for X {}` and an empty impl of a trait with provided methods.
+    #[test]
+    fn gate_ghost_impls_and_traits() {
+        let pre = "pub struct X;\npub trait Tr { fn m(&self) {} }\npub trait Out<A> { type Output; }\npub trait Sub: Out<u8> { }\n";
+        let wrap = |body: &str| format!("{pre}#[cfg(verus_keep_ghost)]\nverus! {{\n{body}\n}}\n");
+        for body in [
+            "impl X { spec fn s(&self) -> bool { true } }",
+            "impl X {}",
+            "pub trait Gh { spec fn s(&self) -> bool; }\nimpl Gh for X { open spec fn s(&self) -> bool { true } }",
+            "pub trait Gh<A>: Out<A> { spec fn post(&self, a: A, o: Self::Output) -> bool; }",
+            "pub trait Gh: Sized { proof fn p(&self); }",
+            "pub trait Gh: NoDeallocDrop { spec fn s(&self) -> bool; }",
+            "impl vstd::view::View for X { type V = int; open spec fn view(&self) -> int { 0 } }",
+            "impl View for X { type V = int; open spec fn view(&self) -> int { 0 } }",
+            "impl<A, F: for<'a> Tr2<(&'a A,)>> Gh2<A> for F where F: Fn(A) -> A, { open spec fn s(&self) -> bool { true } }",
+            "unsafe impl vstd::alloc_check::AllocFreeDrop for X {}",
+            "unsafe impl<T: Copy> NoDeallocDrop for Y<T> {}",
+            "pub proof fn p(f: impl Fn(u8) -> u8) {}",
+            "pub open spec fn q() -> spec_fn(u8) -> bool { |x: u8| true }",
+        ] {
+            assert_eq!(violation(&[("src/lib.rs", &wrap(body))]), None, "{body}");
+        }
+        for (body, what) in [
+            (
+                "impl Copy for X {}",
+                "an impl of the trait `Copy` that gives no `spec` or `proof` function",
+            ),
+            (
+                "unsafe impl Send for X {}",
+                "an impl of the trait `Send` that gives no",
+            ),
+            (
+                "impl Tr for X {}",
+                "an impl of the trait `Tr` that gives no",
+            ),
+            (
+                "impl crate::Tr for X {}",
+                "an impl of the trait `Tr` that gives no",
+            ),
+            (
+                "impl<T> Tr for T {}",
+                "an impl of the trait `Tr` that gives no",
+            ),
+            (
+                "impl<T: for<'a> Fn(&'a u8) -> u8> Tr for T {}",
+                "an impl of the trait `Tr` that gives no",
+            ),
+            (
+                "impl Tr2 for X { type A = u8; }",
+                "an impl of the trait `Tr2` that gives no",
+            ),
+            (
+                "impl core::ops::Deref for X { type Target = u8; }",
+                "an impl of the trait `Deref` that gives no",
+            ),
+            (
+                "impl other::Marker for X {}",
+                "an impl of the trait `Marker` that gives no",
+            ),
+            (
+                "pub trait Gh: Copy { spec fn s(&self) -> bool; }",
+                "the trait `Gh` with the supertrait `Copy`",
+            ),
+            (
+                "pub trait Gh: Tr { spec fn s(&self) -> bool; }",
+                "the trait `Gh` with the supertrait `Tr`",
+            ),
+            (
+                "pub trait Gh: Sub { spec fn s(&self) -> bool; }",
+                "the trait `Gh` with the supertrait `Sub`",
+            ),
+            (
+                "pub trait Gh: Out<u8> + Clone { spec fn s(&self) -> bool; }",
+                "the trait `Gh` with the supertrait `Clone`",
+            ),
+            (
+                "pub trait Gh where Self: Copy { spec fn s(&self) -> bool; }",
+                "the trait `Gh` with a `where` clause",
+            ),
+            ("pub trait Gh { fn m(&self) {} }", "the exec function `m`"),
+        ] {
+            let e = violation(&[("src/lib.rs", &wrap(body))])
+                .unwrap_or_else(|| panic!("accepted: {body}"));
+            assert!(e.contains(what), "{body}: {e}");
+        }
+        // The same in a module of specifications.
+        let lib = "pub struct X;\npub trait Tr { fn m(&self) {} }\n#[cfg(verus_keep_ghost)]\npub mod spec;\n";
+        let e = violation(&[
+            ("src/lib.rs", lib),
+            (
+                "src/spec.rs",
+                "use vstd::prelude::*;\nverus! {\nimpl crate::Tr for crate::X {}\n}\n",
+            ),
+        ])
+        .unwrap();
+        assert!(
+            e.starts_with("src/spec.rs:3: an impl of the trait `Tr` that gives no"),
+            "{e}"
+        );
+        // A trait of the crate that has a method in one of its declarations is not one
+        // without methods.
+        let two = "pub mod a { pub trait Out { type O; } }\npub mod b { pub trait Out { fn m(&self); } }\n#[cfg(verus_keep_ghost)]\nverus! {\npub trait Gh: Out { spec fn s(&self) -> bool; }\n}\n";
+        assert!(
+            violation(&[("src/lib.rs", two)])
+                .unwrap()
+                .contains("with the supertrait `Out`")
+        );
+    }
+
+    #[test]
     fn gate_whitelist_refuses() {
         let one = |src: &str| {
             violation(&[("src/lib.rs", src)]).unwrap_or_else(|| panic!("allowed: {src}"))
@@ -4116,7 +4634,10 @@ mod tests {
             ("pub type Cell = u64;", "the type alias `Cell`"),
             ("pub static S: u8 = 0;", "a `static`"),
             ("macro_rules! m { () => {}; }", "a `macro_rules!`"),
-            ("impl Tr for S { fn m(&self) {} }", "the exec function `m`"),
+            (
+                "impl Tr for S { fn m(&self) {} }",
+                "an impl of the trait `Tr` that gives no `spec` or `proof` function",
+            ),
             ("pub trait Tr { fn m(&self); }", "the exec function `m`"),
             ("use crate::a::Tr;", "a `use` of something else"),
             ("tick!(1);", "an invocation of the crate's macro `tick!`"),

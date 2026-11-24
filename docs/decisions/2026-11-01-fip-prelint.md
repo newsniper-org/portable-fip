@@ -2623,3 +2623,165 @@ shape, verified, its function listed), `plainmod`, `ghostdef`, `cfgstmt`, `cfgat
 `twinmacro`, `twinconst`, `twintype`, `twinmod`, `twinpath`, `twinattr`, `twindrop`,
 `twintrait`, `twin` (no function listed); `cfgitem` and `taint` (the rule on a
 function's own text, now with a cfg on a feature).
+
+## Amendment 2026-11-25 (3): `fip-strict` in one source; two holes found on the way
+
+**Status:** done. `fip-strict` keeps to the list. Two holes were found while doing it,
+one in the list as amended above and one older than the list; both are closed, the
+second reproduced end to end before and after.
+
+### `fip-strict`
+
+Until now every exec item of the crate was declared twice (plain Rust, and `verus!`
+under the gate). Now once:
+
+- `FipBound`, `FipOut`, `FipFn`, `Certified`, `Stateless`, `Compose`, `Then` and every
+  `call` are plain Rust with `cfg_attr(verus_keep_ghost, verus_verify)` and
+  `verus_spec(..)`.
+- The spec functions `pre`, `post`, `allocs` are those of a trait `FipSpec<Args>`, a
+  supertrait of `FipFn<Args>`. Under Verus it is declared in a
+  `#[cfg(verus_keep_ghost)] verus! { .. }` block, with its impls; in plain builds it is
+  a marker implemented for every type.
+- `Output` moved to a supertrait `FipOut<Args>`: `FipSpec::post` names the output type.
+  `F: FipFn<(A,), Output = B>` and `F::Output` read as before; an implementation of
+  `FipFn` gives `Output` in an `impl FipOut<Args>`.
+- `DropFreeFn` (`Copy` under Verus, a marker in plain builds) is gone. The `Fn`-based
+  functions of `fip-core` and `Certified::assume*` state, under Verus,
+  `requires vstd::alloc_check::bound_drop_alloc_free::<F>()` (and
+  `!vstd::alloc_check::drop_may_deallocate::<F>()` where the callable is dropped).
+- `Compose` has one impl per arity `0..=4` in both builds (plain builds had one impl
+  for any `Args`).
+
+Measured dead ends (fork `6ae48cb`), so they are not tried again:
+
+| tried | result |
+|---|---|
+| `FipFn<Args>: FipSpec<Args, <Self as FipFn<Args>>::Output>` | rustc accepts it (plain, and the same shape in plain Rust with real impls); under Verus `E0275` overflow in `rust_to_vir_base::get_impl_paths_for_clauses`, once the trait or an impl is `verus_verify`. Not run on upstream Verus |
+| `#[verifier::external_trait_specification]` with `external_trait_extension` for a plain `FipFn` | the fork refuses an `allocates` bound there outside vstd ("the trait's implementations and provided methods are not checked by Verus"): rightly |
+| `verus_verify` on the `FipBound` impls | `E0407`: the attribute writes `VERUS_UNERASED_PROXY__ALLOCS` for an impl's associated constant and nothing for the trait's. The impls are plain Rust; the trait is `verus_verify` (as a supertrait of a verified trait it has to be: without, Verus panics in `vir/src/traits.rs:1790`) |
+
+Measured for the drop preconditions (they are written out: attribute syntax has no
+`T: Tr with { fn drop allocates 0; }`): a closure that owns a value without drop glue
+is accepted, which `Copy` refused (`verify/alloc_callers.rs`, `below`); one that owns a
+`Vec` fails `!drop_may_deallocate::<F>()` (control `callers-closure-owns-vec`); one
+that owns a value whose `Drop::drop` allocates is refused at the call, also from a
+caller without a bound (probe, not a gate: the fixture would need an allocating
+`Drop`). The fork documents the first precondition as what the bound syntax stands
+for; that it may be written by hand is measured, not documented (request to the fork,
+2026-11-25, to say so and keep it under test).
+
+Counts (`just ci`, fork `6ae48cb`): `fip-strict` 15 verified (23 before: the eight
+associated constants of the four `FipBound` impls are no longer items Verus reads; no
+specification names them), `fip-core` 76, the others unchanged; upstream `8bf68ee` on
+stripped sources 15/58/1/3/4/13/4/6. Sidecars: `fip-strict` lists `Certified::assume`
+and `assume_no_panic_macros` (0 since the amendment above); `fip-core` 10 and
+`fip-alloc` 1 as before; no skip "code for one build only" in any of the three.
+
+**Not gained.** The `call`s and `fip-core`'s seven strict variants are still not
+listed: `Certified`'s and `Compose`'s `call`s come from a macro (one text for five
+impls), and a function whose record names a method of a trait declared differently in
+the two builds is skipped, `FipSpec::pre` in a `requires` too. The second is more than
+is needed when the methods are spec functions; it is left as it is (TODO).
+
+**The exception of the amendment above is gone:** no function of `fip-core` is bounded
+by a name that is `Copy` under Verus.
+
+**API changes** (plain builds): `FipOut` (new; an `impl FipFn` loses its `type
+Output`); `FipSpec` (new; `FipFn::pre` is `FipSpec::pre` in a path); `DropFreeFn`
+removed; `Compose` up to four arguments. Y4, Verigrad and the rIC3 fork have no
+`DropFreeFn`, no `impl .. FipFn<`, no `as FipFn<`, and construct no `Compose(`,
+`Then(` or `Stateless(` (grep over their `.rs` files, 2026-11-25; their builds were
+not run). `tests/verus_drift.rs` is removed with the twins it compared.
+
+### The list, changed twice
+
+1. **Wider, for the marker** (shape 5): the empty trait may have type parameters,
+   `trait Name<A> {}` with `impl<T: ?Sized, A> Name<A> for T {}`, every parameter free.
+   `FipSpec<Args>` needs it. This is an extension of what the user decided, made to
+   carry out the instruction to make `fip-strict` keep to the list; nothing else in
+   the rewrite needed one.
+2. **Narrower, for impls and traits under the gate** (shape 3): a hole of the two
+   amendments above. A block of specifications admitted any impl without an exec
+   function, so `impl Copy for X {}`, `unsafe impl Send for X {}` and an empty
+   `impl Tr for X {}` of a trait with provided methods: the type has the trait, and
+   its methods, in Verus's build only. And a trait declared there could have any
+   supertrait (`trait Gh: Copy`): a bound on it brings `Clone`'s methods into scope in
+   Verus's build only, the reason `DropFreeFn` could not stay. Found when the drop
+   markers' impls were moved back into the block and the check was run on other
+   impls. Now: an impl of a trait under the gate gives a `spec` or `proof` function
+   (then the trait is one of specifications) or is an empty impl of a marker of
+   Verus's crates; a trait declared there has for supertraits only traits of the
+   crate without methods or supertraits (`FipOut`), the drop markers, `Sized`; no
+   `where`. Not reproduced as a wrong verdict: the checker's acceptance was measured,
+   the difference in behaviour was not built.
+
+### A hole older than the list: methods of Verus's library
+
+`#[cfg(verus_keep_ghost)] use vstd::prelude::*;`, which every crate here has, brings
+traits with exec methods into scope under Verus only (`ArrayAdditionalExecFns`,
+`VecAdditionalExecFns`, `StrSliceExecFns`, `StringExecFns`). A method call does not
+name its trait. Probe `p10d`, a crate with that `use` and nothing else under the gate:
+
+```rust
+pub trait MySet { fn set(&mut self, i: usize, v: u8); }
+impl MySet for [u8] { fn set(&mut self, i: usize, v: u8) {} }
+
+#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures r == 20))]
+pub fn quiet(a: &mut [u8; 2]) -> u8 {
+    a.set(0, 1);          // Verus: vstd's set for arrays. Plain build: MySet for [u8].
+    let t = [10u8, 20u8];
+    t[a[0] as usize]
+}
+```
+
+Verus: 0 errors, `quiet` listed. Driver: 2 roots passed, 0 notes, "1 panic sites
+discharged by Verus". The plain build, on `[200, 0]`: "index out of bounds: the len is
+2 but the index is 200". The fork's comparison of exec types and resolutions is
+between its two type checks, both with `vstd`. Every sidecar since the first one
+could have this; the comment on the rule for `use` said such an import "brings ghost
+names, which exec code compiled in both builds cannot use".
+
+Now the generator skips a function whose VIR record names an exec function of one of
+Verus's crates (`vstd`, `verus_builtin`, ..), and what relies on it: the plain build
+has none of them. One exception, `vstd::pervasive::exec_nonstatic_call`, Verus's model
+of calling a callable value. After: `quiet` is skipped with the callee named, and the
+driver reports the index check. Free functions are included, not only methods: a name
+of `vstd`'s prelude that came to shadow one of the standard prelude would be a call
+of this kind (none does at `6ae48cb`: a script over `builtin/src/lib.rs`,
+`vstd/prelude.rs` and `vstd/view.rs`; not a gate).
+
+What the driver already caught, measured before the rule (`p10b`): an allocation
+through such a call. Its own count exceeded the `allocates 0` of the sidecar and it
+kept its count. Panic sites it took from the sidecar.
+
+Our crates and fixtures: no function is skipped by the rule (`fip-core`'s seven
+`Fn`-based functions call `exec_nonstatic_call` and nothing else of Verus's crates).
+A crate that links `vstd` in plain builds too would be refused more than needed.
+
+Probed and not a hole: `#[macro_use] extern crate dep;` with a `proof!` of `dep` that
+runs its tokens. Under Verus rustc refuses the name (`E0659`, a glob import against an
+outer scope), so there is no sidecar.
+
+### Gates
+
+- Unit tests: `gate_marker_traits_with_parameters`, `gate_ghost_impls_and_traits`
+  (13 accepted, 15 refused, a module file, two declarations of one name),
+  `callers_of_verus_library_functions_are_not_listed`.
+- `just verify-sidecar`: `ghostimpl` (`impl Copy for X {}` in a block), `ghostsuper`
+  (`trait Gh: Copy`), `vstdexec` (the probe above; the crate's own `set` stays listed).
+- `just verify-negative`: `strict-twin-item`, `strict-twin-bound`, `strict-twin-impl`
+  (a mutant of `fip-strict` with an exec item of one build, the old `DropFreeFn`, a
+  twin impl: its sidecar lists nothing), in place of the two drift mutants;
+  `callers-closure-owns-vec`.
+- The four mutants that add `Copy` to a state type match the bound wherever rustfmt
+  puts it (two had stopped applying in full when the signatures were reflowed; the
+  gate caught it as "failed for another reason").
+
+### Not done, not measured
+
+- Verigrad's and Y4's gates were not run. Whether a listed function of theirs calls
+  an exec function of Verus's crates is not known (it needs their Verus run).
+- Adjacent to the hole above and not probed: a type or a trait name of `vstd`'s
+  prelude shadowing one of the standard prelude (the script found none; the rule on
+  calls would not see a type), and Verus's own models of built-in operations
+  (indexing, `for`, operators), which are trusted.

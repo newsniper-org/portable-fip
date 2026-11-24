@@ -40,7 +40,7 @@ fn certificates_made_here_are_exactly_the_documented_ones() {
     );
 }
 
-/// Every `unsafe impl .. FipBound` in this crate, plain and Verus declarations: the
+/// Every `unsafe impl .. FipBound` in this crate (one declaration for both builds): the
 /// claims a callable value's bound rests on. `Certified` (claimed by the `unsafe`
 /// constructors, `NO_PANIC_MACROS` its const parameter), `Stateless` (one call of
 /// the wrapped `F`), `Compose` and `Then` (one call of each part, an overflowing sum
@@ -58,34 +58,30 @@ fn fip_bound_impls_are_exactly_the_documented_ones() {
         impls,
         [
             "unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {",
-            "unsafe impl<F: FipBound, G: FipBound> FipBound for Compose<F, G> {",
-            "unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {",
             "unsafe impl<F: FipBound, G: FipBound> FipBound for Then<F, G> {",
             "unsafe impl<F: FipBound> FipBound for Stateless<F> {",
-            "unsafe impl<F: FipBound> FipBound for Stateless<F> {",
-            "unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {",
             "unsafe impl<const ALLOCS: u64, C, const P: bool> FipBound for Certified<ALLOCS, C, P> {",
         ]
     );
-    assert_eq!(src.matches("    const ALLOCS: u64 = F::ALLOCS;").count(), 2);
+    assert_eq!(src.matches("    const ALLOCS: u64 = F::ALLOCS;").count(), 1);
     assert_eq!(
         src.matches("    const ALLOCS: u64 = F::ALLOCS + G::ALLOCS;")
             .count(),
-        4
+        2
     );
     assert_eq!(
         src.matches("    const NO_PANIC_MACROS: bool = P;").count(),
-        2
+        1
     );
     assert_eq!(
         src.matches("    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS;")
             .count(),
-        2
+        1
     );
     assert_eq!(
         src.matches("    const NO_PANIC_MACROS: bool = F::NO_PANIC_MACROS && G::NO_PANIC_MACROS;")
             .count(),
-        4
+        2
     );
 }
 
@@ -100,32 +96,39 @@ fn fip_bound_impls_are_exactly_the_documented_ones() {
 #[test]
 fn alloc_free_drop_impls_are_exactly_the_documented_ones() {
     let src = include_str!("../src/lib.rs");
-    let verus_start = src
-        .find("// ---- Verus declarations")
-        .expect("Verus region");
-    let verus_end = src.find("} // verus!").expect("end of the verus! block");
-    // Items start at column 0 (the doc comments that mention such an impl do not).
-    let mut impls: Vec<(usize, &str)> = Vec::new();
+    // Each is in the block of specifications, which is for Verus's build only
+    // (`#[cfg(verus_keep_ghost)] verus! { .. }`): an empty impl of a marker of Verus's
+    // crates, one of the uses of the gate the sidecar generator admits.
+    let block = "// ---- Specifications (only under the `verus` driver): no exec code.\n\n#[cfg(verus_keep_ghost)]\nverus! {\n";
+    let from = src.find(block).expect("the block of specifications");
+    let to = from + src[from..].find("\n} // verus!\n").expect("its end");
+    let mut impls: Vec<&str> = Vec::new();
     let mut at = 0;
     for l in src.lines() {
-        if l.starts_with("unsafe impl") && l.contains("AllocFreeDrop for") {
-            impls.push((at, l));
+        if l.starts_with("unsafe impl")
+            && (l.contains("AllocFreeDrop for") || l.contains("NoDeallocDrop for"))
+        {
+            assert!(
+                from < at && at < to,
+                "a drop marker impl outside the block of specifications: {l}"
+            );
+            assert!(l.ends_with(" {}"), "not an empty impl: {l}");
+            impls.push(l);
         }
         at += l.len() + 1;
     }
-    assert!(
-        impls.iter().all(|&(p, _)| verus_start < p && p < verus_end),
-        "an `unsafe impl AllocFreeDrop` outside the verus! block: {impls:#?}"
-    );
-    let mut lines: Vec<&str> = impls.iter().map(|&(_, l)| l).collect();
-    lines.sort_unstable();
+    impls.sort_unstable();
     assert_eq!(
-        lines,
+        impls,
         [
             "unsafe impl<F: vstd::alloc_check::AllocFreeDrop, G: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Compose<F, G> {}",
             "unsafe impl<F: vstd::alloc_check::AllocFreeDrop, G: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Then<F, G> {}",
             "unsafe impl<F: vstd::alloc_check::AllocFreeDrop> vstd::alloc_check::AllocFreeDrop for Stateless<F> {}",
+            "unsafe impl<F: vstd::alloc_check::NoDeallocDrop, G: vstd::alloc_check::NoDeallocDrop> vstd::alloc_check::NoDeallocDrop for Compose<F, G> {}",
+            "unsafe impl<F: vstd::alloc_check::NoDeallocDrop, G: vstd::alloc_check::NoDeallocDrop> vstd::alloc_check::NoDeallocDrop for Then<F, G> {}",
+            "unsafe impl<F: vstd::alloc_check::NoDeallocDrop> vstd::alloc_check::NoDeallocDrop for Stateless<F> {}",
             "unsafe impl<const ALLOCS: u64, C: Copy, const P: bool> vstd::alloc_check::AllocFreeDrop for Certified<ALLOCS, C, P> {}",
+            "unsafe impl<const ALLOCS: u64, C: Copy, const P: bool> vstd::alloc_check::NoDeallocDrop for Certified<ALLOCS, C, P> {}",
         ]
     );
 }

@@ -3,8 +3,11 @@
 
 //! Gate: verified callers bound their allocations through `fip_core`'s `allocates`
 //! clauses (decision 2026-11-06-redesign-verus-allocates, phase 2). Every function
-//! here is `allocates 0` and calls one `fip_core` function with a `Copy` closure that
-//! is itself `allocates 0` (`DropFreeFn` is `Copy` under Verus).
+//! here is `allocates 0` and calls one `fip_core` function with a closure that is
+//! itself `allocates 0` and whose drop neither allocates nor deallocates (the
+//! `requires` of the `Fn`-based functions: `vstd::alloc_check::bound_drop_alloc_free`
+//! and `!drop_may_deallocate`, which the fork shows from the closure's captures;
+//! until 2026-11-25 a bound that was `Copy` under Verus).
 //!
 //! `map_in_place`, `compact` and `compact_map` are bounded by the sum of their
 //! callbacks' `call_allocations` (`fip_core::spec::map_allocs` and friends); the lemmas
@@ -20,7 +23,7 @@
 //!
 //! Phase 3: `boxed_once` and `incremented_strict` call strict callables
 //! (`fip_strict::Certified`, `fip_core::strict::map_in_place`), bounded by
-//! `FipFn::allocs`.
+//! `FipSpec::allocs`.
 #![no_std]
 #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 extern crate alloc;
@@ -71,6 +74,21 @@ pub fn evens(xs: &mut [u32]) -> (n: usize)
     allocates 0
 {
     fip_core::compact(xs, |v: &u32| -> (r: bool) allocates 0 { *v % 2 == 0 })
+}
+
+/// A threshold that is not `Copy`, and has no drop glue.
+pub struct Limit {
+    pub at: u32,
+}
+
+/// A closure that owns a value without drop glue is not `Copy`; its drop neither
+/// allocates nor deallocates (`just verify-negative`: one that owns a `Vec` is
+/// refused).
+pub fn below(xs: &mut [u32], limit: Limit) -> (n: usize)
+    allocates 0
+    deallocates 0
+{
+    fip_core::compact(xs, move |v: &u32| -> (r: bool) allocates 0 deallocates 0 { *v < limit.at })
 }
 
 pub fn halved_odds(xs: &mut [u32]) -> (r: (usize, u32))
