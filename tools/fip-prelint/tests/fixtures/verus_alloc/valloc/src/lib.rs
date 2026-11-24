@@ -584,3 +584,81 @@ pub fn via_suffix_typed(k: u8) {
 pub fn bump(a: i32) -> i32 {
     a + 1
 }
+
+/// A `Drop` impl that plain builds have and Verus's does not (audit 2026-11-24).
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub struct Tok(pub u8);
+
+#[cfg(not(verus_keep_ghost))]
+impl Drop for Tok {
+    fn drop(&mut self) {
+        core::mem::forget(Box::new(self.0));
+    }
+}
+
+/// Verus proves that the loop allocates and frees nothing: for it a `Tok` has no
+/// destructor. In this build each `Tok` dropped allocates. The Verus results of a
+/// function that drops a value whose `Drop` impl no sidecar lists are not used.
+#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+pub fn drops_tok(k: u8) {
+    let mut i = 0u8;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+            deallocated() == 0,
+        decreases k - i,
+    ))]
+    while i < k {
+        let _t = Tok(i);
+        i += 1;
+    }
+}
+
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn via_drops_tok(k: u8) {
+    drops_tok(k);
+}
+
+/// A verified function that no sidecar lists (made by a macro: one item text for every
+/// expansion), and a listed caller: its Verus results are not used either (the callee
+/// this build runs must be a listed one).
+macro_rules! make_noop {
+    ($name:ident) => {
+        #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+        pub fn $name() {}
+    };
+}
+make_noop!(made);
+
+#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+pub fn calls_made(k: u8) {
+    let mut i = 0u8;
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        invariant
+            allocated() == 0,
+            deallocated() == 0,
+        decreases k - i,
+    ))]
+    while i < k {
+        made();
+        if let Some(b) = cond_box(false) {
+            core::mem::forget(b);
+        }
+        i += 1;
+    }
+}
+
+/// Allocates if `c`.
+#[cfg_attr(verus_keep_ghost, verus_spec(r =>
+    allocates (if c { 1int } else { 0int })
+    deallocates 0
+))]
+pub fn cond_box(c: bool) -> Option<Box<u8>> {
+    if c { Some(Box::new(1u8)) } else { None }
+}
+
+/// With the bound of `calls_made` this would pass (the driver counts `∞` for its loop).
+#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+pub fn via_calls_made(k: u8) {
+    calls_made(k);
+}

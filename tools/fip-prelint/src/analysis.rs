@@ -2812,6 +2812,74 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 .is_never()
     }
 
+    /// A `Drop` impl that dropping a value of type `t` runs, outside the standard
+    /// library, whose `drop` no Verus sidecar lists; the types of the fields and of the
+    /// type arguments included (fail closed past a depth: a type too deep to walk).
+    fn unverified_destructor(
+        &self,
+        t: Ty<'tcx>,
+        depth: usize,
+        seen: &mut Vec<Ty<'tcx>>,
+    ) -> Option<String> {
+        let tcx = self.tcx;
+        if !t.needs_drop(tcx, self.env) || seen.contains(&t) {
+            return None;
+        }
+        if depth > 16 {
+            return Some(format!(
+                "it drops a value of type `{t}`, too deep to check for `Drop` impls"
+            ));
+        }
+        seen.push(t);
+        match *t.kind() {
+            ty::Adt(adt, args) => {
+                if let Some(d) = tcx.adt_destructor(adt.did())
+                    && !is_std_like(tcx, d.did.krate)
+                {
+                    let listed = tcx.is_mir_available(d.did)
+                        && self
+                            .crates
+                            .verus
+                            .is_listed(tcx, d.did, tcx.optimized_mir(d.did).span)
+                            .is_some();
+                    if !listed {
+                        return Some(format!(
+                            "it drops a value of type `{t}`, whose `Drop` impl (`{}`) no Verus sidecar lists in this build",
+                            def_path(tcx, d.did)
+                        ));
+                    }
+                }
+                for a in args.types() {
+                    if let Some(w) = self.unverified_destructor(a, depth + 1, seen) {
+                        return Some(w);
+                    }
+                }
+                if !is_std_like(tcx, adt.did().krate) {
+                    for f in adt.all_fields() {
+                        let ft = f.ty(tcx, args);
+                        let ft = tcx
+                            .try_normalize_erasing_regions(self.env, ft)
+                            .unwrap_or_else(|_| f.ty(tcx, args).skip_norm_wip());
+                        if let Some(w) = self.unverified_destructor(ft, depth + 1, seen) {
+                            return Some(w);
+                        }
+                    }
+                }
+                None
+            }
+            ty::Tuple(ts) => ts
+                .iter()
+                .find_map(|x| self.unverified_destructor(x, depth + 1, seen)),
+            ty::Array(x, _) | ty::Slice(x) => self.unverified_destructor(x, depth + 1, seen),
+            ty::Closure(_, args) => args
+                .as_closure()
+                .upvar_tys()
+                .iter()
+                .find_map(|x| self.unverified_destructor(x, depth + 1, seen)),
+            _ => None,
+        }
+    }
+
     /// Why the Verus results of the verified function of `inst` may not be used for
     /// this instance, if they may not (decision 2026-11-06-redesign-verus-allocates,
     /// phase 4). Verus proves a body against the specification of each trait method
@@ -2835,6 +2903,17 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
             if data.is_cleanup {
                 continue;
             }
+            // A drop runs the `Drop` impls of the value's type, which are trait
+            // methods like the others: one that exists in this build only (measured:
+            // `#[cfg(not(verus_keep_ghost))] impl Drop for Tok`) is code Verus never
+            // saw, in a function it proved to free nothing.
+            if let TerminatorKind::Drop { place, .. } = &data.terminator().kind {
+                let ty = place.ty(&body.local_decls, tcx).ty;
+                let ty = self.subst(inst, ty).unwrap_or(ty);
+                if let Some(why) = self.unverified_destructor(ty, 0, &mut Vec::new()) {
+                    return Some(why);
+                }
+            }
             let (TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. }) =
                 &data.terminator().kind
             else {
@@ -2845,6 +2924,27 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 continue;
             };
             let Some(tr) = tcx.trait_of_assoc(d0) else {
+                // A function or an inherent method (audit 2026-11-24): the one this
+                // build calls must be the verified one too. The same tokens can name
+                // another function here (a module defined once per build, by a gate
+                // the generator does not read as one, by `#[path]`, or by
+                // `cfg_attr(.., path = ..)`: a loop calling a plain-only twin that
+                // allocates passed with the bound proved for Verus's twin).
+                if is_std_like(tcx, d0.krate) || tcx.intrinsic(d0).is_some() {
+                    continue;
+                }
+                let listed = tcx.is_mir_available(d0)
+                    && self
+                        .crates
+                        .verus
+                        .is_listed(tcx, d0, tcx.optimized_mir(d0).span)
+                        .is_some();
+                if !listed {
+                    return Some(format!(
+                        "it calls `{}`, which no Verus sidecar lists in this build",
+                        def_path(tcx, d0)
+                    ));
+                }
                 continue;
             };
             if tcx.fn_trait_kind_from_def_id(tr).is_some() {

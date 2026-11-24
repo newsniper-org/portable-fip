@@ -1017,6 +1017,85 @@ pub struct Gated {
     /// Of `proof` and `proof_decl`: those the crate does not define itself, or only as
     /// shims that expand to nothing in plain builds. Their arguments are ghost code.
     pub ghost_macros: std::collections::BTreeSet<String>,
+    /// The files (as given) of modules declared under a `#[cfg(..)]`, or with a
+    /// `cfg_attr(.., path = ..)`: one build may read another file for the module.
+    pub files: std::collections::BTreeSet<String>,
+}
+
+/// Whether `src[lo..hi]` lies inside an item with a `#[cfg(..)]` attribute, any
+/// predicate, or `src` has an inner `#![cfg(..)]`.
+pub fn in_gated_item(src: &str, lo: usize, hi: usize) -> bool {
+    let toks = code_toks(src);
+    gated_items(src, &toks).iter().any(|&(a, b)| {
+        let start = toks.get(a).map_or(0, |t| t.1);
+        let end = if b == 0 {
+            0
+        } else {
+            toks.get(b - 1).map_or(src.len(), |t| t.2)
+        };
+        start <= lo && hi <= end
+    })
+}
+
+/// Marker traits of the standard library: importing one under a gate changes no
+/// method call.
+const MARKER_TRAITS: &[&str] = &["Copy", "Send", "Sync", "Sized", "Unpin"];
+
+/// Why a `#![cfg_attr(P, ..)]` of `src` with `verus_keep_ghost` in `P` may change the
+/// code of the crate, if one may: every payload but `feature(..)`, lint levels and
+/// `doc` (`no_std`, `no_implicit_prelude`, `macro_use`, .. change what names mean).
+pub fn inner_cfg_attr_conflict(src: &str) -> Option<String> {
+    let toks = code_toks(src);
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let is = |k: usize, s: &str| k < toks.len() && text(k) == s;
+    for k in 0..toks.len() {
+        if !(is(k, "#")
+            && is(k + 1, "!")
+            && is(k + 2, "[")
+            && is(k + 3, "cfg_attr")
+            && is(k + 4, "("))
+        {
+            continue;
+        }
+        // The predicate, to the first comma at depth 1; then each payload.
+        let mut depth = 0usize;
+        let mut m = k + 4;
+        let mut ghost = false;
+        let mut payloads: Vec<usize> = Vec::new();
+        while m < toks.len() {
+            match toks[m].0 {
+                Tok::Punct(b'(' | b'[') => depth += 1,
+                Tok::Punct(b')' | b']') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Punct(b',') if depth == 1 => payloads.push(m + 1),
+                Tok::Ident if payloads.is_empty() && text(m) == "verus_keep_ghost" => ghost = true,
+                _ => {}
+            }
+            m += 1;
+        }
+        if !ghost {
+            continue;
+        }
+        for p in payloads {
+            if p < m
+                && !matches!(
+                    text(p),
+                    "feature" | "allow" | "warn" | "deny" | "forbid" | "expect" | "doc"
+                )
+            {
+                return Some(format!(
+                    "`#![cfg_attr(.., {}..)]` at line {} (an inner attribute under `verus_keep_ghost` that can change what the crate's code means)",
+                    text(p),
+                    line_of(src, toks[k].1)
+                ));
+            }
+        }
+    }
+    None
 }
 
 fn code_toks(src: &str) -> Vec<(Tok, usize, usize)> {
@@ -1029,12 +1108,22 @@ fn code_toks(src: &str) -> Vec<(Tok, usize, usize)> {
 /// The index after the item that starts at token `k` (through its `;`, or its closing
 /// `}`), with attributes before it counted in.
 fn item_end(toks: &[(Tok, usize, usize)], k: usize) -> usize {
+    item_end_in(toks, k, false)
+}
+
+/// [`item_end`]; with `in_list`, the item may be an element of a list (a field, a
+/// variant, a statement of a block): it also ends before a `,` and before the closer
+/// of what encloses it.
+fn item_end_in(toks: &[(Tok, usize, usize)], k: usize, in_list: bool) -> usize {
     let mut depth = 0usize;
     let mut m = k;
     while m < toks.len() {
         match toks[m].0 {
             Tok::Punct(b'(' | b'[') => depth += 1,
-            Tok::Punct(b')' | b']') => depth = depth.saturating_sub(1),
+            Tok::Punct(b')' | b']') if depth == 0 => return m,
+            Tok::Punct(b')' | b']') => depth -= 1,
+            Tok::Punct(b'}') if depth == 0 => return m,
+            Tok::Punct(b',') if depth == 0 && in_list => return m,
             Tok::Punct(b';') if depth == 0 => return m + 1,
             Tok::Punct(b'{') if depth == 0 => {
                 let mut braces = 0usize;
@@ -1074,20 +1163,66 @@ fn gated_items(src: &str, toks: &[(Tok, usize, usize)]) -> Vec<(usize, usize)> {
             return vec![(0, toks.len())];
         }
         if is(k + 1, "[") && is(k + 2, "cfg") && is(k + 3, "(") {
-            out.push((k, item_end(toks, k + 1)));
+            // After the attributes: an item (its header may have commas, in generics),
+            // or an element of a list (a field, a variant, an argument).
+            let mut first = k;
+            while is(first, "#") && is(first + 1, "[") {
+                let mut depth = 0usize;
+                first += 1;
+                while first < toks.len() {
+                    match toks[first].0 {
+                        Tok::Punct(b'[' | b'(') => depth += 1,
+                        Tok::Punct(b']' | b')') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                first += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    first += 1;
+                }
+            }
+            let item = first < toks.len()
+                && matches!(
+                    text(first),
+                    "pub"
+                        | "fn"
+                        | "impl"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "trait"
+                        | "mod"
+                        | "use"
+                        | "const"
+                        | "static"
+                        | "type"
+                        | "macro_rules"
+                        | "extern"
+                        | "unsafe"
+                        | "async"
+                        | "default"
+                        | "verus"
+                );
+            out.push((k, item_end_in(toks, k + 1, !item)));
         }
     }
     out
 }
 
-/// The leaf names of the `use` tree in `toks[from..to]` (after `use`, before `;`), and
-/// whether it has a glob; `None` if its root is one of [`VERUS_ROOTS`].
+/// The leaves of the `use` tree in `toks[from..to]` (after `use`, before `;`): for
+/// each, the name it brings and the name of what it imports (they differ with `as`);
+/// whether the tree has a glob; and its root. `None` if the root is one of
+/// [`VERUS_ROOTS`].
+#[allow(clippy::type_complexity)]
 fn use_leaves(
     src: &str,
     toks: &[(Tok, usize, usize)],
     from: usize,
     to: usize,
-) -> Option<(Vec<String>, bool)> {
+) -> Option<(Vec<(String, String)>, bool, String)> {
     let text = |k: usize| &src[toks[k].1..toks[k].2];
     let root = (from..to).find(|&k| toks[k].0 == Tok::Ident).map(text)?;
     if VERUS_ROOTS.contains(&root) {
@@ -1113,17 +1248,24 @@ fn use_leaves(
                     && b >= from + 3
                     && toks[b - 3].0 == Tok::Ident
                 {
-                    leaves.push(text(b - 3).to_string());
+                    let n = text(b - 3).to_string();
+                    leaves.push((n.clone(), n));
                 }
             } else {
-                leaves.push(leaf.to_string());
+                // `x as y`: brings `y`, imports `x`.
+                let orig = if k >= from + 3 && text(k - 2) == "as" && toks[k - 3].0 == Tok::Ident {
+                    text(k - 3)
+                } else {
+                    leaf
+                };
+                leaves.push((leaf.to_string(), orig.to_string()));
             }
         }
         if k < to && toks[k].0 == Tok::Punct(b'}') {
             open.pop();
         }
     }
-    Some((leaves, glob))
+    Some((leaves, glob, root.to_string()))
 }
 
 struct Def {
@@ -1180,6 +1322,24 @@ fn definitions(src: &str, toks: &[(Tok, usize, usize)]) -> Vec<Def> {
     out
 }
 
+/// The names of the traits `toks` declares with a method (`trait Name .. { .. fn ..`).
+fn traits_with_methods(src: &str, toks: &[(Tok, usize, usize)]) -> Vec<String> {
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let mut out = Vec::new();
+    for k in 0..toks.len() {
+        if toks[k].0 == Tok::Ident
+            && text(k) == "trait"
+            && toks.get(k + 1).is_some_and(|t| t.0 == Tok::Ident)
+        {
+            let end = item_end(toks, k);
+            if (k + 2..end).any(|m| toks[m].0 == Tok::Ident && text(m) == "fn") {
+                out.push(text(k + 1).to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Whether the `macro_rules!` in `toks[at..end]` expands to nothing in every arm.
 fn empty_macro(toks: &[(Tok, usize, usize)], at: usize, end: usize) -> bool {
     let p = |k: usize, c: u8| k < end && toks[k].0 == Tok::Punct(c);
@@ -1231,10 +1391,63 @@ pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
         .collect();
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut gated_mods: BTreeSet<String> = BTreeSet::new();
+    // (file names given by `#[path = ".."]` on a gated module)
+    let mut gated_paths: BTreeSet<String> = BTreeSet::new();
+    let method_traits: BTreeSet<String> = parsed
+        .iter()
+        .flat_map(|f| traits_with_methods(f.src, &f.toks))
+        .collect();
+    // A module with `cfg_attr(.., path = ..)`: one build reads another file for it.
+    for f in &parsed {
+        let text = |k: usize| &f.src[f.toks[k].1..f.toks[k].2];
+        for k in 0..f.toks.len() {
+            if f.toks[k].0 == Tok::Ident
+                && text(k) == "cfg_attr"
+                && k >= 2
+                && text(k - 1) == "["
+                && text(k - 2) == "#"
+            {
+                let end = item_end(&f.toks, k - 1);
+                let has_path = (k..end).any(|m| {
+                    f.toks[m].0 == Tok::Ident
+                        && text(m) == "path"
+                        && m + 1 < end
+                        && text(m + 1) == "="
+                });
+                let module = (k..end).find(|&m| {
+                    f.toks[m].0 == Tok::Ident
+                        && text(m) == "mod"
+                        && m + 2 < f.toks.len()
+                        && f.toks[m + 1].0 == Tok::Ident
+                        && text(m + 2) == ";"
+                });
+                if let (true, Some(m)) = (has_path, module) {
+                    gated_mods.insert(text(m + 1).to_string());
+                }
+            }
+        }
+    }
     // Gated `use` and `mod name;` items.
     for f in &parsed {
         let text = |k: usize| &f.src[f.toks[k].1..f.toks[k].2];
         for &(a, b) in &f.regions {
+            // `#[path = "file.rs"]` among the attributes of a gated module.
+            for m in a..b {
+                if f.toks[m].0 == Tok::Ident
+                    && text(m) == "path"
+                    && m + 2 < b
+                    && text(m + 1) == "="
+                    && f.toks[m + 2].0 == Tok::Literal
+                {
+                    let lit = text(m + 2).trim_matches('"');
+                    if let Some(name) = std::path::Path::new(lit)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                    {
+                        gated_paths.insert(name.to_string());
+                    }
+                }
+            }
             // After the attributes and the visibility.
             let mut k = a;
             while k < b && text(k) == "#" {
@@ -1270,15 +1483,36 @@ pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
             match text(k) {
                 "use" => {
                     let to = if text(b - 1) == ";" { b - 1 } else { b };
-                    if let Some((leaves, glob)) = use_leaves(f.src, &f.toks, k + 1, to) {
+                    if let Some((leaves, glob, root)) = use_leaves(f.src, &f.toks, k + 1, to) {
+                        let at = format!("{}:{}", f.path, line_of(f.src, f.toks[a].1));
                         if glob {
                             return Err(format!(
-                                "{}:{}: a glob import under `#[cfg(..)]` from another crate than Verus's: the names it brings exist in one build only, and the other build may find them elsewhere",
-                                f.path,
-                                line_of(f.src, f.toks[a].1)
+                                "{at}: a glob import under `#[cfg(..)]` from another crate than Verus's: the names it brings exist in one build only, and the other build may find them elsewhere"
                             ));
                         }
-                        names.extend(leaves);
+                        // A trait in scope in one build only changes which method a
+                        // call `x.m()` resolves to, and the call does not name the
+                        // trait (measured: `use crate::a::Tr` under the gate and
+                        // `use crate::b::Tr` under its negation, both verified).
+                        let local = matches!(root.as_str(), "crate" | "self" | "super");
+                        for (_, orig) in &leaves {
+                            let methods = if local {
+                                method_traits.contains(orig)
+                            } else {
+                                !MARKER_TRAITS.contains(&orig.as_str())
+                            };
+                            if methods {
+                                return Err(format!(
+                                    "{at}: `{orig}` is imported under `#[cfg(..)]`{}: a trait in scope in one build only changes which method a call resolves to",
+                                    if local {
+                                        " and is a trait with methods"
+                                    } else {
+                                        " from another crate, and may be a trait with methods"
+                                    }
+                                ));
+                            }
+                        }
+                        names.extend(leaves.into_iter().map(|(n, _)| n));
                     }
                 }
                 "mod" if k + 2 < b && f.toks[k + 1].0 == Tok::Ident && text(k + 2) == ";" => {
@@ -1289,10 +1523,13 @@ pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
         }
     }
     // A module file declared under a gate is gated as a whole.
+    let mut files_gated: BTreeSet<String> = BTreeSet::new();
     for f in &mut parsed {
         let p = std::path::Path::new(f.path);
         let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let in_gated_mod = gated_mods.contains(stem)
+            || gated_paths.contains(name)
             || p.parent().is_some_and(|d| {
                 d.components().any(|c| {
                     c.as_os_str()
@@ -1302,12 +1539,43 @@ pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
             });
         if in_gated_mod {
             f.regions = vec![(0, f.toks.len())];
+            files_gated.insert(f.path.to_string());
         }
     }
     let mut ghost_macros: BTreeSet<String> = GHOST_MACROS.iter().map(|m| m.to_string()).collect();
     for f in &parsed {
         for d in &f.defs {
-            let gated = f.regions.iter().any(|&(a, b)| a <= d.at && d.at < b);
+            // Under a gate, or with one inside or among its own attributes (a field or
+            // a variant of one build only, `cfg_attr(.., derive(..))`, `repr`).
+            // (back over the visibility: `pub`, `pub(crate)`, ..)
+            let mut first = d.at;
+            while first > 0 {
+                match f.toks[first - 1].0 {
+                    Tok::Ident => first -= 1,
+                    Tok::Punct(b')') => {
+                        let mut m = first - 1;
+                        while m > 0 && f.toks[m].0 != Tok::Punct(b'(') {
+                            m -= 1;
+                        }
+                        if m > 0 && f.toks[m - 1].0 == Tok::Ident {
+                            first = m - 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            let from = attrs_start(f.src, f.toks[first].1).unwrap_or(f.toks[first].1);
+            // (the shapes `cfg_conflict` admits change nothing: `cfg_attr(verus_keep_ghost,
+            // verus_verify)`, `verifier::..`, the driver's inert attributes)
+            let to = if d.end == 0 {
+                from
+            } else {
+                f.toks[d.end - 1].2
+            };
+            let own = cfg_conflict(&f.src[from..to]).is_some();
+            let gated = own || f.regions.iter().any(|&(a, b)| a <= d.at && d.at < b);
             let shim = d.kind == "macro_rules"
                 && GHOST_MACROS.contains(&d.name.as_str())
                 && gated
@@ -1344,6 +1612,7 @@ pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
     Ok(Gated {
         names,
         ghost_macros,
+        files: files_gated,
     })
 }
 
@@ -3021,6 +3290,7 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect(),
             ghost_macros: ["proof"].iter().map(|s| s.to_string()).collect(),
+            files: Default::default(),
         };
         let hit = |item: &str| gated_name_use(item, &g, &none);
         assert_eq!(hit("pub fn f() -> usize { N }").as_deref(), Some("N"));
@@ -3043,6 +3313,7 @@ mod tests {
         let g2 = Gated {
             names: g.names.clone(),
             ghost_macros: Default::default(),
+            files: Default::default(),
         };
         assert_eq!(
             gated_name_use("pub fn f() { proof! { let _x = N; } }", &g2, &none).as_deref(),
@@ -3063,6 +3334,108 @@ mod tests {
         assert_eq!(
             hit("pub fn f<T: Marker>(t: T) {}").as_deref(),
             Some("Marker")
+        );
+    }
+
+    /// Audit 2026-11-24: other ways one text is two programs.
+    #[test]
+    fn gated_from_inside_and_by_attributes() {
+        // A field of one build only, a derive or a `repr` of one build only.
+        let src = "#[cfg_attr(verus_keep_ghost, verus_verify)]\npub struct Ok1(u8);\n#[cfg_attr(verus_keep_ghost, verifier::external_body)]\n#[cfg_attr(fip_prelint, fip::mark(kind = \"x\"))]\npub struct Ok2(u8);\npub struct Buf {\n    pub a: u8,\n    #[cfg(not(verus_keep_ghost))]\n    pub extra: Box<u8>,\n}\n#[cfg_attr(not(verus_keep_ghost), derive(Clone))]\npub struct D(u8);\n#[cfg_attr(not(verus_keep_ghost), repr(C))]\npub(crate) struct R(u8);\npub enum E {\n    A,\n    #[cfg(verus_keep_ghost)]\n    B,\n}\n#[derive(Clone)]\npub struct Plain(u8);\n";
+        let g = gated_of(&[("src/lib.rs", src)]).unwrap();
+        for n in ["Buf", "D", "R", "E"] {
+            assert!(g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        for n in ["Plain", "Ok1", "Ok2"] {
+            assert!(!g.names.contains(n), "{n}: {:?}", g.names);
+        }
+    }
+
+    #[test]
+    fn gated_trait_imports_are_refused() {
+        // A trait with methods in scope in one build only changes what `x.m()` calls.
+        let twins = "pub mod a { pub trait Tr { fn m(self); } }\npub mod b { pub trait Tr { fn m(self); } }\n#[cfg(verus_keep_ghost)]\nuse crate::a::Tr;\n#[cfg(not(verus_keep_ghost))]\nuse crate::b::Tr;\n";
+        let e = gated_of(&[("src/lib.rs", twins)]).unwrap_err();
+        assert!(
+            e.contains("`Tr` is imported under `#[cfg(..)]` and is a trait with methods"),
+            "{e}"
+        );
+        let aliased = "pub mod a { pub trait Tr { fn m(self); } }\n#[cfg(verus_keep_ghost)]\nuse crate::a::Tr as _;\n";
+        assert!(gated_of(&[("src/lib.rs", aliased)]).is_err());
+        // From another crate it cannot be told from a function: refused, the marker
+        // traits of the standard library apart.
+        let ext = "#[cfg(verus_keep_ghost)]\nuse std::io::Write;\n";
+        let e = gated_of(&[("src/lib.rs", ext)]).unwrap_err();
+        assert!(
+            e.contains("from another crate, and may be a trait with methods"),
+            "{e}"
+        );
+        let marker = "#[cfg(verus_keep_ghost)]\npub use core::marker::Copy as DropFreeFn;\n";
+        assert!(
+            gated_of(&[("src/lib.rs", marker)])
+                .unwrap()
+                .names
+                .contains("DropFreeFn")
+        );
+        // A local marker trait and a local function are names like the others.
+        let local = "pub mod s { pub trait Mark {} pub fn post() {} }\n#[cfg(verus_keep_ghost)]\nuse crate::s::{Mark, post};\n";
+        let g = gated_of(&[("src/lib.rs", local)]).unwrap();
+        assert!(g.names.contains("Mark") && g.names.contains("post"));
+    }
+
+    #[test]
+    fn gated_module_files() {
+        // `#[path]` under a gate, and `cfg_attr(.., path = ..)`: the module's file is
+        // another one in the other build.
+        let g = gated_of(&[
+            (
+                "src/lib.rs",
+                "#[cfg(verus_keep_ghost)]\n#[path = \"v_verus.rs\"]\npub mod v;\n#[cfg_attr(not(verus_keep_ghost), path = \"w_plain.rs\")]\npub mod w;\npub mod x;\n",
+            ),
+            ("src/v_verus.rs", "pub fn helper() {}\n"),
+            ("src/w.rs", "pub fn helper() {}\n"),
+            ("src/x.rs", "pub fn helper() {}\n"),
+        ])
+        .unwrap();
+        assert!(
+            g.files.contains("src/v_verus.rs") && g.files.contains("src/w.rs"),
+            "{:?}",
+            g.files
+        );
+        assert!(!g.files.contains("src/x.rs") && !g.files.contains("src/lib.rs"));
+        // An item under any gate, also one that `ghost_only_regions` does not read.
+        let src = "#[cfg(all(verus_keep_ghost))]\npub mod v {\n    pub fn helper() {}\n}\npub fn free() {}\n";
+        let at = src.find("pub fn helper").unwrap();
+        assert!(in_gated_item(src, at, at + 18));
+        let at = src.find("pub fn free").unwrap();
+        assert!(!in_gated_item(src, at, at + 16));
+        assert!(ghost_only_regions(src).is_empty());
+        // An item's header may have commas: the whole item is under the gate.
+        let src = "#[cfg(not(verus_keep_ghost))]\nimpl<A, B> Tr<A, B> for S<A, B>\nwhere\n    A: Copy,\n{\n    fn m(self) {}\n}\npub fn free() {}\n";
+        let at = src.find("fn m").unwrap();
+        assert!(in_gated_item(src, at, at + 13));
+        let at = src.find("pub fn free").unwrap();
+        assert!(!in_gated_item(src, at, at + 16));
+    }
+
+    #[test]
+    fn inner_cfg_attrs() {
+        assert_eq!(
+            inner_cfg_attr_conflict(
+                "#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]\n#![cfg_attr(fip_prelint, fip::export)]\n#![cfg_attr(not(verus_keep_ghost), allow(unused), doc = \"x\")]\n"
+            ),
+            None
+        );
+        let c = inner_cfg_attr_conflict("#![cfg_attr(not(verus_keep_ghost), no_std)]\n").unwrap();
+        assert!(
+            c.starts_with("`#![cfg_attr(.., no_std..)]` at line 1"),
+            "{c}"
+        );
+        assert!(
+            inner_cfg_attr_conflict(
+                "#![cfg_attr(verus_keep_ghost, allow(unused), no_implicit_prelude)]\n"
+            )
+            .is_some()
         );
     }
 }

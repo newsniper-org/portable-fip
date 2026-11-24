@@ -3418,13 +3418,10 @@ types `i32`/`f64`. When the fork rejects the divergence itself: keep the fixture
 `ghost_typed` as a gate on the fork (expecting Verus's refusal), and remove the check
 or narrow it.
 
-## To audit (2026-11-24): what differs between the plain build and the one Verus compiles
+## After the audit of 2026-11-24 (decision record, amendment 2026-11-24 (5))
 
-Three shapes were measured as holes and closed (a `macro_rules!`, a `const`, a type
-alias defined once per build; decision record, amendment 2026-11-24 (4)). The full
-list of ways code gated with `verus_keep_ghost` can change a function compiled in both
-builds was not written down. Do that (gated inherent impls, gated trait impls of
-foreign traits such as `Drop`, gated `use` shadowed by globs of dependencies, gated
-attributes on modules), with a probe for each, before removing the driver's check of
-literals typed by default.
-
+- Rows of the audit's table marked "unit test only" or "not probed" have no end-to-end
+  probe: an operator or `Deref` impl of one build, a derive of one build, a field or
+  variant of one build, crate-level attributes, gated `use` of non-traits.
+- Attribute and derive macros of dependencies stay a trust boundary.
+- The driver's check of literals typed by default: keep or remove, the user's decision.

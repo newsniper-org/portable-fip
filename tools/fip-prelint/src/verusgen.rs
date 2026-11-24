@@ -1144,6 +1144,13 @@ pub fn build(
             .map_err(|e| format!("{s}: cannot read: {e}"))?;
         texts.push((s.clone(), text));
     }
+    for (path, text) in &texts {
+        if let Some(c) = verus::inner_cfg_attr_conflict(text) {
+            return Err(format!(
+                "{path}: {c}: the driver's build and Verus's may differ, so no sidecar is written"
+            ));
+        }
+    }
     let mut gated =
         verus::gated_names(&texts).map_err(|e| format!("{e}, so no sidecar is written"))?;
     gated.names.extend(info.imported_gated.iter().cloned());
@@ -1221,6 +1228,8 @@ pub fn build(
         if verus::ghost_only_regions(&src)
             .iter()
             .any(|&(a, b)| a <= lo && hi <= b)
+            || verus::in_gated_item(&src, lo, hi)
+            || gated.files.contains(&relative(&file, crate_dir))
         {
             skipped.push((
                 f.path.clone(),

@@ -2302,3 +2302,93 @@ method or of a foreign trait whose twin differs (the existing rules cover trait
 methods through "divergent" traits, and impl headers by their text); `#[cfg_attr(..,
 path = ..)]` on a module (the entries then name another file and do not match). The
 driver's check of literals (amendment (2)) stays until that enumeration exists.
+
+## Amendment 2026-11-24 (5): audit of what differs between the plain build and the one Verus compiles
+
+**Status:** done as far as the table says. Four more holes measured and closed; rows
+marked "not probed" rest on a rule and a unit test, or on reading, not on an end-to-end
+run.
+
+**Question.** A sidecar entry states what Verus proved of a function in the program
+Verus compiles (with `verus_keep_ghost`, ghost code erased). The driver analyses the
+plain build (no `verus_keep_ghost`). Since the fork `6ae48cb` the two programs of
+Verus's own runs agree in types; what can make the plain program another one?
+
+**Probes** (a crate with `quiet`, verified `allocates 0 deallocates 0` with a loop, and
+a `#[fip]` caller; "passed" = the caller passed with Verus's bound although the plain
+build allocates in the loop):
+
+| # | how the builds differ | before | now |
+|---|---|---|---|
+| P1 | the callee's module defined once per build, the Verus one under `#[cfg(all(verus_keep_ghost))]` | **passed** | generator: twin and caller skipped; driver: refused |
+| P2 | the callee's module in two files, `#[path]` under each gate | **passed** | the same |
+| P6 | one `mod v;` with `cfg_attr(not(verus_keep_ghost), path = ..)` | **passed** | the same |
+| P3 | `#[cfg(not(verus_keep_ghost))] impl Drop for Tok`, a `Tok` dropped in the loop | **passed** | driver: refused |
+| P8 | a trait imported under each gate from two modules, both traits and impls verified; `S.m()` | **passed** | generator: no sidecar for the crate |
+| P9 | a plain-only trait gives the method (`v.set(..)`) that Verus finds in vstd | refused by the driver (existing rule on trait methods) | unchanged |
+| — | `macro_rules!`, `const`, type alias defined once per build | amendment (4) | |
+| — | a type that ghost code decides | amendments (1)–(3) | |
+
+**Rules added.**
+
+- Driver, `verus_unverified_callee`: the Verus results of a listed function are not
+  used for an instance unless every function or inherent method it calls outside the
+  standard library is listed too (before: trait methods only), and every `Drop` impl
+  that a value it drops runs (the fields' and type arguments' included). It looks at
+  the plain build itself, so it does not depend on how the difference came about.
+  Cost: a listed caller of a verified function that no sidecar lists for another reason
+  (made by a macro, an ambiguous path) loses its results.
+- Generator: a verified function inside an item under any `#[cfg(..)]`, or in a module
+  file declared under one, with `#[path]` under one, or with `cfg_attr(.., path = ..)`,
+  is skipped and taints its callers (before: only directly inside
+  `#[cfg(verus_keep_ghost)]`).
+- Generator: a `use` under a gate of a trait with methods refuses the crate (a trait
+  of the crate with a `fn` in its declaration; from another crate anything but
+  `Copy`, `Send`, `Sync`, `Sized`, `Unpin`, since a trait cannot be told from a
+  function there). The call `x.m()` does not name the trait, so no rule by names sees
+  it, and the callee the plain build takes can be a listed one.
+- Generator: a definition (`const`, `static`, `type`, `macro_rules!`, `struct`, `enum`,
+  `union`) with a `cfg` inside it or among its attributes is one of the names of
+  amendment (4) (a field or variant of one build, `cfg_attr(.., derive(..))`, `repr`);
+  the shapes the item rule admits (`cfg_attr(verus_keep_ghost, verus_verify)`,
+  `verifier::..`, the driver's attributes) apart.
+- Generator: an inner `#![cfg_attr(P, ..)]` with `verus_keep_ghost` in `P` and another
+  payload than `feature(..)`, lint levels or `doc` refuses the crate (`no_std`,
+  `no_implicit_prelude`).
+
+**The ways considered**, and what answers each:
+
+| difference | answer | probed |
+|---|---|---|
+| a `cfg` on a statement or expression of the function | item rule (existing) | fixture `verus_sidecar` |
+| the function defined once per build | ghost-only rule, widened | P1, P2, P6 |
+| a callee (function, inherent method) that is another one in the plain build | driver, new | P1, P2, P6; fixture `calls_made` |
+| a trait method implemented by other code in the plain build | driver (existing), "divergent" traits | P9; fixture `verus_sidecar` |
+| a `Drop` impl of one build | driver, new | P3; fixture `drops_tok` |
+| an operator, `Deref`, `Clone` impl of one build | the two rules on trait methods | not probed (a probe with `core::ops::Not` did not verify for another reason) |
+| a derive of one build | names rule and trait-method rules | unit test only |
+| `macro_rules!`, `const`, `static`, type alias, `struct`, `enum` per build | names rule | three probes; unit tests |
+| a field, variant or `repr` of one build | names rule, widened | unit test only |
+| a gated `use` of a function, type, constant, module | names rule | unit test only |
+| a gated `use` of a trait with methods | refused | P8 |
+| a gated glob import | refused (Verus's crates apart) | unit test only |
+| crate-level attributes of one build | refused, new | unit test only |
+| another file for a module | ghost-only rule, widened | P2, P6 |
+| a `macro_rules!` of a dependency | refused (existing) | measured 2026-11-24 |
+| an attribute or derive macro of a dependency | **not covered** (recorded trust boundary) | — |
+| other cfgs, features, target, edition, environment, `include!` | refused or recorded (existing) | existing gates |
+| types that ghost code decides | the fork's check; the driver's literal check | fixture, `ghosttyped` |
+| what Verus's own macros and `fip-macros` emit for each build | trusted | — |
+| the callee is listed, but not the one the proof used | trait imports refused; `Deref` twins tainted through `Deref::deref`; aliases by name | P8 only |
+
+**The driver's check of literals (amendment (2)).** Kept. After this audit no way is
+known in which the plain build infers another type than the one Verus compiles, for a
+function that is listed; the check is the net for a way not thought of, for integer and
+float literals only. Whether to keep paying its cost (`1_i32`, `2.0_f64` in listed
+functions) is a decision for the user.
+
+Gates: fixture `verus_alloc` (`drops_tok`, `calls_made`; without the two driver rules
+both callers pass and the fixture fails); `just verify-sidecar`, crates `twinmod`,
+`twinpath`, `twinattr` (skipped), `twintrait` (refused); unit tests
+`gated_from_inside_and_by_attributes`, `gated_trait_imports_are_refused`,
+`gated_module_files`, `inner_cfg_attrs`.

@@ -745,10 +745,10 @@ verify-sidecar: verify-strict
     # function whose loop allocates in the plain build only, through a `macro_rules!`, a
     # `const` or a type alias defined once under `cfg(verus_keep_ghost)` and once under
     # its negation, and a `#[fip]` caller passed): the function is skipped.
-    twin() {  # crate
+    twin() {  # crate, expected reason of the skip (a regex; default: a gated name)
       mkdir -p "$out/$1/src"; cat > "$out/$1/src/lib.rs"
       (cd "$out" && $gen --crate-name "$1" --crate-dir "$1" --out "$out/$1.txt" -- {{verus}} --crate-type=lib --crate-name "$1" {{verus_flags}} "$1/src/lib.rs") > "$out/$1.log" 2>&1 || { echo "FAIL: the crate $1 was not verified"; cat "$out/$1.log"; exit 1; }
-      grep -q "^skip $1::quiet the item text has the name " "$out/$1.txt" || { echo "FAIL: $1::quiet is not skipped for the name it uses"; cat "$out/$1.txt"; exit 1; }
+      grep -Eq "^skip $1::quiet ${2:-the item text has the name }" "$out/$1.txt" || { echo "FAIL: $1::quiet is not skipped for the expected reason"; cat "$out/$1.txt"; exit 1; }
       if grep -q "^fn $1::quiet " "$out/$1.txt"; then echo "FAIL: $1::quiet is listed"; exit 1; fi
     }
     twin twinmacro <<'TWIN'
@@ -875,6 +875,181 @@ verify-sidecar: verify-strict
         quiet(k);
     }
     TWIN
+    # The audit of 2026-11-24 (what the plain build and the one Verus compiles can differ
+    # in): a callee in a module defined once per build, under a gate that is not the
+    # plain `#[cfg(verus_keep_ghost)]`, by `#[path]`, or by `cfg_attr(.., path = ..)`.
+    # The verified twin is skipped, and its caller with it.
+    twin twinmod 'relies on the specification of `[a-z]*::v::helper`' <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #![allow(unexpected_cfgs)]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(all(verus_keep_ghost))]
+    pub mod v {
+        use vstd::prelude::*;
+        #[verus_spec(allocates 0 deallocates 0)]
+        pub fn helper() {}
+    }
+    #[cfg(not(verus_keep_ghost))]
+    pub mod v {
+        pub fn helper() {
+            core::mem::forget(Box::new(1u8));
+        }
+    }
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            v::helper();
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
+    mkdir -p "$out/twinpath/src"; printf '%s\n' 'use vstd::prelude::*;' '#[verus_spec(allocates 0 deallocates 0)]' 'pub fn helper() {}' > "$out/twinpath/src/v_verus.rs"
+    mkdir -p "$out/twinpath/src"; printf '%s\n' 'pub fn helper() {' '    core::mem::forget(Box::new(1u8));' '}' > "$out/twinpath/src/v_plain.rs"
+    twin twinpath 'relies on the specification of `[a-z]*::v::helper`' <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #![allow(unexpected_cfgs)]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(verus_keep_ghost)]
+    #[path = "v_verus.rs"]
+    pub mod v;
+    #[cfg(not(verus_keep_ghost))]
+    #[path = "v_plain.rs"]
+    pub mod v;
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            v::helper();
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
+    mkdir -p "$out/twinattr/src"; printf '%s\n' '#[cfg(verus_keep_ghost)]' 'use vstd::prelude::*;' '#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]' 'pub fn helper() {}' > "$out/twinattr/src/v.rs"
+    mkdir -p "$out/twinattr/src"; printf '%s\n' 'pub fn helper() {' '    core::mem::forget(Box::new(1u8));' '}' > "$out/twinattr/src/v_plain.rs"
+    twin twinattr 'relies on the specification of `[a-z]*::v::helper`' <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #![allow(unexpected_cfgs)]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg_attr(not(verus_keep_ghost), path = "v_plain.rs")]
+    pub mod v;
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            v::helper();
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
+    # A trait with methods imported once per build: `S.m()` calls another method in each,
+    # and both are verified. The crate gets no sidecar.
+    mkdir -p "$out/twintrait/src"; cat > "$out/twintrait/src/lib.rs" <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #![allow(unexpected_cfgs)]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    pub struct S;
+    pub mod a {
+        #[cfg(verus_keep_ghost)]
+        use vstd::prelude::*;
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        pub trait Tr: Sized {
+            #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+            fn m(self);
+        }
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        impl Tr for super::S {
+            #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+            fn m(self) {}
+        }
+    }
+    pub mod b {
+        #[cfg(verus_keep_ghost)]
+        use vstd::prelude::*;
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        pub trait Tr: Sized {
+            #[cfg_attr(verus_keep_ghost, verus_spec(allocates 1 deallocates 0))]
+            fn m(self);
+        }
+        #[cfg_attr(verus_keep_ghost, verus_verify)]
+        impl Tr for super::S {
+            #[cfg_attr(verus_keep_ghost, verus_spec(allocates 1 deallocates 0))]
+            fn m(self) {
+                core::mem::forget(Box::new(1u8));
+            }
+        }
+    }
+    #[cfg(verus_keep_ghost)]
+    use crate::a::Tr;
+    #[cfg(not(verus_keep_ghost))]
+    use crate::b::Tr;
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            S.m();
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
+    if (cd "$out" && $gen --crate-name twintrait --crate-dir twintrait --out "$out/twintrait.txt" -- {{verus}} --crate-type=lib --crate-name twintrait {{verus_flags}} twintrait/src/lib.rs) > "$out/twintrait.log" 2>&1; then # negative probe
+      echo "FAIL: a sidecar was generated for a crate that imports a trait with methods under a cfg"; exit 1
+    fi
+    grep -q 'is imported under `#\[cfg(..)\]` and is a trait with methods' "$out/twintrait.log" || { echo "FAIL: the crate twintrait failed for another reason"; cat "$out/twintrait.log"; exit 1; }
+    test ! -e "$out/twintrait.txt"
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe
