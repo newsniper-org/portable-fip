@@ -2743,20 +2743,61 @@ names, which exec code compiled in both builds cannot use".
 
 Now the generator skips a function whose VIR record names an exec function of one of
 Verus's crates (`vstd`, `verus_builtin`, ..), and what relies on it: the plain build
-has none of them. One exception, `vstd::pervasive::exec_nonstatic_call`, Verus's model
-of calling a callable value. After: `quiet` is skipped with the callee named, and the
-driver reports the index check. Free functions are included, not only methods: a name
-of `vstd`'s prelude that came to shadow one of the standard prelude would be a call
-of this kind (none does at `6ae48cb`: a script over `builtin/src/lib.rs`,
-`vstd/prelude.rs` and `vstd/view.rs`; not a gate).
+has none of them. A function of those crates without a record in the run is taken for
+an exec one. After: `quiet` is skipped with the callee named, and the driver reports
+the index check.
+
+Free functions are included, not only methods. Probe `p13` (after a review, same
+day): `#[cfg(verus_keep_ghost)] use vstd::slice::slice_subrange;` is on the list
+(shape 2) and shadows a glob import, `use crate::util::*;`, that gives the plain build
+the crate's own `slice_subrange`. Skipped by the rule; not run against a generator
+without it. (A name of `vstd`'s prelude that came to shadow one of the standard prelude
+would be the same: none does at `6ae48cb`, by a script over `builtin/src/lib.rs`,
+`vstd/prelude.rs` and `vstd/view.rs`; not a gate.)
+
+**The exception: what Verus itself calls for built-in syntax.** `rust_verify` puts
+exec functions of `vstd` in place of some syntax (by their `rustc_diagnostic_item`),
+and Verus's macros do for `for`. Such a call is the plain build's built-in operation.
+The list (`VERUS_SYNTAX_MODELS`), each seen in a VIR log of `6ae48cb`:
+
+| syntax | function of `vstd` |
+|---|---|
+| `f(x)` for a closure or `F: Fn..` | `pervasive::exec_nonstatic_call` |
+| `v[i]` for a `Vec` | `std_specs::vec::vec_index` |
+| `v[i] = x`, `&mut v[i]` | `std_specs::vec::vec_index_mut` |
+| `&[T; N]` as `&[T]` | `array::array_as_slice` |
+| `&mut [T; N]` as `&mut [T]` | `array::ref_mut_array_unsizing_coercion` |
+| `[x; N]` | `array::array_fill_for_copy_types` |
+| a cast with a float | `float::float_cast` |
+| `for x in iter` | `std_specs::iter::VerusForLoopWrapper::new`, `::next` |
+
+The exception holds only in a crate whose sources do not have the function's name as
+an identifier (for the last row, `VerusForLoopWrapper`): with the name written, the
+call may be the crate's own function in the plain build, as in `p13`. Probe `p15`
+(`use vstd::std_specs::vec::vec_index;` under the gate, the crate's `vec_index` by a
+glob): skipped. A function-like macro of another crate cannot bring the name: the
+generator refuses a crate that invokes a macro it does not know (attribute and derive
+macros of dependencies stay the trust boundary they were).
+
+The first form of the rule (commit `4014c7b`) excepted `exec_nonstatic_call` alone,
+from a survey of our crates and fixtures, which use none of the other syntax in a
+listed function. It would have skipped every function with `v[i]` on a `Vec`, a `for`
+loop, an array used as a slice, `[x; N]` or a float cast: found by a review, measured
+(`p14`, `p14b`: 4 of 16 and 3 of 10 functions skipped; none after), before any other
+project regenerated a sidecar. Not on the list, because no call of them was seen:
+`array::array_index_get` and `slice::slice_index_get` (the index of an array or a
+slice leaves no call in the VIR), the casts of raw pointers (not supported in the code
+probed). A model that is missing skips its callers, which the sidecar shows.
 
 What the driver already caught, measured before the rule (`p10b`): an allocation
 through such a call. Its own count exceeded the `allocates 0` of the sidecar and it
 kept its count. Panic sites it took from the sidecar.
 
 Our crates and fixtures: no function is skipped by the rule (`fip-core`'s seven
-`Fn`-based functions call `exec_nonstatic_call` and nothing else of Verus's crates).
-A crate that links `vstd` in plain builds too would be refused more than needed.
+`Fn`-based functions call `exec_nonstatic_call` and nothing else of Verus's crates;
+every function of Verus's crates they name has a record). A crate that links `vstd` in
+plain builds too would be refused more than needed, and so would one with a function
+of its own named like a model (`float_cast`).
 
 Probed and not a hole: `#[macro_use] extern crate dep;` with a `proof!` of `dep` that
 runs its tokens. Under Verus rustc refuses the name (`E0659`, a glob import against an
@@ -2803,7 +2844,9 @@ the recommendation is to keep it.
   (13 accepted, 15 refused, a module file, two declarations of one name),
   `callers_of_verus_library_functions_are_not_listed`.
 - `just verify-sidecar`: `ghostimpl` (`impl Copy for X {}` in a block), `ghostsuper`
-  (`trait Gh: Copy`), `vstdexec` (the probe above; the crate's own `set` stays listed).
+  (`trait Gh: Copy`), `vstdexec` (the probe above; the crate's own `set` stays listed),
+  `vstdfree` (`p13`), `vstdnamed` (`p15`); the control `gateok` has a function
+  `syntax` with every row of the table, which has to stay listed.
 - `just verify-negative`: `strict-twin-item`, `strict-twin-bound`, `strict-twin-impl`
   (a mutant of `fip-strict` with an exec item of one build, the old `DropFreeFn`, a
   twin impl: its sidecar lists nothing), in place of the two drift mutants;

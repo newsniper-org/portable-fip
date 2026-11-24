@@ -1159,6 +1159,25 @@ verify-sidecar: verify-strict
         x + x
     }
 
+    /// Built-in syntax that Verus models with exec functions of its library (the index
+    /// of a `Vec`, a `for` loop, an array as a slice, `[x; N]`, a cast to a float, a
+    /// call of a closure): none of them is a call the crate wrote.
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        requires
+            old(v)@.len() > 1,
+            f.requires((1u8,)),
+    ))]
+    pub fn syntax<F: Fn(u8) -> u8>(v: &mut Vec<u8>, a: &[u8; 4], f: F) -> f64 {
+        let fill = [0u8; 3];
+        let s: &[u8] = a;
+        let mut c: u8 = v[0];
+        v[1] = f(1);
+        for _i in 0..3 {
+            c = 2;
+        }
+        (s.len() + fill.len() + c as usize) as f64
+    }
+
     /// Not verified: no attribute, no gate.
     pub fn root(x: u8) -> u8 {
         if x < 100 { quiet(x) } else { 0 }
@@ -1166,6 +1185,7 @@ verify-sidecar: verify-strict
     TWIN
     (cd "$out" && $gen --crate-name gateok --crate-dir gateok --out "$out/gateok.txt" -- {{verus}} --crate-type=lib --crate-name gateok {{verus_flags}} gateok/src/lib.rs) > "$out/gateok.log" 2>&1 || { echo "FAIL: the crate gateok was not verified"; cat "$out/gateok.log"; exit 1; }
     grep -q "^fn gateok::quiet " "$out/gateok.txt" || { echo "FAIL: a crate that keeps to the list has its function skipped"; cat "$out/gateok.txt"; exit 1; }
+    grep -q "^fn gateok::syntax " "$out/gateok.txt" || { echo "FAIL: a function with built-in syntax only is skipped"; cat "$out/gateok.txt"; exit 1; }
     if grep -q "^skip .*code for one build only" "$out/gateok.txt"; then echo "FAIL: gateok is taken for a crate with code for one build only"; exit 1; fi
     # An item of plain builds only, and a ghost block with a definition: not on the list.
     twin plainmod <<'TWIN'
@@ -1271,6 +1291,84 @@ verify-sidecar: verify-strict
     }
     TWIN
     grep -q "^fn vstdexec::{impl}::set " "$out/vstdexec.txt" || { echo "FAIL: vstdexec: the crate's own set is not listed"; cat "$out/vstdexec.txt"; exit 1; }
+    # The same with a free function: a gated `use` of `vstd::slice::slice_subrange`
+    # shadows the glob import that gives the plain build the crate's function of that
+    # name (the whole slice). Verus proves the index 2 of a table of 3; the plain build
+    # indexes with 3.
+    twin vstdfree "calls an exec function of Verus's library, .vstd::slice::slice_subrange. " <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+    #[cfg(verus_keep_ghost)]
+    use vstd::slice::slice_subrange;
+    #[allow(unused_imports)]
+    use crate::util::*;
+
+    pub mod util {
+        #[cfg(verus_keep_ghost)]
+        use vstd::prelude::*;
+
+        #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+            ensures
+                r@ == s@,
+        ))]
+        pub fn slice_subrange(s: &[u8], _i: usize, _j: usize) -> &[u8] {
+            s
+        }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            r == 0,
+    ))]
+    pub fn quiet(s: &[u8]) -> u8 {
+        if s.len() == 3 {
+            let t = slice_subrange(s, 0, 2);
+            let table = [0u8; 3];
+            table[t.len()]
+        } else {
+            0
+        }
+    }
+    TWIN
+    # One of Verus's models of built-in syntax, called by name the same way: the
+    # exception for `v[i]` does not hold in a crate that writes `vec_index`.
+    twin vstdnamed "calls an exec function of Verus's library, .vstd::std_specs::vec::vec_index. .the crate writes the name .vec_index." <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+    #[cfg(verus_keep_ghost)]
+    use vstd::std_specs::vec::vec_index;
+    #[allow(unused_imports)]
+    use crate::util::*;
+
+    pub mod util {
+        #[cfg(verus_keep_ghost)]
+        use vstd::prelude::*;
+
+        #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+            ensures
+                *r == 200,
+        ))]
+        pub fn vec_index(_v: &Vec<u8>, _i: usize) -> &'static u8 {
+            &200
+        }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            r == 0,
+    ))]
+    pub fn quiet(v: &Vec<u8>) -> u8 {
+        if v.len() == 1 && v[0] == 1 {
+            let k = *vec_index(v, 0);
+            let table = [0u8; 2];
+            table[k as usize]
+        } else {
+            0
+        }
+    }
+    TWIN
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

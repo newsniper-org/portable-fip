@@ -1952,6 +1952,15 @@ fn marker_blanket(
         && m + 4 == b
 }
 
+/// The identifiers of `src` (code tokens: not in comments, doc comments or literals;
+/// also those of `macro_rules!` bodies and macro arguments).
+pub fn ident_tokens(src: &str) -> impl Iterator<Item = &str> {
+    code_toks(src)
+        .into_iter()
+        .filter(|t| t.0 == Tok::Ident)
+        .map(move |t| &src[t.1..t.2])
+}
+
 fn code_toks(src: &str) -> Vec<(Tok, usize, usize)> {
     lex(src)
         .into_iter()

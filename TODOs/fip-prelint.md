@@ -3448,3 +3448,12 @@ where a literal's type came from.
     run by hand at `6ae48cb`, not a gate (it reads the fork's sources).
   - `requires vstd::alloc_check::bound_drop_alloc_free::<F>()` written by hand is
     measured to work, not documented by the fork (request sent 2026-11-25).
+  - The rule on exec functions of Verus's crates closes one way for the same text to
+    be two calls; each such way so far was found by a probe (a trait in scope, a gated
+    `use` over a glob). The general check would compare, per listed function, the
+    callees Verus resolved (the VIR record) with the callees of the plain build's MIR,
+    in the driver: a sidecar format change, and VIR paths (`impl&%N`) have to be
+    matched to rustc's. Not started.
+  - `VERUS_SYNTAX_MODELS` is the list seen at `6ae48cb`; a new pin may add a model
+    (its callers are then skipped: `gateok`'s function `syntax` is the gate for the
+    rows known).

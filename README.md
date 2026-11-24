@@ -366,7 +366,9 @@ crates are compiled by the real rustc and stay ⊤.
   specifications in the trait `FipSpec`, which is a marker in plain builds).
 
   One more rule, on what Verus resolved (2026-11-25): a function that calls an exec
-  function of Verus's own crates is not listed. The plain build has no `vstd`, so the
+  function of Verus's own crates is not listed (other than what Verus itself calls
+  for built-in syntax: `v[i]`, `for`, a call of a closure, ..; and those too in a
+  crate that writes such a function's name). The plain build has no `vstd`, so the
   same text is another call there: with `vstd`'s prelude in scope, `a.set(0, 1)` on an
   array is `vstd::array::ArrayAdditionalExecFns::set` for Verus and, without it, a
   `set` the crate has for slices (measured: Verus proved a result the plain build did
