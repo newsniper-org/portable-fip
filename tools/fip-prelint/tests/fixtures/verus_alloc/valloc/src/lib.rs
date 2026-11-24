@@ -545,39 +545,11 @@ impl Pick for i32 {
     }
 }
 
-/// Ghost code types `n` for Verus (`u64`, whose `pick` allocates nothing), and Verus
-/// proves `allocates 0`. Without the proof block `n` is an `i32`, whose `pick`
-/// allocates: in the program Verus compiles (the fork `66c6c2b` and upstream accept
-/// this) and in this build. The driver refuses a listed function with a literal that
-/// this build types by default (2026-11-24).
-#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
-pub fn ghost_typed(k: u8) {
-    let mut i = 0u8;
-    #[cfg_attr(verus_keep_ghost, verus_spec(
-        invariant
-            allocated() == 0,
-            deallocated() == 0,
-        decreases k - i,
-    ))]
-    while i < k {
-        let n = 1;
-        proof! {
-            let g: u64 = n;
-        }
-        if let Some(b) = n.pick() {
-            core::mem::forget(b);
-        }
-        i += 1;
-    }
-}
+// (A function in which ghost code types a literal, `let n = 1; proof! { let g: u64 = n; }`,
+// was here until the fork `6ae48cb`, which refuses it: `just verify-sidecar`, crate
+// `ghosttyped`.)
 
-/// Would pass with Verus's 0 (the driver counts `∞` for the loop).
-#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
-pub fn via_ghost_typed(k: u8) {
-    ghost_typed(k);
-}
-
-/// The control: with the suffix both builds have `n: u64`.
+/// A literal with its suffix: `n: u64` in every build, and Verus's 0 is taken.
 #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
 pub fn suffix_typed(k: u8) {
     let mut i = 0u8;

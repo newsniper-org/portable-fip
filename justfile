@@ -733,6 +733,14 @@ verify-sidecar: verify-strict
       echo "FAIL: Verus verified a crate whose compiled body differs from the verified one"; exit 1
     fi
     grep -q 'alloc-check: Verus sets `verus_keep_ghost_body` only when it verifies the crate' "$out/cfgbody-verus.log" || { echo "FAIL: Verus refused the crate cfgbody for another reason"; cat "$out/cfgbody-verus.log"; exit 1; }
+    # A type that only ghost code decides (`let n = 1; proof! { let g: u64 = n; }`: Verus
+    # verified with `n: u64` and compiled with `n: i32`, another impl; upstream too): the
+    # fork compares the two type checks since `6ae48cb`, after the verification, so the
+    # run prints "0 errors" and then fails. No sidecar is written.
+    mkdir -p "$out/ghosttyped/src"
+    printf '%s\n' '#![feature(proc_macro_hygiene)]' 'use vstd::prelude::*;' '#[verus_verify]' 'pub trait Pick: Sized {' '    #[verus_spec(r => allocates 1 deallocates 0)]' '    fn pick(self) -> Option<Box<u8>>;' '}' '#[verus_verify]' 'impl Pick for u64 {' '    #[verus_spec(r => allocates 0 deallocates 0)]' '    fn pick(self) -> Option<Box<u8>> { None }' '}' '#[verus_verify]' 'impl Pick for i32 {' '    #[verus_spec(r => allocates 1 deallocates 0)]' '    fn pick(self) -> Option<Box<u8>> { Some(Box::new(1u8)) }' '}' '#[verus_spec(r => allocates 0 deallocates 0)]' 'pub fn ghost_typed() -> Option<Box<u8>> {' '    let n = 1;' '    proof! { let g: u64 = n; }' '    n.pick()' '}' > "$out/ghosttyped/src/lib.rs"
+    ign ghosttyped 'has type `i32` in the compiled program, but `u64` in the verified program'
+    grep -q 'verification results:: [0-9]* verified, 0 errors' "$out/ghosttyped.log" || { echo "NOTE: Verus no longer prints a successful verification before this error (update the comment above)"; exit 1; }
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

@@ -2207,3 +2207,37 @@ error, without it the `#[fip]` caller is refused by the driver's own count),
 `suffix_typed` (the control with `1_u64`: passes with and without), `bump` (`a + 1`
 with `a: i32`: refused too). Measured besides, on a probe crate: the literal inside a
 generic call (`wrap(1).t`) is refused.
+
+## Amendment 2026-11-24 (3): re-pin to the fork 6ae48cb (Verus compares its two type checks)
+
+**Status:** done. The driver's check of literals stays for now (below).
+
+**Pin.** `0.2026.11.24.6ae48cb` (`6ae48cb77d28…`), one commit after `66c6c2b2f`, the
+fork's answer to the report of a type that ghost code decides: the verification records
+the types of exec code, what it resolves to with which type arguments, and its
+literals, by source location, and the compilation must have the same; always, not only
+with `-V alloc-check` (upstream has the bug open, verus-lang/verus#3172). Checked before
+the move (clean worktree, tests first, then the `singular` build): the diff read in
+full (1152 lines); the fork's tests, 5564 passed, 0 failed, 63 ignored (as the fork
+reports); the 6 repro files are refused and no binary is built, the generic call
+(`W<i32>` against `W<u64>`) and the float literal among them; the 13 repro files of the
+two reports before are refused, the 10 before those verify; 114 functions freeing more
+than they state, in both editions, none verifies; the 15 tight bounds as before. The
+crates of this repository and every file of `verify/` pass the new check unchanged.
+
+The error comes after the verification ("N verified, 0 errors" is printed first, then
+the error; exit code 1). The generator and the recipes go by the exit code.
+
+**The fixture case moves.** `ghost_typed` cannot be in a sidecar any more: it is now the
+crate `ghosttyped` of `just verify-sidecar`, a gate on the fork (Verus's error, no
+sidecar). `suffix_typed` and `bump` stay in `verus_alloc`.
+
+**The driver's check of literals (amendment 2026-11-24 (2)) is not removed yet.** With
+the fork's check a listed function has, in the program Verus compiles, the types that
+were verified. What the driver analyses is a third build, the plain one, which differs
+from the one Verus compiles by everything gated with `verus_keep_ghost`. The fork's
+check says nothing about that difference; the generator's rules about gated code do,
+and they were found incomplete the same day (next amendment). The check also does not
+cover the never-type fallback, which the fork's does. It is kept until the generator's
+rules are complete, and then is a decision: it refuses `i32`/`f64` literals that exec
+code types, which is a cost for numeric code.
