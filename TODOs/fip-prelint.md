@@ -3419,9 +3419,9 @@ It was to be removed once the fork rejected the divergence. Measured 2026-11-25
 (amendment 2026-11-25 (3), probe `p12`): a marker trait that is implemented for every
 type in plain builds and for `u64` alone under Verus makes `id(2_000_000_000)` a `u64`
 for Verus and an `i32` in the plain build; the fork's comparison cannot see it, and
-this check is the only refusal. Recommendation to the user: keep it. Open: narrowing
-it (a literal whose type exec code fixes is refused too) needs the driver to tell
-where a literal's type came from.
+this check is the only refusal. Decided by the user on 2026-11-25: it stays. Open:
+narrowing it (a literal whose type exec code fixes is refused too) needs the driver to
+tell where a literal's type came from.
 
 ## After the audit of 2026-11-24 (decision record, amendment 2026-11-24 (5))
 
@@ -3429,8 +3429,8 @@ where a literal's type came from.
   probe: an operator or `Deref` impl of one build, a derive of one build, a field or
   variant of one build, crate-level attributes, gated `use` of non-traits.
 - Attribute and derive macros of dependencies stay a trust boundary.
-- The driver's check of literals typed by default: keep or remove, the user's decision
-  (recommended 2026-11-25: keep; see the section above).
+- The driver's check of literals typed by default: kept (the user's decision,
+  2026-11-25; see the section above).
 - (2026-11-25) The gate rule is a list of allowed shapes (decision record, amendments
   2026-11-25, (2) and (3)). `fip-strict` keeps to it since (3). Open:
   - The strict variants of `fip-core` and the `call`s of `fip-strict` are not listed:

@@ -2699,7 +2699,7 @@ not run). `tests/verus_drift.rs` is removed with the twins it compared.
    `trait Name<A> {}` with `impl<T: ?Sized, A> Name<A> for T {}`, every parameter free.
    `FipSpec<Args>` needs it. This is an extension of what the user decided, made to
    carry out the instruction to make `fip-strict` keep to the list; nothing else in
-   the rewrite needed one.
+   the rewrite needed one. Approved by the user on 2026-11-25.
 2. **Narrower, for impls and traits under the gate** (shape 3): a hole of the two
    amendments above. A block of specifications admitted any impl without an exec
    function, so `impl Copy for X {}`, `unsafe impl Send for X {}` and an empty
@@ -2835,8 +2835,8 @@ functions listed. The plain build: "attempt to add with overflow". The driver:
 the only thing that refuses the crate. The fork's comparison does not see it: both of
 its runs have the impl. So the check is not a net to remove when the fork is fixed; it
 is the plain side of the marker pattern. (Its gate is the fixture case `bump`; this
-route has no gate of its own.) Whether to keep it was left to the user on 2026-11-24:
-the recommendation is to keep it.
+route has no gate of its own.) Whether to keep it was left to the user on 2026-11-24;
+decided on 2026-11-25: it stays.
 
 ### Gates
 
