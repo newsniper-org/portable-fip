@@ -3406,17 +3406,22 @@ See the fifth amendment of that date. Open:
 3. `spec::lemma_compact_map_spec_rejects_extra` is fragile: adding unrelated definitions
    to `spec.rs` makes its third assertion fail. Give it explicit instantiations.
 
-## Interim guard to remove (2026-11-24): literals typed by default
+## The driver's check of literals typed by default (2026-11-24; not interim since 2026-11-25)
 
-`let n = 1; proof! { let g: u64 = n; } n.mk()`: Verus verifies with `n: u64` and
-compiles with `n: i32` (upstream too; reported to the fork 2026-11-24,
-`2026-11-24-ghost-decides-exec-type.md`). The driver refuses, as an error, a listed
-function with an unsuffixed literal of type `i32` or `f64`
-(`verustrust::check_fallback_literals`; decision record `2026-11-01-fip-prelint.md`,
-amendments 2026-11-24 and 2026-11-24 (2)). It also refuses literals that exec code
-types `i32`/`f64`. When the fork rejects the divergence itself: keep the fixture case
-`ghost_typed` as a gate on the fork (expecting Verus's refusal), and remove the check
-or narrow it.
+`let n = 1; proof! { let g: u64 = n; } n.mk()`: Verus verified with `n: u64` and
+compiled with `n: i32` (upstream too; the fork compares its two type checks since
+`6ae48cb`). The driver refuses, as an error, a listed function with an unsuffixed
+literal of type `i32` or `f64` (`verustrust::check_fallback_literals`; decision record
+`2026-11-01-fip-prelint.md`, amendments 2026-11-24 and 2026-11-24 (2)). It also refuses
+literals that exec code types `i32`/`f64`.
+
+It was to be removed once the fork rejected the divergence. Measured 2026-11-25
+(amendment 2026-11-25 (3), probe `p12`): a marker trait that is implemented for every
+type in plain builds and for `u64` alone under Verus makes `id(2_000_000_000)` a `u64`
+for Verus and an `i32` in the plain build; the fork's comparison cannot see it, and
+this check is the only refusal. Recommendation to the user: keep it. Open: narrowing
+it (a literal whose type exec code fixes is refused too) needs the driver to tell
+where a literal's type came from.
 
 ## After the audit of 2026-11-24 (decision record, amendment 2026-11-24 (5))
 
@@ -3424,7 +3429,8 @@ or narrow it.
   probe: an operator or `Deref` impl of one build, a derive of one build, a field or
   variant of one build, crate-level attributes, gated `use` of non-traits.
 - Attribute and derive macros of dependencies stay a trust boundary.
-- The driver's check of literals typed by default: keep or remove, the user's decision.
+- The driver's check of literals typed by default: keep or remove, the user's decision
+  (recommended 2026-11-25: keep; see the section above).
 - (2026-11-25) The gate rule is a list of allowed shapes (decision record, amendments
   2026-11-25, (2) and (3)). `fip-strict` keeps to it since (3). Open:
   - The strict variants of `fip-core` and the `call`s of `fip-strict` are not listed:

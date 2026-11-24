@@ -2762,6 +2762,41 @@ Probed and not a hole: `#[macro_use] extern crate dep;` with a `proof!` of `dep`
 runs its tokens. Under Verus rustc refuses the name (`E0659`, a glob import against an
 outer scope), so there is no sidecar.
 
+### The driver's check of literals has a second reason
+
+The check of amendment 2026-11-24 (a listed function with an unsuffixed literal typed
+`i32` or `f64` is an error) was written as a net until the fork compared the types of
+its two runs, which it does since `6ae48cb`. Probe `p12` (2026-11-25), a crate that
+keeps to the list:
+
+```rust
+#[cfg(not(verus_keep_ghost))] pub trait Wide {}
+#[cfg(not(verus_keep_ghost))] impl<T: ?Sized> Wide for T {}
+#[cfg(verus_keep_ghost)]
+verus! {
+pub trait Wide { spec fn ok(&self) -> bool; }
+impl Wide for u64 { open spec fn ok(&self) -> bool { true } }
+}
+
+pub fn id<T: Wide>(x: T) -> T { x }           // ensures r == x
+
+pub fn quiet() -> bool {                      // ensures r
+    let n = id(2_000_000_000);
+    let m = n + n;
+    m > n
+}
+```
+
+Under Verus the one impl makes the literal a `u64`; in the plain build the marker is
+implemented for every type and the literal falls back to `i32`. Verus: 0 errors, both
+functions listed. The plain build: "attempt to add with overflow". The driver:
+"1 panic sites discharged by Verus", and the error of the check of literals, which is
+the only thing that refuses the crate. The fork's comparison does not see it: both of
+its runs have the impl. So the check is not a net to remove when the fork is fixed; it
+is the plain side of the marker pattern. (Its gate is the fixture case `bump`; this
+route has no gate of its own.) Whether to keep it was left to the user on 2026-11-24:
+the recommendation is to keep it.
+
 ### Gates
 
 - Unit tests: `gate_marker_traits_with_parameters`, `gate_ghost_impls_and_traits`
