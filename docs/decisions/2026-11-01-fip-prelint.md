@@ -2502,3 +2502,124 @@ its own gate).
 **Not done.** The driver's check of literals typed by default (amendment 2026-11-24
 (2)) is unchanged: it is about ghost code, not about the gate. The rows of the audit's
 table without an end-to-end probe are as they were.
+
+## Amendment 2026-11-25 (2): the list as it was decided (the amendment above built less)
+
+**Status:** done. Corrects the amendment above, found by a review.
+
+**What was wrong.** The user decided: the gate is allowed in five shapes, and "any other
+gate (an exec function, a struct, an impl, a constant, a macro, a `use`, a module path,
+..) is refused, whatever its shape". The amendment above built something wider and said
+so only in part: under `#[cfg(not(verus_keep_ghost))]` it admitted every item of plain
+builds but macros (functions, modules, impls, structs, constants, type aliases, `use`),
+and under `#[cfg(verus_keep_ghost)]` every item without an exec function (so also
+structs, constants, type aliases, any `use`), leaving those to the rules on names and to
+the driver. That is the list of dangerous shapes again, on the side most holes of
+2026-11-24 came from (an impl of `Drop` for plain builds, a trait in scope in one
+build, definitions per build).
+
+**The list now** (`verus::gate_violation`). Every use of `verus_keep_ghost` in a crate's
+own sources is one of these, or no function of the crate is listed:
+
+1. `cfg_attr(verus_keep_ghost, ..)` with `verus_spec(..)`, `verus_verify`,
+   `verifier::..`, `feature(..)`, lint levels, `doc`;
+   `cfg_attr(not(verus_keep_ghost), ..)` with `fip_macros::..`, lint levels, `doc`.
+2. `#[cfg(verus_keep_ghost)] use ..;` from one of Verus's crates.
+3. `#[cfg(verus_keep_ghost)]` on a `verus! { .. }` block, a `mod name { .. }` or a
+   `mod name;` (then its files) holding specifications and proofs only.
+4. `#[cfg(not(verus_keep_ghost))] macro_rules!` for `proof` and `proof_decl`, empty.
+5. The marker pattern: `#[cfg(not(verus_keep_ghost))] trait Name {}` (empty) and
+   `#[cfg(not(verus_keep_ghost))] impl<T: ?Sized> Name for T {}` (blanket, empty).
+
+Three things were added to make the five usable; each is part of one of them, and none
+adds exec code:
+
+- to (2): a `use` through a ghost module of the crate (`use crate::spec::{..}`, where
+  `spec` is declared under the gate): the names of (3) have to be imported. `fip-core`
+  does this in three files; without it `fip-core` would not keep to the list, and the
+  user was told it does.
+- to (3), what "specifications and proofs only" is: `spec`, `proof` and `axiom`
+  functions, `spec` constants, `use`, `broadcast use` and `broadcast group`, modules,
+  and impls and traits of those with their associated types (`impl View for T { type V
+  = ..; spec fn view(..) }`). Not: an exec function, a `struct`, `enum`, `union`,
+  `const`, `static`, a type alias, `macro_rules!`, `extern`, an invocation of a macro of
+  the crate. In a `verus!` block that is not a module of its own, a `use` follows (2).
+- to (5): `#[cfg(verus_keep_ghost)] [unsafe] impl .. for Type {}`, empty, of a trait of
+  Verus's crates (`vstd::alloc_check::NoDeallocDrop`): how a type gets the marker under
+  Verus, where the plain build's blanket impl does not exist.
+
+Everything else is a violation, also what earlier rules handled one function at a time:
+a statement or a field under the gate, `cfg!(verus_keep_ghost)`, `#![cfg(..)]`, an item
+of plain builds only. Code that Verus is not to verify needs no gate: Verus ignores a
+function without its attributes.
+
+**What goes with it.**
+
+- The rule on names (amendments 2026-11-24 (4) to (6)) no longer decides anything for a
+  crate's own functions: a crate that keeps to the list has no definition under the
+  gate. It stays as a second net for crates that import one that does not.
+- A crate that imports one that does not keep to the list lists no function that uses
+  anything of it: the generator reads, in the VIR record of each function, the crates
+  its paths start with (functions, types, traits, constants, as Verus resolved them, so
+  through re-exports), and skips those that name such a crate. The user's design said
+  this ("functions that use things of that crate are not listed"); the amendment above
+  only passed the skipped functions and the gated names on.
+- The two refusals that wrote no sidecar (a glob import and a trait with methods under
+  the gate, an inner `cfg_attr` such as `no_std`) are uses of the gate like the others
+  now: the sidecar is written and lists nothing. One behaviour, not two.
+
+**Effect here.** `fip-core`: its sources keep to the list; 10 functions listed as
+before; the 7 strict variants are skipped for using `fip_strict`. `fip-alloc`: 1, as
+before. `fip-strict`: does not keep to the list (first: `src/lib.rs:325`, `pub use
+core::marker::Copy as DropFreeFn` under the gate; then its exec twins); 15 functions
+skipped, none listed, as before.
+
+One thing passes that the letter of the rule on imports does not cover:
+`fip-core`'s seven `Fn`-based functions are bounded by `crate::DropFreeFn`, a re-export
+of that `fip-strict` item. Under Verus it is `core::marker::Copy`, so the VIR names no
+path of `fip_strict`, and the second net lets a divergent trait pass as a bound. It is a
+bound only (a marker), in generic functions, for which the driver takes no Verus bound.
+Making `fip-strict` keep to the list would remove the exception; that is the open
+question in the TODO.
+
+**Costs, measured or known.**
+
+- Ghost datatypes cannot be under the gate (`pub struct Model { n: int }` in a gated
+  `verus!` block is a definition): a struct in `verus!` is an exec type too, and one
+  that exists in Verus's build only is the twin this list refuses. Specifications that
+  need their own datatypes have no place in a crate that keeps to the list. Not needed
+  by `fip-core`. Whether to admit them by name (as the amendment above did for all
+  definitions) is a decision for the user.
+- Ghost items can be imported under the gate only from a ghost module; a specification
+  written in a gated `verus!` block inside a module with exec code can be used there
+  and by path, not imported elsewhere.
+- Fixtures. `verus_sidecar`: the module `plain` and the method `add_plain` lost their
+  gate (Verus ignores them; outputs unchanged but for line numbers); the impl of plain
+  builds that shifted the impl numbers is replaced by a ghost impl that shifts Verus's.
+  `verus_alloc`: the roots `any` and `any_fip` are bounded by the marker and ungated
+  (still refused, as before); **removed**: the roots `boxed` and `boxed_fip` (a `Box`
+  passed to a function bounded by the marker: Verus compiles the crate and refuses the
+  call, so it needs a gate or another crate; the driver's count of such an instance has
+  no fixture now), and `Tok`, `drops_tok`, `via_drops_tok` (a `Drop` impl of plain
+  builds). The driver's two `Drop` rules had no gate before either.
+- Verigrad, by the generator's own check run over its sources (not a regex this time):
+  `verigrad-core` does not keep to the list. First use: `src/backend.rs:10`,
+  `#[cfg(verus_keep_ghost)] use crate::layout::*;`. Read file by file (which cannot see
+  ghost modules of other files, so the `use` cases may be fewer), 18 of its 26 files
+  have a use that is not on the list: imports under the gate from modules that are not
+  ghost modules, impls of plain builds (`eager_act.rs:359`, `reuse_ops.rs:432`), ghost
+  datatypes (`ledger.rs:33` `LedgerEvent`, `storage.rs:13` `Storage`). `verigrad-py`:
+  `src/std_math.rs:36`. Its sidecar (85 functions today) would list none.
+
+**The probes of the audit, again:** twelve crates (`p1`, `p2`, `p6`, `p3`, `p3b`, `p3c`,
+`p3d`, `p9`, the three twins of amendment (4), and `p8`): in each the function is
+skipped for the crate's use of the gate, and the `#[fip]` caller is refused by the
+driver's own count.
+
+Gates: unit tests `gate_whitelist_allows` (every shape of the list in one crate, with a
+ghost module file) and `gate_whitelist_refuses` (50 uses that are not on it, each
+with its message); `just verify-sidecar`: `gateok` (the control: a crate with every
+shape, verified, its function listed), `plainmod`, `ghostdef`, `cfgstmt`, `cfgattr`,
+`twinmacro`, `twinconst`, `twintype`, `twinmod`, `twinpath`, `twinattr`, `twindrop`,
+`twintrait`, `twin` (no function listed); `cfgitem` and `taint` (the rule on a
+function's own text, now with a cfg on a feature).

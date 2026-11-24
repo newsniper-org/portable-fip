@@ -66,17 +66,27 @@ pub fn halves_unannotated(a: u32, b: u32) -> u32 {
 
 /// Impl methods (top plan item 8). The sidecar names them `vside::{impl}::<name>` and
 /// the driver matches them by that path, file and line, not by the impl number: this
-/// crate's plain build has one impl block more than its Verus build (the one below),
-/// so rustc's `{impl#N}` and Verus's `impl&%N` differ.
+/// crate's Verus build has one impl block more than its plain build (the
+/// specification below), so rustc's `{impl#N}` and Verus's `impl&%N` differ.
 #[cfg_attr(verus_keep_ghost, verifier::verify)]
 pub struct Acc {
     pub n: u32,
 }
 
-/// Only in the plain build: it shifts the plain build's impl numbers by one.
-#[cfg(not(verus_keep_ghost))]
+// Only in the Verus build, and a specification: what the gate is for
+// (decision 2026-11-01-fip-prelint, amendment 2026-11-25 (2)). It shifts Verus's impl
+// numbers by one.
+#[cfg(verus_keep_ghost)]
+verus! {
 impl Acc {
-    /// Not seen by Verus: its overflow note stays.
+    pub open spec fn doubled(&self) -> int {
+        2 * self.n
+    }
+}
+}
+
+impl Acc {
+    /// Without a Verus attribute: Verus ignores it, and its overflow note stays.
     #[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]
     pub fn add_plain(&self, a: u32) -> u32 {
         self.n + a
@@ -106,8 +116,8 @@ impl Acc {
     }
 }
 
-/// Not seen by Verus.
-#[cfg(not(verus_keep_ghost))]
+/// Not verified: functions without a Verus attribute, which Verus ignores (no gate; a
+/// module of plain builds only would be more than the gate may hold).
 pub mod plain {
     /// A non-verified function with the same name as the verified `mul`: its overflow
     /// note stays (not in the sidecar).

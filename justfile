@@ -745,16 +745,15 @@ verify-sidecar: verify-strict
     # function whose loop allocates in the plain build only, through a `macro_rules!`, a
     # `const` or a type alias defined once under `cfg(verus_keep_ghost)` and once under
     # its negation, and a `#[fip]` caller passed): the function is skipped.
-    # Since 2026-11-25 exec code and macros under the gate make the whole crate one whose
-    # functions are not listed (`twinmacro`, `twinmod`, `twinpath`, `twinattr`); what the
-    # gate may still hold is answered by the names (`twinconst`, `twintype`, `twindrop`).
-    twin() {  # crate, expected reason of the skip (a regex; default: a gated name)
+    # Since 2026-11-25 the gate may hold only specifications and proofs, the empty
+    # `proof!` shims and marker traits: each of these crates lists no function.
+    twin() {  # crate[, expected reason of the skip (a regex)]
       mkdir -p "$out/$1/src"; cat > "$out/$1/src/lib.rs"
       (cd "$out" && $gen --crate-name "$1" --crate-dir "$1" --out "$out/$1.txt" -- {{verus}} --crate-type=lib --crate-name "$1" {{verus_flags}} "$1/src/lib.rs") > "$out/$1.log" 2>&1 || { echo "FAIL: the crate $1 was not verified"; cat "$out/$1.log"; exit 1; }
-      grep -Eq "^skip $1::quiet ${2:-the item text has the name }" "$out/$1.txt" || { echo "FAIL: $1::quiet is not skipped for the expected reason"; cat "$out/$1.txt"; exit 1; }
+      grep -Eq "^skip $1::quiet ${2:-the crate has code for one build only: }" "$out/$1.txt" || { echo "FAIL: $1::quiet is not skipped for the expected reason"; cat "$out/$1.txt"; exit 1; }
       if grep -q "^fn $1::quiet " "$out/$1.txt"; then echo "FAIL: $1::quiet is listed"; exit 1; fi
     }
-    twin twinmacro 'the crate has code for one build only: ' <<'TWIN'
+    twin twinmacro <<'TWIN'
     #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
     #[cfg(verus_keep_ghost)]
     use vstd::prelude::*;
@@ -882,7 +881,7 @@ verify-sidecar: verify-strict
     # in): a callee in a module defined once per build, under a gate that is not the
     # plain `#[cfg(verus_keep_ghost)]`, by `#[path]`, or by `cfg_attr(.., path = ..)`.
     # The verified twin is skipped, and its caller with it.
-    twin twinmod 'the crate has code for one build only: ' <<'TWIN'
+    twin twinmod <<'TWIN'
     #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
     #![allow(unexpected_cfgs)]
     #[cfg(verus_keep_ghost)]
@@ -922,7 +921,7 @@ verify-sidecar: verify-strict
     TWIN
     mkdir -p "$out/twinpath/src"; printf '%s\n' 'use vstd::prelude::*;' '#[verus_spec(allocates 0 deallocates 0)]' 'pub fn helper() {}' > "$out/twinpath/src/v_verus.rs"
     mkdir -p "$out/twinpath/src"; printf '%s\n' 'pub fn helper() {' '    core::mem::forget(Box::new(1u8));' '}' > "$out/twinpath/src/v_plain.rs"
-    twin twinpath 'the crate has code for one build only: ' <<'TWIN'
+    twin twinpath <<'TWIN'
     #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
     #![allow(unexpected_cfgs)]
     #[cfg(verus_keep_ghost)]
@@ -956,7 +955,7 @@ verify-sidecar: verify-strict
     TWIN
     mkdir -p "$out/twinattr/src"; printf '%s\n' '#[cfg(verus_keep_ghost)]' 'use vstd::prelude::*;' '#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]' 'pub fn helper() {}' > "$out/twinattr/src/v.rs"
     mkdir -p "$out/twinattr/src"; printf '%s\n' 'pub fn helper() {' '    core::mem::forget(Box::new(1u8));' '}' > "$out/twinattr/src/v_plain.rs"
-    twin twinattr 'the crate has code for one build only: ' <<'TWIN'
+    twin twinattr <<'TWIN'
     #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
     #![allow(unexpected_cfgs)]
     #[cfg(verus_keep_ghost)]
@@ -1019,8 +1018,8 @@ verify-sidecar: verify-strict
     }
     TWIN
     # A trait with methods imported once per build: `S.m()` calls another method in each,
-    # and both are verified. The crate gets no sidecar.
-    mkdir -p "$out/twintrait/src"; cat > "$out/twintrait/src/lib.rs" <<'TWIN'
+    # and both are verified. The import is not on the list: no function is listed.
+    twin twintrait <<'TWIN'
     #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
     #![allow(unexpected_cfgs)]
     #[cfg(verus_keep_ghost)]
@@ -1082,11 +1081,115 @@ verify-sidecar: verify-strict
         quiet(k);
     }
     TWIN
-    if (cd "$out" && $gen --crate-name twintrait --crate-dir twintrait --out "$out/twintrait.txt" -- {{verus}} --crate-type=lib --crate-name twintrait {{verus_flags}} twintrait/src/lib.rs) > "$out/twintrait.log" 2>&1; then # negative probe
-      echo "FAIL: a sidecar was generated for a crate that imports a trait with methods under a cfg"; exit 1
-    fi
-    grep -q 'is imported under `#\[cfg(..)\]` and is a trait with methods' "$out/twintrait.log" || { echo "FAIL: the crate twintrait failed for another reason"; cat "$out/twintrait.log"; exit 1; }
-    test ! -e "$out/twintrait.txt"
+    # The control: a crate that uses the gate in every shape on the list has its function
+    # listed (a ghost module in a file, imports from it and from vstd, a ghost block with
+    # an impl and a marker impl, the `proof!` shim, a marker trait for plain builds).
+    mkdir -p "$out/gateok/src"
+    cat > "$out/gateok/src/spec.rs" <<'TWIN'
+    use vstd::prelude::*;
+    verus! {
+    pub open spec fn twice(x: int) -> int {
+        2 * x
+    }
+    pub proof fn lemma_twice(x: int)
+        ensures twice(x) == x + x,
+    {
+    }
+    }
+    TWIN
+    cat > "$out/gateok/src/lib.rs" <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+    #[cfg(verus_keep_ghost)]
+    pub mod spec;
+    #[cfg(verus_keep_ghost)]
+    use crate::spec::{lemma_twice, twice};
+    #[cfg(not(verus_keep_ghost))]
+    macro_rules! proof {
+        ($($t:tt)*) => {};
+    }
+    #[cfg(verus_keep_ghost)]
+    pub use vstd::alloc_check::NoDeallocDrop;
+    #[cfg(not(verus_keep_ghost))]
+    pub trait NoDeallocDrop {}
+    #[cfg(not(verus_keep_ghost))]
+    impl<T: ?Sized> NoDeallocDrop for T {}
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    pub struct Pair {
+        pub a: u8,
+        pub b: u8,
+    }
+    #[cfg(verus_keep_ghost)]
+    #[allow(unsafe_code)]
+    unsafe impl vstd::alloc_check::AllocFreeDrop for Pair {}
+    #[cfg(verus_keep_ghost)]
+    #[allow(unsafe_code)]
+    unsafe impl vstd::alloc_check::NoDeallocDrop for Pair {}
+    #[cfg(verus_keep_ghost)]
+    verus! {
+    impl Pair {
+        pub open spec fn sum(&self) -> int {
+            self.a + self.b
+        }
+    }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        requires
+            x < 100,
+        ensures
+            r == twice(x as int),
+        allocates 0
+        deallocates 0
+    ))]
+    pub fn quiet(x: u8) -> u8 {
+        proof! {
+            lemma_twice(x as int);
+        }
+        x + x
+    }
+
+    /// Not verified: no attribute, no gate.
+    pub fn root(x: u8) -> u8 {
+        if x < 100 { quiet(x) } else { 0 }
+    }
+    TWIN
+    (cd "$out" && $gen --crate-name gateok --crate-dir gateok --out "$out/gateok.txt" -- {{verus}} --crate-type=lib --crate-name gateok {{verus_flags}} gateok/src/lib.rs) > "$out/gateok.log" 2>&1 || { echo "FAIL: the crate gateok was not verified"; cat "$out/gateok.log"; exit 1; }
+    grep -q "^fn gateok::quiet " "$out/gateok.txt" || { echo "FAIL: a crate that keeps to the list has its function skipped"; cat "$out/gateok.txt"; exit 1; }
+    if grep -q "^skip .*code for one build only" "$out/gateok.txt"; then echo "FAIL: gateok is taken for a crate with code for one build only"; exit 1; fi
+    # An item of plain builds only, and a ghost block with a definition: not on the list.
+    twin plainmod <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(not(verus_keep_ghost))]
+    pub mod plain {
+        pub fn root(k: u8) {
+            super::quiet(k);
+        }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {}
+    TWIN
+    twin ghostdef <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(verus_keep_ghost)]
+    verus! {
+    pub struct Model {
+        pub n: int,
+    }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {}
+    TWIN
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe
@@ -1148,10 +1251,18 @@ verify-sidecar: verify-strict
     test ! -e "$out/ext.txt"
     # A Verus-only `cfg_attr` deleting a bounds check: verified, but not listed.
     cp -r "$fx" "$out/cfgitem"
-    printf '\n#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(\n    requires\n        i < xs@.len(),\n))]\npub fn probe2(xs: &[u8], i: usize) -> u8 {\n    #[cfg(not(verus_keep_ghost))]\n    let _x = xs[i + 1];\n    xs[i]\n}\n' >> "$out/cfgitem/vside/src/lib.rs"
+    printf '\n#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(\n    requires\n        i < xs@.len(),\n))]\npub fn probe2(xs: &[u8], i: usize) -> u8 {\n    #[cfg(feature = "extra")]\n    let _x = xs[i + 1];\n    xs[i]\n}\n' >> "$out/cfgitem/vside/src/lib.rs"
     (cd "$out/cfgitem" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/cfgitem.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/cfgitem.log" 2>&1
     if grep -q "^fn vside::probe2 " "$out/cfgitem.txt"; then echo "FAIL: an item with a Verus-only cfg was listed"; exit 1; fi
-    grep -q "^skip vside::probe2 the item text has \`cfg(not(verus_keep_ghost))\`" "$out/cfgitem.txt"
+    grep -q "^skip vside::probe2 the item text has \`cfg(feature" "$out/cfgitem.txt" || { echo "FAIL: probe2 is not skipped for the cfg in its text"; grep probe2 "$out/cfgitem.txt"; exit 1; }
+    # The statement under `#[cfg(not(verus_keep_ghost))]`: a use of the gate that is not on
+    # the list, so no function of the crate is listed (2026-11-25).
+    cp -r "$fx" "$out/cfgstmt"
+    printf '\n#[cfg_attr(fip_prelint, fip::mark(kind = "fip", strict = true))]\n#[cfg_attr(verus_keep_ghost, verus_spec(\n    requires\n        i < xs@.len(),\n))]\npub fn probe2(xs: &[u8], i: usize) -> u8 {\n    #[cfg(not(verus_keep_ghost))]\n    let _x = xs[i + 1];\n    xs[i]\n}\n' >> "$out/cfgstmt/vside/src/lib.rs"
+    (cd "$out/cfgstmt" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/cfgstmt.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/cfgstmt.log" 2>&1
+    if grep -q "^fn vside::probe2 " "$out/cfgstmt.txt"; then echo "FAIL: an item with a Verus-only cfg was listed"; exit 1; fi
+    grep -q "^skip vside::probe2 the crate has code for one build only: src/lib.rs:[0-9]*: \`let\`" "$out/cfgstmt.txt" || { echo "FAIL: a crate with a statement under the gate is not skipped as a whole"; grep probe2 "$out/cfgstmt.txt"; exit 1; }
+    if grep -q "^fn " "$out/cfgstmt.txt"; then echo "FAIL: a crate with a statement under the gate has listed functions"; exit 1; fi
     # The same written `cfg_attr(verus_keep_ghost, cfg(any()))`: a payload that changes code
     # (since 2026-11-25 no function of such a crate is listed).
     cp -r "$fx" "$out/cfgattr"
@@ -1186,7 +1297,7 @@ verify-sidecar: verify-strict
     # A caller verified against the `ensures` of a function skipped for a Verus-only
     # `cfg_attr`: skipped too.
     cp -r "$fx" "$out/taint"
-    printf '\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        !r,\n))]\npub fn on() -> bool {\n    #[cfg(not(verus_keep_ghost))]\n    return true;\n    false\n}\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        true,\n))]\npub fn probe_taint(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n' >> "$out/taint/vside/src/lib.rs"
+    printf '\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        !r,\n))]\npub fn on() -> bool {\n    #[cfg(feature = "extra")]\n    return true;\n    false\n}\n\n#[cfg_attr(verus_keep_ghost, verus_spec(r =>\n    ensures\n        true,\n))]\npub fn probe_taint(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n' >> "$out/taint/vside/src/lib.rs"
     (cd "$out/taint" && VERUS_SINGULAR_PATH="{{singular}}" $gen --crate-name vside --crate-dir vside --out "$out/taint.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} vside/src/lib.rs) > "$out/taint.log" 2>&1
     if grep -q "^fn vside::probe_taint " "$out/taint.txt"; then echo "FAIL: a caller of a cfg-skipped function was listed"; exit 1; fi
     grep -q "^skip vside::probe_taint relies on the specification of \`vside::on\`" "$out/taint.txt"

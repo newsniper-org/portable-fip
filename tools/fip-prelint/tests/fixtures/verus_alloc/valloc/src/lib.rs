@@ -492,28 +492,20 @@ pub fn eat_marked_fip<T: NoDeallocDrop>(t: T) {
     let _u = t;
 }
 
-/// Not seen by Verus (it would refuse the unbounded `T`): generic roots, and a root
-/// passing a `Box`. None may pass with 0 frees.
-#[cfg(not(verus_keep_ghost))]
+/// Generic roots, not verified (no Verus attribute: Verus ignores them, so they need no
+/// gate). In the plain build their `T` is any type, a `Box` too: none may pass with 0
+/// frees. (A root passing a `Box` itself cannot be in this crate: Verus compiles the
+/// crate and refuses `Box<u8>: NoDeallocDrop`; and a module of plain builds only is
+/// more than the gate may hold, amendment 2026-11-25 (2).)
 pub mod unmarked {
     #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
-    pub fn any<T>(t: T) {
+    pub fn any<T: super::NoDeallocDrop>(t: T) {
         super::eat_marked(t);
     }
 
     #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
-    pub fn any_fip<T>(t: T) {
+    pub fn any_fip<T: super::NoDeallocDrop>(t: T) {
         super::eat_marked_fip(t);
-    }
-
-    #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
-    pub fn boxed(b: Box<u8>) {
-        super::eat_marked(b);
-    }
-
-    #[cfg_attr(fip_prelint, fip::mark(kind = "fbip", frees = 0))]
-    pub fn boxed_fip(b: Box<u8>) {
-        super::eat_marked_fip(b);
     }
 }
 
@@ -585,41 +577,9 @@ pub fn bump(a: i32) -> i32 {
     a + 1
 }
 
-/// A `Drop` impl that plain builds have and Verus's does not (audit 2026-11-24).
-#[cfg_attr(verus_keep_ghost, verus_verify)]
-pub struct Tok(pub u8);
-
-#[cfg(not(verus_keep_ghost))]
-impl Drop for Tok {
-    fn drop(&mut self) {
-        core::mem::forget(Box::new(self.0));
-    }
-}
-
-/// Verus proves that the loop allocates and frees nothing: for it a `Tok` has no
-/// destructor. In this build each `Tok` dropped allocates. The generator does not list
-/// a function that names a type with an impl of a foreign trait under a gate; and the
-/// driver would not use the Verus results of one that drops a value whose `Drop` impl
-/// no sidecar lists (measured with the generator rule absent; no fixture reaches it).
-#[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
-pub fn drops_tok(k: u8) {
-    let mut i = 0u8;
-    #[cfg_attr(verus_keep_ghost, verus_spec(
-        invariant
-            allocated() == 0,
-            deallocated() == 0,
-        decreases k - i,
-    ))]
-    while i < k {
-        let _t = Tok(i);
-        i += 1;
-    }
-}
-
-#[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
-pub fn via_drops_tok(k: u8) {
-    drops_tok(k);
-}
+// (A type with a `Drop` impl of plain builds only, and a function dropping it in a loop,
+// were here: such an impl is more than the gate may hold, and the crate would list no
+// function. `just verify-sidecar`, crate `twindrop`.)
 
 /// A verified function that no sidecar lists (made by a macro: one item text for every
 /// expansion), and a listed caller: its Verus results are not used either (the callee

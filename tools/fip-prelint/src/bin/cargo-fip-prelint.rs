@@ -735,6 +735,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     let mut imported_skips: Vec<String> = Vec::new();
     let mut imported_divergent: Vec<String> = Vec::new();
     let mut imported_gated: Vec<String> = Vec::new();
+    let mut imported_nonconforming: Vec<String> = Vec::new();
     let mut imports: Vec<(String, String, String)> = Vec::new();
     for (name, vir) in verusgen::imports(&flags) {
         let Some((_, side)) = import_sidecars.iter().find(|(n, _)| *n == name) else {
@@ -769,9 +770,16 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
                         }
                     }
                 }
-                match verus::gated_names(&texts) {
-                    Ok(g) => imported_gated.extend(g.names),
-                    Err(e) => return fail(&format!("import `{name}` refused: {e}")),
+                // A crate that keeps to what the gate may hold has no name to give;
+                // of another one, nothing is used by a listed function.
+                let own: Vec<(String, String)> = texts
+                    .iter()
+                    .filter(|(p, _)| !Path::new(p).starts_with(".."))
+                    .cloned()
+                    .collect();
+                if verus::gate_violation(&own).is_some() {
+                    imported_nonconforming.push(name.clone());
+                    imported_gated.extend(verus::gated_names(&texts).names);
                 }
             }
             Err(e) => return fail(&format!("import `{name}` refused: {e}")),
@@ -826,6 +834,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     info.imported_skips = imported_skips;
     info.imported_divergent = imported_divergent;
     info.imported_gated = imported_gated;
+    info.imported_nonconforming = imported_nonconforming;
     println!(
         "verification results:: {} verified, 0 errors",
         info.verified

@@ -277,6 +277,10 @@ pub struct VirFn {
     pub deallocates: verus::AllocBound,
     /// `:encapsulates_alloc true` in its attributes (`encapsulates alloc(a, d)`).
     pub encapsulates: bool,
+    /// The first segments of the paths in its record: the crates whose functions,
+    /// types, traits and constants it uses (as Verus resolved them, so through
+    /// re-exports too).
+    pub mentions: Vec<String>,
 }
 
 /// End of the balanced s-expression starting at `open` (a `(`), strings skipped.
@@ -453,6 +457,7 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
             deallocates
         };
         out.push(VirFn {
+            mentions: path_roots(func),
             path,
             span,
             mode,
@@ -467,6 +472,31 @@ pub fn vir_functions(text: &str) -> Result<Vec<VirFn>, String> {
         });
     }
     Ok(out)
+}
+
+/// The identifiers that start a path (`root::..`) in `text`, sorted, each once.
+fn path_roots(text: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let ident = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let mut out = BTreeSet::new();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b':' && b[i + 1] == b':' {
+            let mut j = i;
+            while j > 0 && ident(b[j - 1]) {
+                j -= 1;
+            }
+            // (the first segment: nothing of a path in front of it)
+            let first = j == 0 || !(b[j - 1] == b':' || b[j - 1] == b'%' || b[j - 1] == b'&');
+            if j < i && first && !b[j].is_ascii_digit() {
+                out.insert(text[j..i].to_string());
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// An s-expression of the VIR log: an atom (a string literal keeps its quotes) or a
@@ -767,8 +797,11 @@ pub struct RunInfo {
     /// Traits the run's `--import-sidecar`s record as divergent (their `divergent`
     /// lines): a function naming one of their methods is skipped.
     pub imported_divergent: Vec<String>,
-    /// [`verus::Gated::names`] of the sources of the imported crates.
+    /// [`verus::Gated::names`] of the sources of the imported crates that use
+    /// `verus_keep_ghost` for more than [`verus::gate_violation`] admits.
     pub imported_gated: Vec<String>,
+    /// The names of those crates: a function that uses anything of one is not listed.
+    pub imported_nonconforming: Vec<String>,
 }
 
 /// Checks the `--output-json` result: success, no errors, the entire crate.
@@ -805,6 +838,7 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         imported_skips: Vec::new(),
         imported_divergent: Vec::new(),
         imported_gated: Vec::new(),
+        imported_nonconforming: Vec::new(),
     })
 }
 
@@ -936,6 +970,7 @@ pub fn cfg_skip_reason(why: &str) -> bool {
         || why.starts_with(SKIP_GHOST_ONLY)
         || why.starts_with(SKIP_TAINTED)
         || why.starts_with(SKIP_GATE)
+        || why.starts_with(SKIP_DEP)
 }
 
 const SKIP_CFG_ITEM: &str = "the item text has ";
@@ -943,6 +978,8 @@ const SKIP_GHOST_ONLY: &str = "only in the Verus build";
 const SKIP_TAINTED: &str = "relies on the specification of ";
 /// The crate uses `verus_keep_ghost` for more than [`verus::gate_violation`] admits.
 const SKIP_GATE: &str = "the crate has code for one build only: ";
+/// The function uses something of an imported crate that does.
+const SKIP_DEP: &str = "uses the crate ";
 
 /// The `--import <name>=<file.vir>` arguments of a Verus command line.
 pub fn imports(flags: &[String]) -> Vec<(String, PathBuf)> {
@@ -1147,15 +1184,7 @@ pub fn build(
             .map_err(|e| format!("{s}: cannot read: {e}"))?;
         texts.push((s.clone(), text));
     }
-    for (path, text) in &texts {
-        if let Some(c) = verus::inner_cfg_attr_conflict(text) {
-            return Err(format!(
-                "{path}: {c}: the driver's build and Verus's may differ, so no sidecar is written"
-            ));
-        }
-    }
-    let mut gated =
-        verus::gated_names(&texts).map_err(|e| format!("{e}, so no sidecar is written"))?;
+    let mut gated = verus::gated_names(&texts);
     // What the crate puts under `verus_keep_ghost` beyond what cannot change exec code:
     // then none of its functions is listed (amendment 2026-11-25).
     // (the crate's own sources: an imported crate answers for its own, through the
@@ -1166,7 +1195,9 @@ pub fn build(
         .cloned()
         .collect();
     let gate = verus::gate_violation(&own);
-    gated.names.extend(info.imported_gated.iter().cloned());
+    // In a crate that keeps to the list no definition is under the gate: the names
+    // that count are those of the imported crates that do not keep to it.
+    gated.names = info.imported_gated.iter().cloned().collect();
     let mut source_hashes = Vec::new();
     // Traits implemented or declared differently in the two builds (phase 4 of
     // decision 2026-11-06-redesign-verus-allocates): in any source of the run, or
@@ -1204,6 +1235,20 @@ pub fn build(
         }
         if let Some(v) = &gate {
             skipped.push((f.path.clone(), format!("{SKIP_GATE}{v}")));
+            tainted.insert(verus::impl_key(&f.path));
+            continue;
+        }
+        // Anything of a crate whose exec code is not the same in the two builds: a
+        // function, a type, a trait, a constant, as Verus resolved the names.
+        if let Some(dep) = f
+            .mentions
+            .iter()
+            .find(|m| info.imported_nonconforming.contains(m))
+        {
+            skipped.push((
+                f.path.clone(),
+                format!("{SKIP_DEP}`{dep}`, which has code for one build only"),
+            ));
             tainted.insert(verus::impl_key(&f.path));
             continue;
         }
@@ -1513,6 +1558,7 @@ mod tests {
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
             imported_gated: Vec::new(),
+            imported_nonconforming: Vec::new(),
         };
         let fns = vir_functions(VIR).unwrap();
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
@@ -1538,7 +1584,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fip-verusgen-taint-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let src = "pub fn on() -> bool {\n    #[cfg(not(verus_keep_ghost))]\n    return true;\n    false\n}\n\npub fn g(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n\npub fn h(a: u32, b: u32) -> u32 {\n    g(a, b)\n}\n\npub fn k() -> u32 { 1 }\n\npub fn d() -> u32 { 2 }\n";
+        let src = "pub fn on() -> bool {\n    #[cfg(feature = \"x\")]\n    return true;\n    false\n}\n\npub fn g(a: u32, b: u32) -> u32 {\n    if on() { a / b } else { 0 }\n}\n\npub fn h(a: u32, b: u32) -> u32 {\n    g(a, b)\n}\n\npub fn k() -> u32 { 1 }\n\npub fn d() -> u32 { 2 }\n";
         std::fs::write(dir.join("src/lib.rs"), src).unwrap();
         let sp = |a: (usize, usize), b: (usize, usize)| VirSpan {
             file: "src/lib.rs".to_string(),
@@ -1560,6 +1606,7 @@ mod tests {
             allocates: verus::AllocBound::None,
             deallocates: verus::AllocBound::None,
             encapsulates: false,
+            mentions: Vec::new(),
         };
         let fns = vec![
             f("t::on", (1, 1), ((1, 21), (5, 2)), &[]),
@@ -1580,6 +1627,7 @@ mod tests {
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
             imported_gated: Vec::new(),
+            imported_nonconforming: Vec::new(),
         };
         let info = RunInfo {
             imported_skips: vec!["dep::{impl}::x".to_string()],
@@ -1718,6 +1766,7 @@ mod tests {
             allocates: verus::AllocBound::None,
             deallocates: verus::AllocBound::None,
             encapsulates: false,
+            mentions: Vec::new(),
         };
         let fns = vec![
             f("t::run", 4, (6, 2), &["t::Step::step"]),
@@ -1738,6 +1787,34 @@ mod tests {
             imported_skips: Vec::new(),
             imported_divergent: vec!["Tick".to_string()],
             imported_gated: Vec::new(),
+            imported_nonconforming: Vec::new(),
+        };
+        // The impl of plain builds only is more than the gate may hold: no function of
+        // the crate is listed (amendment 2026-11-25 (2)); the trait is recorded, and
+        // importers take every function as differing between the builds.
+        let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
+        assert!(s.fns.is_empty(), "{s:?}");
+        assert!(
+            s.skipped
+                .iter()
+                .all(|(_, why)| why.starts_with(SKIP_GATE) && why.contains("src/lib.rs:2: ")),
+            "{s:?}"
+        );
+        assert_eq!(
+            s.divergent,
+            vec![("Step".to_string(), "src/lib.rs".to_string(), 3)]
+        );
+        assert!(imported_cfg_skips(&s).contains(&"t::run".to_string()));
+        // The same crate with the impl in both builds, and the trait divergent in a
+        // crate it imports: the callers of the trait's methods are tainted.
+        std::fs::write(
+            dir.join("src/lib.rs"),
+            src.replace("#[cfg(not(verus_keep_ghost))]\n", "// (in both builds)\n"),
+        )
+        .unwrap();
+        let info = RunInfo {
+            imported_divergent: vec!["Tick".to_string(), "Step".to_string()],
+            ..info
         };
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
         let listed: Vec<&str> = s.fns.iter().map(|e| e.path.as_str()).collect();
@@ -1756,10 +1833,7 @@ mod tests {
         assert!(why("t::direct").contains("trait `Step`"), "{s:?}");
         assert!(why("t::run_s").contains("`t::run`"), "{s:?}");
         assert!(why("t::other").contains("trait `Tick`"), "{s:?}");
-        assert_eq!(
-            s.divergent,
-            vec![("Step".to_string(), "src/lib.rs".to_string(), 3)]
-        );
+        assert!(s.divergent.is_empty(), "{s:?}");
         // Importers taint their callers of these.
         assert!(imported_cfg_skips(&s).contains(&"t::run".to_string()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1805,6 +1879,7 @@ mod tests {
             allocates: verus::AllocBound::None,
             deallocates: verus::AllocBound::None,
             encapsulates: false,
+            mentions: Vec::new(),
         }];
         let info = RunInfo {
             version: "v".to_string(),
@@ -1818,6 +1893,7 @@ mod tests {
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
             imported_gated: Vec::new(),
+            imported_nonconforming: Vec::new(),
         };
         let e = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap_err();
         assert!(
@@ -1861,6 +1937,7 @@ mod tests {
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
             imported_gated: Vec::new(),
+            imported_nonconforming: Vec::new(),
         };
         let fns = vir_functions(vir).unwrap();
         assert!(!fns[0].expanded && fns[2].expanded);
