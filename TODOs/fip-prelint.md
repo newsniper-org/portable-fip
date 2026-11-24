@@ -3417,3 +3417,14 @@ amendments 2026-11-24 and 2026-11-24 (2)). It also refuses literals that exec co
 types `i32`/`f64`. When the fork rejects the divergence itself: keep the fixture case
 `ghost_typed` as a gate on the fork (expecting Verus's refusal), and remove the check
 or narrow it.
+
+## To audit (2026-11-24): what differs between the plain build and the one Verus compiles
+
+Three shapes were measured as holes and closed (a `macro_rules!`, a `const`, a type
+alias defined once per build; decision record, amendment 2026-11-24 (4)). The full
+list of ways code gated with `verus_keep_ghost` can change a function compiled in both
+builds was not written down. Do that (gated inherent impls, gated trait impls of
+foreign traits such as `Drop`, gated `use` shadowed by globs of dependencies, gated
+attributes on modules), with a probe for each, before removing the driver's check of
+literals typed by default.
+

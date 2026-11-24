@@ -2241,3 +2241,64 @@ and they were found incomplete the same day (next amendment). The check also doe
 cover the never-type fallback, which the fork's does. It is kept until the generator's
 rules are complete, and then is a decision: it refuses `i32`/`f64` literals that exec
 code types, which is a cost for numeric code.
+
+## Amendment 2026-11-24 (4): names that the two builds define differently
+
+**Status:** done for the kinds below. The rules about code gated with
+`verus_keep_ghost` were audited only as far as this amendment says; see "Not audited".
+
+**The defect** (in this repository's generator; found while asking what the fork's new
+check leaves for the plain build). The driver analyses the plain build, which has no
+`verus_keep_ghost`. A function whose own text has a `cfg` was already skipped, and so
+were callers of functions and of trait methods that differ between the builds. Not
+covered: a function that uses, by name, something else that is defined once for each
+build. Measured on the pin `66c6c2b` with three crates, each with a function `quiet`
+(`allocates 0 deallocates 0`, a loop) and a `#[fip]` caller:
+
+| defined twice | Verus's build | plain build | before |
+|---|---|---|---|
+| `macro_rules! tick` | expands to nothing | `mem::forget(Box::new(..))` | `quiet` listed, the caller **passed** with Verus's bound |
+| `const N: usize` | `0` | `64`, and the loop allocates if `N > 0` | the same |
+| `type Cell` | `u64` | `i32`, another impl of a trait | listed, and the driver took Verus's bound; the run failed only on the literal check of amendment (2) (`let n: Cell = 1;`). Without a literal (`i as Cell`) it was measured after the change only: skipped |
+
+**The rule.** The generator collects, over the sources of the crate and of the crates it
+imports, the names that the builds may give different meanings (`verus::gated_names`):
+a `const`, `static`, `type`, `macro_rules!`, `struct`, `enum` or `union` defined under a
+`#[cfg(..)]` (on the item, on an item around it such as `#[cfg(verus_keep_ghost)]
+verus! { .. }`, by `#![cfg(..)]`, or in a module file declared under one); a name that
+a gated `use` brings from another crate than Verus's; and, to a fixpoint, every
+definition of those kinds that names one. A verified function whose exec code names one
+is skipped, and its callers with it (the existing propagation). Exec code is the item
+text without its attributes (specifications are written in them) and without the
+arguments of `proof!` and `proof_decl!`, as long as the crate defines those only as
+empty shims for plain builds. A gated glob import from another crate than Verus's
+refuses the crate: its names cannot be listed.
+
+It goes by names, not by resolution: a local variable called like a gated constant
+skips its function. One exception, measured to be needed: the name of a trait that is
+declared or implemented in one build only (`AllocFreeDrop`, `DropFreeFn`,
+`NoDeallocDrop`: vstd's trait under Verus, every type in plain builds) counts only
+where it is called or starts a path. As a bound it is the marker pattern, which has its
+own rules (callers of such a trait's methods are tainted; the driver takes no Verus
+bound for a generic function). Without the exception the seven `Fn`-based functions of
+`fip-core` were skipped for their bound `crate::DropFreeFn`.
+
+**Effect here.** `fip-strict` lists no function any more: `Certified::assume` and
+`assume_no_panic_macros` construct `Certified`, a struct defined once in `verus! { .. }`
+and once for plain builds. Nothing was taken from those two entries (the driver counts
+0 in them itself). `fip-core` keeps its 10 functions and `fip-alloc` its one; the
+strict variants of `fip-core` are skipped as before, now for naming `Output`, which
+`fip-strict`'s gated impls define.
+
+**Gates.** Unit tests of `gated_names` and `gated_name_use`; `just verify-sidecar`,
+crates `twinmacro`, `twinconst`, `twintype` (the three programs of the table): verified,
+and `quiet` skipped for the name.
+
+**Not audited.** What else can differ between the plain build and the one Verus
+compiles was not enumerated: this amendment closes the three shapes that were measured
+and the kinds of definition listed above. Known to be outside: attribute and derive
+macros of dependencies (the recorded trust boundary); a gated `impl` of an inherent
+method or of a foreign trait whose twin differs (the existing rules cover trait
+methods through "divergent" traits, and impl headers by their text); `#[cfg_attr(..,
+path = ..)]` on a module (the entries then name another file and do not match). The
+driver's check of literals (amendment (2)) stays until that enumeration exists.

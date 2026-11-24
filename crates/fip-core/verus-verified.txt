@@ -19,7 +19,7 @@ source src/slice.rs 2247a5f17429a225750b56afdbbcb78b0082f6af36e6b145273375f2f0fb
 source src/slot.rs 58e62907ea83484297a4cfc1a895f4305eae48855a9e34a44e0382901f3dbf40
 source src/spec.rs 7935bb81bc26a3fb40aef360f94e86604fcaf8602956e7fc045e9df35a498b20
 source src/strict.rs 16cc0ce81094f63954b2276f6887022fa7bae4c929cc1cfb9be57558d072eaf3
-import fip_strict 200a369902a003b2be1feea1e72b9576cf120c16a865fde3765ad7a4cb864d05 2024
+import fip_strict acd202055206e88da11ab99343253dd9f913aa18c870105e2420d5abab5b2e2b 2024
 fn fip_core::slice::compact src/slice.rs:75 f87efb333abd3543369faeb49cd0d39c743145d9e53c6affb6e80b8e9d37e52c requires opaque:e2901c9f7fdc0e176b499136dfaab12b21cadd2f02715f0c49a7281b52a45011 opaque:41aa57f5daeca134b627407240558a8b34cf02a926496a0e5328cf3560123839 -
 fn fip_core::slice::compact_map src/slice.rs:436 8a5b57fa3823a001d9d7a174852df9a1ba173716b83cd78bb434c3163c53ffcc requires opaque:2aac94d8d2cb29332d0cde80513f7ad0d41c11265a804982f0b3d8340722b93a opaque:1113b18b796150d855da6afd78e23b94931a487034f1ba53cd8b0da6eaba81eb -
 fn fip_core::slice::compact_map_st src/slice.rs:566 99bc8bdb2bc40e9216e89aa16f942d7ecca4a4044723c7757852015de16b3cf7 requires 0 0 -
@@ -30,13 +30,13 @@ fn fip_core::slice::swap src/slice.rs:42 3613d1d3f849b02493bdea65b74c9a6cef66580
 fn fip_core::slice::swap_lt src/slice.rs:20 27d224243561ab5daa606997d244bfd7d6339b7ebaf84466658cbcf488501639 requires 0 0 -
 fn fip_core::slot::replace src/slot.rs:9 4d63939287394155056a667ca1e3910b736756857ec5596f53d2a31a08d55dc7 - 0 0 -
 fn fip_core::slot::update src/slot.rs:38 88d40dac0b6cbef0087edc3541fd9cc61cb7a22891851830dec852ba6d87f53c requires opaque:e571657d71b1062dd66108a9cd11c50d519a8fdedff56a7c90968c453dec2ce0 opaque:21293237c53c3f1b731e0d822674dc8680c1c371bc5092fd00d77a8d8cf1b0b8 -
-skip fip_core::strict::compact relies on the specification of `fip_core::spec::compact_fip_post`, whose code may differ in the driver's build
-skip fip_core::strict::compact_map relies on the specification of `fip_core::spec::compact_map_fip_post`, whose code may differ in the driver's build
-skip fip_core::strict::compact_map_st relies on the specification of `fip_core::spec::state::compact_map_st_fip_ok`, whose code may differ in the driver's build
-skip fip_core::strict::dedup_by relies on the specification of `fip_core::spec::dedup_fip_post`, whose code may differ in the driver's build
-skip fip_core::strict::map_in_place relies on the specification of `fip_strict::FipFn::call`, whose code may differ in the driver's build
-skip fip_core::strict::map_in_place_st relies on the specification of `fip_core::spec::state::map_st_fip_ok`, whose code may differ in the driver's build
-skip fip_core::strict::update relies on the specification of `fip_strict::FipFn::call`, whose code may differ in the driver's build
+skip fip_core::strict::compact the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
+skip fip_core::strict::compact_map the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
+skip fip_core::strict::compact_map_st the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
+skip fip_core::strict::dedup_by the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
+skip fip_core::strict::map_in_place the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
+skip fip_core::strict::map_in_place_st the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
+skip fip_core::strict::update the item text has the name `Output`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ
 divergent AllocFreeDrop ../fip-strict/src/lib.rs:299
 divergent AllocFreeDrop ../fip-strict/src/lib.rs:301
 divergent AllocFreeDrop ../fip-strict/src/lib.rs:642

@@ -734,6 +734,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     // builds: callers verified against their `ensures` are not listed.
     let mut imported_skips: Vec<String> = Vec::new();
     let mut imported_divergent: Vec<String> = Vec::new();
+    let mut imported_gated: Vec<String> = Vec::new();
     let mut imports: Vec<(String, String, String)> = Vec::new();
     for (name, vir) in verusgen::imports(&flags) {
         let Some((_, side)) = import_sidecars.iter().find(|(n, _)| *n == name) else {
@@ -757,6 +758,21 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
                     sc.edition.clone(),
                 ));
                 imported_divergent.extend(sc.divergent.iter().map(|(t, _, _)| t.clone()));
+                // The names its sources gate (`check_import` found the sources unchanged).
+                let dir = Path::new(side).parent().unwrap_or(Path::new("."));
+                let mut texts = Vec::new();
+                for (path, _) in &sc.sources {
+                    match std::fs::read_to_string(dir.join(path)) {
+                        Ok(t) => texts.push((path.clone(), t)),
+                        Err(e) => {
+                            return fail(&format!("import `{name}` refused: {path}: {e}"));
+                        }
+                    }
+                }
+                match verus::gated_names(&texts) {
+                    Ok(g) => imported_gated.extend(g.names),
+                    Err(e) => return fail(&format!("import `{name}` refused: {e}")),
+                }
             }
             Err(e) => return fail(&format!("import `{name}` refused: {e}")),
         }
@@ -809,6 +825,7 @@ fn verus_sidecar(mut args: Vec<String>) -> ExitCode {
     info.imports = imports;
     info.imported_skips = imported_skips;
     info.imported_divergent = imported_divergent;
+    info.imported_gated = imported_gated;
     println!(
         "verification results:: {} verified, 0 errors",
         info.verified

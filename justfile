@@ -741,6 +741,140 @@ verify-sidecar: verify-strict
     printf '%s\n' '#![feature(proc_macro_hygiene)]' 'use vstd::prelude::*;' '#[verus_verify]' 'pub trait Pick: Sized {' '    #[verus_spec(r => allocates 1 deallocates 0)]' '    fn pick(self) -> Option<Box<u8>>;' '}' '#[verus_verify]' 'impl Pick for u64 {' '    #[verus_spec(r => allocates 0 deallocates 0)]' '    fn pick(self) -> Option<Box<u8>> { None }' '}' '#[verus_verify]' 'impl Pick for i32 {' '    #[verus_spec(r => allocates 1 deallocates 0)]' '    fn pick(self) -> Option<Box<u8>> { Some(Box::new(1u8)) }' '}' '#[verus_spec(r => allocates 0 deallocates 0)]' 'pub fn ghost_typed() -> Option<Box<u8>> {' '    let n = 1;' '    proof! { let g: u64 = n; }' '    n.pick()' '}' > "$out/ghosttyped/src/lib.rs"
     ign ghosttyped 'has type `i32` in the compiled program, but `u64` in the verified program'
     grep -q 'verification results:: [0-9]* verified, 0 errors' "$out/ghosttyped.log" || { echo "NOTE: Verus no longer prints a successful verification before this error (update the comment above)"; exit 1; }
+    # A name that the two builds define differently (2026-11-24: the generator listed a
+    # function whose loop allocates in the plain build only, through a `macro_rules!`, a
+    # `const` or a type alias defined once under `cfg(verus_keep_ghost)` and once under
+    # its negation, and a `#[fip]` caller passed): the function is skipped.
+    twin() {  # crate
+      mkdir -p "$out/$1/src"; cat > "$out/$1/src/lib.rs"
+      (cd "$out" && $gen --crate-name "$1" --crate-dir "$1" --out "$out/$1.txt" -- {{verus}} --crate-type=lib --crate-name "$1" {{verus_flags}} "$1/src/lib.rs") > "$out/$1.log" 2>&1 || { echo "FAIL: the crate $1 was not verified"; cat "$out/$1.log"; exit 1; }
+      grep -q "^skip $1::quiet the item text has the name " "$out/$1.txt" || { echo "FAIL: $1::quiet is not skipped for the name it uses"; cat "$out/$1.txt"; exit 1; }
+      if grep -q "^fn $1::quiet " "$out/$1.txt"; then echo "FAIL: $1::quiet is listed"; exit 1; fi
+    }
+    twin twinmacro <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(verus_keep_ghost)]
+    macro_rules! tick {
+        ($x:expr) => {};
+    }
+    #[cfg(not(verus_keep_ghost))]
+    macro_rules! tick {
+        ($x:expr) => {
+            core::mem::forget(Box::new($x));
+        };
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            tick!(i);
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
+    twin twinconst <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(verus_keep_ghost)]
+    #[verus_verify]
+    pub const N: usize = 0;
+    #[cfg(not(verus_keep_ghost))]
+    pub const N: usize = 64;
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            if N > 0 {
+                core::mem::forget(Box::new(1u8));
+            }
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
+    twin twintype <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg(verus_keep_ghost)]
+    pub type Cell = u64;
+    #[cfg(not(verus_keep_ghost))]
+    pub type Cell = i32;
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    pub trait Mk: Sized {
+        #[cfg_attr(verus_keep_ghost, verus_spec(r => allocates 1 deallocates 0))]
+        fn mk(self) -> Option<Box<u8>>;
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    impl Mk for u64 {
+        #[cfg_attr(verus_keep_ghost, verus_spec(r => allocates 0 deallocates 0))]
+        fn mk(self) -> Option<Box<u8>> {
+            None
+        }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    impl Mk for i32 {
+        #[cfg_attr(verus_keep_ghost, verus_spec(r => allocates 1 deallocates 0))]
+        fn mk(self) -> Option<Box<u8>> {
+            Some(Box::new(1u8))
+        }
+    }
+
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(k: u8) {
+        let mut i = 0u8;
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant
+                allocated() == 0,
+                deallocated() == 0,
+            decreases k - i,
+        ))]
+        while i < k {
+            let n = i as Cell;
+            if let Some(b) = n.mk() {
+                core::mem::forget(b);
+            }
+            i += 1;
+        }
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(k: u8) {
+        quiet(k);
+    }
+    TWIN
     # A standard-library crate run (`--is-vstd`; the fork audit, 2026-11-09): refused
     # before Verus runs, nothing written (the driver also refuses a sidecar recording it).
     if (cd "$fx" && $gen --crate-name vside --crate-dir vside --out "$out/isvstd.txt" -- {{verus}} --crate-type=lib --crate-name vside {{verus_flags}} --is-vstd vside/src/lib.rs) 2> "$out/isvstd.err"; then # negative probe

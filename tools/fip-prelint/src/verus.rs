@@ -987,6 +987,446 @@ pub fn line_of(src: &str, at: usize) -> usize {
         + 1
 }
 
+// ---------------------------------------------------------------------------------
+// Names defined for one build only (decision 2026-11-01-fip-prelint, amendment
+// 2026-11-24 (4)).
+
+/// Crates whose items exist only in Verus's build by design: a gated `use` of one of
+/// them brings ghost names, which exec code compiled in both builds cannot use.
+const VERUS_ROOTS: &[&str] = &[
+    "vstd",
+    "verus_builtin",
+    "verus_builtin_macros",
+    "builtin",
+    "builtin_macros",
+];
+
+/// The macros whose arguments are ghost code, when the crate does not define them
+/// otherwise than as empty shims for plain builds (see [`Gated::ghost_macros`]).
+const GHOST_MACROS: &[&str] = &["proof", "proof_decl"];
+
+/// What [`gated_names`] finds in the sources of a crate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Gated {
+    /// Names that mean something else, or exist only, in one of the two builds: a
+    /// `const`, `static`, `type`, `macro_rules!`, `struct`, `enum` or `union` defined
+    /// under a `#[cfg(..)]` (on the item, on an item around it, or in a module file
+    /// declared under one), a name a gated `use` brings from another crate than
+    /// Verus's, and every definition of those kinds that names one.
+    pub names: std::collections::BTreeSet<String>,
+    /// Of `proof` and `proof_decl`: those the crate does not define itself, or only as
+    /// shims that expand to nothing in plain builds. Their arguments are ghost code.
+    pub ghost_macros: std::collections::BTreeSet<String>,
+}
+
+fn code_toks(src: &str) -> Vec<(Tok, usize, usize)> {
+    lex(src)
+        .into_iter()
+        .filter(|t| !matches!(t.0, Tok::Ws | Tok::Comment | Tok::OuterDoc))
+        .collect()
+}
+
+/// The index after the item that starts at token `k` (through its `;`, or its closing
+/// `}`), with attributes before it counted in.
+fn item_end(toks: &[(Tok, usize, usize)], k: usize) -> usize {
+    let mut depth = 0usize;
+    let mut m = k;
+    while m < toks.len() {
+        match toks[m].0 {
+            Tok::Punct(b'(' | b'[') => depth += 1,
+            Tok::Punct(b')' | b']') => depth = depth.saturating_sub(1),
+            Tok::Punct(b';') if depth == 0 => return m + 1,
+            Tok::Punct(b'{') if depth == 0 => {
+                let mut braces = 0usize;
+                while m < toks.len() {
+                    match toks[m].0 {
+                        Tok::Punct(b'{') => braces += 1,
+                        Tok::Punct(b'}') => {
+                            braces -= 1;
+                            if braces == 0 {
+                                return m + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    m += 1;
+                }
+                return toks.len();
+            }
+            _ => {}
+        }
+        m += 1;
+    }
+    toks.len()
+}
+
+/// Token ranges `k..end` of the items of `toks` with a `#[cfg(..)]` attribute, any
+/// predicate (`k` at the `#`); the whole file for an inner `#![cfg(..)]`.
+fn gated_items(src: &str, toks: &[(Tok, usize, usize)]) -> Vec<(usize, usize)> {
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let is = |k: usize, s: &str| k < toks.len() && text(k) == s;
+    let mut out = Vec::new();
+    for k in 0..toks.len() {
+        if !is(k, "#") {
+            continue;
+        }
+        if is(k + 1, "!") && is(k + 2, "[") && is(k + 3, "cfg") && is(k + 4, "(") {
+            return vec![(0, toks.len())];
+        }
+        if is(k + 1, "[") && is(k + 2, "cfg") && is(k + 3, "(") {
+            out.push((k, item_end(toks, k + 1)));
+        }
+    }
+    out
+}
+
+/// The leaf names of the `use` tree in `toks[from..to]` (after `use`, before `;`), and
+/// whether it has a glob; `None` if its root is one of [`VERUS_ROOTS`].
+fn use_leaves(
+    src: &str,
+    toks: &[(Tok, usize, usize)],
+    from: usize,
+    to: usize,
+) -> Option<(Vec<String>, bool)> {
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let root = (from..to).find(|&k| toks[k].0 == Tok::Ident).map(text)?;
+    if VERUS_ROOTS.contains(&root) {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    let mut glob = false;
+    let mut open: Vec<usize> = Vec::new();
+    for k in from..=to {
+        let boundary = k == to || matches!(toks[k].0, Tok::Punct(b',' | b'}' | b';'));
+        if k < to {
+            match toks[k].0 {
+                Tok::Punct(b'{') => open.push(k),
+                Tok::Punct(b'*') => glob = true,
+                _ => {}
+            }
+        }
+        if boundary && k > from && toks[k - 1].0 == Tok::Ident {
+            let leaf = text(k - 1);
+            if leaf == "self" {
+                // `a::b::{self}`: the name is `b`.
+                if let Some(&b) = open.last()
+                    && b >= from + 3
+                    && toks[b - 3].0 == Tok::Ident
+                {
+                    leaves.push(text(b - 3).to_string());
+                }
+            } else {
+                leaves.push(leaf.to_string());
+            }
+        }
+        if k < to && toks[k].0 == Tok::Punct(b'}') {
+            open.pop();
+        }
+    }
+    Some((leaves, glob))
+}
+
+struct Def {
+    kind: &'static str,
+    name: String,
+    /// Token range of the definition, from its keyword.
+    at: usize,
+    end: usize,
+}
+
+/// The `const`, `static`, `type`, `macro_rules!`, `struct`, `enum` and `union`
+/// definitions of `toks`, by their names (a `const` generic parameter, `*const T` and
+/// `const fn` are none).
+fn definitions(src: &str, toks: &[(Tok, usize, usize)]) -> Vec<Def> {
+    let text = |k: usize| &src[toks[k].1..toks[k].2];
+    let ident = |k: usize| k < toks.len() && toks[k].0 == Tok::Ident;
+    let is = |k: usize, s: &str| k < toks.len() && text(k) == s;
+    let mut out = Vec::new();
+    for k in 0..toks.len() {
+        if !ident(k) {
+            continue;
+        }
+        let prev = if k > 0 { text(k - 1) } else { "" };
+        let (kind, n) = match text(k) {
+            "const" if !matches!(prev, "<" | "," | "*" | "~") && ident(k + 1) && is(k + 2, ":") => {
+                ("const", k + 1)
+            }
+            "static" if ident(k + 1) && is(k + 1, "mut") && ident(k + 2) && is(k + 3, ":") => {
+                ("static", k + 2)
+            }
+            "static" if ident(k + 1) && is(k + 2, ":") => ("static", k + 1),
+            "type"
+                if ident(k + 1)
+                    && (is(k + 2, "=") || is(k + 2, "<") || is(k + 2, ":") || is(k + 2, ";")) =>
+            {
+                ("type", k + 1)
+            }
+            "macro_rules" if is(k + 1, "!") && ident(k + 2) => ("macro_rules", k + 2),
+            "struct" | "enum" if ident(k + 1) => ("type-def", k + 1),
+            "union" if ident(k + 1) && (is(k + 2, "{") || is(k + 2, "<")) => ("type-def", k + 1),
+            _ => continue,
+        };
+        let name = text(n).to_string();
+        if name == "_" {
+            continue;
+        }
+        out.push(Def {
+            kind,
+            name,
+            at: k,
+            end: item_end(toks, k),
+        });
+    }
+    out
+}
+
+/// Whether the `macro_rules!` in `toks[at..end]` expands to nothing in every arm.
+fn empty_macro(toks: &[(Tok, usize, usize)], at: usize, end: usize) -> bool {
+    let p = |k: usize, c: u8| k < end && toks[k].0 == Tok::Punct(c);
+    let mut arms = 0;
+    for k in at..end {
+        if p(k, b'=') && p(k + 1, b'>') {
+            arms += 1;
+            if !(p(k + 2, b'{') && p(k + 3, b'}')) {
+                return false;
+            }
+        }
+    }
+    arms > 0
+}
+
+/// The names of `files` (path relative to the crate directory, text) that the two
+/// builds may give different meanings ([`Gated`]). The driver's build has no
+/// `verus_keep_ghost`: a `macro_rules!`, a `const` or a type alias defined once for each
+/// build, or defined for one and found elsewhere by the other (a glob import, an
+/// earlier `macro_rules!`), makes one function text two programs (measured
+/// 2026-11-24: a `#[fip]` caller of a loop that allocates in the plain build only
+/// passed with the bound Verus proved for its own build).
+///
+/// `Err` for a gated glob import from another crate than Verus's: its names cannot be
+/// listed.
+pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
+    use std::collections::BTreeSet;
+    struct File<'a> {
+        path: &'a str,
+        src: &'a str,
+        toks: Vec<(Tok, usize, usize)>,
+        regions: Vec<(usize, usize)>,
+        defs: Vec<Def>,
+    }
+    let mut parsed: Vec<File> = files
+        .iter()
+        .map(|(path, src)| {
+            let toks = code_toks(src);
+            let regions = gated_items(src, &toks);
+            let defs = definitions(src, &toks);
+            File {
+                path,
+                src,
+                toks,
+                regions,
+                defs,
+            }
+        })
+        .collect();
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut gated_mods: BTreeSet<String> = BTreeSet::new();
+    // Gated `use` and `mod name;` items.
+    for f in &parsed {
+        let text = |k: usize| &f.src[f.toks[k].1..f.toks[k].2];
+        for &(a, b) in &f.regions {
+            // After the attributes and the visibility.
+            let mut k = a;
+            while k < b && text(k) == "#" {
+                let mut depth = 0usize;
+                k += 1;
+                while k < b {
+                    match f.toks[k].0 {
+                        Tok::Punct(b'[' | b'(') => depth += 1,
+                        Tok::Punct(b']' | b')') => {
+                            depth -= 1;
+                            if depth == 0 {
+                                k += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+            }
+            if k < b && text(k) == "pub" {
+                k += 1;
+                if k < b && text(k) == "(" {
+                    while k < b && text(k) != ")" {
+                        k += 1;
+                    }
+                    k += 1;
+                }
+            }
+            if k >= b {
+                continue;
+            }
+            match text(k) {
+                "use" => {
+                    let to = if text(b - 1) == ";" { b - 1 } else { b };
+                    if let Some((leaves, glob)) = use_leaves(f.src, &f.toks, k + 1, to) {
+                        if glob {
+                            return Err(format!(
+                                "{}:{}: a glob import under `#[cfg(..)]` from another crate than Verus's: the names it brings exist in one build only, and the other build may find them elsewhere",
+                                f.path,
+                                line_of(f.src, f.toks[a].1)
+                            ));
+                        }
+                        names.extend(leaves);
+                    }
+                }
+                "mod" if k + 2 < b && f.toks[k + 1].0 == Tok::Ident && text(k + 2) == ";" => {
+                    gated_mods.insert(text(k + 1).to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    // A module file declared under a gate is gated as a whole.
+    for f in &mut parsed {
+        let p = std::path::Path::new(f.path);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let in_gated_mod = gated_mods.contains(stem)
+            || p.parent().is_some_and(|d| {
+                d.components().any(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .is_some_and(|c| gated_mods.contains(c))
+                })
+            });
+        if in_gated_mod {
+            f.regions = vec![(0, f.toks.len())];
+        }
+    }
+    let mut ghost_macros: BTreeSet<String> = GHOST_MACROS.iter().map(|m| m.to_string()).collect();
+    for f in &parsed {
+        for d in &f.defs {
+            let gated = f.regions.iter().any(|&(a, b)| a <= d.at && d.at < b);
+            let shim = d.kind == "macro_rules"
+                && GHOST_MACROS.contains(&d.name.as_str())
+                && gated
+                && empty_macro(&f.toks, d.at, d.end);
+            if d.kind == "macro_rules" && GHOST_MACROS.contains(&d.name.as_str()) && !shim {
+                ghost_macros.remove(&d.name);
+            }
+            if gated && !shim {
+                names.insert(d.name.clone());
+            }
+        }
+    }
+    // Definitions naming one, to a fixpoint.
+    loop {
+        let mut changed = false;
+        for f in &parsed {
+            for d in &f.defs {
+                if names.contains(&d.name) {
+                    continue;
+                }
+                let hit = (d.at + 1..d.end).any(|k| {
+                    f.toks[k].0 == Tok::Ident && names.contains(&f.src[f.toks[k].1..f.toks[k].2])
+                });
+                if hit {
+                    names.insert(d.name.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(Gated {
+        names,
+        ghost_macros,
+    })
+}
+
+/// The first identifier of `item`'s exec code that is one of `gated.names`:
+/// attributes (specifications are written in them) and the arguments of
+/// `gated.ghost_macros` apart.
+///
+/// A name in `traits` (the traits declared or implemented in one build only,
+/// [`divergent_traits`]) counts only where it is called or is the start of a path
+/// (`X(..)`, `X!(..)`, `X::..`). As a bound (`F: Fn(T) -> T + crate::X`) it is the
+/// marker pattern, which has its own rules: the generator taints a function naming a
+/// method of such a trait, and the driver takes no Verus bound for a generic function.
+pub fn gated_name_use(
+    item: &str,
+    gated: &Gated,
+    traits: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let toks = code_toks(item);
+    let text = |k: usize| &item[toks[k].1..toks[k].2];
+    let close = |open: u8| match open {
+        b'(' => b')',
+        b'[' => b']',
+        _ => b'}',
+    };
+    // The index after the group opening at `k`.
+    let skip_group = |k: usize| -> usize {
+        let Tok::Punct(o) = toks[k].0 else {
+            return k + 1;
+        };
+        let c = close(o);
+        let mut depth = 0usize;
+        let mut m = k;
+        while m < toks.len() {
+            if toks[m].0 == Tok::Punct(o) {
+                depth += 1;
+            } else if toks[m].0 == Tok::Punct(c) {
+                depth -= 1;
+                if depth == 0 {
+                    return m + 1;
+                }
+            }
+            m += 1;
+        }
+        toks.len()
+    };
+    let mut k = 0;
+    while k < toks.len() {
+        if text(k) == "#" {
+            let b = if k + 1 < toks.len() && text(k + 1) == "!" {
+                k + 2
+            } else {
+                k + 1
+            };
+            if b < toks.len() && text(b) == "[" {
+                k = skip_group(b);
+                continue;
+            }
+        }
+        if toks[k].0 == Tok::Ident {
+            let w = text(k);
+            if gated.ghost_macros.contains(w)
+                && k + 2 < toks.len()
+                && text(k + 1) == "!"
+                && matches!(toks[k + 2].0, Tok::Punct(b'(' | b'[' | b'{'))
+            {
+                k = skip_group(k + 2);
+                continue;
+            }
+            if gated.names.contains(w) {
+                let used = k + 1 < toks.len()
+                    && (matches!(toks[k + 1].0, Tok::Punct(b'(' | b'!'))
+                        || (toks[k + 1].0 == Tok::Punct(b':')
+                            && toks.get(k + 2).is_some_and(|t| t.0 == Tok::Punct(b':'))));
+                if used || !traits.contains(w) {
+                    return Some(w.to_string());
+                }
+            }
+        }
+        k += 1;
+    }
+    None
+}
+
 /// Byte ranges of the items that carry exactly `#[cfg(verus_keep_ghost)]` (from the
 /// attribute through the item's closing `}` or `;`): code only the Verus build
 /// compiles, such as a `verus! { .. }` block with Verus-only twins of plain items.
@@ -2474,6 +2914,155 @@ mod tests {
         assert_eq!(
             lib_crate_name("[package]\nname = \"a-b\"\n"),
             Some("a_b".to_string())
+        );
+    }
+
+    fn gated_of(files: &[(&str, &str)]) -> Result<Gated, String> {
+        let files: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect();
+        gated_names(&files)
+    }
+
+    /// Amendment 2026-11-24 (4): what the two builds may define differently.
+    #[test]
+    fn gated_definitions_are_found() {
+        // A macro, a const, a static, a type alias and a struct, each defined once per build.
+        let twins = "#[cfg(verus_keep_ghost)]\nmacro_rules! tick { ($x:expr) => {}; }\n#[cfg(not(verus_keep_ghost))]\nmacro_rules! tick { ($x:expr) => { core::mem::forget(Box::new($x)); }; }\n#[cfg(verus_keep_ghost)]\npub const N: usize = 0;\n#[cfg(not(verus_keep_ghost))]\npub const N: usize = 64;\n#[cfg(not(verus_keep_ghost))]\nstatic mut S: u8 = 0;\n#[cfg(verus_keep_ghost)]\npub type Cell = u64;\n#[cfg(not(verus_keep_ghost))]\npub struct Buf(Box<u8>);\npub const FREE: usize = 1;\npub fn f<const K: usize>(p: *const u8) {}\n";
+        let g = gated_of(&[("src/lib.rs", twins)]).unwrap();
+        for n in ["tick", "N", "S", "Cell", "Buf"] {
+            assert!(g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        // Not gated; a const generic parameter and `*const T` define nothing.
+        for n in ["FREE", "K", "u8", "f"] {
+            assert!(!g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        // Definitions that name a gated one, to a fixpoint; inside a gated item too.
+        let chain = "#[cfg(verus_keep_ghost)]\nverus! {\n    pub const N: usize = 0;\n}\npub const M: usize = N + 1;\npub struct W { c: [u8; M] }\nmacro_rules! use_w { () => { W { c: [0; M] } }; }\npub const OTHER: usize = 3;\n";
+        let g = gated_of(&[("src/lib.rs", chain)]).unwrap();
+        for n in ["N", "M", "W", "use_w"] {
+            assert!(g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        assert!(!g.names.contains("OTHER"));
+        // A module file declared under a gate is gated as a whole; `#![cfg(..)]` too.
+        let g = gated_of(&[
+            (
+                "src/lib.rs",
+                "#[cfg(verus_keep_ghost)]\npub mod spec;\nmod plain;\n",
+            ),
+            ("src/spec.rs", "pub const K: usize = 1;\n"),
+            ("src/spec/state.rs", "pub type T = u8;\n"),
+            ("src/plain.rs", "pub const P: usize = 1;\n"),
+            (
+                "src/inner.rs",
+                "#![cfg(not(verus_keep_ghost))]\npub const Q: usize = 1;\n",
+            ),
+        ])
+        .unwrap();
+        assert!(g.names.contains("K") && g.names.contains("T") && g.names.contains("Q"));
+        assert!(!g.names.contains("P"));
+    }
+
+    #[test]
+    fn gated_uses_are_found() {
+        // Verus's crates bring ghost names; other paths bring names by their leaves.
+        let src = "#[cfg(verus_keep_ghost)]\nuse vstd::prelude::*;\n#[cfg(verus_keep_ghost)]\npub use vstd::alloc_check::NoDeallocDrop;\n#[cfg(verus_keep_ghost)]\nuse crate::spec::{a, b as c, m::{self, d}};\n#[cfg(verus_keep_ghost)]\npub(crate) use core::marker::Copy as DropFreeFn;\nuse core::mem::swap;\n";
+        let g = gated_of(&[("src/lib.rs", src)]).unwrap();
+        for n in ["a", "c", "m", "d", "DropFreeFn"] {
+            assert!(g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        for n in [
+            "b",
+            "spec",
+            "core",
+            "marker",
+            "Copy",
+            "swap",
+            "NoDeallocDrop",
+            "prelude",
+        ] {
+            assert!(!g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        // A gated glob from another crate than Verus's cannot be listed.
+        let e = gated_of(&[("src/lib.rs", "#[cfg(verus_keep_ghost)]\nuse a::*;\n")]).unwrap_err();
+        assert!(
+            e.starts_with("src/lib.rs:1: a glob import under `#[cfg(..)]`"),
+            "{e}"
+        );
+        assert!(gated_of(&[("src/lib.rs", "use a::*;\n")]).is_ok());
+    }
+
+    #[test]
+    fn ghost_macro_shims() {
+        // fip-core's shims: nothing in plain builds, vstd's macros under Verus.
+        let shim = "#[cfg(not(verus_keep_ghost))]\nmacro_rules! proof { ($($t:tt)*) => {}; }\n#[cfg(not(verus_keep_ghost))]\nmacro_rules! proof_decl { ($($t:tt)*) => {}; }\n";
+        let g = gated_of(&[("src/lib.rs", shim)]).unwrap();
+        assert!(g.names.is_empty(), "{:?}", g.names);
+        assert!(g.ghost_macros.contains("proof") && g.ghost_macros.contains("proof_decl"));
+        // A shim that expands to code is a gated macro like another, and its arguments
+        // are not ghost code; so is an ungated macro of that name.
+        let full =
+            "#[cfg(not(verus_keep_ghost))]\nmacro_rules! proof { ($($t:tt)*) => { $($t)* }; }\n";
+        let g = gated_of(&[("src/lib.rs", full)]).unwrap();
+        assert!(g.names.contains("proof") && !g.ghost_macros.contains("proof"));
+        let own = "macro_rules! proof { ($($t:tt)*) => { $($t)* }; }\n";
+        let g = gated_of(&[("src/lib.rs", own)]).unwrap();
+        assert!(!g.names.contains("proof") && !g.ghost_macros.contains("proof"));
+        assert!(g.ghost_macros.contains("proof_decl"));
+    }
+
+    #[test]
+    fn gated_names_in_exec_code() {
+        let none = std::collections::BTreeSet::new();
+        let g = Gated {
+            names: ["N", "tick", "post", "Marker"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ghost_macros: ["proof"].iter().map(|s| s.to_string()).collect(),
+        };
+        let hit = |item: &str| gated_name_use(item, &g, &none);
+        assert_eq!(hit("pub fn f() -> usize { N }").as_deref(), Some("N"));
+        assert_eq!(
+            hit("pub fn f(i: u8) { tick!(i); }").as_deref(),
+            Some("tick")
+        );
+        // Specifications (attributes) and ghost blocks are not exec code.
+        assert_eq!(
+            hit(
+                "#[cfg_attr(verus_keep_ghost, verus_spec(r => ensures post(r), N > 0))]\npub fn f() -> u8 {\n    #[cfg_attr(verus_keep_ghost, verus_spec(invariant post(0)))]\n    loop {}\n    proof! { assert(post(N)); }\n}"
+            ),
+            None
+        );
+        assert_eq!(
+            hit("// N\n/// tick\npub fn f() -> &'static str { \"N\" }"),
+            None
+        );
+        // Without the shim the arguments of `proof!` are code.
+        let g2 = Gated {
+            names: g.names.clone(),
+            ghost_macros: Default::default(),
+        };
+        assert_eq!(
+            gated_name_use("pub fn f() { proof! { let _x = N; } }", &g2, &none).as_deref(),
+            Some("N")
+        );
+        // A divergent trait as a bound is the marker pattern; called, or as a path, it is not.
+        let traits: std::collections::BTreeSet<String> = ["Marker".to_string()].into();
+        let with = |item: &str| gated_name_use(item, &g, &traits);
+        assert_eq!(
+            with("pub fn f<T: crate::Marker + Copy>(t: T) where T: Marker {}"),
+            None
+        );
+        assert_eq!(with("pub fn f() { Marker(); }").as_deref(), Some("Marker"));
+        assert_eq!(
+            with("pub fn f() { Marker::go(); }").as_deref(),
+            Some("Marker")
+        );
+        assert_eq!(
+            hit("pub fn f<T: Marker>(t: T) {}").as_deref(),
+            Some("Marker")
         );
     }
 }

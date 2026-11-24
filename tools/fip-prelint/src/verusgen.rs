@@ -767,6 +767,8 @@ pub struct RunInfo {
     /// Traits the run's `--import-sidecar`s record as divergent (their `divergent`
     /// lines): a function naming one of their methods is skipped.
     pub imported_divergent: Vec<String>,
+    /// [`verus::Gated::names`] of the sources of the imported crates.
+    pub imported_gated: Vec<String>,
 }
 
 /// Checks the `--output-json` result: success, no errors, the entire crate.
@@ -802,6 +804,7 @@ pub fn run_info(json: &Json) -> Result<RunInfo, String> {
         imports: Vec::new(),
         imported_skips: Vec::new(),
         imported_divergent: Vec::new(),
+        imported_gated: Vec::new(),
     })
 }
 
@@ -1134,6 +1137,16 @@ pub fn build(
     // `src/`); an imported crate's sources passed the same scan in its own run.
     let files: Vec<PathBuf> = sources.iter().map(|s| crate_dir.join(s)).collect();
     cfg_check_files(crate_dir, &files)?;
+    // Names the two builds may give different meanings (amendment 2026-11-24 (4)).
+    let mut texts: Vec<(String, String)> = Vec::new();
+    for s in &sources {
+        let text = std::fs::read_to_string(crate_dir.join(s))
+            .map_err(|e| format!("{s}: cannot read: {e}"))?;
+        texts.push((s.clone(), text));
+    }
+    let mut gated =
+        verus::gated_names(&texts).map_err(|e| format!("{e}, so no sidecar is written"))?;
+    gated.names.extend(info.imported_gated.iter().cloned());
     let mut source_hashes = Vec::new();
     // Traits implemented or declared differently in the two builds (phase 4 of
     // decision 2026-11-06-redesign-verus-allocates): in any source of the run, or
@@ -1220,6 +1233,16 @@ pub fn build(
             skipped.push((
                 f.path.clone(),
                 format!("{SKIP_CFG_ITEM}{c}: the driver's build and Verus's may differ"),
+            ));
+            tainted.insert(verus::impl_key(&f.path));
+            continue;
+        }
+        if let Some(n) = verus::gated_name_use(&src[lo..hi], &gated, &divergent_names) {
+            skipped.push((
+                f.path.clone(),
+                format!(
+                    "{SKIP_CFG_ITEM}the name `{n}`, which is defined under a `cfg` (or by a definition that names one that is): the driver's build and Verus's may differ"
+                ),
             ));
             tainted.insert(verus::impl_key(&f.path));
             continue;
@@ -1462,6 +1485,7 @@ mod tests {
             imports: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
+            imported_gated: Vec::new(),
         };
         let fns = vir_functions(VIR).unwrap();
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
@@ -1528,6 +1552,7 @@ mod tests {
             imports: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
+            imported_gated: Vec::new(),
         };
         let info = RunInfo {
             imported_skips: vec!["dep::{impl}::x".to_string()],
@@ -1685,6 +1710,7 @@ mod tests {
             imports: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: vec!["Tick".to_string()],
+            imported_gated: Vec::new(),
         };
         let s = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap();
         let listed: Vec<&str> = s.fns.iter().map(|e| e.path.as_str()).collect();
@@ -1764,6 +1790,7 @@ mod tests {
             imports: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
+            imported_gated: Vec::new(),
         };
         let e = build(&dir, "t", &dir, &info, "4.16.0", &[], &fns).unwrap_err();
         assert!(
@@ -1806,6 +1833,7 @@ mod tests {
             imports: Vec::new(),
             imported_skips: Vec::new(),
             imported_divergent: Vec::new(),
+            imported_gated: Vec::new(),
         };
         let fns = vir_functions(vir).unwrap();
         assert!(!fns[0].expanded && fns[2].expanded);
