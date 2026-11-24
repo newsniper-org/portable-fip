@@ -2392,3 +2392,37 @@ both callers pass and the fixture fails); `just verify-sidecar`, crates `twinmod
 `twinpath`, `twinattr` (skipped), `twintrait` (refused); unit tests
 `gated_from_inside_and_by_attributes`, `gated_trait_imports_are_refused`,
 `gated_module_files`, `inner_cfg_attrs`.
+
+## Amendment 2026-11-24 (6): destructors run inside the standard library
+
+**Status:** done. Found by a review of amendment (5).
+
+The driver's rule on `Drop` impls looked at the drops of the listed body. A value moved
+into a function of the standard library is dropped there: measured after amendment (5),
+`v.clear()` on a `Vec<Tok>` with `#[cfg(not(verus_keep_ghost))] impl Drop for Tok`
+(which allocates) was listed and its `#[fip]` caller **passed**. The same holds for
+other impls of the standard library's traits that it calls itself (`sort` and `Ord`,
+`Vec::clone` and `Clone`); with `Option::<Num>::clone` and a `Clone` impl per build the
+function was already skipped (the trait is "divergent").
+
+- Generator: the type of an impl, under a gate, of a trait the crate does not declare
+  (`Drop`, `Clone`, `Ord`, ..) is a gated name (amendment (4)): a function whose exec
+  code names it is skipped, and callers of such functions with it. A value of the type
+  reaches a function through a parameter or return type (named), a field (the struct
+  naming it is a gated name too), or a callee (tainted). A blanket impl adds no name.
+- Driver: for a callee in the standard library, the `Drop` impls of its type arguments
+  are checked like those of a value dropped in the body. And the walk refuses what it
+  does not look into (`dyn Trait`, a projection that did not normalise, a coroutine)
+  instead of passing it; a type parameter passes (no Verus bound is taken for a
+  generic function).
+
+Measured, each layer alone: with the generator of amendment (5), the driver refuses
+the direct drop, `drop(Tok(i))` and `v.clear()`; with the new generator the three
+functions are skipped for the name `Tok`. `Verus` itself refuses a `Drop` impl marked
+`verifier::external` ("its `Drop` implementation is not visible"), so that is no way
+around.
+
+Gates: unit test `gated_impls_of_foreign_traits`; `just verify-sidecar`, crate
+`twindrop`. **No gate for the driver's two `Drop` rules**: the generator now skips every
+function that could reach them, and a fixture cannot list one. They were measured by
+hand as said above, with the generator binary of the commit before.

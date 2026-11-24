@@ -2876,8 +2876,33 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 .upvar_tys()
                 .iter()
                 .find_map(|x| self.unverified_destructor(x, depth + 1, seen)),
-            _ => None,
+            // A type parameter: no Verus bound is taken for a generic function, and an
+            // instance has its arguments.
+            ty::Param(_) => None,
+            // Whatever else needs a drop is not looked into (`dyn Trait`, whose
+            // destructor is not known here; a projection that did not normalise; a
+            // coroutine): refused.
+            _ => Some(format!(
+                "it drops a value of type `{t}`, whose `Drop` impls cannot be listed here"
+            )),
         }
+    }
+
+    /// [`Self::unverified_destructor`] of the type arguments of the function type `fty`
+    /// (of a callee in the standard library), with the instance's arguments.
+    fn unverified_destructor_in_args(&self, inst: Instance<'tcx>, fty: Ty<'tcx>) -> Option<String> {
+        let fty = self.subst(inst, fty).unwrap_or(fty);
+        let ty::FnDef(_, args) = *fty.kind() else {
+            return None;
+        };
+        // (fail closed on arguments with bound variables: not looked into)
+        let Some(args) = args.no_bound_vars() else {
+            return Some(format!(
+                "it calls `{fty}`, whose type arguments cannot be checked for `Drop` impls"
+            ));
+        };
+        args.types()
+            .find_map(|t| self.unverified_destructor(t, 0, &mut Vec::new()))
     }
 
     /// Why the Verus results of the verified function of `inst` may not be used for
@@ -2931,6 +2956,12 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 // `cfg_attr(.., path = ..)`: a loop calling a plain-only twin that
                 // allocates passed with the bound proved for Verus's twin).
                 if is_std_like(tcx, d0.krate) || tcx.intrinsic(d0).is_some() {
+                    // A function of the standard library drops values of its type
+                    // arguments without a drop in this body (`mem::drop(t)`,
+                    // `Vec::<T>::clear`): their `Drop` impls count as for a drop here.
+                    if let Some(why) = self.unverified_destructor_in_args(inst, fty) {
+                        return Some(why);
+                    }
                     continue;
                 }
                 let listed = tcx.is_mir_available(d0)
@@ -2969,6 +3000,9 @@ impl<'a, 'tcx> Analysis<'a, 'tcx> {
                 ));
             };
             if is_std_like(tcx, cd.krate) {
+                if let Some(why) = self.unverified_destructor_in_args(inst, fty) {
+                    return Some(why);
+                }
                 continue;
             }
             let listed = tcx.is_mir_available(cd)

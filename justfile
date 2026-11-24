@@ -981,6 +981,40 @@ verify-sidecar: verify-strict
         quiet(k);
     }
     TWIN
+    # A `Drop` impl of plain builds only, run inside the standard library (`v.clear()`):
+    # no call and no drop in the function names it. The function names the type.
+    twin twindrop <<'TWIN'
+    #![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
+    #![allow(unexpected_cfgs)]
+    #[cfg(verus_keep_ghost)]
+    use vstd::prelude::*;
+
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    pub struct Tok(pub u8);
+    #[cfg(not(verus_keep_ghost))]
+    impl Drop for Tok {
+        fn drop(&mut self) {
+            core::mem::forget(Box::new(self.0));
+        }
+    }
+    #[cfg(verus_keep_ghost)]
+    #[allow(unsafe_code)]
+    unsafe impl vstd::alloc_check::NoDeallocDrop for Tok {}
+    #[cfg(verus_keep_ghost)]
+    #[allow(unsafe_code)]
+    unsafe impl vstd::alloc_check::AllocFreeDrop for Tok {}
+
+    /// Takes its `Tok`s from the caller; the plain build runs `Tok`'s destructor in `clear`.
+    #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
+    pub fn quiet(v: &mut Vec<Tok>) {
+        v.clear();
+    }
+
+    #[cfg_attr(fip_prelint, fip::mark(kind = "fip"))]
+    pub fn via_quiet(v: &mut Vec<Tok>) {
+        quiet(v);
+    }
+    TWIN
     # A trait with methods imported once per build: `S.m()` calls another method in each,
     # and both are verified. The crate gets no sidecar.
     mkdir -p "$out/twintrait/src"; cat > "$out/twintrait/src/lib.rs" <<'TWIN'

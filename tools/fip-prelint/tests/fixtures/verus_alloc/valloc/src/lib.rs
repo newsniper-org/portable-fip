@@ -597,8 +597,10 @@ impl Drop for Tok {
 }
 
 /// Verus proves that the loop allocates and frees nothing: for it a `Tok` has no
-/// destructor. In this build each `Tok` dropped allocates. The Verus results of a
-/// function that drops a value whose `Drop` impl no sidecar lists are not used.
+/// destructor. In this build each `Tok` dropped allocates. The generator does not list
+/// a function that names a type with an impl of a foreign trait under a gate; and the
+/// driver would not use the Verus results of one that drops a value whose `Drop` impl
+/// no sidecar lists (measured with the generator rule absent; no fixture reaches it).
 #[cfg_attr(verus_keep_ghost, verus_spec(allocates 0 deallocates 0))]
 pub fn drops_tok(k: u8) {
     let mut i = 0u8;

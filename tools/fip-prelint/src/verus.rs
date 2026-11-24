@@ -1427,6 +1427,116 @@ pub fn gated_names(files: &[(String, String)]) -> Result<Gated, String> {
             }
         }
     }
+    // The traits the crate declares: an impl of another one (`Drop`, `Clone`, `Ord`,
+    // ..) under a gate can run where no call names it, inside the standard library
+    // (`mem::drop(t)`, `Vec::<T>::clear`, `sort`), so the type it is for is a gated
+    // name itself (measured: `v.clear()` on a `Vec<Tok>` with a plain-only
+    // `impl Drop for Tok` passed).
+    let local_traits: BTreeSet<String> = parsed
+        .iter()
+        .flat_map(|f| {
+            (0..f.toks.len()).filter_map(|k| {
+                let text = |k: usize| &f.src[f.toks[k].1..f.toks[k].2];
+                (f.toks[k].0 == Tok::Ident
+                    && text(k) == "trait"
+                    && f.toks.get(k + 1).is_some_and(|t| t.0 == Tok::Ident))
+                .then(|| text(k + 1).to_string())
+            })
+        })
+        .collect();
+    for f in &parsed {
+        let text = |k: usize| &f.src[f.toks[k].1..f.toks[k].2];
+        for &(a, b) in &f.regions {
+            for k in a..b {
+                if !(f.toks[k].0 == Tok::Ident && text(k) == "impl") {
+                    continue;
+                }
+                // `impl<..> Path<..> for Type<..> {`: the header, to its `{`.
+                let end = (k..b)
+                    .find(|&m| f.toks[m].0 == Tok::Punct(b'{'))
+                    .unwrap_or(b);
+                let Some(at_for) =
+                    (k..end).find(|&m| f.toks[m].0 == Tok::Ident && text(m) == "for")
+                else {
+                    continue;
+                };
+                // The generic parameters of the impl (a blanket impl is for none of
+                // the crate's types).
+                let mut params: BTreeSet<&str> = BTreeSet::new();
+                if k + 1 < end && text(k + 1) == "<" {
+                    let mut depth = 0usize;
+                    let mut m = k + 1;
+                    while m < at_for {
+                        match text(m) {
+                            "<" => depth += 1,
+                            ">" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {
+                                if depth == 1
+                                    && f.toks[m].0 == Tok::Ident
+                                    && matches!(text(m - 1), "<" | "," | "const")
+                                {
+                                    params.insert(text(m));
+                                }
+                            }
+                        }
+                        m += 1;
+                    }
+                }
+                // The trait and the type: the last identifier of each path, before any `<`.
+                let tail = |toks: &[(Tok, usize, usize)]| -> Option<&str> {
+                    let mut last = None;
+                    let mut depth = 0usize;
+                    for t in toks {
+                        match &f.src[t.1..t.2] {
+                            "<" => depth += 1,
+                            ">" => depth = depth.saturating_sub(1),
+                            "where" if depth == 0 => break,
+                            w => {
+                                if depth == 0 && t.0 == Tok::Ident {
+                                    last = Some(w);
+                                }
+                            }
+                        }
+                    }
+                    last
+                };
+                // (after the impl's own `<..>`)
+                let mut from = k + 1;
+                if from < at_for && text(from) == "<" {
+                    let mut depth = 0usize;
+                    while from < at_for {
+                        match text(from) {
+                            "<" => depth += 1,
+                            ">" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        from += 1;
+                    }
+                    from += 1;
+                }
+                let tr = tail(&f.toks[from.min(at_for)..at_for]);
+                if tr.is_none_or(|t| local_traits.contains(t)) {
+                    continue;
+                }
+                let ty = tail(&f.toks[at_for + 1..end]);
+                if let Some(t) = ty
+                    && !params.contains(t)
+                {
+                    names.insert(t.to_string());
+                }
+            }
+        }
+    }
     // Gated `use` and `mod name;` items.
     for f in &parsed {
         let text = |k: usize| &f.src[f.toks[k].1..f.toks[k].2];
@@ -3437,5 +3547,20 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    /// Audit 2026-11-24: an impl of a std trait under a gate runs inside std.
+    #[test]
+    fn gated_impls_of_foreign_traits() {
+        let src = "pub struct Tok(u8);\npub struct Num(u8);\npub struct Free(u8);\npub trait Own { fn m(&self); }\n#[cfg(not(verus_keep_ghost))]\nimpl Drop for Tok {\n    fn drop(&mut self) {}\n}\n#[cfg(not(verus_keep_ghost))]\nimpl<'a> core::cmp::PartialEq<Num> for crate::Num {\n    fn eq(&self, o: &Num) -> bool { true }\n}\n#[cfg(not(verus_keep_ghost))]\nimpl Own for Free {\n    fn m(&self) {}\n}\n#[cfg(not(verus_keep_ghost))]\nimpl<T: ?Sized> Clone for Wrap<T> where T: Copy {\n    fn clone(&self) -> Self { loop {} }\n}\n#[cfg(not(verus_keep_ghost))]\nimpl<T> Default for T {\n    fn default() -> T { loop {} }\n}\nimpl Clone for Free {\n    fn clone(&self) -> Self { Free(0) }\n}\n";
+        let g = gated_of(&[("src/lib.rs", src)]).unwrap();
+        for n in ["Tok", "Num", "Wrap"] {
+            assert!(g.names.contains(n), "{n}: {:?}", g.names);
+        }
+        // A trait of the crate (its methods are named where they are called), a
+        // blanket impl, an impl that is not gated.
+        for n in ["Free", "T", "Own"] {
+            assert!(!g.names.contains(n), "{n}: {:?}", g.names);
+        }
     }
 }
