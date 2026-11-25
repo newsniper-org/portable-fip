@@ -106,7 +106,10 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   (`66c6c2b2f…`, one more: the crate's source may not name `verus_keep_ghost_body`, and
   the compilation must read what the verification read), then to `0.2026.11.24.6ae48cb`
   (`6ae48cb77…`, one more: the compiled program must give exec code the types that were
-  verified); two commits: closures written with `#[verus_spec(..)]`, closure types
+  verified), then 2026-11-25 to `0.2026.11.25.53ea62b` (`53ea62b9f…`, four more: the
+  drop precondition written by hand with three holes of its check closed, and three
+  limits of the attribute syntax met while `fip-strict` was put in one source); two
+  commits: closures written with `#[verus_spec(..)]`, closure types
   `Copy` to the solver), with `deallocates 0` on `FipFn::call` and the rest of
   `fip-core` (amendments
   of those dates in

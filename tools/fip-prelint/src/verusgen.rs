@@ -991,8 +991,9 @@ pub const SKIP_VERUS_EXEC: &str = "calls an exec function of Verus's library, ";
 /// operation. If the crate writes the identifier anywhere (a gated `use` of the
 /// function shadows a glob import of the plain build), the call may be the crate's
 /// own, and the exception does not apply. Each entry was seen in a VIR log of the fork
-/// `6ae48cb` (2026-11-25); a model that is not here makes its callers skipped, which
-/// shows in the sidecar.
+/// `53ea62b` (2026-11-25; the casts of raw pointers from the fork's answer of that day,
+/// which also says that the index of an array or a slice is no call); a model that is
+/// not here makes its callers skipped, which shows in the sidecar.
 const VERUS_SYNTAX_MODELS: &[(&str, &str)] = &[
     // `f(x)` for a closure or an `F: Fn..`
     (
@@ -1017,6 +1018,28 @@ const VERUS_SYNTAX_MODELS: &[(&str, &str)] = &[
     ),
     // `x as f64` and the other casts with a float
     ("vstd::float::float_cast", "float_cast"),
+    // `as` between raw pointers and to an integer, and `*[T; N]` as `*[T]`
+    ("vstd::raw_ptr::cast_ptr_to_usize", "cast_ptr_to_usize"),
+    (
+        "vstd::raw_ptr::cast_ptr_to_thin_ptr",
+        "cast_ptr_to_thin_ptr",
+    ),
+    (
+        "vstd::raw_ptr::cast_array_ptr_to_slice_ptr",
+        "cast_array_ptr_to_slice_ptr",
+    ),
+    (
+        "vstd::raw_ptr::cast_slice_ptr_to_slice_ptr",
+        "cast_slice_ptr_to_slice_ptr",
+    ),
+    (
+        "vstd::raw_ptr::cast_slice_ptr_to_str_ptr",
+        "cast_slice_ptr_to_str_ptr",
+    ),
+    (
+        "vstd::raw_ptr::cast_str_ptr_to_slice_ptr",
+        "cast_str_ptr_to_slice_ptr",
+    ),
     // `for x in iter`
     ("vstd::std_specs::iter::{impl}::new", "VerusForLoopWrapper"),
     ("vstd::std_specs::iter::{impl}::next", "VerusForLoopWrapper"),

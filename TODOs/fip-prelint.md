@@ -3446,14 +3446,16 @@ tell where a literal's type came from.
     closure whose captured value has an allocating `Drop` (measured by hand).
   - The check that `vstd`'s prelude has no name of the standard prelude is a script
     run by hand at `6ae48cb`, not a gate (it reads the fork's sources).
-  - `requires vstd::alloc_check::bound_drop_alloc_free::<F>()` written by hand is
-    measured to work, not documented by the fork (request sent 2026-11-25).
+  - `requires vstd::alloc_check::bound_drop_alloc_free::<F>()` written by hand:
+    supported by the fork since `53ea62b` (documented, under test; its answer of
+    2026-11-25).
   - The rule on exec functions of Verus's crates closes one way for the same text to
     be two calls; each such way so far was found by a probe (a trait in scope, a gated
     `use` over a glob). The general check would compare, per listed function, the
     callees Verus resolved (the VIR record) with the callees of the plain build's MIR,
     in the driver: a sidecar format change, and VIR paths (`impl&%N`) have to be
-    matched to rustc's. Not started.
-  - `VERUS_SYNTAX_MODELS` is the list seen at `6ae48cb`; a new pin may add a model
-    (its callers are then skipped: `gateok`'s function `syntax` is the gate for the
-    rows known).
+    matched to rustc's (and `_VERUS_VERIFIED_f` to `f` for a call with
+    `#[verus_spec(with ..)]`, the fork notes). Not started.
+  - `VERUS_SYNTAX_MODELS` is the list seen at `53ea62b`; a new pin may add a model
+    (its callers are then skipped: `gateok`'s functions `syntax` and `casts` are the
+    gate for the rows known).

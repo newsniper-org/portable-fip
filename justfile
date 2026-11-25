@@ -1178,6 +1178,17 @@ verify-sidecar: verify-strict
         (s.len() + fill.len() + c as usize) as f64
     }
 
+    /// The casts of raw pointers are exec functions of `vstd::raw_ptr` for Verus.
+    #[cfg_attr(verus_keep_ghost, verus_spec(r =>
+        ensures
+            true,
+    ))]
+    pub fn casts(p: *const u8, a: *const [u8; 4], t: *const str) -> (usize, *const u16, *const [u16], *const str) {
+        let s: *const [u8] = a;
+        let b: *const [u8] = t as *const [u8];
+        (p as usize, p as *const u16, s as *const [u16], b as *const str)
+    }
+
     /// Not verified: no attribute, no gate.
     pub fn root(x: u8) -> u8 {
         if x < 100 { quiet(x) } else { 0 }
@@ -1186,6 +1197,7 @@ verify-sidecar: verify-strict
     (cd "$out" && $gen --crate-name gateok --crate-dir gateok --out "$out/gateok.txt" -- {{verus}} --crate-type=lib --crate-name gateok {{verus_flags}} gateok/src/lib.rs) > "$out/gateok.log" 2>&1 || { echo "FAIL: the crate gateok was not verified"; cat "$out/gateok.log"; exit 1; }
     grep -q "^fn gateok::quiet " "$out/gateok.txt" || { echo "FAIL: a crate that keeps to the list has its function skipped"; cat "$out/gateok.txt"; exit 1; }
     grep -q "^fn gateok::syntax " "$out/gateok.txt" || { echo "FAIL: a function with built-in syntax only is skipped"; cat "$out/gateok.txt"; exit 1; }
+    grep -q "^fn gateok::casts " "$out/gateok.txt" || { echo "FAIL: a function with casts of raw pointers only is skipped"; cat "$out/gateok.txt"; exit 1; }
     if grep -q "^skip .*code for one build only" "$out/gateok.txt"; then echo "FAIL: gateok is taken for a crate with code for one build only"; exit 1; fi
     # An item of plain builds only, and a ghost block with a definition: not on the list.
     twin plainmod <<'TWIN'

@@ -2664,11 +2664,15 @@ Measured for the drop preconditions (they are written out: attribute syntax has 
 `T: Tr with { fn drop allocates 0; }`): a closure that owns a value without drop glue
 is accepted, which `Copy` refused (`verify/alloc_callers.rs`, `below`); one that owns a
 `Vec` fails `!drop_may_deallocate::<F>()` (control `callers-closure-owns-vec`); one
-that owns a value whose `Drop::drop` allocates is refused at the call, also from a
-caller without a bound (probe, not a gate: the fixture would need an allocating
-`Drop`). The fork documents the first precondition as what the bound syntax stands
-for; that it may be written by hand is measured, not documented (request to the fork,
-2026-11-25, to say so and keep it under test).
+that owns a value whose `Drop::drop` allocates was refused in the probe (not a gate:
+the fixture would need an allocating `Drop`). That probe was read wrongly here at
+first, as a refusal by the check at the call: its closure had an `allocates` bound,
+and the refusal was that bound's. Without the bound the fork `6ae48cb` let such a
+closure through a function with the first precondition alone (amendment (4): the
+fork's hole, closed in `53ea62b`; with both preconditions it was refused). The fork
+documented the first precondition as what the bound syntax stands for; that it may be
+written by hand was measured, not documented (request to the fork, 2026-11-25; answered
+the same day: supported, documented, under test).
 
 Counts (`just ci`, fork `6ae48cb`): `fip-strict` 15 verified (23 before: the eight
 associated constants of the four `FipBound` impls are no longer items Verus reads; no
@@ -2769,6 +2773,7 @@ The list (`VERUS_SYNTAX_MODELS`), each seen in a VIR log of `6ae48cb`:
 | `&mut [T; N]` as `&mut [T]` | `array::ref_mut_array_unsizing_coercion` |
 | `[x; N]` | `array::array_fill_for_copy_types` |
 | a cast with a float | `float::float_cast` |
+| `as` between raw pointers and to an integer, `*[T; N]` as `*[T]` | the six `raw_ptr::cast_..` (added with the pin `53ea62b`, from the fork's answer) |
 | `for x in iter` | `std_specs::iter::VerusForLoopWrapper::new`, `::next` |
 
 The exception holds only in a crate whose sources do not have the function's name as
@@ -2786,8 +2791,10 @@ loop, an array used as a slice, `[x; N]` or a float cast: found by a review, mea
 (`p14`, `p14b`: 4 of 16 and 3 of 10 functions skipped; none after), before any other
 project regenerated a sidecar. Not on the list, because no call of them was seen:
 `array::array_index_get` and `slice::slice_index_get` (the index of an array or a
-slice leaves no call in the VIR), the casts of raw pointers (not supported in the code
-probed). A model that is missing skips its callers, which the sidecar shows.
+slice leaves no call in the VIR; the fork confirms they are never made). The casts of
+raw pointers were missing at first (the one form probed was not supported) and made
+their callers skipped: six functions, named by the fork, each then seen. A model that
+is missing skips its callers, which the sidecar shows.
 
 What the driver already caught, measured before the rule (`p10b`): an allocation
 through such a call. Its own count exceeded the `allocates 0` of the sidecar and it
@@ -2863,3 +2870,60 @@ decided on 2026-11-25: it stays.
   prelude shadowing one of the standard prelude (the script found none; the rule on
   calls would not see a type), and Verus's own models of built-in operations
   (indexing, `for`, operators), which are trusted.
+
+## Amendment 2026-11-25 (4): pin `0.2026.11.25.53ea62b`
+
+**Status:** done. The fork's answer to the request of amendment (3)
+(`2026-11-25-reply-drop-preconditions-by-hand.md`): four commits on `6ae48cb`.
+
+**What the fork says, and what was measured here** (binary built from a clean
+worktree of `53ea62b9f21fdd4b329c132b4e7e42bb572e0687`; the diff, 1042 lines, read to
+the end with its tests):
+
+| the fork's statement | measured |
+|---|---|
+| `rust_verify_test` 5587 passed, 0 failed, 63 ignored | 5585 passed and 2 failed in a run without `VERUS_CVC5_PATH` (the two `observer` tests that need cvc5 1.3.4; the host has 1.3.0); that target again with the path: 52 passed, 0 failed |
+| vstd 2175 verified | 2175 verified, 0 errors (`vargo build --release --features singular`) |
+| the precondition written by hand is supported: checked at the call, then assumed | `t1`..`t3` of the request as before; the fork's tests read |
+| hole A: a closure without an `allocates` bound that owns a value whose `Drop::drop` allocates went through a marked parameter | the fork's example: 3 verified, 0 errors on `6ae48cb`; refused on `53ea62b` ("what it captures is only checked for a closure with an `allocates` bound") |
+| hole B: without `-V alloc-check` the precondition could be proved for any type and exported | the example: 2 verified with `--no-cheating` on `6ae48cb`; an error on `53ea62b` |
+| hole C: a spec function's `recommends` | the example: 1 verified on `6ae48cb`; "could not prove termination" on `53ea62b` |
+| `u1`, `u2`, `u3` fixed | `u1`: no `E0275`, the verification runs; `u2`: no panic, exit 0; `u3`: 1 verified |
+| nothing else changes | 200 probe files of the earlier pins, editions 2021 and 2024, on both binaries: one file differs (the `E0275` experiment, which verifies now). 105 files of the requests' repro directories: three differ (`u1`..`u3`) |
+
+One sentence of the answer does not hold as written: the request's `t2` with the
+closure's `allocates 0` removed still verifies on `53ea62b`. Its closure names
+`w.a`, so it captures a `u8` and is `Copy`; nothing of a `Loud` is dropped with it.
+With the whole value captured (`let r = &w;`) it is refused, as the fork's test has it.
+
+**The reading of `t2` in amendment (3) was wrong**, as the fork points out: the
+refusal came from the closure's own bound, not from the check at the call. Corrected
+there. On `6ae48cb`, with the first precondition alone (`Certified::assume*`), a
+closure without a bound that owns a value with an allocating `Drop` was accepted
+(measured: 4 verified); with both preconditions (the `Fn`-based functions of
+`fip-core`) it was refused by `!drop_may_deallocate::<F>()` (measured). `assume` moves
+its closure and drops nothing, and a `Certified` of a closure that is not `Copy` has
+neither drop marker, so the strict combinators did not take it: no function of this
+repository was verified with something false. A user's own function with the first
+precondition alone was exposed.
+
+**A rule that is new for verified callers:** a closure passed for a parameter with the
+drop precondition has an `allocates` bound or is `Copy`. A closure without a bound
+that is not `Copy` was accepted before when its captures had no drop glue. No caller
+in `verify/` had to change.
+
+**Not taken up.** `u1` and `u3` would let `Output` go back into `FipFn` and the
+`FipBound` impls be `verus_verify` again. The proofs also have to verify on upstream
+Verus (`just verify-upstream`), where the fork says all three are as they were (not
+run here), and the layout is published: it stays.
+
+**The models of built-in syntax** (amendment (3)): the fork names six more, the casts
+of raw pointers in `vstd::raw_ptr`. Each was seen at `53ea62b` (a function with one
+was skipped) and is on the list; the control `gateok` has a function `casts`. It also
+says: `array_index_get` and `slice_index_get` are never made; `.await` is no call in
+the log; a call with `#[verus_spec(with ..)]` is `_VERUS_VERIFIED_f` in the VIR and `f`
+in the plain build (for the comparison of callees that is not started; TODO).
+
+**Repository:** `just ci` passes on the pin with the same counts as before (15, 76, 1,
+and the files of `verify/`); the sidecars change in their stamps and import hashes
+only; no expected output of the driver's tests changes.
