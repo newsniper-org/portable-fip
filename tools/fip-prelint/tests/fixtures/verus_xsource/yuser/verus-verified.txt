@@ -6,7 +6,7 @@ fip-prelint verus sidecar
 # function with `encapsulates`). Top plan T13.4, redesign phase 4.
 format 7
 crate yuser
-verus 0.2026.11.25.53ea62b 53ea62b9f21fdd4b329c132b4e7e42bb572e0687
+verus 0.2026.11.28.7ffdff6 7ffdff60b4e508ab54a4ef5da042cde386a18510
 z3 4.16.0
 toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
@@ -14,7 +14,7 @@ cfg x86_64-unknown-linux-gnu - 2024
 verified 14
 source ../ypool/src/lib.rs e0741458ed510401b809897e9b91e334cc72c99d327d83f62c20494dc74f68b0
 source src/lib.rs cbc83254a28ba73c55a89002fc2a10df8f2b414ae257878893a3faebd8807f27
-import ypool 05ec826a3d2cd482d76c05e43d8f7581a28034a4609d27146c01436b2465c038 2024
+import ypool 4f39c72d0e5fab16f45c5ddedce6d78526878e1150ce81fb9ea55c941b0b6c3a 2024
 fn yuser::drain src/lib.rs:34 cca0c0c66a94d5a2c6fd8f3dbded643149393c048462f7d0763709ef42819b12 - 0 - -
 fn yuser::put_twice src/lib.rs:112 c8f973d46bf1831d687148065cbf04ca8e2a1d030b6ac94915e4a04f4f213b0c - 0 2 -
 fn yuser::put_twice_over src/lib.rs:134 86f08658806a975da16e148040db9b46509b5536099bfd3443eb5324ea60f434 - 0 2 -

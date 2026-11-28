@@ -2927,3 +2927,58 @@ in the plain build (for the comparison of callees that is not started; TODO).
 **Repository:** `just ci` passes on the pin with the same counts as before (15, 76, 1,
 and the files of `verify/`); the sidecars change in their stamps and import hashes
 only; no expected output of the driver's tests changes.
+
+## Amendment 2026-11-28: pin `0.2026.11.28.7ffdff6`
+
+**Status:** done. Four notices of the fork (2026-11-26, two of 2026-11-27, 2026-11-28),
+read to the end: eighteen commits on `53ea62b`. One pin it recommended on the way,
+`308bec9fa`, verified `ensures false` and was withdrawn the next day; it was never
+pinned here.
+
+**Read and not read.** The notices in full. Of the diff (13842 lines): the source
+changes of the commits on trait bounds and of the `trusted_call` fix in full, the
+option of `-V triage`, the comment that states why checking a query in parts is
+sound (`air/src/smt_verify.rs`, `smt_check_partitions`), the discovery of
+`.verus-hints`, and the fork's page of changes. **Not read:** the implementation of
+`by(tactic)`, `isolate`, the hints and triage (about 6000 lines) and their tests and
+documents (about 5800). This repository uses none of them.
+
+**Measured** (binaries built from clean worktrees; the binary of `53ea62b` was built
+again and gives the outputs of 2026-11-25 on 400 runs):
+
+| the fork's statement | measured |
+|---|---|
+| tests 5757 passed at `ad7680a47`, vstd 2177 | at `7ffdff60b`: 5759 passed, 0 failed, 63 ignored (two example files more); per file as the notices say (`assert_by_tactic` 120, `verus_hints` 14, `triage` 9, `trusted_call` 18, `traits` 252); vstd 2177 verified |
+| a function's bound on a trait Verus does not read: a warning, now an error | `fn f<T: ToString>`: 1 verified with the warning on `53ea62b`, the error on `7ffdff6` |
+| `proof { #![verifier::trusted_call] .. }` verified as exec code, erased when compiled | `53ea62b`: 1 verified without `--no-cheating`; **with `--no-cheating` an error on both pins** ("cannot be used with --no-cheating"), so no sidecar run could have it; `7ffdff6`: an error either way |
+| the three programs that verified `ensures false` on `308bec9fa` | refused on `53ea62b` and on `7ffdff6` (not run on `308bec9fa`) |
+| not fixed, upstream too: a bound on an auto trait with `impl !Send` | `ensures false`: 2 verified, 0 errors, with `--no-cheating -V alloc-check`, on both pins |
+| not fixed: higher-ranked bounds lose `for<'a>` | not measured (the notice gives no program) |
+| code that uses none of the new features is checked as before | 200 probe files, two editions: one differs (an experiment with a plain supertrait: the new error); 105 repro files: one differs (`u2`, the new error) |
+| the example file of the notice of 2026-11-28 | 15 verified, 0 errors with `-V alloc-check --no-cheating --edition 2024` |
+| `.verus-hints` next to the crate root is read without an option | measured: a hint without a hash is reported with the hash to write; with it, "1 hint .. applied" |
+
+**This repository:** `just ci` passes unchanged on the pin (the same counts; no warning
+of the kind that is an error now was in the log of the pin before). The sidecars change
+in their stamps and import hashes only: the `.vir` format changed, the VIR log the
+generator reads did not in what it reads.
+
+**Two holes of Verus that stay open** (fork and upstream), for a crate with a sidecar:
+
+- A bound on an auto trait is not in Verus's model, so with a negative impl
+  (`impl !Send for I {}`) two impls that Rust keeps apart overlap in the model, and
+  `false` is proved (measured). It needs `negative_impls`, so a plain build on nightly,
+  or a crate for Verus alone. The list of uses of `verus_keep_ghost` already refuses
+  such an impl under the gate; ungated it is not refused. Not closed here.
+- Higher-ranked bounds. `fip-core` has them (`F: for<'a> FipFn<(&'a T,), ..>`); no impl
+  of this repository is kept apart from another by one (the impls of `FipFn`, `FipOut`,
+  `FipSpec` have distinct self types or tuple arities).
+
+**New in the fork, and what it means here.** `-V triage` is a diagnostic. A tactic
+script is expanded into proof code that is checked as any other. `isolate` (in a
+script, as `#[verifier::tactic(isolate(..))]`, or from `.verus-hints`) adds one
+function to what is trusted, the check of a query in parts. The surface gates of the
+verified crates refuse the attribute (it is not on their list); a script's `isolate()`
+and a hints file they do not see. A hints file is not among a sidecar's hashed sources:
+it can change how an obligation is checked (its rlimit, in a part of its own), not
+what is checked.

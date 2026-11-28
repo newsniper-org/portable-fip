@@ -108,7 +108,11 @@ Phase 1 of `2026-11-06-redesign-verus-allocates.md` (decisions D4, D5):
   (`6ae48cb77…`, one more: the compiled program must give exec code the types that were
   verified), then 2026-11-25 to `0.2026.11.25.53ea62b` (`53ea62b9f…`, four more: the
   drop precondition written by hand with three holes of its check closed, and three
-  limits of the attribute syntax met while `fip-strict` was put in one source); two
+  limits of the attribute syntax met while `fip-strict` was put in one source), then
+  2026-11-28 to `0.2026.11.28.7ffdff6` (`7ffdff60b…`, eighteen more: a bound on a trait
+  Verus does not read is an error, `trusted_call` on a `proof` block is one, and the
+  features that are off unless used: `-V triage`, `assert .. by(tactic)`, `isolate`,
+  `.verus-hints`); two
   commits: closures written with `#[verus_spec(..)]`, closure types
   `Copy` to the solver), with `deallocates 0` on `FipFn::call` and the rest of
   `fip-core` (amendments

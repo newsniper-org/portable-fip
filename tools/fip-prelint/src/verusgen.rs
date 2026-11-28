@@ -991,7 +991,7 @@ pub const SKIP_VERUS_EXEC: &str = "calls an exec function of Verus's library, ";
 /// operation. If the crate writes the identifier anywhere (a gated `use` of the
 /// function shadows a glob import of the plain build), the call may be the crate's
 /// own, and the exception does not apply. Each entry was seen in a VIR log of the fork
-/// `53ea62b` (2026-11-25; the casts of raw pointers from the fork's answer of that day,
+/// `53ea62b` (2026-11-25, and the control of `just verify-sidecar` has them on `7ffdff6`; the casts of raw pointers from the fork's answer of that day,
 /// which also says that the index of an array or a slice is no call); a model that is
 /// not here makes its callers skipped, which shows in the sidecar.
 const VERUS_SYNTAX_MODELS: &[(&str, &str)] = &[
