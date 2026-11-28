@@ -434,6 +434,13 @@ verify-negative: verify-strict verify-core
     # `Certified`'s `call` cannot show it; without the requirement, neither can the
     # `_st` combinators and `dedup_by`.
     expect_alloc_fail certified-pre-no-dealloc fip-strict lib.rs '/^                &&& call_deallocations(self.inner(), args) == 0$/d' 'deallocates 0'
+    # (2026-11-28) `Certified::may_unwind` must be the closure's: with `false`, `call`
+    # would claim not to unwind for a closure that may.
+    expect_verus_fail certified-may-unwind-false fip-strict lib.rs 's/^                call_unwinds(self.inner(), args)$/                false/' 'cannot show this call will not unwind'
+    # ... and a function that calls its callable does not unwind only when the callable
+    # does not: without the condition, the claim is refused.
+    expect_verus_fail update-no-unwind-unconditional fip-core slot.rs 's/^    no_unwind when !call_unwinds(f, (\*old(slot),))$/    no_unwind/' 'cannot show this call will not unwind'
+    expect_verus_fail strict-compact-no-unwind-unconditional fip-core strict.rs 's/^    no_unwind when (forall|a: T| !#\[trigger\] keep.may_unwind((&a,)))$/    no_unwind/' 'cannot show this call will not unwind'
     expect_alloc_fail map-st-dealloc-unrequired fip-core slice.rs '/^        map_st_by_ok(old(xs)@, f, s0),$/ { n; n; /call_deallocations/d; }' 'call_deallocations\(f, \(s, x\)\) == 0'
     # Strict variants (`FipFn` callables), same mutations.
     expect_verus_fail strict-compact-no-swap     fip-core strict.rs '/^pub fn compact</,/^}/ s/^                crate::slice::swap_lt(xs, w, r);$//' "$spec"
@@ -536,6 +543,13 @@ verify-negative: verify-strict verify-core
     }
     callers_fail closure-allocates '/^pub fn evens(/,/^}/ s/allocates 0 { \*v % 2 == 0 }/allocates 0 { let _b = Box::new(0u8); *v % 2 == 0 }/' 'unable to prove post-condition of closure' 'Box::new'
     callers_fail closure-unbounded '/^pub fn evens(/,/^}/ s/-> (r: bool) allocates 0 {/-> (r: bool) {/' 'postcondition not satisfied' 'allocates 0'
+    # (2026-11-28) Unwinding: a caller that may not unwind is refused with a callable
+    # that may (a closure without `no_unwind`), through an `Fn`-based function, a strict
+    # combinator and an adapter.
+    callers_fail unwind-closure '/^pub fn bumped_no_unwind(/,/^}/ s/ensures r == v + 1 no_unwind allocates 0/ensures r == v + 1 allocates 0/' 'cannot show this call will not unwind' 'fip_core::update'
+    callers_fail unwind-loop-closure '/^pub fn evens_no_unwind(/,/^}/ s/-> (r: bool) no_unwind allocates 0/-> (r: bool) allocates 0/' 'cannot show this call will not unwind' 'fip_core::compact'
+    callers_fail unwind-certified '/^pub fn incremented_strict_no_unwind(/,/^}/ s/requires v < 100 no_unwind allocates 0/requires v < 100 allocates 0/' 'cannot show this call will not unwind' 'fip_core::strict::map_in_place'
+    callers_fail unwind-compose-part '/^pub fn halved_twice_no_unwind(/,/^}/ { 0,/-> (r: u8) no_unwind allocates 0/ s/-> (r: u8) no_unwind allocates 0/-> (r: u8) allocates 0/ }' 'cannot show this call will not unwind' 'fip_core::strict::update'
     # (2026-11-25) The callable of an `Fn`-based function is dropped there: a closure
     # that owns a `Vec` deallocates when it is. (Until then the bound `DropFreeFn`,
     # `Copy` under Verus, refused it; now the function's `requires`.)

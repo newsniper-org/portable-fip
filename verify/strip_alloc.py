@@ -58,7 +58,7 @@ ONLY_ALLOCATES_ATTR = re.compile(
 )
 LEFTOVER = re.compile(
     r"\ballocates\b|\ballocated\(\)|\bcall_allocations\b|\balloc_check\b|\bverifier::fip\b"
-    r"|\bdeallocates\b|\bdeallocated\(\)|\bcall_deallocations\b"
+    r"|\bdeallocates\b|\bdeallocated\(\)|\bcall_deallocations\b|\bcall_unwinds\b"
 )
 FIP_ATTR = re.compile(r"^\s*#\[cfg_attr\(verus_keep_ghost, verifier::fip(?:\(strict\))?\)\]$")
 
@@ -111,6 +111,14 @@ def strip(s: str) -> str:
                 raise SystemExit(f"strip_alloc: multi-line `allocates` clause: {t}")
             continue
         if "allocated()" in t or "call_allocations" in t or "call_deallocations" in t:
+            continue
+        # The fork's unwinding of function values: `no_unwind when ..call_unwinds..` of
+        # the `Fn`-based functions goes (upstream: they may unwind, as before), and
+        # `Certified::may_unwind` is `true` (its `call` then claims nothing).
+        if t.startswith("no_unwind when ") and "call_unwinds(" in t:
+            continue
+        if t == "call_unwinds(self.inner(), args)":
+            lines.append(line.replace("call_unwinds(self.inner(), args)", "true"))
             continue
         # The drop preconditions of the `Fn`-based functions (conjuncts of a `requires`
         # that has others).

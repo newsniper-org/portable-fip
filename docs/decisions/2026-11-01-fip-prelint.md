@@ -2982,3 +2982,78 @@ verified crates refuse the attribute (it is not on their list); a script's `isol
 and a hints file they do not see. A hints file is not among a sidecar's hashed sources:
 it can change how an obligation is checked (its rlimit, in a part of its own), not
 what is checked.
+
+## Amendment 2026-11-28 (2): the higher-order functions say when they do not unwind
+
+**Status:** done (specifications only; no exec code changes).
+
+**The limit that was there.** A function that may not unwind could call none of the
+functions that take a callable: the seven `Fn`-based functions of `fip-core`, its seven
+strict variants, `Certified::assume*`. None had an unwinding signature, and Verus
+takes a function without one for one that may unwind. Measured on `7ffdff6` before the
+change: a `no_unwind` caller of `fip_core::update` with a `no_unwind` closure, and one
+of `fip_core::strict::map_in_place` with a certified `no_unwind` closure: "cannot show
+this call will not unwind" for `update`, `Certified::assume` and `map_in_place`. So
+what `#[fip(total)]` generates (`no_unwind`) and the higher-order half of the library
+did not go together. The decision of 2026-11-06 recorded it as a limit of the fork
+("closures cannot carry bounds in this mode"); the fork has had `no_unwind` on
+closures and `call_unwinds(f, args)` since its deallocation work.
+
+**Now.**
+
+- `Certified::assume*`: `no_unwind`.
+- `fip_core::update`: `no_unwind when !call_unwinds(f, (*old(slot),))`. The six
+  `Fn`-based functions with a loop: `no_unwind when (forall|a: T| !call_unwinds(f,
+  (a,)))`, by the callable's arity.
+- `FipSpec` has a fourth spec function, `may_unwind(&self, args) -> bool`, and
+  `FipFn::call` is `no_unwind when !self.may_unwind(args)`. `Certified`:
+  `call_unwinds(closure, args)`. `Stateless`: the part's. `Compose`, `Then`: the first
+  part's, or the second's on a result the first allows.
+- The strict variants: the same conditions with `may_unwind`.
+
+No proof changed: the condition is about the callable alone, and each call inside
+shows its own instance of it. After: both callers verify. Nothing is asked of a caller
+that states no `no_unwind`.
+
+**Not precise.** The functions with a loop ask that the callable unwinds for no
+argument, not only for the elements it is called with. A closure declared `no_unwind`
+satisfies it; one with `no_unwind when c` on its arguments does not. `update` is
+precise.
+
+**Not reached.**
+
+- `-V alloc-check-strict` still refuses the crates (1 and 3 errors reported): it wants
+  an unconditional `no_unwind` beside every `allocates`, and a function that calls a
+  callable cannot have one.
+- The macros: a `#[fip(total)]` function calling `fip_core::strict::update(slot, 0,
+  fip_fn!(same_total))` does not get to the verifier. The macro's scan asks for a
+  certificate constant of `strict::update` that the Verus build does not have
+  (`E0425`). So the gates are hand-written callers (`verify/alloc_callers.rs`), as for
+  the allocation bounds of these functions.
+
+**Upstream.** `call_unwinds` is the fork's. For `just verify-upstream` the conditions
+of the `Fn`-based functions are stripped (they may unwind there, as before) and
+`Certified::may_unwind` is `true`; `no_unwind when` and the rest verify on upstream
+0.2026.11.02 as written (the counts are unchanged).
+
+**API.** A hand-written `impl FipSpec` needs `may_unwind` (none outside this
+repository is known).
+
+**Gates:** four callers in `verify/alloc_callers.rs` (an `Fn`-based function, one with
+a loop, a strict combinator, `Compose`), each refused with a closure that may unwind
+(four controls); mutants: `Certified::may_unwind` as `false`, and an unconditional
+`no_unwind` on `update` and on `strict::compact`.
+
+## Note 2026-11-28: what else of the fork this repository could use
+
+Looked at after the pin, with measurements where one was cheap.
+
+| the fork has | here | |
+|---|---|---|
+| unwinding of function values | amendment (2) above | used |
+| `-V triage` | a diagnostic for a function that fails or exceeds its rlimit | nothing to change; useful by hand |
+| `assert .. by(tactic)`, `induct` | the proofs of `fip-core` also verify on upstream Verus, which has neither: usable only in what is stripped for upstream. There, the six lemmas with an induction are one line each (`if n > 0 { lemma(.., n - 1); }`) | no gain found |
+| `isolate`, `.verus-hints`, `-V hints-locked` | the most expensive function of `fip-core` (`strict::dedup_by`) uses 1.03 M of an rlimit of 30 M; the crate verifies in 2.5 s | not needed |
+| the fixes of the attribute syntax (`u1`, `u3` of 2026-11-25) | `Output` could return into `FipFn`, the `FipBound` impls be read by Verus | not on upstream; the layout is published |
+| `-V fip-lint` | run on `fip-core`: no finding | could be a gate |
+| operator markers (`FipAdd`, ..), `encapsulates alloc` | no generic operator call and no allocator API in the verified crates | not applicable |

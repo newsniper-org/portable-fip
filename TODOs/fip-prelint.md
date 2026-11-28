@@ -3456,6 +3456,15 @@ tell where a literal's type came from.
     in the driver: a sidecar format change, and VIR paths (`impl&%N`) have to be
     matched to rustc's (and `_VERUS_VERIFIED_f` to `f` for a call with
     `#[verus_spec(with ..)]`, the fork notes). Not started.
+  - (2026-11-28) Unwinding signatures of the higher-order functions (amendment
+    2026-11-28 (2)). Open: the conditions of the functions with a loop are for every
+    argument, not for the elements; `-V alloc-check-strict` wants an unconditional
+    `no_unwind` (ask the fork whether `no_unwind when` can count); a `#[fip(total)]`
+    function cannot name a strict combinator (no certificate constant in the Verus
+    build), so the macro path has no gate.
+  - (2026-11-28) Two holes of Verus stay open (amendment 2026-11-28): a negative impl
+    with a bound on an auto trait, and higher-ranked bounds. The generator could
+    refuse a crate with a negative impl; not done.
   - `VERUS_SYNTAX_MODELS` is the list seen at `53ea62b`; a new pin may add a model
     (its callers are then skipped: `gateok`'s functions `syntax` and `casts` are the
     gate for the rows known).

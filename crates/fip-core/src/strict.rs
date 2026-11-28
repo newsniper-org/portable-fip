@@ -73,6 +73,7 @@ use vstd::prelude::*;
     ensures
         f.post((*old(slot),), *final(slot)),
         r == hole,
+    no_unwind when !f.may_unwind((*old(slot),))
     allocates f.allocs()
     deallocates 0
 ))]
@@ -108,6 +109,7 @@ pub fn update<
         final(xs)@.len() == old(xs)@.len(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.post((old(xs)@[i],), final(xs)@[i]),
         h == hole,
+    no_unwind when (forall|a: T| !#[trigger] f.may_unwind((a,)))
     allocates old(xs)@.len() * f.allocs()
     deallocates 0
 ))]
@@ -172,6 +174,7 @@ pub fn map_in_place<
         map_st_fip_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0)),
         forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_fip_inv(old(xs)@, f, s0, inv)
             ==> st_trace_inv(map_st_fip_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
+    no_unwind when (forall|s: S, a: T| !#[trigger] f.may_unwind((s, a)))
     allocates old(xs)@.len() * f.allocs()
     deallocates 0
 ))]
@@ -251,6 +254,7 @@ pub fn map_in_place_st<
         forall|i: int| 0 <= i < old(xs)@.len() ==> keep.pre((&old(xs)@[i],)),
     ensures
         compact_fip_post(old(xs)@, final(xs)@, w as int, keep),
+    no_unwind when (forall|a: T| !#[trigger] keep.may_unwind((&a,)))
     allocates old(xs)@.len() * keep.allocs()
     deallocates 0
 ))]
@@ -326,6 +330,7 @@ pub fn compact<
     ensures
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_fip_post(old(xs)@, final(xs)@, w as int, same, idx, src),
+    no_unwind when (forall|a: T, b: T| !#[trigger] same.may_unwind((&a, &b)))
     allocates old(xs)@.len() * same.allocs()
     deallocates 0
 ))]
@@ -433,6 +438,7 @@ pub fn dedup_by<
         r.1 == hole,
         exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
             #[trigger] compact_map_fip_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
+    no_unwind when (forall|a: T| !#[trigger] f.may_unwind((a,)))
     allocates old(xs)@.len() * f.allocs()
     deallocates 0
 ))]
@@ -568,6 +574,7 @@ pub fn compact_map<
             &&& forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_fip_inv(old(xs)@, f, s0, inv)
                 ==> st_trace_inv(ss, inv)
         }),
+    no_unwind when (forall|s: S, a: T| !#[trigger] f.may_unwind((s, a)))
     allocates old(xs)@.len() * f.allocs()
     deallocates 0
 ))]

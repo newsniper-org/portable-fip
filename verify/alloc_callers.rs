@@ -139,6 +139,56 @@ pub fn incremented_strict(xs: &mut [u8]) -> (h: u8)
     fip_core::strict::map_in_place(xs, 0, f)
 }
 
+// Unwinding (2026-11-28, the fork's `call_unwinds` for function values): the
+// higher-order functions do not unwind when their callable does not, so a caller that
+// may not unwind (what `#[fip(total)]` generates) can call them. `just verify-negative`:
+// with a closure that may unwind, each of these callers is refused.
+
+/// An `Fn`-based function with a closure that cannot unwind.
+pub fn bumped_no_unwind(x: &mut u64) -> (h: u64)
+    requires
+        *old(x) < 100,
+    no_unwind
+    allocates 0
+{
+    fip_core::update(x, 0, |v: u64| -> (r: u64) requires v < 100 ensures r == v + 1 no_unwind allocates 0 deallocates 0 { v + 1 })
+}
+
+/// One with a loop.
+pub fn evens_no_unwind(xs: &mut [u32]) -> (n: usize)
+    no_unwind
+    allocates 0
+{
+    fip_core::compact(xs, |v: &u32| -> (r: bool) no_unwind allocates 0 deallocates 0 { *v % 2 == 0 })
+}
+
+/// A strict combinator with a certified closure that cannot unwind.
+pub fn incremented_strict_no_unwind(xs: &mut [u8]) -> (h: u8)
+    requires
+        forall|i: int| 0 <= i < old(xs)@.len() ==> old(xs)@[i] < 100,
+    no_unwind
+    allocates 0
+{
+    let f = unsafe {
+        fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) requires v < 100 no_unwind allocates 0 deallocates 0 { v + 1 })
+    };
+    fip_core::strict::map_in_place(xs, 0, f)
+}
+
+/// Through an adapter: `Compose(f, g)` does not unwind when neither part does.
+pub fn halved_twice_no_unwind(x: &mut u8) -> (h: u8)
+    no_unwind
+    allocates 0
+{
+    let f = unsafe {
+        fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) no_unwind allocates 0 deallocates 0 { v / 2 })
+    };
+    let g = unsafe {
+        fip_strict::Certified::<0, _, false>::assume(|v: u8| -> (r: u8) no_unwind allocates 0 deallocates 0 { v / 2 })
+    };
+    fip_core::strict::update(x, 0, fip_strict::Compose(f, g))
+}
+
 // Deallocation bounds (the fork's `deallocates`, 2026-11-22): `map_in_place`, `compact`
 // and `compact_map` are bounded by the sum of their callbacks' `call_deallocations`
 // (`fip_core::dealloc_spec`), `update` by its one call; the lemmas of

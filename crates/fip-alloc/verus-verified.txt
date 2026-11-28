@@ -13,5 +13,5 @@ flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu - 2024
 verified 1
 source src/lib.rs a3b0ab109ebacc01b97bc9060426465c068e89a99f1fe0155ceb168f8bfb8439
-import fip_strict 7dd4f66d1931c61f27b1aa0227dd391e25b27167f72739271d44635e23025aca 2024
+import fip_strict 2f4642874c062dee920fcd3fb8a5a13694ea6770ae70a3d05d57d445d12d3e9f 2024
 fn fip_alloc::refill src/lib.rs:42 911eadcfc3e416fa7c7357878c6c907cb22834e1c6cf9435b0c6cffd17996239 - 0 0 -

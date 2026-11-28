@@ -108,6 +108,7 @@ pub fn swap<T: crate::AllocFreeDrop>(xs: &mut [T], i: usize, j: usize) {
         exists|idx: Seq<int>| idx.len() == w
             && #[trigger] strictly_increasing_below(idx, old(xs)@.len() as int)
             && forall|i: int| 0 <= i < w ==> final(xs)@[i] == old(xs)@[idx[i]],
+    no_unwind when (forall|a: T| !#[trigger] call_unwinds(keep, (&a,)))
     allocates crate::spec::compact_allocs(keep, old(xs)@, old(xs)@.len() as int)
     deallocates crate::dealloc_spec::compact_deallocs(keep, old(xs)@, old(xs)@.len() as int)
 ))]
@@ -178,6 +179,7 @@ pub fn compact<T: crate::AllocFreeDrop, F: Fn(&T) -> bool>(xs: &mut [T], keep: F
         final(xs)@.len() == old(xs)@.len(),
         forall|i: int| 0 <= i < old(xs)@.len() ==> f.ensures((old(xs)@[i],), final(xs)@[i]),
         h == hole,
+    no_unwind when (forall|a: T| !#[trigger] call_unwinds(f, (a,)))
     allocates crate::spec::map_allocs(f, old(xs)@, old(xs)@.len() as int)
     deallocates crate::dealloc_spec::map_deallocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
@@ -251,6 +253,7 @@ pub fn map_in_place<T: crate::AllocFreeDrop, F: Fn(T) -> T>(xs: &mut [T], hole: 
         map_st_by_post(old(xs)@, final(xs)@, f, s0, r.0, map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0)),
         forall|inv: spec_fn(int, S) -> bool| #[trigger] map_st_by_inv(old(xs)@, f, s0, inv)
             ==> st_trace_inv(map_st_by_trace(old(xs)@, final(xs)@, f, s0, r.0), inv),
+    no_unwind when (forall|s: S, a: T| !#[trigger] call_unwinds(f, (s, a)))
     allocates 0
     deallocates 0
 ))]
@@ -344,6 +347,7 @@ pub fn map_in_place_st<S: crate::AllocFreeDrop, T: crate::AllocFreeDrop, F: Fn(S
     ensures
         exists|idx: Seq<int>, src: Seq<int>|
             #[trigger] dedup_by_post(old(xs)@, final(xs)@, w as int, same, idx, src),
+    no_unwind when (forall|a: T, b: T| !#[trigger] call_unwinds(same, (&a, &b)))
     allocates 0
     deallocates 0
 ))]
@@ -461,6 +465,7 @@ pub fn dedup_by<T: crate::AllocFreeDrop, F: Fn(&T, &T) -> bool>(xs: &mut [T], sa
         r.1 == hole,
         exists|ys: Seq<T>, ks: Seq<bool>, idx: Seq<int>, pos: Seq<int>|
             #[trigger] compact_map_by_post(old(xs)@, final(xs)@, r.0 as int, f, ys, ks, idx, pos),
+    no_unwind when (forall|a: T| !#[trigger] call_unwinds(f, (a,)))
     allocates crate::spec::compact_map_allocs(f, old(xs)@, old(xs)@.len() as int)
     deallocates crate::dealloc_spec::compact_map_deallocs(f, old(xs)@, old(xs)@.len() as int)
 ))]
@@ -607,6 +612,7 @@ pub fn compact_map<T: crate::AllocFreeDrop, F: Fn(T) -> (T, bool)>(
             &&& forall|inv: spec_fn(int, S) -> bool| #[trigger] compact_map_st_by_inv(old(xs)@, f, s0, inv)
                 ==> st_trace_inv(ss, inv)
         }),
+    no_unwind when (forall|s: S, a: T| !#[trigger] call_unwinds(f, (s, a)))
     allocates 0
     deallocates 0
 ))]

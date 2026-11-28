@@ -62,6 +62,14 @@
 //! unchanged. Under Verus it is `vstd::alloc_check::AllocFreeDrop` (primitives,
 //! references, vstd's std types such as `Box<u8>`).
 //!
+//! Unwinding (2026-11-28): each function that calls a callable is `no_unwind when` the
+//! callable does not unwind: `update` for the one call it makes
+//! (`!call_unwinds(f, (*old(slot),))`), the functions with a loop for every argument
+//! (`forall|a: T| !call_unwinds(f, (a,))`, which a `no_unwind` closure satisfies), the
+//! strict variants with `FipSpec::may_unwind` in place of `call_unwinds`. A caller that
+//! may not unwind can so call them. (`-V alloc-check-strict` still refuses them: it
+//! wants an unconditional `no_unwind` beside every `allocates`.)
+//!
 //! A callable `f: F` has no bound for it in the signature. Under Verus each `Fn`-based
 //! function requires `vstd::alloc_check::bound_drop_alloc_free::<F>()` and
 //! `!vstd::alloc_check::drop_may_deallocate::<F>()`: dropping the callable neither

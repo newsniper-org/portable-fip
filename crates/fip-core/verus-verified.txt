@@ -12,24 +12,24 @@ toolchain 1.100.0-x86_64-unknown-linux-gnu
 flags --no-cheating -V alloc-check
 cfg x86_64-unknown-linux-gnu - 2024
 verified 76
-source ../fip-strict/src/lib.rs 0bbfad77f02062487590edde0d4d0aad167f2092f60f98747d355bc89517ca5f
+source ../fip-strict/src/lib.rs f944cec3d4aeae3ea2f9d4e5c8988f96a58f4b361dc0e06ebbc23b7a9adc10a2
 source src/dealloc_spec.rs 0f1511f078151498b2ec932b91773372b6c267e40671241dcdc637b3bebc9a29
-source src/lib.rs 7e858ad322a0f06f302705c6b0b9ed71c5e6e02e1b1685201e61dd751d67e48a
-source src/slice.rs 2dedea0345d860d9f47e829bfa3d412870938809b07c3f86b601cbcd94bbd998
-source src/slot.rs 1e9cf0777c2582a898aac4be84c6c84f089126145793761f1e6607b5ea7f470a
+source src/lib.rs 8853c8daa97a42c5deca635e49e621c3355e08c218dd20398e7e5404df2b0686
+source src/slice.rs 8365fd90b695f0f3af2178d79edf9d3dbf3715c5474c211d3700abf8e07ab038
+source src/slot.rs cde995e186f9fe646edb4397fd3de68b64b1846117ecaa69fd52b8e711265628
 source src/spec.rs f30d83d9199b3e7712d926b49b6f6d63885ff268df8b277f1981e4a6d6f41070
-source src/strict.rs 151c63b950b863ec27b4c53058018d483377055261c91056ee4ae6807a8a87e4
-import fip_strict 7dd4f66d1931c61f27b1aa0227dd391e25b27167f72739271d44635e23025aca 2024
-fn fip_core::slice::compact src/slice.rs:75 526cc18117d0cac2b85e2fee39759fde672ebfe998ef5af9aa50a44585191145 requires opaque:6135d512e57d77da66a85c95bc2e2504d17b68996c965b8ed6b16a7d27dfe590 opaque:df4bbe1610b149c6eab78e8909bf75f66942363c72efbca1d6552edb9cdb9321 -
-fn fip_core::slice::compact_map src/slice.rs:430 aa09c99f36f0dfb6f0c3c901c4e9ac2279c2e5aa0d5bc0fd83d450960637dd66 requires opaque:c177e4fa3b9e44b6967c7b8d1d174a302171bc0aff56d44a523a18e0ba9868f9 opaque:9b743efdc2a90023e5d16f23309a86502f8f6becc123327f6ceaab8845e3361f -
-fn fip_core::slice::compact_map_st src/slice.rs:562 5a9b60c719f2d9ad299d8d7bf996dd7858d1da12f8925cff340c71ca23c03877 requires 0 0 -
-fn fip_core::slice::dedup_by src/slice.rs:310 a4be11a2503812e889dbc610fab58f55bc717ebbb94f79ae61c66a9b0856850e requires 0 0 -
-fn fip_core::slice::map_in_place src/slice.rs:154 50d50ff417fe1f0ded31d42326c2218588073fbe079c1f810dab855630ea2c7a requires opaque:1990269e9586f093e3529e59f702bdffc39de706f0b9beb057cbe45862712fb2 opaque:be40741f58326f9498b7907956df0b5e98ff0790e54fdff9277ad417c3fc168d -
-fn fip_core::slice::map_in_place_st src/slice.rs:210 176d17c5cb6a040786fe72c73c707f5fdfc03d284e3be466e41d3297eb3df28a requires 0 0 -
+source src/strict.rs 178d044dada1d6b55fb44dad4bff0a9e83d3a4073f134690c4e492eb32215328
+import fip_strict 2f4642874c062dee920fcd3fb8a5a13694ea6770ae70a3d05d57d445d12d3e9f 2024
+fn fip_core::slice::compact src/slice.rs:75 0d5190eb8d2f1b4f202efa7fce196c8eacd5036851975eb64ef9ba05167f3a0a requires opaque:6135d512e57d77da66a85c95bc2e2504d17b68996c965b8ed6b16a7d27dfe590 opaque:df4bbe1610b149c6eab78e8909bf75f66942363c72efbca1d6552edb9cdb9321 -
+fn fip_core::slice::compact_map src/slice.rs:434 f9026897ebba4d6486195c4d89c6d26d1951ef4bc704e39e17559b7f97666760 requires opaque:c177e4fa3b9e44b6967c7b8d1d174a302171bc0aff56d44a523a18e0ba9868f9 opaque:9b743efdc2a90023e5d16f23309a86502f8f6becc123327f6ceaab8845e3361f -
+fn fip_core::slice::compact_map_st src/slice.rs:567 45ca322ec5c8e58c4e9fd930ab98874ed79c0fe9a456842058f0584f451e9d56 requires 0 0 -
+fn fip_core::slice::dedup_by src/slice.rs:313 67da35be7ccefc28ce4d4d8ff9eee5a11b587a2bb7d10ccb02f27edc2a60ddd9 requires 0 0 -
+fn fip_core::slice::map_in_place src/slice.rs:155 aef300097c139a9042af3530b8766dab559a423650da5a331e41325b57497501 requires opaque:1990269e9586f093e3529e59f702bdffc39de706f0b9beb057cbe45862712fb2 opaque:be40741f58326f9498b7907956df0b5e98ff0790e54fdff9277ad417c3fc168d -
+fn fip_core::slice::map_in_place_st src/slice.rs:212 193c006201242c0bcada5151009cedaa149a02d2db28f798048f2d09bbca8eae requires 0 0 -
 fn fip_core::slice::swap src/slice.rs:42 3613d1d3f849b02493bdea65b74c9a6cef66580aee050f6ec352c735e48f4121 requires 0 0 -
 fn fip_core::slice::swap_lt src/slice.rs:20 27d224243561ab5daa606997d244bfd7d6339b7ebaf84466658cbcf488501639 requires 0 0 -
 fn fip_core::slot::replace src/slot.rs:9 4d63939287394155056a667ca1e3910b736756857ec5596f53d2a31a08d55dc7 - 0 0 -
-fn fip_core::slot::update src/slot.rs:38 bd79a26061e9faa131735bf7e3c3a760e845dc02bd83df34d17f80ffa25083d1 requires opaque:0a4ca925f6c8868e96d46d69b6a26f2a342e8e3992f876026f6149c2f49b9b6c opaque:257bbdc31bea4e14d314bc93c84e9f9bea153d5b02707e7d07e7531df0012626 -
+fn fip_core::slot::update src/slot.rs:38 af42d38abe254930b360ec61e50e09e35d4b9025884f72907bf821676e11c78d requires opaque:0a4ca925f6c8868e96d46d69b6a26f2a342e8e3992f876026f6149c2f49b9b6c opaque:257bbdc31bea4e14d314bc93c84e9f9bea153d5b02707e7d07e7531df0012626 -
 skip fip_core::strict::compact relies on the specification of `fip_core::spec::compact_fip_post`, whose code may differ in the driver's build
 skip fip_core::strict::compact_map relies on the specification of `fip_core::spec::compact_map_fip_post`, whose code may differ in the driver's build
 skip fip_core::strict::compact_map_st relies on the specification of `fip_core::spec::state::compact_map_st_fip_ok`, whose code may differ in the driver's build
@@ -37,22 +37,22 @@ skip fip_core::strict::dedup_by relies on the specification of `fip_core::spec::
 skip fip_core::strict::map_in_place relies on the specification of `fip_strict::FipFn::call`, whose code may differ in the driver's build
 skip fip_core::strict::map_in_place_st relies on the specification of `fip_core::spec::state::map_st_fip_ok`, whose code may differ in the driver's build
 skip fip_core::strict::update relies on the specification of `fip_strict::FipFn::call`, whose code may differ in the driver's build
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:308
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:310
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:592
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:596
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:600
-divergent AllocFreeDrop ../fip-strict/src/lib.rs:604
-divergent FipSpec ../fip-strict/src/lib.rs:383
-divergent FipSpec ../fip-strict/src/lib.rs:385
-divergent FipSpec ../fip-strict/src/lib.rs:548
-divergent FipSpec ../fip-strict/src/lib.rs:564
+divergent AllocFreeDrop ../fip-strict/src/lib.rs:315
+divergent AllocFreeDrop ../fip-strict/src/lib.rs:317
+divergent AllocFreeDrop ../fip-strict/src/lib.rs:610
+divergent AllocFreeDrop ../fip-strict/src/lib.rs:614
+divergent AllocFreeDrop ../fip-strict/src/lib.rs:618
+divergent AllocFreeDrop ../fip-strict/src/lib.rs:622
+divergent FipSpec ../fip-strict/src/lib.rs:392
+divergent FipSpec ../fip-strict/src/lib.rs:394
+divergent FipSpec ../fip-strict/src/lib.rs:558
 divergent FipSpec ../fip-strict/src/lib.rs:576
-divergent FipSpec ../fip-strict/src/lib.rs:686
-divergent FipSpec ../fip-strict/src/lib.rs:742
-divergent NoDeallocDrop ../fip-strict/src/lib.rs:323
-divergent NoDeallocDrop ../fip-strict/src/lib.rs:325
-divergent NoDeallocDrop ../fip-strict/src/lib.rs:594
-divergent NoDeallocDrop ../fip-strict/src/lib.rs:598
-divergent NoDeallocDrop ../fip-strict/src/lib.rs:602
-divergent NoDeallocDrop ../fip-strict/src/lib.rs:606
+divergent FipSpec ../fip-strict/src/lib.rs:591
+divergent FipSpec ../fip-strict/src/lib.rs:706
+divergent FipSpec ../fip-strict/src/lib.rs:765
+divergent NoDeallocDrop ../fip-strict/src/lib.rs:330
+divergent NoDeallocDrop ../fip-strict/src/lib.rs:332
+divergent NoDeallocDrop ../fip-strict/src/lib.rs:612
+divergent NoDeallocDrop ../fip-strict/src/lib.rs:616
+divergent NoDeallocDrop ../fip-strict/src/lib.rs:620
+divergent NoDeallocDrop ../fip-strict/src/lib.rs:624

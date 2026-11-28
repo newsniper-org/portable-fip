@@ -110,6 +110,13 @@
 //! [`Certified::assume`] and [`Certified::assume_no_panic_macros`] require, under Verus,
 //! that dropping the closure cannot allocate (`vstd::alloc_check::bound_drop_alloc_free`,
 //! which the fork checks at each verified call for the closure passed).
+//!
+//! Unwinding (2026-11-28): [`FipFn::call`] is `no_unwind when !self.may_unwind(args)`.
+//! For [`Certified`], `may_unwind(args)` is the closure's `call_unwinds(closure, args)`
+//! (the fork's unwinding of function values); for the adapters, that a part may unwind
+//! (the second on a result the first allows). The two constructors are `no_unwind`. So
+//! a function that may not unwind (what `#[fip(total)]` generates) can build and call a
+//! certified callable whose closure is `no_unwind`.
 //! Verify with `just verify-strict` (exports the Verus metadata `fip-core` imports).
 //!
 //! `#![no_std]`, no `alloc`, no dependencies.
@@ -375,7 +382,9 @@ pub trait FipOut<Args> {
 /// Under Verus (`cfg(verus_keep_ghost)`) a trait with the spec functions
 /// `pre(&self, args: Args) -> bool`, `post(&self, args: Args, out: Self::Output) -> bool`
 /// and `allocs(&self) -> nat`, which [`FipFn::call`] requires, ensures and is bounded
-/// by. A type implements it in a `#[cfg(verus_keep_ghost)] verus! { .. }` block.
+/// by, and `may_unwind(&self, args: Args) -> bool`: `call` is
+/// `no_unwind when !self.may_unwind(args)` (since 2026-11-28). A type implements it in
+/// a `#[cfg(verus_keep_ghost)] verus! { .. }` block.
 ///
 /// In plain builds a marker implemented for every type, so the supertrait of
 /// [`FipFn`] restricts nothing and needs no `vstd`.
@@ -407,6 +416,7 @@ pub trait FipFn<Args>: FipBound + FipOut<Args> + FipSpec<Args> {
             self.pre(args),
         ensures
             self.post(args, r),
+        no_unwind when !self.may_unwind(args)
         allocates self.allocs()
         deallocates 0
     ))]
@@ -552,6 +562,8 @@ pub trait FipSpec<Args>: FipOut<Args> {
     spec fn post(&self, args: Args, out: Self::Output) -> bool;
     /// Upper bound on the allocations of one call (Verus `allocates`).
     spec fn allocs(&self) -> nat;
+    /// Whether a call with `args` may unwind (`call` is `no_unwind when !may_unwind(args)`).
+    spec fn may_unwind(&self, args: Args) -> bool;
 }
 
 impl<const ALLOCS: u64, C, const P: bool> Certified<ALLOCS, C, P> {
@@ -571,6 +583,9 @@ impl<S, A, B, F: FipFn<(A,), Output = B>> FipSpec<(S, A)> for Stateless<F> {
     open spec fn allocs(&self) -> nat {
         self.0.allocs()
     }
+    open spec fn may_unwind(&self, args: (S, A)) -> bool {
+        self.0.may_unwind((args.1,))
+    }
 }
 
 impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S, C)>> FipSpec<(S, A)> for Then<F, G> {
@@ -583,6 +598,9 @@ impl<S, A, B, C, F: FipFn<(S, A), Output = (S, B)>, G: FipFn<(S, B), Output = (S
     }
     open spec fn allocs(&self) -> nat {
         self.0.allocs() + self.1.allocs()
+    }
+    open spec fn may_unwind(&self, args: (S, A)) -> bool {
+        self.0.may_unwind(args) || exists|r: (S, B)| #[trigger] self.0.post(args, r) && self.1.may_unwind(r)
     }
 }
 
@@ -633,6 +651,7 @@ impl<const ALLOCS: u64, C> Certified<ALLOCS, C, false> {
             vstd::alloc_check::bound_drop_alloc_free::<C>(),
         ensures
             r.inner() == f,
+        no_unwind
         allocates 0
         deallocates 0
     ))]
@@ -661,6 +680,7 @@ impl<const ALLOCS: u64, C> Certified<ALLOCS, C, true> {
             vstd::alloc_check::bound_drop_alloc_free::<C>(),
         ensures
             r.inner() == f,
+        no_unwind
         allocates 0
         deallocates 0
     ))]
@@ -697,6 +717,9 @@ macro_rules! certified_fip_fn {
             }
             open spec fn post(&self, args: ($($A,)*), out: R) -> bool {
                 self.inner().ensures(args, out)
+            }
+            open spec fn may_unwind(&self, args: ($($A,)*)) -> bool {
+                call_unwinds(self.inner(), args)
             }
         }
         } // verus!
@@ -749,6 +772,9 @@ macro_rules! compose_fip_fn {
             }
             open spec fn allocs(&self) -> nat {
                 self.0.allocs() + self.1.allocs()
+            }
+            open spec fn may_unwind(&self, args: ($($A,)*)) -> bool {
+                self.0.may_unwind(args) || exists|y: B| #[trigger] self.0.post(args, y) && self.1.may_unwind((y,))
             }
         }
         } // verus!

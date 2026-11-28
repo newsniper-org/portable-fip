@@ -474,7 +474,11 @@ state.
   that requires the count below 1000 (invariant `c == 10 + k`); without the invariant
   the call is rejected.
 - **Strict forms.** `fip_core::strict::*_st` have the same specifications with
-  `FipSpec::pre` / `post` (the specification trait of `FipFn`). A verified caller passes a named function as a `FipFn` value
+  `FipSpec::pre` / `post` (the specification trait of `FipFn`).
+- **Unwinding.** Every higher-order function is `no_unwind when` its callable does not
+  unwind (`call_unwinds` for an `Fn`, `FipSpec::may_unwind` for a `FipFn`), so a
+  caller that may not unwind can use them with a `no_unwind` closure
+  (`verify/alloc_callers.rs`). A verified caller passes a named function as a `FipFn` value
   (`fip_fn!(tick_checked)`, bounded by the function's generated certificate in the
   plain build, no `unsafe` at the call site), whose `pre` / `post` are the function's
   `requires` / `ensures`. Under Verus `fip_fn!` reads no certificate: a closure keeps

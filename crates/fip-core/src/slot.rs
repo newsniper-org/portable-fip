@@ -55,6 +55,7 @@ pub fn replace<T: crate::AllocFreeDrop>(slot: &mut T, new: T) -> T {
     ensures
         f.ensures((*old(slot),), *final(slot)),
         r == hole,
+    no_unwind when !call_unwinds(f, (*old(slot),))
     allocates call_allocations(f, (*old(slot),))
     deallocates call_deallocations(f, (*old(slot),))
 ))]
